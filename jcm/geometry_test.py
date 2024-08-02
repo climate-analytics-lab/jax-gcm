@@ -1,5 +1,5 @@
 import unittest
-import geometry
+from jcm import geometry
 
 class TestGeometryUnit(unittest.TestCase):
 
@@ -8,5 +8,3 @@ class TestGeometryUnit(unittest.TestCase):
 
         # Check that hsg is not null.
         self.assertIsNotNone(vals[0])
-
-unittest.main()

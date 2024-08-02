@@ -1,5 +1,5 @@
 import unittest
-import convection
+from jcm import convection
 from jax import random
 import jax.numpy as jnp
 
@@ -39,5 +39,3 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         self.assertIsNotNone(dfqa)
         self.assertIsNotNone(cbmf)
         self.assertIsNotNone(precnv)
-
-unittest.main()

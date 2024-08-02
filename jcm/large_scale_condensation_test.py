@@ -1,5 +1,5 @@
 import unittest
-import large_scale_condensation
+from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 import jax.numpy as jnp
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
@@ -11,11 +11,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         qsat = jnp.ones((ix, il, kx))
         itop = jnp.full((ix, il), kx - 1)
 
-        itop, precls, dtlsc, dqlsc = large_scale_condensation.get_large_scale_condensation_tendencies(psa, qa, qsat, itop, fsg, dhs, p0, cp, alhc, grav)
+        itop, precls, dtlsc, dqlsc = get_large_scale_condensation_tendencies(psa, qa, qsat, itop)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(itop)
         self.assertIsNotNone(precls)
         self.assertIsNotNone(dtlsc)
         self.assertIsNotNone(dqlsc)
-
-unittest.main()

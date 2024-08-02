@@ -5,8 +5,8 @@ Parametrization of large-scale condensation.
 
 import jax.numpy as jnp
 
-from physical_constants import p0, cp, alhc, grav
-from geometry import fsg, dhs
+from jcm.physical_constants import p0, cp, alhc, grav
+from jcm.geometry import fsg, dhs
 
 # Constants for large-scale condensation
 trlsc = 4.0   # Relaxation time (in hours) for specific humidity

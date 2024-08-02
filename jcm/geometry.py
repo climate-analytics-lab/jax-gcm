@@ -6,8 +6,8 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 from jax import jit
 
-from params import kx, il, iy
-from physical_constants import akap, omega
+from jcm.params import kx, il, iy
+from jcm.physical_constants import akap, omega
 
 # Initializes all of the model geometry variables.
 @jit

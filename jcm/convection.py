@@ -6,8 +6,8 @@ version of the Tiedke (1993) mass-flux convection scheme.
 
 import jax.numpy as jnp
 
-from physical_constants import p0, alhc, wvi, grav
-from geometry import dhs, fsg
+from jcm.physical_constants import p0, alhc, wvi, grav
+from jcm.geometry import dhs, fsg
 
 # Diagnose convectively unstable gridboxes
 

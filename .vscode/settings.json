@@ -1,0 +1,7 @@
+{
+    "python.testing.pytestArgs": [
+        "jcm"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}

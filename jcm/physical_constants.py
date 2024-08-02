@@ -5,7 +5,7 @@ For storing and initializing physical constants.
 
 import jax.numpy as jnp
 
-from params import kx
+from jcm.params import kx
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)

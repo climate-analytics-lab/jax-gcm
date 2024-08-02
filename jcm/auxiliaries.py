@@ -5,7 +5,7 @@ For storing variables used by multiple physics schemes.
 
 import jax.numpy as jnp
 
-from params import ix, il
+from jcm.params import ix, il
 from speedyf90_types import p
 
 # Physical variables shared among all physics schemes

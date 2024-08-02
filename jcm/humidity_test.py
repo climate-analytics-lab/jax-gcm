@@ -1,5 +1,5 @@
 import unittest
-import humidity
+from jcm import humidity
 import jax.numpy as jnp
 
 class TestHumidityUnit(unittest.TestCase):
@@ -34,5 +34,3 @@ class TestHumidityUnit(unittest.TestCase):
 
         # Check that qa is the same when converted to rh then back again.
         self.assertEqual(float(jnp.take(qa, 0)), float(jnp.take(qg, 0)))
-
-unittest.main()
