@@ -9,23 +9,41 @@ import jax.numpy as jnp
 from jcm.physical_constants import p0, alhc, wvi, grav
 from jcm.geometry import dhs, fsg
 
-# Diagnose convectively unstable gridboxes
 
-# Convection is activated in gridboxes with conditional instability. This
-# is diagnosed by checking for any tropopsheric half level where the
-# saturation moist static energy is lower than in the boundary-layer level.
-# In gridboxes where this is true, convection is activated if either: there
-# is convective instability - the actual moist static energy at the
-# tropospheric level is lower than in the boundary-layer level, or, the
-# relative humidity in the boundary-layer level and lowest tropospheric
-# level exceed a set threshold (rhbl).
+psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
+trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
+rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for secondary mass flux
+rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
+entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
+smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
+
 def diagnose_convection(psa, se, qa, qsat):
+    """
+    Diagnose convectively unstable gridboxes  
+
+    Convection is activated in gridboxes with conditional instability. This
+    is diagnosed by checking for any tropopsheric half level where the
+    saturation moist static energy is lower than in the boundary-layer level.
+    In gridboxes where this is true, convection is activated if either: there
+    is convective instability - the actual moist static energy at the
+    tropospheric level is lower than in the boundary-layer level, or, the
+    relative humidity in the boundary-layer level and lowest tropospheric
+    level exceed a set threshold (rhbl).
+
+    Args:
+    psa: Normalised surface pressure [p/p0]
+    se: Dry static energy [c_p.T + g.z]
+    qa: Specific humidity [g/kg]
+    qsat: Saturation specific humidity [g/kg]
+
+    Returns:
+    itop: Top of convection (layer index)
+    qdif: Excess humidity in convective gridboxes
+
+    """
     ix, il, kx = se.shape
     itop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize itop with nlp
     qdif = jnp.zeros((ix, il), dtype=float)
-
-    psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
-    rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 
     # Saturation moist static energy
     mss = se + alhc * qsat
@@ -79,17 +97,27 @@ def diagnose_convection(psa, se, qa, qsat):
 
     return itop, qdif
 
-# Compute convective fluxes of dry static energy and moisture using a
-# simplified mass-flux scheme.
-def get_convection_tendencies(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa):
+def get_convection_tendencies(psa, se, qa, qsat):
+    """
+    Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
+
+    Args:
+    psa: Normalised surface pressure [p/p0]
+    se: Dry static energy [c_p.T + g.z]
+    qa: Specific humidity [g/kg]
+    qsat: Saturation specific humidity [g/kg]
+
+    Returns:
+    itop: Top of convection (layer index)
+    cbmf: Cloud-base mass flux
+    precnv: Convective precipitation [g/(m^2 s)]
+    dfse:  Net flux of dry static energy into each atmospheric layer
+    dfqa: Net flux of specific humidity into each atmospheric layer
+
+    """
     _, _, kx = se.shape
 
     # 1. Initialization of output and workspace arrays
-    psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
-    trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
-    rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for secondary mass flux
-    entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
-    smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
@@ -177,4 +205,4 @@ def get_convection_tendencies(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa)
     dfse = fus - fds + alhc * precnv
     dfqa = fuq - fdq - precnv
 
-    return dfse, dfqa, cbmf, precnv
+    return itop, dfse, dfqa, cbmf, precnv

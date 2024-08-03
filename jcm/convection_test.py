@@ -1,5 +1,5 @@
 import unittest
-from jcm import convection
+from jcm.convection import diagnose_convection, get_convection_tendencies
 from jax import random
 import jax.numpy as jnp
 
@@ -13,7 +13,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         qa = random.uniform(key, (ix, il, kx))
         qsat = random.uniform(key, (ix, il, kx))
 
-        itop, qdif = convection.diagnose_convection(psa, se, qa, qsat)
+        itop, qdif = diagnose_convection(psa, se, qa, qsat)
 
         # Check that itop and qdif is not null.
         self.assertIsNotNone(itop)
@@ -32,9 +32,10 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         dfse = jnp.ones((ix, il, kx))
         dfqa = jnp.ones((ix, il, kx))
 
-        dfse, dfqa, cbmf, precnv = convection.get_convection_tendencies(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa)
+        itop, dfse, dfqa, cbmf, precnv = get_convection_tendencies(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa)
 
         # Check that  dfse, dfqa, cbmf and precnv is not null.
+        self.assertIsNotNone(itop)
         self.assertIsNotNone(dfse)
         self.assertIsNotNone(dfqa)
         self.assertIsNotNone(cbmf)

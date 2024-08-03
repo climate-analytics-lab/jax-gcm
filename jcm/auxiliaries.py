@@ -9,6 +9,8 @@ from jcm.params import ix, il
 from speedyf90_types import p
 
 # Physical variables shared among all physics schemes
+# TODO: Check these should be initialized to zeros (and need initialization at all)
+
 precnv = jnp.zeros((ix, il), dtype=p) # Convective precipitation [g/(m^2 s)], total
 precls = jnp.zeros((ix, il), dtype=p) # Large-scale precipitation [g/(m^2 s)], total
 snowcv = jnp.zeros((ix, il), dtype=p) # Convective precipitation [g/(m^2 s)], snow only
