@@ -3,7 +3,7 @@ from jcm.convection import diagnose_convection, get_convection_tendencies
 from jax import random
 import jax.numpy as jnp
 
-class TestLargeScaleCondensationUnit(unittest.TestCase):
+class TestConvectionUnit(unittest.TestCase):
 
     def test_diagnose_convection(self):
         key = random.PRNGKey(0)
