@@ -119,6 +119,12 @@ def get_convection_tendencies(psa, se, qa, qsat):
 
     # 1. Initialization of output and workspace arrays
 
+    dfse = jnp.zeros_like(se)
+    dfqa = jnp.zeros_like(qa)
+
+    cbmf = jnp.zeros_like(psa)
+    precnv = jnp.zeros_like(psa)
+
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)

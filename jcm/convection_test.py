@@ -26,13 +26,8 @@ class TestConvectionUnit(unittest.TestCase):
         se = random.uniform(key, (ix, il, kx))
         qa = random.uniform(key, (ix, il, kx))
         qsat = random.uniform(key, (ix, il, kx))
-        itop = jnp.ones((ix, il), dtype=int) * (kx - 2)
-        cbmf = jnp.ones((ix, il))
-        precnv = jnp.ones((ix, il))
-        dfse = jnp.ones((ix, il, kx))
-        dfqa = jnp.ones((ix, il, kx))
 
-        itop, dfse, dfqa, cbmf, precnv = get_convection_tendencies(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa)
+        itop, dfse, dfqa, cbmf, precnv = get_convection_tendencies(psa, se, qa, qsat)
 
         # Check that  dfse, dfqa, cbmf and precnv is not null.
         self.assertIsNotNone(itop)
