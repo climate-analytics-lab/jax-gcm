@@ -6,7 +6,7 @@ import geometry
 # These have not yet been defined - TS 08/14/24
 #import mod_radcon
 #import land_model
-import humidity
+from humidity import get_qsat
 
 # constants for sufrace fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -33,9 +33,10 @@ hdrag = 2000.0 # Height scale for orographic correction
 clambda = 7.0  # Heat conductivity in skin-to-root soil layer
 clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
-forog = jnp.zeros([il,ix]) # Time-invariant fields (initial. in SFLSET)
 
-def surface_flux(ix,il):
+
+def get_surface_fluxes(ix,il, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
+                 tsea, ssrd, slrd):
     '''
 
     Parameters
@@ -44,7 +45,8 @@ def surface_flux(ix,il):
     ix - longitudes
     '''
     
-    
-
-
-
+    #(\___/)
+    #(=^.^=) In the fortran code this is a variable that is used in both subroutines 
+    #(")_(") but it requires initialization from il,ix. Need to determine if get_surface_flux is always declared first.
+    global forog 
+    forog = jnp.zeros([il,ix]) # Time-invariant fields (initial. in SFLSET)
