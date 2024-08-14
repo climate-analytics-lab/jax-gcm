@@ -1,9 +1,4 @@
-import numpy as np
-
-# Define dimensions
-ix = 100  # Example dimension sizes
-il = 50
-kx = 25
+import jax.numpy as jnp
 
 # Radiation and cloud constants
 # Albedo values
@@ -20,19 +15,19 @@ ablco2_ref = None  # To be initialized elsewhere
 
 # Time-invariant fields (arrays)
 # fband = energy fraction emitted in each LW band = f(T)
-fband = np.zeros((301, 4))  # Example shape (100:400, 4)
+fband = jnp.zeros((301, 4))  # Example shape (100:400, 4)
 
 # Radiative properties of the surface (updated in fordate)
 # Albedo and snow cover arrays
-alb_l = np.zeros((ix, il))  # Daily-mean albedo over land (bare-land + snow)
-alb_s = np.zeros((ix, il))  # Daily-mean albedo over sea (open sea + sea ice)
-albsfc = np.zeros((ix, il)) # Combined surface albedo (land + sea)
-snowc = np.zeros((ix, il))  # Effective snow cover (fraction)
+alb_l = jnp.zeros((ix, il))  # Daily-mean albedo over land (bare-land + snow)
+alb_s = jnp.zeros((ix, il))  # Daily-mean albedo over sea (open sea + sea ice)
+albsfc = jnp.zeros((ix, il)) # Combined surface albedo (land + sea)
+snowc = jnp.zeros((ix, il))  # Effective snow cover (fraction)
 
 # Transmissivity and blackbody radiation (updated in radsw/radlw)
-tau2 = np.zeros((ix, il, kx, 4))     # Transmissivity of atmospheric layers
-st4a = np.zeros((ix, il, kx, 2))     # Blackbody emission from full and half atmospheric levels
-stratc = np.zeros((ix, il, 2))       # Stratospheric correction term
-flux = np.zeros((ix, il, 4))         # Radiative flux in different spectral bands
+tau2 = jnp.zeros((ix, il, kx, 4))     # Transmissivity of atmospheric layers
+st4a = jnp.zeros((ix, il, kx, 2))     # Blackbody emission from full and half atmospheric levels
+stratc = jnp.zeros((ix, il, 2))       # Stratospheric correction term
+flux = jnp.zeros((ix, il, 4))         # Radiative flux in different spectral bands
 
 
