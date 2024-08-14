@@ -1,1 +1,4 @@
 jax
+
+# Testing requirements
+pytest-cov
