@@ -6,6 +6,7 @@ saturation specific humidity.
 
 import jax.numpy as jnp
 
+
 def spec_hum_to_rel_hum(ta, ps, sig, qa):
     """
     Converts specific humidity to relative humidity, and also returns saturation 
@@ -26,6 +27,7 @@ def spec_hum_to_rel_hum(ta, ps, sig, qa):
     rh = qa / qsat
     return rh, qsat
 
+
 def rel_hum_to_spec_hum(ta, ps, sig, rh):
     """
     Converts relative humidity to specific humidity, and also returns saturation 
@@ -45,7 +47,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
     qa = rh * qsat
     return qa, qsat
 
-# Computes saturation specific humidity.
+
 def get_qsat(ta, ps, sig):
     """
     Computes saturation specific humidity.
