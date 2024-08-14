@@ -26,7 +26,7 @@ jobs:
         continue-on-error: true
       - name: Test with pytest
         run: |
-          coverage run -m pytest  -v -s
+          coverage run -m pytest  -v -s --cov-fail-under=90
       - name: Generate Coverage Report
         run: |
           coverage report -m
