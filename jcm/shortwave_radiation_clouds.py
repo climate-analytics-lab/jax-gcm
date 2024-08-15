@@ -26,7 +26,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     wpcl    = 0.2   # Cloud cover weight for the square-root of precipitation (for p = 1 mm/day)
     pmaxcl  = 10.0  # Maximum value of precipitation (mm/day) contributing to cloud cover
     clsmax  = 0.60  # Maximum stratiform cloud cover
-    lsminl = 0.15  # Minimum stratiform cloud cover over land (for RH = 1)
+    clsminl = 0.15  # Minimum stratiform cloud cover over land (for RH = 1)
     gse_s0  = 0.25  # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1  = 0.40  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
 
@@ -34,7 +34,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     # cloudc(p.ix,p.il)  # Total cloud cover
     # clstr(p.ix,p.il)   # Stratiform cloud cover
 
-    nl1  = p.kx-1
+    nl1  = p.kx-2
     nlp  = p.kx+1
     rrcl = 1./(rhcl2-rhcl1)
 
@@ -48,17 +48,17 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #       the level of maximum relative humidity.
 
     #First for loop (2 levels)
-    mask = rh[:, :, nl1-1] > rhcl1  # Create a mask where the condition is true
-    cloudc = jnp.where(mask, rh[:, :, nl1-1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
+    mask = rh[:, :, nl1] > rhcl1  # Create a mask where the condition is true
+    cloudc = jnp.where(mask, rh[:, :, nl1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
     #Second for loop (three levels)
-    drh = rh[:, :, 2:p.kx-1] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:p.kx-1] > qacl)  # Create a boolean mask where the conditions are met
+    drh = rh[:, :, 2:p.kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:p.kx-2] > qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
     # Update icltop where the mask is True
-    k_indices = jnp.arange(2, p.kx-1)  # Generate the k indices (since range starts from 2)
+    k_indices = jnp.arange(2, p.kx-2)  # Generate the k indices (since range starts from 2)
     icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
     icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
 
@@ -75,4 +75,15 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     clfact = 1.2
     rgse   = 1.0/(gse_s1 - gse_s0)
 
-    return icltop, cloudc #, clstr
+    #Fourth for loop (Two Loops)
+    # 1. Equivalent specific humidity of clouds
+    qcloud = qa[:, :, nl1]
+    # 2. Stratocumulus clouds over sea and land
+    fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
+    # Stratocumulus clouds over sea
+    clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
+    # Stratocumulus clouds over land
+    clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, p.kx - 1]
+    clstr = clstr + fmask * (clstrl - clstr)
+
+    return icltop, cloudc, clstr
