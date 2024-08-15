@@ -1,7 +1,7 @@
-import sys
-# Change to your path
-sys.path.append('/Users/pratishthagaur/jax-gcm/jcm')
-from shortwave_radiation_solar import solar
+# import sys
+# # Change to your path
+# sys.path.append('/Users/harinrajaradhakrishnan/Desktop/jax-gcm/jcm')
+from jcm.shortwave_radiation_solar import solar
 import pytest
 import numpy as np
 from numpy.testing import assert_array_almost_equal

@@ -15,7 +15,7 @@ def solar(tyear):
     topsr : array-like
         Daily-average insolation at the top of the atmosphere for each latitude band.
     """
-    from geometry import coa, sia
+    from jcm.geometry import coa, sia
     csol = 1368.0
     
     # Constants and precomputed values
@@ -52,3 +52,5 @@ def solar(tyear):
     
 
     return topsr
+
+
