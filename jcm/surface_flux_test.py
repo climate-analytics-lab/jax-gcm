@@ -20,7 +20,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("surface_flux_test1.csv", mode='r') as file:
+        with open("test_files/surface_flux_test1.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -92,7 +92,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="false"
 
-        with open("surface_flux_test2.csv", mode='r') as file:
+        with open("test_files/surface_flux_test2.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -164,7 +164,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("surface_flux_test3.csv", mode='r') as file:
+        with open("test_files/surface_flux_test3.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -236,7 +236,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("surface_flux_test4.csv", mode='r') as file:
+        with open("test_files/surface_flux_test4.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -308,7 +308,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("surface_flux_test5.csv", mode='r') as file:
+        with open("test_files/surface_flux_test5.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
