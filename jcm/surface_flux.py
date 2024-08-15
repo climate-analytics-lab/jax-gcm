@@ -44,8 +44,38 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     il - latitude
     ix - longitudes
 
-    forog - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
-            subroutine. Now used in main
+    forog : 2D array
+        - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
+        subroutine. Now used in main
+
+    psa : 2D array
+        - Normalised surface pressure
+    ua : 3D array
+        - u-wind
+    va : 3D array
+        - v-wind
+    ta :  3D array
+        - Temperature
+    qa : 3D array
+        - Specific humidity [g/kg]
+    rh : 3D array
+        - Relative humidity
+    phi : 3D array
+        - Geopotential
+    phi0 : 2D array
+        - Surface geopotential
+    fmask : 2D array
+        - Fractional land-sea mask
+    tsea : 2D array
+        - Sea-surface temperature
+    ssrd : 2D array
+        - Downward flux of short-wave radiation at the surface
+    slrd : 2D array
+        - Downward flux of long-wave radiation at the surface
+    lfluxland : boolean
+
+    Returns
+    -------
     '''
     
     ''' 
