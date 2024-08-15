@@ -150,3 +150,65 @@ def test_clouds_case4(self):
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
+
+def test_clouds_case5(self):
+
+        a = 420985739
+        b = 293084750
+        c = 238947502
+        d = 430098572
+        e = 9876423
+        f = 9023874
+        g = 9238475
+        
+        ix, il, kx = 1, 1, 8
+        qa = jnp.ones((ix, il, kx))*a
+        rh = jnp.ones((ix,il,kx))*b
+        precnv = jnp.ones((ix,il))*c
+        precls = jnp.ones((ix,il))*d
+        iptop = jnp.ones((ix,il))*e
+        gse = jnp.ones((ix,il))*f
+        fmask = jnp.ones((ix,il))*g
+
+        # from speedy:
+        icltop_true = 7
+        cloudc_true = 1.0
+        clstr_true = 406148436502325.7
+
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        
+        # Check that icltop, cloudc, and clstr are not null.
+        self.assertAlmostEqual(icltop,icltop_true)
+        self.assertAlmostEqual(cloudc,cloudc_true)
+        self.assertAlmostEqual(clstr,clstr_true)
+
+def test_clouds_case6(self):
+
+        a = 0.0000005
+        b = -0.00000076
+        c = 0.0000000008
+        d = 0.0000000006
+        e = 0.00000000002
+        f = 0.00000004
+        g = 0.000000003
+        
+        ix, il, kx = 1, 1, 8
+        qa = jnp.ones((ix, il, kx))*a
+        rh = jnp.ones((ix,il,kx))*b
+        precnv = jnp.ones((ix,il))*c
+        precls = jnp.ones((ix,il))*d
+        iptop = jnp.ones((ix,il))*e
+        gse = jnp.ones((ix,il))*f
+        fmask = jnp.ones((ix,il))*g
+
+        # from speedy:
+        icltop_true = 0
+        cloudc_true = 6.955861003243796e-05
+        clstr_true = -3.42000013589859e-16
+
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        
+        # Check that icltop, cloudc, and clstr are not null.
+        self.assertAlmostEqual(icltop,icltop_true)
+        self.assertAlmostEqual(cloudc,cloudc_true)
+        self.assertAlmostEqual(clstr,clstr_true)
