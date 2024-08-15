@@ -1,8 +1,5 @@
-import os
-os.environ['JAX_PLATFORMS'] = 'cpu'
-
 import unittest
-import humidity
+from jcm import humidity
 import jax.numpy as jnp
 
 class TestHumidityUnit(unittest.TestCase):
@@ -13,6 +10,7 @@ class TestHumidityUnit(unittest.TestCase):
         pressure = jnp.array([[[0.5] * 96] * 48])
         sigma = 4
         qsat = humidity.get_qsat(temp, pressure, sigma)
+        print("QSAT (standard case):", qsat)
 
         # Check that qsat is not null and all values are non-negative.
         self.assertIsNotNone(qsat)
@@ -21,12 +19,14 @@ class TestHumidityUnit(unittest.TestCase):
         # Edge case: Very low temperature
         temp = jnp.array([[[100] * 96] * 48])
         qsat = humidity.get_qsat(temp, pressure, sigma)
+        print("QSAT (low temperature):", qsat)
         self.assertIsNotNone(qsat)
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at low temperature")
 
         # Edge case: Very high temperature
         temp = jnp.array([[[350] * 96] * 48])
         qsat = humidity.get_qsat(temp, pressure, sigma)
+        print("QSAT (high temperature):", qsat)
         self.assertIsNotNone(qsat)
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at high temperature")
 
@@ -36,6 +36,8 @@ class TestHumidityUnit(unittest.TestCase):
         sigma = 4
         qg = jnp.array([[[2] * 96] * 48])
         rh, qsat = humidity.spec_hum_to_rel_hum(temp, pressure, sigma, qg)
+        print("RH (standard case):", rh)
+        print("QSAT (standard case):", qsat)
 
         # Check that rh and qsat are not null.
         self.assertIsNotNone(rh)
@@ -84,8 +86,9 @@ class TestHumidityUnit(unittest.TestCase):
         qg = jnp.array([[[2] * 96] * 48])
         rh, _ = humidity.spec_hum_to_rel_hum(temp, pressure, sigma, qg)
         qa, _ = humidity.rel_hum_to_spec_hum(temp, pressure, sigma, rh)
+        print("QA (converted from RH):", qa)
+        print("Original QG:", qg)
 
         # Check that qa is the same when converted to rh then back again.
         self.assertEqual(float(jnp.take(qa, 0)), float(jnp.take(qg, 0)))
         
-
