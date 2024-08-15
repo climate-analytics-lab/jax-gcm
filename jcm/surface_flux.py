@@ -1,12 +1,12 @@
 import jax as jnp
 
 # importing custom functions from library
-import physical_constants
-import geometry
+from physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
+from geometry import coa
 # These have not yet been defined - TS 08/14/24
-#import mod_radcon
-#import land_model
-from humidity import get_qsat
+#from mod_radcon import emisfc, alb_l, alb_s, snowc
+#from land_model import stl_am, soilw_am
+from humidity import get_qsat, rel_hum_to_spec_hum
 
 # constants for sufrace fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -45,8 +45,7 @@ def get_surface_fluxes(ix,il, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ix - longitudes
     '''
     
-    #(\___/)
-    #(=^.^=) In the fortran code this is a variable that is used in both subroutines 
-    #(")_(") but it requires initialization from il,ix. Need to determine if get_surface_flux is always declared first.
-    global forog 
-    forog = jnp.zeros([il,ix]) # Time-invariant fields (initial. in SFLSET)
+    # variable was initially declared in the set_orog_land_sfc_drag subroutine
+    rhdrag = 1.0/(grav*hdrag)
+
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
