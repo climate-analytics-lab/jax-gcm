@@ -68,4 +68,11 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     icltop = jnp.minimum(iptop, icltop)
 
-    #return icltop, cloudc, clstr
+    # 2.  Equivalent specific humidity of clouds
+    qcloud = qa[:,:,nl1]
+
+    # 3. Stratiform clouds at the top of PBL
+    clfact = 1.2
+    rgse   = 1.0/(gse_s1 - gse_s0)
+
+    return icltop, cloudc #, clstr
