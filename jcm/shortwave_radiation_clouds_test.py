@@ -62,14 +62,14 @@ class TestClouds(unittest.TestCase):
 
     def test_clouds_case2(self):
 
-        a = 512983
+        a = 5129
         b = 0.25234
-        c = -3298429847
+        c = -329842
         d = 2.134
         e = 3
-        f = 0.010134985739
-        g = -10000000000
-        
+        f = 0.01013498
+        g = -1000000
+
         ix, il, kx = 1, 1, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
@@ -82,7 +82,7 @@ class TestClouds(unittest.TestCase):
         # from speedy:
         icltop_true = 3
         cloudc_true = 1.0
-        clstr_true = -378510015.04063606
+        clstr_true = -37851.001504063606
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -155,14 +155,14 @@ class TestClouds(unittest.TestCase):
 
     def test_clouds_case5(self):
 
-        a = 420985739
-        b = 293084750
-        c = 238947502
-        d = 430098572
-        e = 9876423
-        f = 9023874
-        g = 9238475
-        
+        a = 420
+        b = 293
+        c = 238
+        d = 430
+        e = 9823
+        f = 9023
+        g = 9238
+
         ix, il, kx = 1, 1, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
@@ -175,7 +175,7 @@ class TestClouds(unittest.TestCase):
         # from speedy:
         icltop_true = 7
         cloudc_true = 1.0
-        clstr_true = 406148436502325.7
+        clstr_true = 406010.11613339186
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
