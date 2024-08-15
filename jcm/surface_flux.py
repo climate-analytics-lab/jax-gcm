@@ -93,7 +93,11 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ##########################################################
 
     if lfluxland:
-        pass
+        # 1. Extrapolation of wind, temp, hum. and density to the surface
+
+        # 1.1 Wind components
+        u0 = fwind0*ua[:,:,kx]
+        v0 = fwind0*va[:,:,kx]
 
 
 
