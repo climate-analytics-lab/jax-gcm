@@ -8,7 +8,7 @@ class TestClouds(unittest.TestCase):
 
     def test_clouds_general(self):
         
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))
         rh = jnp.ones((ix,il,kx))
         precnv = jnp.ones((ix,il))
@@ -39,7 +39,7 @@ class TestClouds(unittest.TestCase):
         f = 0.01
         g = 3400
         
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -49,9 +49,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = 3
-        cloudc_true = 0.6324555414579978
-        clstr_true = 127.5000050663948
+        icltop_true = jnp.ones((ix,il))*3
+        cloudc_true = jnp.ones((ix,il))*0.6324555414579978
+        clstr_true = jnp.ones((ix,il))*127.5000050663948
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -70,7 +70,7 @@ class TestClouds(unittest.TestCase):
         f = 0.01013498
         g = -1000000
 
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -80,9 +80,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = 3
-        cloudc_true = 1.0
-        clstr_true = -37851.001504063606
+        icltop_true = jnp.ones((ix,il))*3
+        cloudc_true = jnp.ones((ix,il))*1.0
+        clstr_true = jnp.ones((ix,il))*-37851.001504063606
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -101,7 +101,7 @@ class TestClouds(unittest.TestCase):
         f = 0
         g = 0
         
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -111,9 +111,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = 0
-        cloudc_true = 0.0
-        clstr_true = 0.0
+        icltop_true = jnp.ones((ix,il))*0
+        cloudc_true = jnp.ones((ix,il))*0.0
+        clstr_true = jnp.ones((ix,il))*0.0
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -132,7 +132,7 @@ class TestClouds(unittest.TestCase):
         f = -1
         g = -1
         
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -142,9 +142,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = -1
-        cloudc_true = 1.0
-        clstr_true = 0.15000000596046448
+        icltop_true = jnp.ones((ix,il))*-1
+        cloudc_true = jnp.ones((ix,il))*1.0
+        clstr_true = jnp.ones((ix,il))*0.15000000596046448
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -163,7 +163,7 @@ class TestClouds(unittest.TestCase):
         f = 9023
         g = 9238
 
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -173,9 +173,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = 7
-        cloudc_true = 1.0
-        clstr_true = 406010.11613339186
+        icltop_true = jnp.ones((ix,il))*7
+        cloudc_true = jnp.ones((ix,il))*1.0
+        clstr_true = jnp.ones((ix,il))*406010.11613339186
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
@@ -194,7 +194,7 @@ class TestClouds(unittest.TestCase):
         f = 0.00000004
         g = 0.000000003
         
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 96, 48, 8
         qa = jnp.ones((ix, il, kx))*a
         rh = jnp.ones((ix,il,kx))*b
         precnv = jnp.ones((ix,il))*c
@@ -204,9 +204,9 @@ class TestClouds(unittest.TestCase):
         fmask = jnp.ones((ix,il))*g
 
         # from speedy:
-        icltop_true = 0
-        cloudc_true = 6.955861003243796e-05
-        clstr_true = -3.42000013589859e-16
+        icltop_true = jnp.ones((ix,il))*0
+        cloudc_true = jnp.ones((ix,il))*6.955861003243796e-05
+        clstr_true = jnp.ones((ix,il))*-3.42000013589859e-16
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
