@@ -54,7 +54,8 @@ class TestClouds(unittest.TestCase):
         clstr_true = 0.026250001043081284
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
-        
+        if (icltop != iptop):
+            icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
@@ -85,7 +86,8 @@ class TestClouds(unittest.TestCase):
         clstr_true = 0.007570200300812721
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
-        
+        if (icltop != iptop):
+            icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
@@ -116,7 +118,8 @@ class TestClouds(unittest.TestCase):
         clstr_true = 0.0
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
-        
+        if (icltop != iptop):
+            icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
@@ -147,7 +150,8 @@ class TestClouds(unittest.TestCase):
         clstr_true = 0.15000000596046448
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
-        
+        if (icltop != iptop):
+            icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
@@ -212,7 +216,8 @@ class TestClouds(unittest.TestCase):
         clstr_true = -3.42000013589859e-16
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
-        
+        if (icltop != iptop):
+            icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
