@@ -65,6 +65,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
     pr1 = jnp.minimum(pmaxcl, 86.4 * (precnv + precls))
+    pr1 = jnp.where(jnp.isnan(pr1), 1.0, pr1)
     cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     icltop = jnp.minimum(iptop, icltop)
 
