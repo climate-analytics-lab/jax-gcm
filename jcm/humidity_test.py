@@ -5,9 +5,6 @@ import unittest
 import humidity
 import jax.numpy as jnp
 
-# Ensure JAX uses CPU backend
-os.environ['JAX_PLATFORMS'] = 'cpu'
-
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
