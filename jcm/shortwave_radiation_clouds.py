@@ -1,5 +1,14 @@
 import jax.numpy as jnp
-
+from dataclasses import dataclass
+@dataclass
+class SWRadiationData:
+    qcloud: jnp.ndarray
+    fsol: jnp.ndarray
+    ozone: jnp.ndarray
+    ozupp: jnp.ndarray
+    zenit: jnp.ndarray
+    stratz: jnp.ndarray
+    
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #import params as p 
     from jcm.params import kx 
