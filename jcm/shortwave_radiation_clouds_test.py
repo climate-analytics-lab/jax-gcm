@@ -17,17 +17,19 @@ class TestClouds(unittest.TestCase):
         gse = jnp.ones((ix,il))
         fmask = jnp.ones((ix,il))
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, qcloud = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertIsNotNone(icltop)
         self.assertIsNotNone(cloudc)
         self.assertIsNotNone(clstr)
+        self.assertIsNotNone(qcloud)
 
         # Check that our outputs are the right shape
         self.assertEqual(icltop.shape,precnv.shape)
         self.assertEqual(cloudc.shape,precnv.shape)
         self.assertEqual(clstr.shape,precnv.shape)
+        self.assertEqual(qcloud.shape,precnv.shape)
 
     def test_clouds_case1(self):
 
@@ -53,7 +55,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 0.6324555414579978
         clstr_true = 0.026250001043081284
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         if (icltop != iptop):
             icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
@@ -85,7 +87,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 1.0
         clstr_true = 0.007570200300812721
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         if (icltop != iptop):
             icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
@@ -117,7 +119,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 0.0
         clstr_true = 0.0
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         if (icltop != iptop):
             icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
@@ -149,7 +151,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 1.0
         clstr_true = 0.15000000596046448
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         if (icltop != iptop):
             icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.
@@ -181,7 +183,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 1.0
         clstr_true = 4.395000174641609
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         if (icltop != iptop):
             icltop_true -= 1
@@ -215,7 +217,7 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 6.955861003243796e-05
         clstr_true = -3.42000013589859e-16
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
+        icltop, cloudc, clstr, _ = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         if (icltop != iptop):
             icltop_true -= 1
         # Check that icltop, cloudc, and clstr are not null.

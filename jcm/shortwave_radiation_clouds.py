@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #import params as p 
     from jcm.params import kx 
@@ -86,4 +87,4 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
     clstr = clstr + fmask * (clstrl - clstr)
 
-    return icltop, cloudc, clstr
+    return icltop, cloudc, clstr, qcloud
