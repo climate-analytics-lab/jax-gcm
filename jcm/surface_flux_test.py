@@ -7,10 +7,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test1(self):
         il, ix, kx = 96, 48, 8
-        psa = 1000. * jnp.ones((il, ix)) #surface pressure
+        psa = jnp.ones((il, ix)) #surface pressure
         ua = jnp.ones(((il, ix, kx))) #zonal wind
         va = jnp.ones(((il, ix, kx))) #meridional wind
         ta = 288. * jnp.ones(((il, ix, kx))) #temperature
+        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
         rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
         phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
         phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
@@ -79,10 +80,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test2(self):
         il, ix, kx = 96, 48, 8
-        psa = 1000. * jnp.ones((il, ix)) #surface pressure
+        psa = jnp.ones((il, ix)) #surface pressure
         ua = jnp.ones(((il, ix, kx))) #zonal wind
         va = jnp.ones(((il, ix, kx))) #meridional wind
         ta = 288. * jnp.ones(((il, ix, kx))) #temperature
+        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
         rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
         phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
         phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
@@ -151,10 +153,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test3(self):
         il, ix, kx = 96, 48, 8
-        psa = 1000. * jnp.ones((il, ix)) #surface pressure
+        psa = jnp.ones((il, ix)) #surface pressure
         ua = jnp.ones(((il, ix, kx))) #zonal wind
         va = jnp.ones(((il, ix, kx))) #meridional wind
         ta = 288. * jnp.ones(((il, ix, kx))) #temperature
+        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
         rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
         phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
         phi0 = -10. * jnp.ones((il, ix)) #surface geopotential
@@ -223,10 +226,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test4(self):
         il, ix, kx = 96, 48, 8
-        psa = 1000. * jnp.ones((il, ix)) #surface pressure
+        psa = jnp.ones((il, ix)) #surface pressure
         ua = jnp.ones(((il, ix, kx))) #zonal wind
         va = jnp.ones(((il, ix, kx))) #meridional wind
         ta = 300. * jnp.ones(((il, ix, kx))) #temperature
+        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
         rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
         phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
         phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
@@ -295,10 +299,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test5(self):
         il, ix, kx = 96, 48, 8
-        psa = 1000. * jnp.ones((il, ix)) #surface pressure
+        psa = jnp.ones((il, ix)) #surface pressure
         ua = jnp.ones(((il, ix, kx))) #zonal wind
         va = jnp.ones(((il, ix, kx))) #meridional wind
         ta = 285. * jnp.ones(((il, ix, kx))) #temperature
+        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
         rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
         phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
         phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
