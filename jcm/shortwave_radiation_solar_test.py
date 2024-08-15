@@ -1,10 +1,11 @@
 import sys
+# Change to your path
 sys.path.append('/Users/pratishthagaur/jax-gcm/jcm')
 from shortwave_radiation_solar import solar
 import pytest
 import numpy as np
 from numpy.testing import assert_array_almost_equal
-# Define your test cases
+
 @pytest.mark.parametrize("input_value, expected_output", [
     (0.0, np.array([
         553.93423522, 551.02920315, 545.81299099, 538.30748186, 528.544079,
@@ -16,7 +17,7 @@ from numpy.testing import assert_array_almost_equal
         272.04837186, 246.54472938, 220.47604007, 194.01174187, 167.34305152,
         140.69016017, 114.31490282, 88.54239741, 63.80107855, 40.70440366,
         20.24489631, 4.43498509, 0., 0., 0., 0., 0., 0.
-    ])),  # Replace '...' with the expected output when input is 0.0
+    ])),  
     (0.2, np.array([
         59.64891891, 82.51370562, 109.0996075, 135.94454033, 162.48195582,
         188.46471746, 213.72891835, 238.14170523, 261.58627434, 283.95547202,
@@ -28,7 +29,7 @@ from numpy.testing import assert_array_almost_equal
         303.77351671, 282.48360014, 260.01911561, 236.4767785, 211.95903738,
         186.57407167, 160.43718712, 133.67240691, 106.41888862, 78.84586166,
         51.20481384, 24.06562443, 0.89269878
-    ])),  # Replace '...' with the expected output when input is 0.2
+    ])),  
     (0.4, np.array([
         0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
         0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
@@ -42,7 +43,7 @@ from numpy.testing import assert_array_almost_equal
         4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
         4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
         4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02
-    ])),  # Replace '...' with the expected output when input is 0.4
+    ])),  
     (0.6, np.array([
         0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
         83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
@@ -53,7 +54,7 @@ from numpy.testing import assert_array_almost_equal
         446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
         410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
         359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132
-    ])),  # Replace '...' with the expected output when input is 0.6
+    ])),  
     (0.8, np.array([
         2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
         2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
@@ -67,7 +68,7 @@ from numpy.testing import assert_array_almost_equal
         2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
         1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
         1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00
-    ])),  # Replace '...' with the expected output when input is 0.7
+    ])),  
     (1.0, np.array([
         553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
         516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
@@ -78,7 +79,7 @@ from numpy.testing import assert_array_almost_equal
         272.04837717, 246.54473496, 220.47604586, 194.01174781, 167.34305754,
         140.69016619, 114.31490876, 88.54240315, 63.80108395, 40.70440853,
         20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.
-    ])),  # Replace '...' with the expected output when input is 1.0
+    ])),  
 ])
 def test_solar(input_value, expected_output, decimal=3):
     res=solar(input_value)
