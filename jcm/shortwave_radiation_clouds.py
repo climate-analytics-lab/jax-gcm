@@ -62,5 +62,10 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
     icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
 
+    #Third for loop (two levels)
+    # Perform the calculations (Two Loops)
+    pr1 = jnp.minimum(pmaxcl, 86.4 * (precnv + precls))
+    cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    icltop = jnp.minimum(iptop, icltop)
 
     #return icltop, cloudc, clstr
