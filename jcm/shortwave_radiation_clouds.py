@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
-    import params as p 
+    #import params as p 
+    kx = 8 
     '''
     qa(ix,il,kx)   # Specific humidity [g/kg]
     rh(ix,il,kx)   # Relative humidity
@@ -33,8 +34,8 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     # cloudc(p.ix,p.il)  # Total cloud cover
     # clstr(p.ix,p.il)   # Stratiform cloud cover
 
-    nl1  = p.kx-2
-    nlp  = p.kx+1
+    nl1  = kx-2
+    nlp  = kx+1
     rrcl = 1./(rhcl2-rhcl1)
 
     # 1.  Cloud cover, defined as the sum of:
@@ -52,12 +53,12 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
     #Second for loop (three levels)
-    drh = rh[:, :, 2:p.kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:p.kx-2] > qacl)  # Create a boolean mask where the conditions are met
+    drh = rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
     # Update icltop where the mask is True
-    k_indices = jnp.arange(2, p.kx-2)  # Generate the k indices (since range starts from 2)
+    k_indices = jnp.arange(2, kx-2)  # Generate the k indices (since range starts from 2)
     icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
     icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
 
@@ -82,7 +83,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
-    clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, p.kx - 1]
+    clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
     clstr = clstr + fmask * (clstrl - clstr)
 
     return icltop, cloudc, clstr
