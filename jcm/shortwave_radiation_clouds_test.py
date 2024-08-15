@@ -1,5 +1,5 @@
 import unittest
-from jcm.shortwave_radiation_clouds import clouds
+from jcm.shortwave_radiation import clouds
 import jax.numpy as jnp
 
 
