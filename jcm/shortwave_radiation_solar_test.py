@@ -79,5 +79,5 @@ import numpy as np
         20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.
     ])),  # Replace '...' with the expected output when input is 1.0
 ])
-def test_solar(input_value, expected_output):
+def test_solar(input_value, expected_output, decimal=4):
     assert solar(input_value) == expected_output
