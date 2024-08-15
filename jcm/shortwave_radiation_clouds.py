@@ -1,6 +1,6 @@
 import jax.numpy as jnp
-from dataclasses import dataclass
-@dataclass
+import tree_math
+@tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray
     fsol: jnp.ndarray
