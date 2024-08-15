@@ -78,14 +78,15 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     rgse   = 1.0/(gse_s1 - gse_s0)
 
     #Fourth for loop (Two Loops)
-    # 1. Equivalent specific humidity of clouds
-    qcloud = qa[:, :, nl1]
     # 2. Stratocumulus clouds over sea and land
     fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
+    print(clstr)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
+    print(clstr)
     clstr = clstr + fmask * (clstrl - clstr)
+    print(clstr)
 
     return icltop, cloudc, clstr
