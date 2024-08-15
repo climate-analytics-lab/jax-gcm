@@ -2,6 +2,8 @@ import unittest
 from jcm.shortwave_radiation_clouds import clouds
 import jax.numpy as jnp
 
+
+# truth for test cases are generated from https://github.com/duncanwp/speedy_test
 class TestClouds(unittest.TestCase):
 
     def test_clouds_general(self):
@@ -58,7 +60,7 @@ class TestClouds(unittest.TestCase):
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case2(self):
+    def test_clouds_case2(self):
 
         a = 512983
         b = 0.25234
@@ -89,7 +91,7 @@ def test_clouds_case2(self):
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case3(self):
+    def test_clouds_case3(self):
 
         a = 0
         b = 0
@@ -120,7 +122,7 @@ def test_clouds_case3(self):
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case4(self):
+    def test_clouds_case4(self):
 
         a = -1
         b = -1
@@ -151,7 +153,7 @@ def test_clouds_case4(self):
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case5(self):
+    def test_clouds_case5(self):
 
         a = 420985739
         b = 293084750
@@ -182,7 +184,7 @@ def test_clouds_case5(self):
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case6(self):
+    def test_clouds_case6(self):
 
         a = 0.0000005
         b = -0.00000076
