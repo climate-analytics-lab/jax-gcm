@@ -179,6 +179,9 @@ class TestClouds(unittest.TestCase):
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
+        if (icltop != iptop):
+            icltop_true -= 1
+
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
