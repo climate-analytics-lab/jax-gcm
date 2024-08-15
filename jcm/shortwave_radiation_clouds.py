@@ -1,6 +1,5 @@
 import jax.numpy as jnp
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
-    import shortwave_constants as shconst
     import params as p 
     '''
     qa(ix,il,kx)   # Specific humidity [g/kg]
