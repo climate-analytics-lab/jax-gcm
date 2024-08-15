@@ -1,4 +1,4 @@
-import jax as jnp
+import jax.numpy as jnp
 
 # importing custom functions from library
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
@@ -8,7 +8,7 @@ from jcm.geometry import coa
 #from land_model import stl_am, soilw_am
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 
-import jcm.params
+from jcm.params import ix,il,kx
 # import types
 
 # constants for sufrace fluxes
@@ -50,7 +50,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     forog : 2D array
         - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
         subroutine. Now used in main
-
     psa : 2D array
         - Normalised surface pressure
     ua : 3D array
@@ -86,18 +85,78 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     rhdrag = 1.0/(grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
+
+    
     '''
 
     ##########################################################
     # Land surface
     ##########################################################
 
+    # initializing variables
+    t1 = jnp.zeros([il,ix,2])
+    q1 = jnp.zeros([il,ix,2])
+    t2 = jnp.zeros([il,ix,2])
+    qsat0 = jnp.zeros([il,ix,2])
+    denvvs = jnp.zeros([il,ix,2])
+    
     if lfluxland:
+
+
         # 1. Extrapolation of wind, temp, hum. and density to the surface
 
         # 1.1 Wind components
-        u0 = fwind0*ua[:,:,kx]
-        v0 = fwind0*va[:,:,kx]
+        u0 = fwind0*ua[:,:,-1]
+        v0 = fwind0*va[:,:,-1]
+
+        gtemp0 = 1.0 - ftemp0
+        rcp = 1.0/cp 
+        nl1 = kx-2             # original code had kx-1 which works for 1 based indexing but not 2
+
+        # substituting the for loop at line 109
+        # Temperature difference between lowest level and sfc
+        # line 112
+        dt1 = wvi[-1,1]*(ta[:,:,-1] - ta[:,:,nl1])
+
+        # print(dt1.shape) # 48 x 96
+        # print(ta.shape) # 48 x 96 x 8 
+        # print(phi0) # 48 x 96
+        # print(t1.shape)
+
+        
+        # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
+        # line 115 - 116
+        t1 = t1.at[:,:,0].add(ta[:,:,-1] + dt1)
+        t1 = t1.at[:,:,1].set(t1[:,:,0] - jnp.multiply(phi0,dt1)/(rgas*288.0*sigl[-1]))
+
+        # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
+        # line 119 - 120
+        t2 = t2.at[:,:,1].set(ta[:,:,-1] + rcp*phi[:,:,-1])
+        t2 = t2.at[:,:,0].set(t2[:,:,1] - rcp*phi0)
+
+        # lines 124 - 137
+        t1.at[:,:,0].set(jnp.where(ta[:,:,kx] > ta[:,:,nl1], ftemp0*t1[:,:,0] + gtemp0*t2[:,:,0], ta[:,:,-1]))
+        t1.at[:,:,1].set(jnp.where(ta[:,:,kx] > ta[:,:,nl1], ftemp0*t1[:,:,1] + gtemp0*t2[:,:,0], ta[:,:,kx]))
+        # Initialize variable
+        t0 = t1[:,:,1] + jnp.multiply(fmask,(t1[:,:,0] - t1[:,:,1]))
+
+        # line 140
+        # denvvs(:,:,0) = (p0*psa/(rgas*t0))*sqrt(u0**2.0 + v0**2.0 + vgust**2.0)
+        denvvs.at[:,:,0].set(jnp.multiply(jnp.divide(p0*psa,rgas*t0),\
+                     jnp.sqrt(jnp.square(u0) + jnp.square(v0) + jnp.square(vgust))))
+
+
+
+
+
+
+        
+        
+
+
+
+
+        
 
 
 
