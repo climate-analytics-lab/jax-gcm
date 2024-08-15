@@ -34,7 +34,7 @@ class TestZonalAverageFields(unittest.TestCase):
 
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
-        fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
+        fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
             self.tyear, self.sia, self.coa
         )
         
@@ -43,7 +43,7 @@ class TestZonalAverageFields(unittest.TestCase):
 
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
-        fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
+        fsol, ozupp, ozone, zenit, stratz, = get_zonal_average_fields(
             self.tyear, self.sia, self.coa
         )
         
@@ -53,7 +53,7 @@ class TestZonalAverageFields(unittest.TestCase):
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
-        fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
+        fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
             self.tyear, self.sia, self.coa
         )
         
@@ -68,7 +68,7 @@ class TestZonalAverageFields(unittest.TestCase):
         sia = random.uniform(key, (self.il,), minval=-1, maxval=1)
         coa = jnp.sqrt(1 - sia**2)
         
-        fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
+        fsol, ozupp, ozone, zenit, stratz= get_zonal_average_fields(
             self.tyear, sia, coa
         )
         
