@@ -51,16 +51,19 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     mask = rh[:, :, nl1] > rhcl1  # Create a mask where the condition is true
     cloudc = jnp.where(mask, rh[:, :, nl1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
+    print(icltop)
 
     #Second for loop (three levels)
     drh = rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
     mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
+
     # Update icltop where the mask is True
     k_indices = jnp.arange(2, kx-2)  # Generate the k indices (since range starts from 2)
     icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
     icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
+    print(icltop)
 
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
@@ -68,7 +71,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(iptop, icltop)
-
+    print(icltop)
     # 2.  Equivalent specific humidity of clouds
     qcloud = qa[:,:,nl1]
 
