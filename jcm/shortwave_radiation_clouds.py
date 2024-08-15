@@ -30,7 +30,7 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     gse_s0  = 0.25  # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1  = 0.40  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
 
-    # icltop(p.ix,p.il)  # Cloud top level
+    # icltop(p.ix,p.il)  # Cloud top level (make sure returns integer)
     # cloudc(p.ix,p.il)  # Total cloud cover
     # clstr(p.ix,p.il)   # Stratiform cloud cover
 
@@ -49,22 +49,23 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
 
     #First for loop (2 levels)
     mask = rh[:, :, nl1-1] > rhcl1  # Create a mask where the condition is true
-
     cloudc = jnp.where(mask, rh[:, :, nl1-1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
-
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
     #Second for loop (three levels)
-    # do k = 3, kx - 2
-    #         do i = 1, ix
-    #             do j = 1, il
-    #                 drh = rh(i,j,k) - rhcl1
-    #                 if (drh > cloudc(i,j) .and. qa(i,j,k) > qacl) then
-    #                     cloudc(i,j) = drh
-    #                     icltop(i,j) = k
-    #                 end if
-    #             end do
-    #         end do
-    #     end do
+    drh = rh[:, :, 2:p.kx-1] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:p.kx-1] > qacl)  # Create a boolean mask where the conditions are met
+    cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
+    cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
+    # Update icltop where the mask is True
+    k_indices = jnp.arange(2, p.kx-1)  # Generate the k indices (since range starts from 2)
+    icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
+    icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
+
+    #Third for loop (two levels)
+    # Perform the calculations (Two Loops)
+    pr1 = jnp.minimum(pmaxcl, 86.4 * (precnv + precls))
+    cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    icltop = jnp.minimum(iptop, icltop)
 
     #return icltop, cloudc, clstr
