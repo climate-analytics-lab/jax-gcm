@@ -16,7 +16,7 @@ def solar(tyear):
         Daily-average insolation at the top of the atmosphere for each latitude band.
     """
     from geometry import coa, sia
-    csol = 1361.0
+    csol = 1368.0
     
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
@@ -49,5 +49,6 @@ def solar(tyear):
     sh0 = jnp.sin(h0)
 
     topsr = csolp * fdis * (h0 * sia * sdecl + sh0 * coa * cdecl)
+    
 
     return topsr
