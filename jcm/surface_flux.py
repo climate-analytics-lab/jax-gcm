@@ -35,7 +35,7 @@ clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
 
 
-def get_surface_fluxes(ix,il, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
+def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
                  tsea, ssrd, slrd):
     '''
 
@@ -43,9 +43,17 @@ def get_surface_fluxes(ix,il, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ----------
     il - latitude
     ix - longitudes
+
+    forog - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
+            subroutine. Now used in main
     '''
     
+    ''' 
     # variable was initially declared in the set_orog_land_sfc_drag subroutine
     rhdrag = 1.0/(grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
+    '''
+
+     
+
