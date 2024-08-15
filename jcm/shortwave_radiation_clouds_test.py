@@ -2,6 +2,8 @@ import unittest
 from jcm.shortwave_radiation_clouds import clouds
 import jax.numpy as jnp
 
+
+# truth for test cases are generated from https://github.com/duncanwp/speedy_test
 class TestClouds(unittest.TestCase):
 
     def test_clouds_general(self):
@@ -15,7 +17,7 @@ class TestClouds(unittest.TestCase):
         gse = jnp.ones((ix,il))
         fmask = jnp.ones((ix,il))
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertIsNotNone(icltop)
@@ -51,14 +53,14 @@ class TestClouds(unittest.TestCase):
         cloudc_true = 0.6324555414579978
         clstr_true = 127.5000050663948
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case2(self):
+    def test_clouds_case2(self):
 
         a = 512983
         b = 0.25234
@@ -82,14 +84,14 @@ def test_clouds_case2(self):
         cloudc_true = 1.0
         clstr_true = -378510015.04063606
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case3(self):
+    def test_clouds_case3(self):
 
         a = 0
         b = 0
@@ -113,14 +115,14 @@ def test_clouds_case3(self):
         cloudc_true = 0.0
         clstr_true = 0.0
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case4(self):
+    def test_clouds_case4(self):
 
         a = -1
         b = -1
@@ -144,14 +146,14 @@ def test_clouds_case4(self):
         cloudc_true = 1.0
         clstr_true = 0.15000000596046448
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case5(self):
+    def test_clouds_case5(self):
 
         a = 420985739
         b = 293084750
@@ -175,14 +177,14 @@ def test_clouds_case5(self):
         cloudc_true = 1.0
         clstr_true = 406148436502325.7
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
         self.assertAlmostEqual(cloudc,cloudc_true)
         self.assertAlmostEqual(clstr,clstr_true)
 
-def test_clouds_case6(self):
+    def test_clouds_case6(self):
 
         a = 0.0000005
         b = -0.00000076
@@ -206,7 +208,7 @@ def test_clouds_case6(self):
         cloudc_true = 6.955861003243796e-05
         clstr_true = -3.42000013589859e-16
 
-        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask,icltop,cloudc,clstr)
+        icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
         # Check that icltop, cloudc, and clstr are not null.
         self.assertAlmostEqual(icltop,icltop_true)
