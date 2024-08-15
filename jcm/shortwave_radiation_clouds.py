@@ -82,11 +82,8 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
-    print(fmask)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
-    print(fmask)
     clstr = clstr + fmask * (clstrl - clstr)
-    print(fmask)
 
     return icltop, cloudc, clstr
