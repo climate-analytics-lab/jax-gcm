@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #import params as p 
-    kx = 8 
+    from jcm.params import kx 
     '''
     qa(ix,il,kx)   # Specific humidity [g/kg]
     rh(ix,il,kx)   # Relative humidity
