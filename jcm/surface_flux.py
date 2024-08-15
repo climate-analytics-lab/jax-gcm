@@ -1,12 +1,15 @@
 import jax as jnp
 
 # importing custom functions from library
-from physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
-from geometry import coa
+from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
+from jcm.geometry import coa
 # These have not yet been defined - TS 08/14/24
 #from mod_radcon import emisfc, alb_l, alb_s, snowc
 #from land_model import stl_am, soilw_am
-from humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+
+import jcm.params
+# import types
 
 # constants for sufrace fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -36,7 +39,7 @@ clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
 
 def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
-                 tsea, ssrd, slrd):
+                 tsea, ssrd, slrd, lfluxland):
     '''
 
     Parameters
@@ -84,6 +87,16 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
     '''
+
+    ##########################################################
+    # Land surface
+    ##########################################################
+
+    if lfluxland:
+        pass
+
+
+
 
      
 
