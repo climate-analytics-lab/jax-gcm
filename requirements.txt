@@ -1,4 +1,4 @@
 jax
-
+dinosaur
 # Testing requirements
 pytest-cov
