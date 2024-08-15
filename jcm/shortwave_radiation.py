@@ -1,9 +1,31 @@
 import jax.numpy as jnp
 from jax import jit
 from jcm.physical_constants import solc,epssw
-from jcm.params import il
-from jcm.geometry import sia,coa
+from jcm.params import il, ix
+# from jcm.geometry import sia,coa
 
+
+sia = jnp.array([-0.99882019, -0.99358201, -0.98417646, -0.97064298, -0.95303822,
+       -0.93143612, -0.90592718, -0.87661856, -0.843633  , -0.80710906,
+       -0.76719975, -0.72407258, -0.67790836, -0.62890077, -0.57725537,
+       -0.52318871, -0.46692774, -0.40870813, -0.34877434, -0.28737777,
+       -0.22477564, -0.16123083, -0.09700976, -0.03238179,  0.03238179,
+        0.09700976,  0.16123083,  0.22477564,  0.28737777,  0.34877434,
+        0.40870813,  0.46692774,  0.52318871,  0.57725537,  0.62890077,
+        0.67790836,  0.72407258,  0.76719975,  0.80710906,  0.843633  ,
+        0.87661856,  0.90592718,  0.93143612,  0.95303822,  0.97064298,
+        0.98417646,  0.99358201,  0.99882019])
+
+coa = jnp.array([0.04856168, 0.11311405, 0.17719114, 0.24052484, 0.30285006,
+       0.36390487, 0.42343352, 0.48118592, 0.53692026, 0.59040238,
+       0.64140824, 0.68972379, 0.73514642, 0.77748558, 0.81656368,
+       0.85221686, 0.88429548, 0.91266515, 0.93720673, 0.95781732,
+       0.97441055, 0.98691672, 0.99528343, 0.99947557, 0.99947557,
+       0.99528343, 0.98691672, 0.97441055, 0.95781732, 0.93720673,
+       0.91266515, 0.88429548, 0.85221686, 0.81656368, 0.77748558,
+       0.73514642, 0.68972379, 0.64140824, 0.59040238, 0.53692026,
+       0.48118592, 0.42343352, 0.36390487, 0.30285006, 0.24052484,
+       0.17719114, 0.11311405, 0.04856168])
 
 @jit
 def get_zonal_average_fields(tyear):
@@ -55,31 +77,31 @@ def get_zonal_average_fields(tyear):
     topsr = solar(tyear)
 
     # Initialize arrays
-    fsol = jnp.zeros((il,))
-    ozupp = jnp.zeros((il,))
-    ozone = jnp.zeros((il,))
-    zenit = jnp.zeros((il,))
-    stratz = jnp.zeros((il,))
+    fsol = jnp.zeros((ix, il,))
+    ozupp = jnp.zeros((ix, il,))
+    ozone = jnp.zeros((ix, il,))
+    zenit = jnp.zeros((ix, il,))
+    stratz = jnp.zeros((ix, il,))
 
     def compute_fields(j, fsol, ozupp, ozone, zenit, stratz):
         flat2 = 1.5 * sia[j] ** 2 - 0.5
 
         # Solar radiation at the top
-        fsol = fsol.at[j].set(topsr[j])
+        fsol = fsol.at[:,j].set(topsr[j])
 
         # Ozone depth in upper stratosphere
-        ozupp = ozupp.at[j].set(0.5 * epssw)
-        ozone = ozone.at[j].set(0.4 * epssw * (1.0 + coz1 * sia[j] + coz2 * flat2))
+        ozupp = ozupp.at[:,j].set(0.5 * epssw)
+        ozone = ozone.at[:,j].set(0.4 * epssw * (1.0 + coz1 * sia[j] + coz2 * flat2))
 
         # Zenith angle correction to (downward) absorptivity
-        zenit = zenit.at[j].set(1.0 + azen * (1.0 - (coa[j] * jnp.cos(rzen) + sia[j] * jnp.sin(rzen))) ** nzen)
+        zenit = zenit.at[:,j].set(1.0 + azen * (1.0 - (coa[j] * jnp.cos(rzen) + sia[j] * jnp.sin(rzen))) ** nzen)
 
         # Ozone absorption in upper and lower stratosphere
-        ozupp = ozupp.at[j].set(fsol[j] * ozupp[j] * zenit[j])
-        ozone = ozone.at[j].set(fsol[j] * ozone[j] * zenit[j])
+        ozupp = ozupp.at[:,j].set(fsol[:,j] * ozupp[:,j] * zenit[:,j])
+        ozone = ozone.at[:,j].set(fsol[:,j] * ozone[:,j] * zenit[:,j])
 
         # Polar night cooling in the stratosphere
-        stratz = stratz.at[j].set(jnp.maximum(fs0 - fsol[j], 0.0))
+        stratz = stratz.at[:,j].set(jnp.maximum(fs0 - fsol[:,j], 0.0))
 
         return fsol, ozupp, ozone, zenit, stratz
 
