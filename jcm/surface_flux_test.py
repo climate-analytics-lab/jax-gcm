@@ -1,5 +1,5 @@
 import unittest
-from jcm.surface_fluxes import get_surface_fluxes
+from jcm.surface_fluxes import get_surface_fluxes, set_orog_land_sfc_drag
 import jax.numpy as jnp
 import csv
 
