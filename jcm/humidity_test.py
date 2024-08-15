@@ -1,8 +1,5 @@
-import os
-os.environ['JAX_PLATFORMS'] = 'cpu'
-
 import unittest
-import humidity
+from jcm import humidity
 import jax.numpy as jnp
 
 class TestHumidityUnit(unittest.TestCase):
