@@ -161,7 +161,7 @@ class TestClouds(unittest.TestCase):
         d = 430
         e = 9823
         f = 9023
-        g = 9238
+        g = 0.1
 
         ix, il, kx = 1, 1, 8
         qa = jnp.ones((ix, il, kx))*a
@@ -175,7 +175,7 @@ class TestClouds(unittest.TestCase):
         # from speedy:
         icltop_true = 7
         cloudc_true = 1.0
-        clstr_true = 406010.11613339186
+        clstr_true = 4.395000174641609
 
         icltop, cloudc, clstr = clouds(qa,rh,precnv,precls,iptop,gse,fmask)
         
