@@ -369,3 +369,35 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertAlmostEqual(jnp.max(t0),test_data["t0"][0])
         self.assertAlmostEqual(jnp.min(t0),test_data["t0"][1])
         self.assertAlmostEqual(jnp.mean(t0),test_data["t0"][2])
+
+    def test_surface_fluxes_drag_test(self):
+        il, ix, kx = 96, 48, 8
+
+        hdrag = 2000.0 # Height scale for orographic correction        
+        grav = 9.81 # gravity constant
+        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
+
+        forog_test = np.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
+
+        with open("surface_flux_drag_test.csv", mode='r') as file:
+            reader = csv.reader(file)
+        
+            # Read the header (keys)
+            keys = next(reader)
+        
+            # Initialize an empty dictionary with keys
+            test_data = {key: [] for key in keys}
+        
+            # Read the rows and append values to the dictionary
+            for row in reader:
+                for i, value in enumerate(row):
+                    test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
+        
+            # Convert lists to JAX arrays
+            test_data = {key: jnp.array(value) for key, value in test_data.items()}
+    
+        forog_test = set_orog_land_sfc_drag( phi0, grav, hdrag )
+        
+        self.assertAlmostEqual(jnp.max(forog_test),test_data["forog"][0])
+        self.assertAlmostEqual(jnp.min(forog_test),test_data["forog"][1])
+        self.assertAlmostEqual(jnp.mean(forog_test),test_data["forog"][2])
