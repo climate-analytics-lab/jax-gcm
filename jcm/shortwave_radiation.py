@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
+from jax import vmap
 from jcm.physical_constants import solc,epssw
 from jcm.params import il, ix
 # from jcm.geometry import sia,coa
@@ -28,7 +29,7 @@ coa = jnp.array([0.04856168, 0.11311405, 0.17719114, 0.24052484, 0.30285006,
        0.17719114, 0.11311405, 0.04856168])
 
 @jit
-def get_zonal_average_fields(tyear):
+def get_zonal_average_fields(tyear, sia, coa, solc, il, ix, epssw):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
@@ -44,6 +45,8 @@ def get_zonal_average_fields(tyear):
         Solar constant
     il : int
         Number of latitude zones
+    ix : int
+        Number of vertical layers
     epssw : float
         Ozone absorption constant
 
@@ -74,7 +77,7 @@ def get_zonal_average_fields(tyear):
 
     # Solar radiation at the top
     topsr = jnp.zeros(il)
-    topsr = solar(tyear)
+    topsr = solar(tyear)  # Assuming solar is another JAX function you defined
 
     # Initialize arrays
     fsol = jnp.zeros((ix, il,))
@@ -87,26 +90,29 @@ def get_zonal_average_fields(tyear):
         flat2 = 1.5 * sia[j] ** 2 - 0.5
 
         # Solar radiation at the top
-        fsol = fsol.at[:,j].set(topsr[j])
+        fsol = fsol.at[:, j].set(topsr[j])
 
         # Ozone depth in upper stratosphere
-        ozupp = ozupp.at[:,j].set(0.5 * epssw)
-        ozone = ozone.at[:,j].set(0.4 * epssw * (1.0 + coz1 * sia[j] + coz2 * flat2))
+        ozupp = ozupp.at[:, j].set(0.5 * epssw)
+        ozone = ozone.at[:, j].set(0.4 * epssw * (1.0 + coz1 * sia[j] + coz2 * flat2))
 
         # Zenith angle correction to (downward) absorptivity
-        zenit = zenit.at[:,j].set(1.0 + azen * (1.0 - (coa[j] * jnp.cos(rzen) + sia[j] * jnp.sin(rzen))) ** nzen)
+        zenit = zenit.at[:, j].set(1.0 + azen * (1.0 - (coa[j] * jnp.cos(rzen) + sia[j] * jnp.sin(rzen))) ** nzen)
 
         # Ozone absorption in upper and lower stratosphere
-        ozupp = ozupp.at[:,j].set(fsol[:,j] * ozupp[:,j] * zenit[:,j])
-        ozone = ozone.at[:,j].set(fsol[:,j] * ozone[:,j] * zenit[:,j])
+        ozupp = ozupp.at[:, j].set(fsol[:, j] * ozupp[:, j] * zenit[:, j])
+        ozone = ozone.at[:, j].set(fsol[:, j] * ozone[:, j] * zenit[:, j])
 
         # Polar night cooling in the stratosphere
-        stratz = stratz.at[:,j].set(jnp.maximum(fs0 - fsol[:,j], 0.0))
+        stratz = stratz.at[:, j].set(jnp.maximum(fs0 - fsol[:, j], 0.0))
 
         return fsol, ozupp, ozone, zenit, stratz
 
-    for j in range(il):
-        fsol, ozupp, ozone, zenit, stratz = compute_fields(j, fsol, ozupp, ozone, zenit, stratz)
+    # Use vmap to vectorize the compute_fields function over the latitude index j
+    vmap_compute_fields = vmap(compute_fields, in_axes=(0, None, None, None, None, None), out_axes=(None, None, None, None, None))
+
+    # Apply vmap across all latitudes
+    fsol, ozupp, ozone, zenit, stratz = vmap_compute_fields(jnp.arange(il), fsol, ozupp, ozone, zenit, stratz)
 
     return fsol, ozupp, ozone, stratz
 
