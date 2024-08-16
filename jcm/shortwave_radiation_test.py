@@ -5,18 +5,165 @@ import numpy as np
 from numpy.testing import assert_array_almost_equal
 from jax import random
 
-from jcm.shortwave_radiation import get_zonal_average_fields, solar, clouds
+from jcm.shortwave_radiation import get_zonal_average_fields, solar, clouds, get_shortwave_rad_fluxes
 from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix
 from jcm.geometry import sia
 
 
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
+class TestShortWaveRadiation(unittest.TestCase):
+    def test_shortwave_radiation_general(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*1
+        qa = jnp.ones((ix, il, kx))*1
+        cloudc = jnp.ones((ix,il))*1
+        clstr = jnp.ones((ix,il))*1
+        psa = jnp.ones((ix,il))*1
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        dummy_fdabs = jnp.ones((kx))
+
+        self.assertIsNone(fsfcd)
+        self.assertIsNone(fsfc)
+        self.assertIsNone(ftop)
+        self.assertIsNone(fdabs)
+
+        self.assertEqual(fsfcd.shape,icltop.shape)
+        self.assertEqual(fsfc.shape,icltop.shape)
+        self.assertEqual(ftop.shape,icltop.shape)
+        self.assertEqual(fdabs.shape,dummy_fdabs.shape)
+
+    def test_shortwave_radiation_case1(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*1
+        qa = jnp.ones((ix, il, kx))*1
+        cloudc = jnp.ones((ix,il))*1
+        clstr = jnp.ones((ix,il))*1
+        psa = jnp.ones((ix,il))*1
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = -0.4300000071525574
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
+
+    def test_shortwave_radiation_case2(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*1
+        qa = jnp.ones((ix, il, kx))*5
+        cloudc = jnp.ones((ix,il))*1.56
+        clstr = jnp.ones((ix,il))*132.5
+        psa = jnp.ones((ix,il))*3
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = -0.6708000111579895
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
+
+    def test_shortwave_radiation_case3(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*1
+        qa = jnp.ones((ix, il, kx))*2.3
+        cloudc = jnp.ones((ix,il))*0.00001
+        clstr = jnp.ones((ix,il))*1
+        psa = jnp.ones((ix,il))*2345
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = -4.300000071525574e-06
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
+
+    def test_shortwave_radiation_case4(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*0
+        qa = jnp.ones((ix, il, kx))*0
+        cloudc = jnp.ones((ix,il))*0
+        clstr = jnp.ones((ix,il))*0
+        psa = jnp.ones((ix,il))*0
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = 0.0
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
+
+    def test_shortwave_radiation_case5(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = np.ones((ix,il))*1
+        qa = np.ones((ix, il, kx))*0.2
+        cloudc = np.ones((ix,il))*0.3
+        clstr = np.ones((ix,il))*0.1
+        psa = np.ones((ix,il))*.005
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = -0.1290000021457672
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
+
+    def test_shortwave_radiation_case6(self):
+        ix, il, kx = 1, 1, 8
+
+        icltop = jnp.ones((ix,il))*2
+        qa = jnp.ones((ix, il, kx))*1
+        cloudc = jnp.ones((ix,il))*0.0005
+        clstr = jnp.ones((ix,il))*0.00006
+        psa = jnp.ones((ix,il))*0.0001
+
+        fsfcd_true = 0.0
+        fsfc_true = 0.0
+        ftop_true = -0.0002150000035762787
+        fdabs_true = jnp.ones((kx))*0
+
+        fsfcd, fsfc, ftop, fdabs = get_shortwave_rad_fluxes(psa,qa,icltop,cloudc,clstr)
+
+        self.assertAlmostEqual(fsfcd,fsfcd_true)
+        self.assertAlmostEqual(fsfc,fsfc_true)
+        self.assertAlmostEqual(ftop,ftop_true)
+        self.assertAlmostEqual(fdabs,fdabs_true)
 
 class TestClouds(unittest.TestCase):
-
     def test_clouds_general(self):
-        
         ix, il, kx = 1, 1, 8
         qa = jnp.ones((ix, il, kx))
         rh = jnp.ones((ix,il,kx))
