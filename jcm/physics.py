@@ -9,6 +9,9 @@ import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
+from shortwave_radiation import SWRadiationData
+from mod_radcon import ModRadConData
+from convection import ConvectionData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
@@ -25,6 +28,12 @@ class PhysicsState:
     surface_pressure: jnp.ndarray
     # relative_humidity: jnp.ndarray
 
+@tree_math.struct
+class PhysicsData:
+    shortwave_rad: SWRadiationData
+    convection: ConvectionData
+    mod_radcon: ModRadConData
+    
 
 @tree_math.struct
 class PhysicsTendency:
