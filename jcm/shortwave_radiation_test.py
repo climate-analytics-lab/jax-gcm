@@ -7,14 +7,13 @@ from jcm.params import il, ix
 from unittest.mock import patch
 # Assuming the functions are imported from the module where they're defined
 # from your_module import get_zonal_average_fields, solar
+from jcm.geometry import sia
 
 class TestZonalAverageFields(unittest.TestCase):
 
     def setUp(self):
         # Set up test case with known inputs
         self.tyear = 0.25  # Example time of the year (spring equinox)
-        self.sia = jnp.linspace(-1, 1, il)  # Example sine of latitude array
-        self.coa = jnp.linspace(0, 1, il)  # Example cosine of latitude array
         self.solc = solc
         self.il = il
         self.ix = ix
@@ -23,7 +22,7 @@ class TestZonalAverageFields(unittest.TestCase):
     def test_output_shapes(self):
         # Ensure that the output shapes are correct
         fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
-            self.tyear, self.sia, self.coa
+            self.tyear
         )
         
         self.assertEqual(fsol.shape, (self.ix, self.il))
@@ -35,7 +34,7 @@ class TestZonalAverageFields(unittest.TestCase):
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
         fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
-            self.tyear, self.sia, self.coa
+            self.tyear
         )
         
         topsr = solar(self.tyear)
@@ -44,7 +43,7 @@ class TestZonalAverageFields(unittest.TestCase):
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
         fsol, ozupp, ozone, zenit, stratz, = get_zonal_average_fields(
-            self.tyear, self.sia, self.coa
+            self.tyear
         )
         
         fs0 = 6.0
@@ -54,22 +53,21 @@ class TestZonalAverageFields(unittest.TestCase):
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
         fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
-            self.tyear, self.sia, self.coa
+            self.tyear
         )
         
         # Expected form for ozone based on the provided formula
-        flat2 = 1.5 * self.sia ** 2 - 0.5
-        expected_ozone = 0.4 * self.epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (self.tyear + 10.0 / 365.0))) * self.sia + 1.8 * flat2)
+        flat2 = 1.5 * sia**2 - 0.5
+        expected_ozone = 0.4 * self.epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (self.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
+        print
         self.assertTrue(jnp.allclose(ozone[:, 0], fsol[:, 0] * expected_ozone[0]))
 
     def test_random_input_consistency(self):
         # Check that random inputs produce consistent outputs
         key = random.PRNGKey(0)
-        sia = random.uniform(key, (self.il,), minval=-1, maxval=1)
-        coa = jnp.sqrt(1 - sia**2)
         
         fsol, ozupp, ozone, zenit, stratz= get_zonal_average_fields(
-            self.tyear, sia, coa
+            self.tyear
         )
         
         # Ensure outputs are consistent and within expected ranges
@@ -85,8 +83,8 @@ class TestZonalAverageFields(unittest.TestCase):
 #     def setUp(self):
 #         # Set up test case with known inputs
 #         self.tyear = 0.25  # Example time of the year (spring equinox)
-#         self.sia = jnp.linspace(-1, 1, il)  # Example sine of latitude array
-#         self.coa = jnp.linspace(0, 1, il)  # Example cosine of latitude array
+#        = jnp.linspace(-1, 1, il)  # Example sine of latitude array
+#        = jnp.linspace(0, 1, il)  # Example cosine of latitude array
 #         self.solc = solc
 #         self.il = il
 #         self.ix = ix
@@ -98,7 +96,7 @@ class TestZonalAverageFields(unittest.TestCase):
 #         mock_solar.return_value = jnp.array([500.0] * self.il)
         
 #         fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
-#             self.tyear, self.sia, self.coa
+#             self.tyear
 #         )
 #         print(jnp.all(fsol[:,0]))
 #         # Check that fsol uses the mocked solar values
@@ -110,7 +108,7 @@ class TestZonalAverageFields(unittest.TestCase):
 #         mock_solar.return_value = jnp.array([100.0] * self.il)
         
 #         fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
-#             self.tyear, self.sia, self.coa
+#             self.tyear
 #         )
         
 #         fs0 = 6.0
@@ -123,12 +121,12 @@ class TestZonalAverageFields(unittest.TestCase):
 #         mock_solar.return_value = jnp.array([300.0] * self.il)
         
 #         fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
-#             self.tyear, self.sia, self.coa
+#             self.tyear
 #         )
         
 #         # Expected form for ozone based on the provided formula
-#         flat2 = 1.5 * self.sia ** 2 - 0.5
-#         expected_ozone = 0.4 * self.epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (self.tyear + 10.0 / 365.0))) * self.sia + 1.8 * flat2)
+#         flat2 = 1.5  ** 2 - 0.5
+#         expected_ozone = 0.4 * self.epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (self.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
 #         self.assertTrue(jnp.allclose(ozone[:, 0], 300.0 * expected_ozone[0]))
 
 #     @patch('jcm.shortwave_radiation.solar')
