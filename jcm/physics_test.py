@@ -1,9 +1,10 @@
 import unittest
 from jcm.physics import get_physical_tendencies
-from jcm.held_suarez_forcing import held_suarez_forcings
 from jcm.speedy_test_model import SpeedyTestModel
 from dinosaur.primitive_equations import PrimitiveEquations
+from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
+from jcm.held_suarez import HeldSuarezForcing
 
 class TestPhysicsUnit(unittest.TestCase):
 
@@ -11,7 +12,9 @@ class TestPhysicsUnit(unittest.TestCase):
         speedy_model = SpeedyTestModel()
     
         state = speedy_model.get_initial_state()
-
+        state.tracers = {
+            'specific_humidity': primitive_equations_states.gaussian_scalar(
+                speedy_model.coords, speedy_model.physics_specs)}
         # Choose a vertical multiplication method
         vertical_matmul_method = 'dense'  # or 'sparse'
 
@@ -31,7 +34,9 @@ class TestPhysicsUnit(unittest.TestCase):
             vertical_advection=vertical_advection,
             include_vertical_advection=include_vertical_advection)
 
-        physics_terms = [ held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
+        hsf = HeldSuarezForcing(speedy_model.coords, speedy_model.physics_specs, speedy_model.ref_temps)
+
+        physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
         dynamics_tendency = get_physical_tendencies(state,dynamics,physics_terms)
 

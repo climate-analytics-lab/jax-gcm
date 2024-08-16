@@ -4,14 +4,13 @@ from dinosaur.scales import units
 import jax
 import numpy as np
 from jcm.physics import get_physical_tendencies
-from jcm.held_suarez_forcing import held_suarez_forcings
 from dinosaur.time_integration import ExplicitODE
-
+from jcm.held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
         return get_physical_tendencies(state, dynamics, physics_terms)
-    return ExplicitODE.from_function(physical_tendencies)
+    return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyTestModel:
     """
@@ -70,9 +69,9 @@ class SpeedyTestModel:
             self.coords,
             self.physics_specs)
 
-        physics_terms = [
-            held_suarez_forcings,
-        ]
+        hsf = HeldSuarezForcing(self.coords, self.physics_specs, self.ref_temps)
+
+        physics_terms = [ hsf.held_suarez_forcings ] 
 
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 

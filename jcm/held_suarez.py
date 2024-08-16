@@ -8,6 +8,7 @@ from dinosaur import coordinate_systems
 from dinosaur import primitive_equations
 from dinosaur import scales
 from dinosaur import typing
+from jcm.physics import PhysicsState, PhysicsTendency
 
 Quantity = units.Quantity
 
@@ -83,3 +84,13 @@ class HeldSuarezForcing:
         return self.ka + (self.ks - self.ka) * (
             cutoff[:, np.newaxis, np.newaxis] * np.cos(self.lat) ** 4
     )
+
+    def held_suarez_forcings(self, state: PhysicsState):
+        Teq = self.equilibrium_temperature(state.surface_pressure)
+        d_temperature = -self.kt() * (state.temperature - Teq)
+
+        d_v_wind = -self.kv() * state.v_wind
+        d_u_wind = -self.kv() * state.v_wind
+        d_spec_humidity = 0 # just keep the same specific humidity?
+
+        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity)

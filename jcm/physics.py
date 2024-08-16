@@ -46,7 +46,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         Physics state variables
     """
     # Calculate u and v from vorticity and divergence
-    u, v = vor_div_to_uv_nodal(state, dynamics.coords.horizontal, state.vorticity, state.divergence)
+    u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
     # Calculate geopotential
     phi_spectral = get_geopotential(
@@ -57,7 +57,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
     # Z, X, Y
     t_spectral = state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
-    q_spectral = state['tracers']['specific_humidity']
+    q_spectral = state.tracers['specific_humidity']
 
     t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
         (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
