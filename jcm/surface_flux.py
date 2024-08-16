@@ -100,7 +100,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
     dtheta = 3.0   # Potential temp. gradient for stability correction
     fstab = 0.67   # Amplitude of stability correction (fraction)
-    hdrag = 2000.0 # Height scale for orographic correction
     clambda = 7.0  # Heat conductivity in skin-to-root soil layer
     clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
@@ -301,3 +300,25 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
         t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+
+def set_orog_land_sfc_drag(phi0):
+    '''
+    Parameters
+    ----------
+    phi0 : Array
+        - Array used for calculating the forog
+    '''
+
+    hdrag = 2000.0 # Height scale for orographic correction
+    rhdrag = 1/(grav*hdrag)
+
+    # setting creating values for forog
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.where(phi0 > 0, phi0, 0)))
+
+    return forog
+
+    
+
+    
+
