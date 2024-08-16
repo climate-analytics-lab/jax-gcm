@@ -288,7 +288,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             2. Net Heat Fluxes into sea surface
     """
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn[:, : , 1] = ssrd * (1.0 - alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + (alhc * evap[:, :, 1]))
 
     """
         Using a land-sea mask to compute a weighted average of surface fluxes and temperatures.
