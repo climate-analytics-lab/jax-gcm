@@ -321,7 +321,15 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         tskin = tsea + fmask * (tskin  - tsea)
         t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
-    return slru
+    ustr = jnp.nan
+    vstr = jnp.nan
+    tsfc = jnp.nan
+    tskin = jnp.nan
+    u0 = jnp.nan
+    v0 = jnp.nan
+    t0 = jnp.nan
+
+    return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
 
 
 def set_orog_land_sfc_drag(phi0):
