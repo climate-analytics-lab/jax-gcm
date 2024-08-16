@@ -293,7 +293,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     qsat0_0 = jnp.zeros_like(qsat0_1)
     qsat0 = stack_matrices(qsat0_0, qsat0_1)
     
-    evap = evap.at[:, :, 1].set()
     evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
     evap_0 = jnp.zeros_like(evap_1)
     evap = stack_matrices(evap_0, evap_1)
