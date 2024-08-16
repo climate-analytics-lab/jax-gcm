@@ -1,6 +1,6 @@
 jax
 dinosaur
 tree-math
-sayhello
+
 # Testing requirements
 pytest-cov
