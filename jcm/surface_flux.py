@@ -18,7 +18,7 @@ lskineb = True   # true : redefine skin temp. from energy balance
 # import types
 
 @jax.jit
-def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
+def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
                  tsea, ssrd, slrd, lfluxland):
     '''
 
@@ -27,9 +27,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     il - latitude
     ix - longitudes
 
-    forog : 2D array
-        - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
-        subroutine. Now used in main
     psa : 2D array
         - Normalised surface pressure
     ua : 3D array
@@ -60,15 +57,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     -------
 
     '''
-    
-    ''' 
-    # variable was initially declared in the set_orog_land_sfc_drag subroutine
-    rhdrag = 1.0/(grav*hdrag)
-
-    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
-
-    
-    '''
 
     # Issue 27, requires land_model -  https://github.com/climate-analytics-lab/jax-gcm/issues/29
     lfluxland = False
@@ -84,6 +72,8 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     slru_shape[-1] = 3
     
     # Continue original code 
+    forog = set_orog_land_sfc_drag(phi0)
+
     lscasym = True   # true : use an asymmetric stability coefficient
     lskineb = True   # true : redefine skin temp. from energy balance
 
@@ -123,6 +113,8 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # initializing variables
     t1 = jnp.zeros([*phi0.shape,2])
     denvvs = jnp.zeros([*phi0.shape,2])
+
+    
     q1 = jnp.zeros([*phi0.shape,2])
 
     lscasym, lskineb = True, True
