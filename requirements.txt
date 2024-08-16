@@ -1,5 +1,5 @@
 jax
-dinosaur
+pip install git+https://github.com/google-research/dinosaur  # fix me! google hasn't put v1 on pip yet
 tree-math
 
 # Testing requirements
