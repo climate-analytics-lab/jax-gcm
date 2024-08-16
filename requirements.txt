@@ -1,4 +1,5 @@
 jax
-
+dinosaur
+tree-math
 # Testing requirements
 pytest-cov
