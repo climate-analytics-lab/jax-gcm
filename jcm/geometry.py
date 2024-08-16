@@ -37,9 +37,9 @@ def initialize_geometry():
     sia_half = jnp.cos(3.141592654 * (j - 0.25) / (il + 0.5))
     coa_half = jnp.sqrt(1.0 - sia_half ** 2.0)
 
-    sia = jnp.concatenate((-sia_half[jnp.newaxis], sia_half[jnp.newaxis]), axis=0)
-    coa = jnp.concatenate((coa_half[jnp.newaxis], coa_half[jnp.newaxis]), axis=0)
-    radang = jnp.concatenate((-jnp.arcsin(sia_half)[jnp.newaxis], jnp.arcsin(sia_half)[jnp.newaxis]), axis=0)
+    sia = jnp.concatenate((-sia_half, sia_half[::-1]), axis=0).ravel()
+    coa = jnp.concatenate((coa_half, coa_half[::-1]), axis=0).ravel()
+    radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
 
     # Expand cosine and its reciprocal to cover both hemispheres
     cosg = jnp.repeat(coa_half, 2)
