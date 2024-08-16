@@ -74,7 +74,9 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     lfluxland = False
     emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
     ks = 2 # Defined in the lfluxland functions
-    alb_s = jnp.ones((il, ix))
+    slru_shape = list(phi0.shape)
+    slru_shape.append(3)
+    slru = jnp.zeros(slru_shape)
     
     # Continue original code 
     lscasym = True   # true : use an asymmetric stability coefficient
@@ -103,7 +105,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
     dtheta = 3.0   # Potential temp. gradient for stability correction
     fstab = 0.67   # Amplitude of stability correction (fraction)
-    hdrag = 2000.0 # Height scale for orographic correction
     clambda = 7.0  # Heat conductivity in skin-to-root soil layer
     clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
@@ -302,10 +303,8 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             1. Emission of lw radiation from the surface    
             2. Net Heat Fluxes into sea surface
     """
-    slru[:, :, 1] = esbc * (tsea ** 4.0)
-    # 'alb_s' is a JAX ndarray of zeros.
-    # Replacing it with an array of ones as per the computation.
-    hfluxn[:, : , 1] = (ssrd * alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
+    slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
+    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + (alhc * evap[:, :, 1]))
 
     """
         Using a land-sea mask to compute a weighted average of surface fluxes and temperatures.
@@ -322,3 +321,27 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
         t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+    return slru
+
+
+def set_orog_land_sfc_drag(phi0):
+    '''
+    Parameters
+    ----------
+    phi0 : Array
+        - Array used for calculating the forog
+    '''
+
+    hdrag = 2000.0 # Height scale for orographic correction
+    rhdrag = 1/(grav*hdrag)
+
+    # setting creating values for forog
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.where(phi0 > 0, phi0, 0)))
+
+    return forog
+
+    
+
+    
+
