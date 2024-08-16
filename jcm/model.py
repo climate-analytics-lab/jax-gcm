@@ -4,6 +4,11 @@ import jax
 import numpy as np
 from jcm.physics import get_physical_tendencies
 from jcm.convection import get_convection_tendencies
+from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+from jcm.surface_fluxes import get_surface_fluxes
+from jcm.vertical_diffusion import get_vertical_diffusion_tend
 from dinosaur.time_integration import ExplicitODE
 
 
@@ -71,7 +76,14 @@ class SpeedyModel:
             physics_specs)
 
         physics_terms = [
-            get_convection_tendencies #FIXME: convert physics functions to use data class' as input/output
+            get_convection_tendencies, #FIXME: convert physics functions to use data class' as input/output
+            get_large_scale_condensation_tendencies,
+            clouds,
+            get_shortwave_rad_fluxes,
+            get_downward_longwave_rad_fluxes,
+            get_surface_fluxes, # In speedy this gets called again if air-sea coupling is on
+            get_upward_longwave_rad_fluxes,
+            get_vertical_diffusion_tend
         ]
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 
