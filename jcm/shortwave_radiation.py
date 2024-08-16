@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
-from jcm.physical_constants import solc,epssw
+from jcm.physical_constants import epssw
 from jcm.params import il, ix
 from jcm.geometry import sia,coa
 from jcm.shortwave_radiation_solar import solar
@@ -20,8 +20,6 @@ def get_zonal_average_fields(tyear):
         Sine of latitude array
     coa : jnp.ndarray
         Cosine of latitude array
-    solc : float
-        Solar constant
     il : int
         Number of latitude zones
     epssw : float
@@ -36,6 +34,8 @@ def get_zonal_average_fields(tyear):
         Ozone concentration in lower stratosphere
     stratz : jnp.ndarray
         Polar night cooling in the stratosphere
+    zenit : jnp.ndarray
+        The Zenit angle
     """
 
     # Alpha = year phase (0 - 2pi, 0 = winter solstice = 22 Dec)
@@ -83,34 +83,3 @@ def get_zonal_average_fields(tyear):
     fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(sia, coa, topsr)
 
     return fsol, ozupp, ozone, zenit, stratz
-
-# @jit
-# def solar(tyear):
-#     """
-#     Example implementation of the solar subroutine using JAX.
-
-#     Parameters:
-#     tyear : float
-#         Time as fraction of year (0-1, 0 = 1 Jan)
-#     solc : float
-#         Solar constant
-#     topsr : jnp.ndarray
-#         Array to hold solar radiation values
-
-#     Returns:
-#     topsr : jnp.ndarray
-#         Updated array with solar radiation values
-#     """
-#     # Example calculation (you may replace this with the actual implementation)
-#     return jnp.array([  0.        ,  11.7592291 ,  36.17967221,  62.37982749,
-#         89.00025789, 115.57292167, 141.84417253, 167.63513079,
-#        192.80057852, 217.21274849, 240.75546083, 263.32066537,
-#        284.8073584 , 305.12085103, 324.17260453, 341.88024969,
-#        358.16757826, 372.96491594, 386.20901108, 397.84346693,
-#        407.81888344, 416.09288126, 422.63043185, 427.40389234,
-#        430.39312664, 431.58561647, 430.97645518, 428.56841898,
-#        424.37194347, 418.40514039, 410.69366489, 401.27070803,
-#        390.17695405, 377.4603214 , 363.17606856, 347.38657514,
-#        330.16140263, 311.57736317, 291.71876667, 270.67820204,
-#        248.55772488, 225.47230974, 201.55584544, 176.97731864,
-#        151.98202326, 127.03117273, 103.47897701,  92.20329543])
