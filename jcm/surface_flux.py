@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 
 # importing custom functions from library
@@ -16,6 +17,7 @@ lskineb = True   # true : redefine skin temp. from energy balance
 
 # import types
 
+@jax.jit
 def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
                  tsea, ssrd, slrd, lfluxland):
     '''
@@ -72,6 +74,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     lfluxland = False
     emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
     ks = 2 # Defined in the lfluxland functions
+    alb_s = jnp.ones((il, ix))
     
     # Continue original code 
     lscasym = True   # true : use an asymmetric stability coefficient
@@ -112,17 +115,20 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ##########################################################
 
     # initializing variables
-    t1 = jnp.zeros([il,ix,2])
-    q1 = jnp.zeros([il,ix,2])
-    t2 = jnp.zeros([il,ix,2])
-    qsat0 = jnp.zeros([il,ix,2])
-    denvvs = jnp.zeros([il,ix,2])
+    t1 = jnp.zeros([*phi0.shape,2])
+    denvvs = jnp.zeros([*phi0.shape,2])
+    q1 = jnp.zeros([*phi0.shape,2])
 
     lscasym, lskineb = True, True
     esbc  = emisfc * sbc
     ghum0 = 1.0 - fhum0
     
+    # Ouptut Variables
+    shf = jnp.zeros(())
+
     if lfluxland:
+
+        raise NotImplementedError
 
         # 1. Extrapolation of wind, temp, hum. and density to the surface
 
@@ -247,7 +253,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             if lscasym: astab = 0.5 # To get smaller dS/dT in stable conditions
             else: astab = 1.0
 
-            dths = np.where(
+            dths = jnp.where(
                 tsea > t2[:, :, 1],
                 jnp.minimum(dtheta, tsea - t2[:, :, 1]),
                 jnp.maximum(-dtheta, astab * (tsea - t2[:, :, 1]))
@@ -272,13 +278,24 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # Sea Surface
     ##########################################################    
 
+    @jax.jit
+    def stack_matrices(matrix1, matrix2):
+        return jnp.vstack((matrix1.reshape((1, *matrix1.shape)), matrix2.reshape((1, *matrix2.shape)))).reshape((*matrix1.shape, 2))
+    
     # Defining Sensible Heat Flux
-    shf[:, :, 1] = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]) 
-
+    shf_1 = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1])
+    shf_0 = jnp.zeros_like(shf_1)
+    shf = stack_matrices(shf_0, shf_1)
 
     # Defining Evaporation
-    qsat0[:, :, 1] = get_qsat(tsea, psa, 1.0)
-    evap[:, :, 1] = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
+    qsat0_1 = get_qsat(tsea, psa, 1.0)
+    qsat0_0 = jnp.zeros_like(qsat0_1)
+    qsat0 = stack_matrices(qsat0_0, qsat0_1)
+    
+    evap = evap.at[:, :, 1].set()
+    evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
+    evap_0 = jnp.zeros_like(evap_1)
+    evap = stack_matrices(evap_0, evap_1)
 
     """
         Defining:
@@ -286,12 +303,16 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             2. Net Heat Fluxes into sea surface
     """
     slru[:, :, 1] = esbc * (tsea ** 4.0)
-    hfluxn[:, : , 1] = ssrd * (1.0 - alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
+    # 'alb_s' is a JAX ndarray of zeros.
+    # Replacing it with an array of ones as per the computation.
+    hfluxn[:, : , 1] = (ssrd * alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
 
     """
         Using a land-sea mask to compute a weighted average of surface fluxes and temperatures.
     """
     if lfluxland:
+        raise NotImplementedError
+
         ustr.at[:, :, 2].add(fmask * (ustr[:, :, 0] - ustr[:, :, 1]))
         vstr.at[:, :, 2].add(fmask * (vstr[:, :, 0] - vstr[:, :, 1]))
         shf.at[:, :, 2].add( fmask * (shf[:, :, 0]  - shf[:, :, 1]))
