@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
 # These have not yet been defined - TS 08/14/24
-#from mod_radcon import emisfc, alb_l, alb_s, snowc
+from mod_radcon import emisfc, alb_l, alb_s, snowc
 #from land_model import stl_am, soilw_am
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 
@@ -97,6 +97,10 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     t2 = jnp.zeros([il,ix,2])
     qsat0 = jnp.zeros([il,ix,2])
     denvvs = jnp.zeros([il,ix,2])
+
+    lscasym, lskineb = True, True
+    esbc  = emisfc * sbc
+    ghum0 = 1.0 - fhum0
     
     if lfluxland:
 
