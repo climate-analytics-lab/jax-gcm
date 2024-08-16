@@ -1,17 +1,24 @@
+import jax
 import jax.numpy as jnp
 
 # importing custom functions from library
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
 # These have not yet been defined - TS 08/14/24
-#from mod_radcon import emisfc, alb_l, alb_s, snowc
-#from land_model import stl_am, soilw_am
+#from jcm.mod_radcon import emisfc, alb_l, alb_s, snowc
+#from jcm.land_model import stl_am, soilw_am
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.params import ix, iy, il, kx
 
-from jcm.params import ix,il,kx
+lscasym = True   # true : use an asymmetric stability coefficient
+lskineb = True   # true : redefine skin temp. from energy balance
+
+
+
 # import types
 
-def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
+@jax.jit
+def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
                  tsea, ssrd, slrd, lfluxland):
     '''
 
@@ -20,9 +27,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     il - latitude
     ix - longitudes
 
-    forog : 2D array
-        - adjustments for drag coefficient. Originally calculated in set_orog_land_sfc_drag
-        subroutine. Now used in main
     psa : 2D array
         - Normalised surface pressure
     ua : 3D array
@@ -51,16 +55,29 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     Returns
     -------
-    '''
-    
-    ''' 
-    # variable was initially declared in the set_orog_land_sfc_drag subroutine
-    rhdrag = 1.0/(grav*hdrag)
 
-    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.max(phi0, 0.0)*rhdrag))
-
-    
     '''
+
+    # Issue 27, requires land_model -  https://github.com/climate-analytics-lab/jax-gcm/issues/29
+    lfluxland = False
+    emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
+    ks = 2 # Defined in the lfluxland functions
+    slru_shape = list(phi0.shape)
+    slru_shape.append(3)
+    slru = jnp.zeros(slru_shape)
+    shf = jnp.zeros(slru_shape)
+    evap = jnp.zeros(slru_shape)
+    slru_shape[-1] = 2
+    qsat0 = jnp.zeros(slru_shape)
+    slru_shape[-1] = 3
+    
+    # Continue original code 
+    forog = set_orog_land_sfc_drag(phi0)
+
+    lscasym = True   # true : use an asymmetric stability coefficient
+    lskineb = True   # true : redefine skin temp. from energy balance
+
+
 
     # constants for sufrace fluxes
     fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -83,23 +100,33 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
     dtheta = 3.0   # Potential temp. gradient for stability correction
     fstab = 0.67   # Amplitude of stability correction (fraction)
-    hdrag = 2000.0 # Height scale for orographic correction
     clambda = 7.0  # Heat conductivity in skin-to-root soil layer
     clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
+
+    esbc  = emisfc*sbc
+    ghum0 = 1.0 - fhum0
 
     ##########################################################
     # Land surface
     ##########################################################
 
     # initializing variables
-    t1 = jnp.zeros([il,ix,2])
-    q1 = jnp.zeros([il,ix,2])
-    t2 = jnp.zeros([il,ix,2])
-    qsat0 = jnp.zeros([il,ix,2])
-    denvvs = jnp.zeros([il,ix,2])
+    t1 = jnp.zeros([*phi0.shape,2])
+    denvvs = jnp.zeros([*phi0.shape,2])
+
     
+    q1 = jnp.zeros([*phi0.shape,2])
+
+    lscasym, lskineb = True, True
+    esbc  = emisfc * sbc
+    ghum0 = 1.0 - fhum0
+    
+    # Ouptut Variables
+    shf = jnp.zeros(())
+
     if lfluxland:
 
+        raise NotImplementedError
 
         # 1. Extrapolation of wind, temp, hum. and density to the surface
 
@@ -224,7 +251,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             if lscasym: astab = 0.5 # To get smaller dS/dT in stable conditions
             else: astab = 1.0
 
-            dths = np.where(
+            dths = jnp.where(
                 tsea > t2[:, :, 1],
                 jnp.minimum(dtheta, tsea - t2[:, :, 1]),
                 jnp.maximum(-dtheta, astab * (tsea - t2[:, :, 1]))
@@ -249,26 +276,42 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # Sea Surface
     ##########################################################    
 
-    # Defining Sensible Heat Flux
-    shf[:, :, 1] = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]) 
+    # @jax.jit
+    # def stack_matrices(matrix1, matrix2):
+    #     return jnp.vstack((matrix1.reshape((1, *matrix1.shape)), matrix2.reshape((1, *matrix2.shape)))).reshape((*matrix1.shape, 2))
+    
+    # # Defining Sensible Heat Flux
+    # shf_1 = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1])
+    # shf_0 = jnp.zeros_like(shf_1)
+    # shf = stack_matrices(shf_0, shf_1)
 
+    # # Defining Evaporation
+    # qsat0_1 = get_qsat(tsea, psa, 1.0)
+    # qsat0_0 = jnp.zeros_like(qsat0_1)
+    # qsat0 = stack_matrices(qsat0_0, qsat0_1)
+    
+    # evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
+    # evap_0 = jnp.zeros_like(evap_1)
+    # evap = stack_matrices(evap_0, evap_1)
 
-    # Defining Evaporation
-    qsat0[:, :, 1] = get_qsat(tsea, psa, 1.0)
-    evap[:, :, 1] = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
+    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
+    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
+    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
 
     """
         Defining:
             1. Emission of lw radiation from the surface    
             2. Net Heat Fluxes into sea surface
     """
-    slru[:, :, 1] = esbc * (tsea ** 4.0)
-    hfluxn[:, : , 1] = ssrd * (1.0 - alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
+    slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
+    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + (alhc * evap[:, :, 1]))
 
     """
         Using a land-sea mask to compute a weighted average of surface fluxes and temperatures.
     """
     if lfluxland:
+        raise NotImplementedError
+
         ustr.at[:, :, 2].add(fmask * (ustr[:, :, 0] - ustr[:, :, 1]))
         vstr.at[:, :, 2].add(fmask * (vstr[:, :, 0] - vstr[:, :, 1]))
         shf.at[:, :, 2].add( fmask * (shf[:, :, 0]  - shf[:, :, 1]))
@@ -278,3 +321,35 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
         t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+    ustr = jnp.nan
+    vstr = jnp.nan
+    tsfc = jnp.nan
+    tskin = jnp.nan
+    u0 = jnp.nan
+    v0 = jnp.nan
+    t0 = jnp.nan
+
+    return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
+
+
+def set_orog_land_sfc_drag(phi0):
+    '''
+    Parameters
+    ----------
+    phi0 : Array
+        - Array used for calculating the forog
+    '''
+
+    hdrag = 2000.0 # Height scale for orographic correction
+    rhdrag = 1/(grav*hdrag)
+
+    # setting creating values for forog
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.where(phi0 > 0, phi0, 0)))
+
+    return forog
+
+    
+
+    
+

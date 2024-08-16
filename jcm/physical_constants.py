@@ -20,7 +20,8 @@ rgas = akap * cp # Gas constant per unit mass for dry air (J/K/kg)
 alhc = 2501.0 # Latent heat of condensation, in J/g for consistency with specific humidity in g/Kg
 alhs = 2801.0 # Latent heat of sublimation
 sbc = 5.67e-8 # Stefan-Boltzmann constant
-
+solc = 342.0 # Solar constant (area averaged) in W/m^2
+epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
 # Functions of sigma and latitude (initial. in INPHYS)
 sigl = jnp.log(jnp.linspace(1.0, 0.0, kx)) # Logarithm of full-level sigma
 sigh = jnp.linspace(1.0, 0.0, kx + 1) # Half-level sigma
