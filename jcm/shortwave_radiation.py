@@ -15,6 +15,175 @@ class SWRadiationData:
     zenit: jnp.ndarray
     stratz: jnp.ndarray
 
+def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr):
+    from jcm.params import kx 
+    from geometry import fsg, dhs
+    import mod_radcon
+    ''''
+    psa(ix,il)       # Normalised surface pressure [p/p0]
+    qa(ix,il,kx)     # Specific humidity [g/kg]
+    icltop(ix,il)    # Cloud top level
+    cloudc(ix,il)    # Total cloud cover
+    clstr(ix,il)     # Stratiform cloud cover
+    fsfcd(ix,il)    # Total downward flux of short-wave radiation at
+                                            # the surface
+    fsfc(ix,il)     # Net downward flux of short-wave radiation at the
+                                            # surface
+    ftop(ix,il)     # Net downward flux of short-wave radiation at the
+                                            # top of the atmosphere
+    dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each
+                                            # atmospheric layer
+    '''
+    nl1 = kx - 1
+
+    fband2 = 0.05
+    fband1 = 1.0 - fband2
+    #  Initialization
+    tau2 = 0.0
+
+    #return fsfcd, fsfc, ftop, dfabs
+
+    #     integer :: i, j, k
+    #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
+
+        
+
+    #     ! 1.  Initialization
+    #     tau2 = 0.0
+
+    #     do i = 1, ix
+    #         do j = 1, il
+    #             if (icltop(i,j) <= kx) then
+    #                 tau2(i,j,icltop(i,j),3) = albcl*cloudc(i,j)
+    #             end if
+    #             tau2(i,j,kx,3) = albcls*clstr(i,j)
+    #         end do
+    #     end do
+
+    #     ! 2. Shortwave transmissivity:
+    #     ! function of layer mass, ozone (in the statosphere),
+    #     ! abs. humidity and cloud cover (in the troposphere)
+    #     psaz = psa*zenit
+    #     acloud = cloudc*min(abscl1*qcloud, abscl2)
+    #     tau2(:,:,1,1) = exp(-psaz*dhs(1)*absdry)
+
+    #     do k = 2, nl1
+    #         abs1 = absdry + absaer*fsg(k)**2
+
+    #         do i = 1, ix
+    #             do j = 1, il
+    #                 if (k >= icltop(i,j)) then
+    #                     tau2(i,j,k,1) = exp(-psaz(i,j)*dhs(k)*(abs1 + abswv1*qa(i,j,k) + acloud(i,j)))
+    #                 else
+    #                     tau2(i,j,k,1) = exp(-psaz(i,j)*dhs(k)*(abs1 + abswv1*qa(i,j,k)))
+    #                 end if
+    #             end do
+    #         end do
+    #     end do
+
+    #     abs1 = absdry + absaer*fsg(kx)**2
+    #     tau2(:,:,kx,1) = exp(-psaz*dhs(kx)*(abs1 + abswv1*qa(:,:,kx)))
+
+    #     do k = 2, kx
+    #         tau2(:,:,k,2) = exp(-psaz*dhs(k)*abswv2*qa(:,:,k))
+    #     end do
+
+    #     ! 3. Shortwave downward flux
+    #     ! 3.1 Initialization of fluxes
+    #     ftop = fsol
+    #     flux(:,:,1) = fsol*fband1
+    #     flux(:,:,2) = fsol*fband2
+
+    #     ! 3.2 Ozone and dry-air absorption in the stratosphere
+    #     k = 1
+    #     dfabs(:,:,k) = flux(:,:,1)
+    #     flux(:,:,1)  = tau2(:,:,k,1)*(flux(:,:,1) - ozupp*psa)
+    #     dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
+
+    #     k = 2
+    #     dfabs(:,:,k) = flux(:,:,1)
+    #     flux(:,:,1)  = tau2(:,:,k,1)*(flux(:,:,1) - ozone*psa)
+    #     dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
+
+    #     ! 3.3  Absorption and reflection in the troposphere
+    #     do k = 3, kx
+    #         tau2(:,:,k,3) = flux(:,:,1)*tau2(:,:,k,3)
+    #         flux (:,:,1)  = flux(:,:,1) - tau2(:,:,k,3)
+    #         dfabs(:,:,k)  = flux(:,:,1)
+    #         flux (:,:,1)  = tau2(:,:,k,1)*flux(:,:,1)
+    #         dfabs(:,:,k)  = dfabs(:,:,k) - flux(:,:,1)
+    #     end do
+
+    #     do k = 2, kx
+    #         dfabs(:,:,k) = dfabs(:,:,k) + flux(:,:,2)
+    #         flux(:,:,2)  = tau2(:,:,k,2)*flux(:,:,2)
+    #         dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,2)
+    #     end do
+
+    #     ! 4. Shortwave upward flux
+    #     ! 4.1  Absorption and reflection at the surface
+    #     fsfcd       = flux(:,:,1) + flux(:,:,2)
+    #     flux(:,:,1) = flux(:,:,1)*albsfc
+    #     fsfc        = fsfcd - flux(:,:,1)
+
+    #     ! 4.2  Absorption of upward flux
+    #     do k=kx,1,-1
+    #         dfabs(:,:,k) = dfabs(:,:,k) + flux(:,:,1)
+    #         flux(:,:,1)  = tau2(:,:,k,1)*flux(:,:,1)
+    #         dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
+    #         flux(:,:,1)  = flux(:,:,1) + tau2(:,:,k,3)
+    #     end do
+
+    #     ! 4.3  Net solar radiation = incoming - outgoing
+    #     ftop = ftop - flux(:,:,1)
+
+    #     ! 5.  Initialization of longwave radiation model
+    #     ! 5.1  Longwave transmissivity:
+    #     ! function of layer mass, abs. humidity and cloud cover.
+
+    #     ! Cloud-free levels (stratosphere + PBL)
+    #     k = 1
+    #     tau2(:,:,k,1) = exp(-psa*dhs(k)*ablwin)
+    #     tau2(:,:,k,2) = exp(-psa*dhs(k)*ablco2)
+    #     tau2(:,:,k,3) = 1.0
+    #     tau2(:,:,k,4) = 1.0
+
+    #     do k = 2, kx, kx - 2
+    #         tau2(:,:,k,1) = exp(-psa*dhs(k)*ablwin)
+    #         tau2(:,:,k,2) = exp(-psa*dhs(k)*ablco2)
+    #         tau2(:,:,k,3) = exp(-psa*dhs(k)*ablwv1*qa(:,:,k))
+    #         tau2(:,:,k,4) = exp(-psa*dhs(k)*ablwv2*qa(:,:,k))
+    #     end do
+
+    #     ! Cloudy layers (free troposphere)
+    #     acloud = cloudc * ablcl2
+
+    #     do k = 3, nl1
+    #         do i = 1, ix
+    #             do j = 1, il
+    #                  deltap = psa(i,j)*dhs(k)
+
+    #                  if (k < icltop(i,j)) then
+    #                    acloud1 = acloud(i,j)
+    #                  else
+    #                    acloud1 = ablcl1*cloudc(i,j)
+    #                  endif
+
+    #                  tau2(i,j,k,1) = exp(-deltap*(ablwin+acloud1))
+    #                  tau2(i,j,k,2) = exp(-deltap*ablco2)
+    #                  tau2(i,j,k,3) = exp(-deltap*max(ablwv1*qa(i,j,k), acloud(i,j)))
+    #                  tau2(i,j,k,4) = exp(-deltap*max(ablwv2*qa(i,j,k), acloud(i,j)))
+    #             end do
+    #         end do
+    #     end do
+
+    #     ! 5.2  Stratospheric correction terms
+    #     eps1 = epslw/(dhs(1) + dhs(2))
+    #     stratc(:,:,1) = stratz*psa
+    #     stratc(:,:,2) = eps1*psa
+    # end
+
+
 
 @jit
 def get_zonal_average_fields(tyear):
