@@ -5,6 +5,7 @@ from jcm.physical_constants import epssw
 from jcm.params import il, ix
 from jcm.geometry import sia, coa
 import tree_math
+from jcm.physics import PhysicsData
 
 @tree_math.struct
 class SWRadiationData:
@@ -15,10 +16,10 @@ class SWRadiationData:
     zenit: jnp.ndarray
     stratz: jnp.ndarray
 
-def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr):
+def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiationData, 
+                             pdata: PhysicsData):
     from jcm.params import kx 
     from geometry import fsg, dhs
-    import mod_radcon
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -33,60 +34,68 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr):
                                             # top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each
                                             # atmospheric layer
+    #     integer :: i, j, k
+    #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
     '''
+    albcl   = 0.43  # Cloud albedo (for cloud cover = 1)
+    albcls  = 0.50  # Stratiform cloud albedo (for st. cloud cover = 1)
+    abscl1 =  0.015 # Absorptivity of clouds (visible band, maximum value)
+    abscl2 =  0.15  # Absorptivity of clouds
+    absdry =  0.033 # Absorptivity of dry air (visible band)
+    absaer =  0.033 # Absorptivity of aerosols (visible band)
+    abswv1 =  0.022 # Absorptivity of water vapour
+    abswv2 = 15.000 # Absorptivity of water vapour
     nl1 = kx - 1
 
     fband2 = 0.05
     fband1 = 1.0 - fband2
     #  Initialization
-    tau2 = 0.0
+    tau2 = mod_radcon.tau2*0.0
+
+    mask = icltop <= kx  # Create a mask where icltop <= kx
+    clamped_icltop = jnp.clip(icltop - 1, 0, tau2.shape[2] - 1) # Clamp icltop - 1 to be within the valid index range for tau2
+    tau2 = tau2.at[:, :, clamped_icltop, 2].set(
+        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
+    )
+    tau2 = tau2.at[:, :, kx - 1, 2].set(albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
+
+    # 2. Shortwave transmissivity:
+    # function of layer mass, ozone (in the statosphere),
+    # abs. humidity and cloud cover (in the troposphere)
+    psaz = psa*swdata.zenit
+    acloud = cloudc*jnp.minimum(abscl1*swdata.qcloud, abscl2)
+    tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*absdry))
+
+    # Create an array for all k values
+    k_values = jnp.arange(1, nl1 + 1)
+    # Compute abs1 for all k values at once
+    abs1 = absdry + absaer * fsg[1:nl1 + 1]**2  # Vectorized abs1 calculation for all k
+    # Expand dimensions of arrays for broadcasting
+    k_broadcasted = k_values[None, None, :]
+    icltop_expanded = icltop[:, :, None]  # Expand icltop to match dimensions of k
+    dhs_expanded = dhs[None, None, 1:nl1 + 1]
+    qa_expanded = qa[:, :, 1:nl1 + 1]
+    # Create a mask where k >= icltop
+    mask = k_broadcasted >= icltop_expanded
+    # Compute the common part of the expression
+    common_expr = -psaz[:, :, None] * dhs_expanded * (abs1 + abswv1 * qa_expanded)
+    # Compute tau2 with the cloud term added only where mask is true
+    tau2_cloud = jnp.exp(common_expr + acloud[:, :, None])
+    tau2_no_cloud = jnp.exp(common_expr)
+    # Use the mask to combine the two conditions
+    tau2 = tau2.at[:, :, 1:nl1 + 1, 1].set(jnp.where(mask, tau2_cloud, tau2_no_cloud))
+
+    abs1_star = absdry + absaer*fsg[kx - 1]**2
+    tau2 = tau2.at[:,:,kx- 1,1].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
+    tau2 = tau2.at[:, :, 1:kx - 1, 2].set(jnp.exp(-psaz[:, :, None] * dhs[1:kx - 1] * abswv2 * qa[:, :, 1:kx-1]))
+
+    # 3. Shortwave downward flux
+    # 3.1 Initialization of fluxes
+    ftop = swdata.fsol
+    pdata.mod_radcon.flux[:,:,0] = swdata.fsol*fband1
+    pdata.mod_radcon.flux[:,:,1] = swdata.fsol*fband2
 
     #return fsfcd, fsfc, ftop, dfabs
-
-    #     integer :: i, j, k
-    #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
-
-        
-
-    #     ! 1.  Initialization
-    #     tau2 = 0.0
-
-    #     do i = 1, ix
-    #         do j = 1, il
-    #             if (icltop(i,j) <= kx) then
-    #                 tau2(i,j,icltop(i,j),3) = albcl*cloudc(i,j)
-    #             end if
-    #             tau2(i,j,kx,3) = albcls*clstr(i,j)
-    #         end do
-    #     end do
-
-    #     ! 2. Shortwave transmissivity:
-    #     ! function of layer mass, ozone (in the statosphere),
-    #     ! abs. humidity and cloud cover (in the troposphere)
-    #     psaz = psa*zenit
-    #     acloud = cloudc*min(abscl1*qcloud, abscl2)
-    #     tau2(:,:,1,1) = exp(-psaz*dhs(1)*absdry)
-
-    #     do k = 2, nl1
-    #         abs1 = absdry + absaer*fsg(k)**2
-
-    #         do i = 1, ix
-    #             do j = 1, il
-    #                 if (k >= icltop(i,j)) then
-    #                     tau2(i,j,k,1) = exp(-psaz(i,j)*dhs(k)*(abs1 + abswv1*qa(i,j,k) + acloud(i,j)))
-    #                 else
-    #                     tau2(i,j,k,1) = exp(-psaz(i,j)*dhs(k)*(abs1 + abswv1*qa(i,j,k)))
-    #                 end if
-    #             end do
-    #         end do
-    #     end do
-
-    #     abs1 = absdry + absaer*fsg(kx)**2
-    #     tau2(:,:,kx,1) = exp(-psaz*dhs(kx)*(abs1 + abswv1*qa(:,:,kx)))
-
-    #     do k = 2, kx
-    #         tau2(:,:,k,2) = exp(-psaz*dhs(k)*abswv2*qa(:,:,k))
-    #     end do
 
     #     ! 3. Shortwave downward flux
     #     ! 3.1 Initialization of fluxes
