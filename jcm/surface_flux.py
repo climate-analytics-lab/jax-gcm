@@ -77,6 +77,11 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     slru_shape = list(phi0.shape)
     slru_shape.append(3)
     slru = jnp.zeros(slru_shape)
+    shf = jnp.zeros(slru_shape)
+    evap = jnp.zeros(slru_shape)
+    slru_shape[-1] = 2
+    qsat0 = jnp.zeros(slru_shape)
+    slru_shape[-1] = 3
     
     # Continue original code 
     lscasym = True   # true : use an asymmetric stability coefficient
@@ -279,23 +284,27 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # Sea Surface
     ##########################################################    
 
-    @jax.jit
-    def stack_matrices(matrix1, matrix2):
-        return jnp.vstack((matrix1.reshape((1, *matrix1.shape)), matrix2.reshape((1, *matrix2.shape)))).reshape((*matrix1.shape, 2))
+    # @jax.jit
+    # def stack_matrices(matrix1, matrix2):
+    #     return jnp.vstack((matrix1.reshape((1, *matrix1.shape)), matrix2.reshape((1, *matrix2.shape)))).reshape((*matrix1.shape, 2))
     
-    # Defining Sensible Heat Flux
-    shf_1 = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1])
-    shf_0 = jnp.zeros_like(shf_1)
-    shf = stack_matrices(shf_0, shf_1)
+    # # Defining Sensible Heat Flux
+    # shf_1 = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1])
+    # shf_0 = jnp.zeros_like(shf_1)
+    # shf = stack_matrices(shf_0, shf_1)
 
-    # Defining Evaporation
-    qsat0_1 = get_qsat(tsea, psa, 1.0)
-    qsat0_0 = jnp.zeros_like(qsat0_1)
-    qsat0 = stack_matrices(qsat0_0, qsat0_1)
+    # # Defining Evaporation
+    # qsat0_1 = get_qsat(tsea, psa, 1.0)
+    # qsat0_0 = jnp.zeros_like(qsat0_1)
+    # qsat0 = stack_matrices(qsat0_0, qsat0_1)
     
-    evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
-    evap_0 = jnp.zeros_like(evap_1)
-    evap = stack_matrices(evap_0, evap_1)
+    # evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
+    # evap_0 = jnp.zeros_like(evap_1)
+    # evap = stack_matrices(evap_0, evap_1)
+
+    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
+    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
+    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
 
     """
         Defining:
