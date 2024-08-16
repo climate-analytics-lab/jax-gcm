@@ -379,7 +379,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         forog_test = np.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
 
-        with open("surface_flux_drag_test.csv", mode='r') as file:
+        with open("test_files/surface_flux_drag_test.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
