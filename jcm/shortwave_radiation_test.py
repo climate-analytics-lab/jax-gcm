@@ -12,11 +12,6 @@ from jcm.geometry import sia
 
 
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
-class TestGetShortwaveFluxes(unittest.TestCase):
-
-    def test_shortwave_fluxes_general(self):
-
-        self.assertIsNotNone()
 
 class TestClouds(unittest.TestCase):
 
