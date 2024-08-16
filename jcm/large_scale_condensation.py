@@ -34,7 +34,13 @@ def get_large_scale_condensation_tendencies(psa, qa, qsat, itop):
         dqlsc: Specific humidity tendency due to large-scale condensation
 
     """
- 
+
+    # 1. Initialization
+
+    # Initialize outputs
+    dtlsc = jnp.zeros_like(qa)
+    dqlsc = jnp.zeros_like(qa)
+    
     # Constants for computation
     qsmax = 10.0
 
@@ -49,25 +55,26 @@ def get_large_scale_condensation_tendencies(psa, qa, qsat, itop):
     # instability
     
     # Compute sig2, rhref, and dqmax arrays
-    sig2 = fsg[1:]**2.0
+    sig2 = fsg**2.0
     
     rhref = rhlsc + drhlsc * (sig2 - 1.0)
-    rhref = rhref.at[1:].set(jnp.maximum(rhref[1:], rhblsc))
+    rhref = jnp.maximum(rhref, rhblsc)
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array
-    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * qsat[..., 1:] - qa[..., 1:]
+    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * qsat[..., :] - qa[..., :]
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = jnp.where(negative_dqa_mask, dqa * rtlsc, 0.0)
-    dtlsc = jnp.where(negative_dqa_mask, tfact * jnp.minimum(-dqlsc, dqmax[jnp.newaxis, jnp.newaxis, :] * psa2[:, :, jnp.newaxis]), 0.)
+    dqlsc = dqlsc.at[..., 1:].set(jnp.where(negative_dqa_mask[..., 1:], dqa[..., 1:] * rtlsc, 0.0))
+    dtlsc = dtlsc.at[..., 1:].set(jnp.where(negative_dqa_mask[..., 1:], tfact * jnp.minimum(-dqlsc[..., 1:], dqmax[jnp.newaxis, jnp.newaxis, 1:] * psa2[:, :, jnp.newaxis]), 0.))
 
-    itop = jnp.where(negative_dqa_mask, jnp.minimum(jnp.arange(1, kx), itop), itop)
+    # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
+    itop = jnp.minimum(jnp.argmin(dqa[..., 1:]>=0, axis=2)+1, itop)
 
     # Large-scale precipitation
     pfact = dhs * prg
-    precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc, axis=2)
+    precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
     precls *= psa
 
     return itop, precls, dtlsc, dqlsc

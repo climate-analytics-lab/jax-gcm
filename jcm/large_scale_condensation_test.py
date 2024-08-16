@@ -1,6 +1,7 @@
 import unittest
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 import jax.numpy as jnp
+import numpy as np
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
@@ -25,13 +26,14 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         0.16069981,  0.        ,  0.        ]]])
         qsat = jnp.asarray([[[1.64229703e-01, 1.69719307e-02, 1.45193088e-01, 1.98833509e+00,
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01]]])
-        itop = jnp.zeros((ix, il))
+        itop = jnp.ones((ix, il)) * 4
 
         itop, precls, dtlsc, dqlsc = get_large_scale_condensation_tendencies(psa, qa, qsat, itop)
         
+        np.testing.assert_allclose(dtlsc, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
+       0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]]]), atol=1e-4, rtol=0)
+        np.testing.assert_allclose(dqlsc, jnp.asarray([[[ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
+        0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00]]]), atol=1e-4, rtol=0)
         self.assertAlmostEqual(precls, jnp.asarray([1.293]), delta=0.05)
-        self.assertAlmostEqual(dtlsc, jnp.asarray([0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
-       0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]))
-        self.assertAlmostEqual(dqlsc, jnp.asarray([ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
-        0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00]))
+        self.assertEqual(itop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
 
