@@ -1,4 +1,5 @@
 from jcm.physics import PhysicsTendency, PhysicsState
+from held_suarez import HeldSuarezForcing
 '''
 we need to return an instance of the Physics Tendency:
 
