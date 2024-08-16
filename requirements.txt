@@ -1,5 +1,5 @@
 jax
-dinosaur @ git+https://github.com/google-research/dinosaur  # fix me! google hasn't put v1 on pip yet
+dinosaur-dycore @ git+https://github.com/google-research/dinosaur@1.0.0  # fix me! google hasn't put v1 on pip yet
 tree-math
 
 # Testing requirements
