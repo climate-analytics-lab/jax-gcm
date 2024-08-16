@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+from jcm.physical_constants import solc
 
 # Constants
 # solc = 342.0  # Solar constant (W/m^2)
@@ -16,7 +17,7 @@ def solar(tyear):
         Daily-average insolation at the top of the atmosphere for each latitude band.
     """
     from jcm.geometry import coa, sia
-    csol = 1368.0
+    csol = 4*solc
     
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
