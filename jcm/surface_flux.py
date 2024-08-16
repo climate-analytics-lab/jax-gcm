@@ -72,6 +72,9 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     lfluxland = False
     emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
     ks = 2 # Defined in the lfluxland functions
+    slru_shape = list(phi0.shape)
+    slru_shape.append(3)
+    slru = jnp.zeros(slru_shape)
     
     # Continue original code 
     lscasym = True   # true : use an asymmetric stability coefficient
@@ -284,7 +287,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
             1. Emission of lw radiation from the surface    
             2. Net Heat Fluxes into sea surface
     """
-    slru[:, :, 1] = esbc * (tsea ** 4.0)
+    slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
     hfluxn[:, : , 1] = ssrd * (1.0 - alb_s) + slrd - slru[:, : , 1] + shf[:, :, 1] + (alhc * evap[:, :, 1])
 
     """
@@ -300,6 +303,8 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
         t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+    return slru
 
 
 def set_orog_land_sfc_drag(phi0):
