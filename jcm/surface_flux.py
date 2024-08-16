@@ -104,7 +104,6 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     
     if lfluxland:
 
-
         # 1. Extrapolation of wind, temp, hum. and density to the surface
 
         # 1.1 Wind components
