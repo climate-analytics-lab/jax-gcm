@@ -4,11 +4,16 @@ import jax.numpy as jnp
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
 # These have not yet been defined - TS 08/14/24
-from mod_radcon import emisfc, alb_l, alb_s, snowc
-#from land_model import stl_am, soilw_am
+#from jcm.mod_radcon import emisfc, alb_l, alb_s, snowc
+#from jcm.land_model import stl_am, soilw_am
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.params import ix, iy, il, kx
 
-from jcm.params import ix,il,kx
+lscasym = True   # true : use an asymmetric stability coefficient
+lskineb = True   # true : redefine skin temp. from energy balance
+
+
+
 # import types
 
 def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
@@ -51,6 +56,7 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     Returns
     -------
+
     '''
     
     ''' 
@@ -61,6 +67,17 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     
     '''
+
+    # Issue 27, requires land_model -  https://github.com/climate-analytics-lab/jax-gcm/issues/29
+    lfluxland = False
+    emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
+    ks = 2 # Defined in the lfluxland functions
+    
+    # Continue original code 
+    lscasym = True   # true : use an asymmetric stability coefficient
+    lskineb = True   # true : redefine skin temp. from energy balance
+
+
 
     # constants for sufrace fluxes
     fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -86,6 +103,9 @@ def get_surface_fluxes(forog, psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     hdrag = 2000.0 # Height scale for orographic correction
     clambda = 7.0  # Heat conductivity in skin-to-root soil layer
     clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
+
+    esbc  = emisfc*sbc
+    ghum0 = 1.0 - fhum0
 
     ##########################################################
     # Land surface
