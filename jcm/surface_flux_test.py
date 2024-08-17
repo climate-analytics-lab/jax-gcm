@@ -21,7 +21,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("test_files/surface_flux_test1.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_test1.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -396,7 +396,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             # Convert lists to JAX arrays
             test_data = {key: jnp.array(value) for key, value in test_data.items()}
     
-        forog_test = set_orog_land_sfc_drag( phi0, grav, hdrag )
+        forog_test = set_orog_land_sfc_drag( phi0 )
         
         self.assertAlmostEqual(jnp.max(forog_test),test_data["forog"][0])
         self.assertAlmostEqual(jnp.min(forog_test),test_data["forog"][1])
