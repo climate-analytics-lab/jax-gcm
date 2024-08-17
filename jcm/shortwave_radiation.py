@@ -18,7 +18,7 @@ class SWRadiationData:
 
 def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiationData, 
                              pdata: PhysicsData):
-    from jcm.params import kx 
+    from jcm.params import ix, il, kx 
     from geometry import fsg, dhs
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
@@ -50,7 +50,7 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     fband2 = 0.05
     fband1 = 1.0 - fband2
     #  Initialization
-    tau2 = mod_radcon.tau2*0.0
+    tau2 = pdata.mod_radcon.tau2*0.0
 
     mask = icltop <= kx  # Create a mask where icltop <= kx
     clamped_icltop = jnp.clip(icltop - 1, 0, tau2.shape[2] - 1) # Clamp icltop - 1 to be within the valid index range for tau2
@@ -89,19 +89,11 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     tau2 = tau2.at[:,:,kx- 1,1].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
     tau2 = tau2.at[:, :, 1:kx - 1, 2].set(jnp.exp(-psaz[:, :, None] * dhs[1:kx - 1] * abswv2 * qa[:, :, 1:kx-1]))
 
-    # 3. Shortwave downward flux
-    # 3.1 Initialization of fluxes
-    ftop = swdata.fsol
-    pdata.mod_radcon.flux[:,:,0] = swdata.fsol*fband1
-    pdata.mod_radcon.flux[:,:,1] = swdata.fsol*fband2
+
 
     #return fsfcd, fsfc, ftop, dfabs
-
-    #     ! 3. Shortwave downward flux
-    #     ! 3.1 Initialization of fluxes
-    #     ftop = fsol
-    #     flux(:,:,1) = fsol*fband1
-    #     flux(:,:,2) = fsol*fband2
+    
+    
 
     #     ! 3.2 Ozone and dry-air absorption in the stratosphere
     #     k = 1
