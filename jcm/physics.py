@@ -30,10 +30,13 @@ class PhysicsState:
 
 @tree_math.struct
 class PhysicsData:
-    shortwave_rad: SWRadiationData
-    convection: ConvectionData
-    mod_radcon: ModRadConData
-    
+    shortwave_rad = SWRadiationData()
+    convection = ConvectionData()
+    mod_radcon = ModRadConData()
+
+    def initialize(self):
+        a = 1
+        # option to call initialization members to something specific here if necessary (if we can't start with zeros)
 
 @tree_math.struct
 class PhysicsTendency:
@@ -119,7 +122,22 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
-    physics_tendency = sum(term(physics_state) for term in physics_terms)
+    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
+    # and implicitly passed to the next physics_term. tendencies are summed 
+    physics_tendency = PhysicsTendency(
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind))
+    
+    data = PhysicsData()
+    # optionally initialize the physics data here if it needs to be 
+
+    for term in physics_terms:
+        tend, data = term(physics_state, data)
+        physics_tendency += tend
+
+    #physics_tendency = sum(term(physics_state) for term in physics_terms)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency

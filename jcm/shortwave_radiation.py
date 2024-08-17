@@ -8,13 +8,12 @@ import tree_math
 
 @tree_math.struct
 class SWRadiationData:
-    qcloud: jnp.ndarray
-    fsol: jnp.ndarray
-    ozone: jnp.ndarray
-    ozupp: jnp.ndarray
-    zenit: jnp.ndarray
-    stratz: jnp.ndarray
-
+    qcloud = jnp.zeros((ix,il))
+    fsol= jnp.zeros((ix,il))
+    ozone = jnp.zeros((ix,il))
+    ozupp = jnp.zeros((ix,il))
+    zenit = jnp.zeros((ix,il))
+    stratz = jnp.zeros((ix,il))
 
 @jit
 def get_zonal_average_fields(tyear):
@@ -86,7 +85,7 @@ def get_zonal_average_fields(tyear):
     return fsol, ozupp, ozone, zenit, stratz
     
 
-def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
+def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
     #import params as p 
     from jcm.params import kx 
     '''
