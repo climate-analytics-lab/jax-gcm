@@ -40,7 +40,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             columns = next(reader)
             colmap = dict(zip(columns, range(len(columns))))
 
-            test_data = np.matrix(np.loadtxt(filename, delimiter=",", skiprows=1))
+            test_data = jnp.matrix(jnp.loadtxt(filename, delimiter=",", skiprows=1))
             # Convert lists to JAX arrays
             test_data = {key: jnp.array(value) for key, value in test_data.items()}
     
