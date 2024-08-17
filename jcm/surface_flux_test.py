@@ -22,19 +22,25 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland="true"
 
         with open("jcm/test_files/surface_flux_test1.csv", mode='r') as file:
-            reader = csv.reader(file)
+            # reader = csv.reader(file)
         
-            # Read the header (keys)
-            keys = next(reader)
+            # # Read the header (keys)
+            # keys = next(reader)
         
-            # Initialize an empty dictionary with keys
-            test_data = {key: [] for key in keys}
+            # # Initialize an empty dictionary with keys
+            # test_data = {key: [] for key in keys}
         
             # Read the rows and append values to the dictionary
-            for row in reader:
-                for i, value in enumerate(row):
-                    test_data[keys[i]].append(value if value.replace('.','',1).isdigit() else float(value))
-        
+            #for row in reader:
+            #    for i, value in enumerate(row):
+            #        #test_data[keys[i]].append(value if value.replace('.','',1).isdigit() else float(value))
+            #        test_data[keys[i]].append(float(value) if value.replace('.', '', 1).isdigit() else value)
+            #
+            reader = csv.reader(file)
+            columns = next(reader)
+            colmap = dict(zip(columns, range(len(columns))))
+
+            test_data = np.matrix(np.loadtxt(filename, delimiter=",", skiprows=1))
             # Convert lists to JAX arrays
             test_data = {key: jnp.array(value) for key, value in test_data.items()}
     
