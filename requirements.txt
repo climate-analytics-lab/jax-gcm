@@ -1,6 +1,7 @@
 jax
 dinosaur
 tree-math
+pandas
 
 # Testing requirements
 pytest-cov

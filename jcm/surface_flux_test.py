@@ -319,22 +319,26 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("jcm/test_files/surface_flux_test5.csv", mode='r') as file:
-            reader = csv.reader(file)
+        # with open("jcm/test_files/surface_flux_test5.csv", mode='r') as file:
+        #     reader = csv.reader(file)
         
-            # Read the header (keys)
-            keys = next(reader)
+        #     # Read the header (keys)
+        #     keys = next(reader)
         
-            # Initialize an empty dictionary with keys
-            test_data = {key: [] for key in keys}
+        #     # Initialize an empty dictionary with keys
+        #     test_data = {key: [] for key in keys}
         
-            # Read the rows and append values to the dictionary
-            for row in reader:
-                for i, value in enumerate(row):
-                    test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
+        #     # Read the rows and append values to the dictionary
+        #     for row in reader:
+        #         for i, value in enumerate(row):
+        #             test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
+        #         #row_ls = row.split(",")
+        #         #for i, value in enumerate(row_ls)
         
-            # Convert lists to JAX arrays
-            test_data = {key: jnp.array(value) for key, value in test_data.items()}
+        #     # Convert lists to JAX arrays
+        #     test_data = {key: jnp.array(value) for key, value in test_data.items()}
+        import pandas as pd
+        test_data = pd.read_csv("jcm/test_files/surface_flux_test5.csv")
     
         
         ustr,vstr,shf,evap,slru,hfluxn,tsfc,tskin,u0,v0,t0 = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,ssrd,slrd,lfluxland)
