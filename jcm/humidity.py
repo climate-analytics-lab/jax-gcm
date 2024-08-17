@@ -5,7 +5,14 @@ saturation specific humidity.
 '''
 
 import jax.numpy as jnp
+import tree_math
+from params import ix, il, kx
 
+@tree_math.struct
+class HumidityData:
+    rh = jnp.zeros((ix,il,kx))
+    qa = jnp.zeros((ix,il,kx)) # this is also known as qg in physics.f90
+    qsat = jnp.zeros((ix,il,kx))
 
 def spec_hum_to_rel_hum(ta, ps, sig, qa):
     """

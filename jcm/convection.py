@@ -22,9 +22,7 @@ smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-ba
 class ConvectionData:
     psa = jnp.zeros((ix,il)) # normalized surface pressure
     se = jnp.zeros((ix,il,kx)) # dry static energy
-    qa = jnp.zeros((ix,il,kx)) # specific humidity
-    qsat = jnp.zeros((ix,il,kx)) # saturation specific humidity
-    itop = jnp.zeros((ix,il),dtype=int) # Top of convection (layer index)
+    iptop = jnp.zeros((ix,il),dtype=int) # Top of convection (layer index)
     cbmf = jnp.zeros((ix,il)) # Cloud-base mass flux
     precnv = jnp.zeros((ix,il)) # Convective precipitation [g/(m^2 s)]
     dfse = jnp.zeros((ix,il,kx)) # Net flux of dry static energy into each atmospheric layer
@@ -51,12 +49,12 @@ def diagnose_convection(psa, se, qa, qsat):
     qsat: Saturation specific humidity [g/kg]
 
     Returns:
-    itop: Top of convection (layer index)
+    iptop: Top of convection (layer index)
     qdif: Excess humidity in convective gridboxes
 
     """
     ix, il, kx = se.shape
-    itop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize itop with nlp
+    iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
     qdif = jnp.zeros((ix, il), dtype=float)
 
     # Saturation moist static energy
@@ -97,19 +95,19 @@ def diagnose_convection(psa, se, qa, qsat):
     qthr1 = rhbl * qsat[:, :, kx-2]
     lqthr = (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1)
 
-    # Applying masks to itop and qdif
+    # Applying masks to iptop and qdif
     mask_ktop1_less_kx = ktop1 < kx
     mask_ktop2_less_kx = ktop2 < kx
 
     combined_mask1 = mask_ktop1_less_kx & mask_ktop2_less_kx
-    itop = jnp.where(combined_mask1, ktop1, itop)
+    iptop = jnp.where(combined_mask1, ktop1, iptop)
     qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
 
     combined_mask2 = mask_ktop1_less_kx & lqthr & ~combined_mask1
-    itop = jnp.where(combined_mask2, ktop1, itop)
+    iptop = jnp.where(combined_mask2, ktop1, iptop)
     qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
 
-    return itop, qdif
+    return iptop, qdif
 
 def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     """
@@ -118,11 +116,11 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     Args:
     psa: Normalised surface pressure [p/p0]
     se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg]
-    qsat: Saturation specific humidity [g/kg]
+    qa: Specific humidity [g/kg] - PhysicsData.Humidity
+    qsat: Saturation specific humidity [g/kg] - PhysicsData.Humidity
 
     Returns:
-    itop: Top of convection (layer index)
+    iptop: Top of convection (layer index)
     cbmf: Cloud-base mass flux
     precnv: Convective precipitation [g/(m^2 s)]
     dfse:  Net flux of dry static energy into each atmospheric layer
@@ -130,12 +128,13 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
 
     """
     conv = physics_data.convection
+    humidity = physics_data.humidity
     _, _, kx = conv.se.shape
 
     # 1. Initialization of output and workspace arrays
 
     dfse = jnp.zeros_like(conv.se)
-    dfqa = jnp.zeros_like(conv.qa)
+    dfqa = jnp.zeros_like(physics_data.humidity.qa)
 
     cbmf = jnp.zeros_like(conv.psa)
     precnv = jnp.zeros_like(conv.psa)
@@ -146,17 +145,17 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     entr *= entmax / sentr
 
     # 2. Check of conditions for convection
-    itop, qdif = diagnose_convection(conv.psa, conv.se, conv.qa, conv.qsat)
+    iptop, qdif = diagnose_convection(conv.psa, conv.se, humidity.qa, humidity.qsat)
 
     # 3. Convection over selected grid-points
     # 3.1 Boundary layer (cloud base)
     # Maximum specific humidity in the PBL
-    mask = itop < kx
-    qmax = jnp.maximum(1.01 * conv.qa[:, :, -1], conv.qsat[:, :, -1])
+    mask = iptop < kx
+    qmax = jnp.maximum(1.01 * humidity.qa[:, :, -1], humidity.qsat[:, :, -1])
 
     # Dry static energy and moisture at upper boundary
     sb = conv.se[:, :, -2] + wvi[-2, 1] * (conv.se[:, :, -1] - conv.se[:, :, -2])
-    qb = jnp.minimum(conv.qa[:, :, -2] + wvi[-2, 1] * (conv.qa[:, :, -1] - conv.qa[:, :, -2]), conv.qa[:, :, -1])
+    qb = jnp.minimum(humidity.qa[:, :, -2] + wvi[-2, 1] * (humidity.qa[:, :, -1] - humidity.qa[:, :, -2]), humidity.qa[:, :, -1])
 
     # Cloud-base mass flux, computed to satisfy:
     # fmass*(qmax-qb)*(g/dp)=qdif/trcnv
@@ -190,7 +189,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
 
     # Calculate sb and qb for each layer in the loop using broadcasting
     sb_vals = conv.se[:, :, k_vals-1] + wvi[k_vals-1, 1] * (conv.se[:, :, k_vals] - conv.se[:, :, k_vals-1])
-    qb_vals = conv.qa[:, :, k_vals-1] + wvi[k_vals-1, 1] * (conv.qa[:, :, k_vals] - conv.qa[:, :, k_vals-1])
+    qb_vals = humidity.qa[:, :, k_vals-1] + wvi[k_vals-1, 1] * (humidity.qa[:, :, k_vals] - humidity.qa[:, :, k_vals-1])
 
     # Mass entrainment
     enmass = entr[k_vals-1] * conv.psa[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
@@ -198,7 +197,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # Upward fluxes at upper boundary
     fmass_broadcast += enmass
     fus_broadcast += enmass * conv.se[:, :, k_vals]
-    fuq_broadcast += enmass * conv.qa[:, :, k_vals]
+    fuq_broadcast += enmass * humidity.qa[:, :, k_vals]
 
     # Downward fluxes at upper boundary
     fds_vals = fmass_broadcast * sb_vals
@@ -209,14 +208,14 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     dfqa = dfqa.at[:, :, k_vals].set(fuq_broadcast - fdq_vals)
 
     # Secondary moisture flux
-    delq_vals = rhil * conv.qsat[:, :, k_vals] - conv.qa[:, :, k_vals]
+    delq_vals = rhil * humidity.qsat[:, :, k_vals] - humidity.qa[:, :, k_vals]
     fsq_vals = jnp.where(delq_vals > 0, smf * cbmf[:, :, jnp.newaxis] * delq_vals, 0.0)
 
     dfqa = dfqa.at[:, :, k_vals].add(fsq_vals)
     dfqa = dfqa.at[:, :, -1].add(-jnp.sum(fsq_vals, axis=-1))
 
     # 3.3 Top layer (condensation and detrainment)
-    k = itop
+    k = iptop
 
     # Flux of convective precipitation
     qsatb = conv.qsat[:, :, k] + wvi[k, 1] *(conv.qsat[:, :, k+1]- conv.qsat[:, :, k])
@@ -229,9 +228,9 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
     # pass on the rest of physics_data that was not updated or needed in this function
     # since convection doesn't generate new tendencies, just return PhysicsTendency instance that is all 0's
-    
-    convection_out = ConvectionData(conv.psa,conv.se,conv.qa,conv.qsat,itop,cbmf,precnv,dfse,dfqa)
-    physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon)
+
+    convection_out = ConvectionData(conv.psa,conv.se,iptop,cbmf,precnv,dfse,dfqa)
+    physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon, physics_data.humidity)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

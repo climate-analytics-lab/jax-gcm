@@ -12,6 +12,7 @@ from typing import Callable
 from shortwave_radiation import SWRadiationData
 from mod_radcon import ModRadConData
 from convection import ConvectionData
+from humidity import HumidityData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
@@ -33,6 +34,7 @@ class PhysicsData:
     shortwave_rad = SWRadiationData()
     convection = ConvectionData()
     mod_radcon = ModRadConData()
+    humidity = HumidityData()
 
     def initialize(self):
         a = 1

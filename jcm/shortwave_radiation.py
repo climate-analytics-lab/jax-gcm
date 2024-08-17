@@ -3,7 +3,9 @@ from jax import jit
 from jax import vmap
 from jcm.physical_constants import epssw
 from jcm.params import il, ix
-from jcm.geometry import sia, coa
+from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
+from jcm.geometry import sia, coa, fmask
+from jcm.data import tyear # maybe this can come from somewhere else? this is where it comes from in speedy fortran
 import tree_math
 
 @tree_math.struct
@@ -14,15 +16,19 @@ class SWRadiationData:
     ozupp = jnp.zeros((ix,il))
     zenit = jnp.zeros((ix,il))
     stratz = jnp.zeros((ix,il))
+    gse = jnp.zeros((ix,il))
+    icltop = jnp.zeros((ix,il))
+    cloudc = jnp.zeros((ix,il))
+    cloudstr = jnp.zeros((ix,il))
 
 @jit
-def get_zonal_average_fields(tyear):
+def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
     
     Parameters:
-    tyear : float
+    tyear : float - where should this be defined? 
         Time as fraction of year (0-1, 0 = 1 Jan)
 
     Returns:
@@ -82,23 +88,36 @@ def get_zonal_average_fields(tyear):
 
     fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(sia, coa, topsr)
 
-    return fsol, ozupp, ozone, zenit, stratz
+    swrad_out = SWRadiationData()
+    swrad_out = physics_data.shortwave_rad
+    swrad_out.fsol = fsol
+    swrad_out.ozupp = ozupp
+    swrad_out.ozone = ozone
+    swrad_out.zenit = zenit
+    swrad_out.stratz = stratz
+
+    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    return physics_tendencies, physics_data
     
 
-def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
+def clouds(physics_data: PhysicsData, state: PhysicsState):
     #import params as p 
     from jcm.params import kx 
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
-        qa: Specific humidity [g/kg]
-        rh: Relative humidity
-        precnv: Convection precipitation
-        precls: Large-scale condensational precipitation
-        iptop: Cloud top level
-        gse: Vertical gradient of dry static energy
-        fmask: Fraction land-sea mask
+        qa: Specific humidity [g/kg] - PhysicsData.Convection
+        rh: Relative humidity - PhysicsData.Humidity
+        precnv: Convection precipitation - PhysicsData.Convection
+        precls: Large-scale condensational precipitation - PhysicsData.Condensation
+        iptop: Cloud top level - PhysicsData.Convection
+        gse: Vertical gradient of dry static energy - this gets created and set in phyiscs.f90 (line 147) - it is added to the shortwave rad dataclass 
+                                                        but the setting needs to be done in physics.py or updated to be done inside this function
+        fmask: Fraction land-sea mask - FIX ME! should this come from geometry.initialize()? It gets set on start up
+                                        See boundaries.f90:38 fmask = load_boundary_file("surface.nc", "lsm")
 
     Returns:
         icltop: Cloud top level
@@ -106,6 +125,11 @@ def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
         clstr: Stratiform cloud cover
         
     '''
+
+    humidity = physics_data.humidity
+    conv = physics_data.convection
+    condensation = physics_data.condensation
+    swrad = physics_data.shortwave_rad
 
     # Constants
     rhcl1   = 0.30  # Relative humidity threshold corresponding to cloud cover = 0
@@ -132,13 +156,13 @@ def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
     #       the level of maximum relative humidity.
 
     #First for loop (2 levels)
-    mask = rh[:, :, nl1] > rhcl1  # Create a mask where the condition is true
-    cloudc = jnp.where(mask, rh[:, :, nl1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
+    mask = humidity.rh[:, :, nl1] > rhcl1  # Create a mask where the condition is true
+    cloudc = jnp.where(mask, humidity.rh[:, :, nl1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
     #Second for loop (three levels)
-    drh = rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
+    drh = humidity.rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (humidity.qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
 
@@ -149,13 +173,13 @@ def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
 
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
-    pr1 = jnp.minimum(pmaxcl, 86.4 * (precnv + precls))
+    pr1 = jnp.minimum(pmaxcl, 86.4 * (conv.precnv + condensation.precls))
     cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
-    icltop = jnp.minimum(iptop, icltop)
+    icltop = jnp.minimum(conv.iptop, icltop)
 
     # 2.  Equivalent specific humidity of clouds
-    qcloud = qa[:,:,nl1]
+    qcloud = humidity.qa[:,:,nl1]
 
     # 3. Stratiform clouds at the top of PBL
     clfact = 1.2
@@ -163,14 +187,24 @@ def clouds(qa,rh,precnv,precls,iptop,gse,fmask):
 
     #Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
+    fstab = jnp.clip(rgse * (swrad.gse - gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
-    clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
+    clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + fmask * (clstrl - clstr)
 
-    return icltop, cloudc, clstr, qcloud
+    swrad_out = SWRadiationData()
+    swrad_out = swrad
+    swrad_out.icltop = icltop
+    swrad_out.cloudc = cloudc
+    swrad_out.clstr = clstr
+    swrad_out.qcloud = qcloud
+
+    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    return physics_tendencies, physics_data
 
 def solar(tyear):
     """
@@ -220,4 +254,3 @@ def solar(tyear):
     topsr = csolp * fdis * (h0 * sia * sdecl + sh0 * coa * cdecl)
 
     return topsr
-
