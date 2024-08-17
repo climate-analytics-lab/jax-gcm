@@ -33,7 +33,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             # Read the rows and append values to the dictionary
             for row in reader:
                 for i, value in enumerate(row):
-                    test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
+                    test_data[keys[i]].append(value if value.replace('.','',1).isdigit() else float(value))
         
             # Convert lists to JAX arrays
             test_data = {key: jnp.array(value) for key, value in test_data.items()}
