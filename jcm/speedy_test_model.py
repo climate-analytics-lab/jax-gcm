@@ -3,9 +3,9 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import numpy as np
-from jcm.physics import get_physical_tendencies
+from physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
-from jcm.held_suarez import HeldSuarezForcing
+from held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
@@ -101,3 +101,7 @@ class SpeedyTestModel:
             inner_steps=self.inner_steps))
         return integrate_fn(state)
 
+    def data_to_xarray(self, data):
+        from dinosaur.xarray_utils import data_to_xarray
+        
+        return data_to_xarray(data, coords=self.coords, times=self.times)

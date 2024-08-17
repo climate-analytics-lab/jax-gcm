@@ -11,9 +11,12 @@ import tree_math
 from typing import Callable
 
 from dinosaur.coordinate_systems import CoordinateSystem
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
+from dinosaur.sigma_coordinates import SigmaCoordinates
+from dinosaur.scales import units
 
+from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal, Grid
+from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations, PrimitiveEquationsSpecs
+from dinosaur import primitive_equations_states
 
 @tree_math.struct
 class PhysicsState:
@@ -57,11 +60,14 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
     # Z, X, Y
     t_spectral = state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+    
     q_spectral = state.tracers['specific_humidity']
-
+    
     t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
         (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
     )
+    
+    
     sp = jnp.exp(log_sp)
     physics_state = PhysicsState(u, v, t, q, phi, sp)
     return physics_state
@@ -85,7 +91,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature)
     q_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.specific_humidity)
     
-    log_sp_tendency = jnp.zeros_like(t_tendency) # This assumes the physics tendency is zero for log_surface_pressure
+    log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
     dynamics_tendency = State(vor_tendency, div_tendency, t_tendency, log_sp_tendency, {'specific_humidity': q_tendency})
