@@ -94,7 +94,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="false"
 
-        with open("test_files/surface_flux_test2.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_test2.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -167,7 +167,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("test_files/surface_flux_test3.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_test3.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -240,7 +240,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("test_files/surface_flux_test4.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_test4.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -313,7 +313,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
         lfluxland="true"
 
-        with open("test_files/surface_flux_test5.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_test5.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
@@ -377,9 +377,9 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         grav = 9.81 # gravity constant
         phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
 
-        forog_test = np.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
+        forog_test = jnp.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
 
-        with open("test_files/surface_flux_drag_test.csv", mode='r') as file:
+        with open("jcm/test_files/surface_flux_drag_test.csv", mode='r') as file:
             reader = csv.reader(file)
         
             # Read the header (keys)
