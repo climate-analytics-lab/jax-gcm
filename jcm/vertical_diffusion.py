@@ -36,7 +36,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     rhgrad = diffusion_constants.relative_humidity_max_gradient
     segrad = diffusion_constants.dry_static_energy_min_gradient
 
-    #### We ddefine cp and alhc within functions
+    #### We define cp and alhc within functions
     cp = 1004.0  # Specific heat capacity at constant pressure
     alhc = 2.5e6  # Latent heat of condensation (J/kg)
 
@@ -61,7 +61,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     rsig = 1.0 / dhs
     rsig1 = 1.0 / (1.0 - sigh) ### In f90, rsig1 miss kx value Yu Liang
     
-    # Step 1: Shallow convection
+    # Step 2: Shallow convection
     drh0 = rhgrad * (fsg[kx - 1] - sigh[nl1 - 1])  # 
     fvdiq2 = fvdiq * sigh[nl1 -1]
 
@@ -86,7 +86,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     fluxq_condition1 = jnp.where((dmse >= 0.0) & (drh >= 0.0), fcnv * fshcq * qsat[:, :, kx - 1] * drh, 0)
 
     # Update qtenvd based on fluxq_condition1
-    qtenvd = qtenvd.at[:, :, nl1 - 1].set(jnp.where((dmse >= 0.0) & (drh >= 0.0), fluxq_condition1 * rsig[nl1], qtenvd[:, :, nl1]))
+    qtenvd = qtenvd.at[:, :, nl1 - 1].set(jnp.where((dmse >= 0.0) & (drh >= 0.0), fluxq_condition1 * rsig[nl1 - 1], qtenvd[:, :, nl1 - 1]))
     qtenvd = qtenvd.at[:, :, kx - 1].set(jnp.where((dmse >= 0.0) & (drh >= 0.0), -fluxq_condition1 * rsig[kx - 1], qtenvd[:, :, kx - 1])
             )
 
@@ -101,7 +101,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
                         jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[:, :, kx - 1])
             )
 
-    # Step 2: Vertical diffusion of moisture above the PBL
+    # Step 3: Vertical diffusion of moisture above the PBL
     # Define the k range
     k_range = jnp.arange(2, kx - 2)
 
@@ -129,28 +129,18 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     qtenvd = qtenvd.at[:, :, k_selected + 1].add(
         -fluxq * rsig[k_selected + 1][jnp.newaxis, jnp.newaxis, :]
             )
-
-
-    # Step 3: Damping of super-adiabatic lapse rate
     
-    # Calculate se0 for all k, i, and j
+    # Step 4: Damping of super-adiabatic lapse rate
     se0 = se[:, :, 1:nl1+1] + segrad * (phi[:, :, :nl1] - phi[:, :, 1:nl1+1])
 
-    # Calculate the condition where se < se0
     condition = se[:, :, :nl1] < se0
 
-    # Calculate fluxse where the condition is True
     fluxse = jnp.where(condition, fvdise * (se0 - se[:, :, :nl1]), 0)
 
-    # Update ttenvd for all k, i, and j where the condition is True
-    ttenvd = ttenvd.at[:, :, :nl1].add(fluxse * rsig[:nl1][jnp.newaxis, jnp.newaxis, :])
+    ttenvd = ttenvd.at[:, :, :nl1].add(fluxse * rsig[:nl1])
 
-    # Accumulate the fluxse across the remaining k1 values
-    # We need to add the fluxse to the subsequent layers in a cumulative way
-    cumulative_fluxse = jnp.cumsum(fluxse[:, :, ::-1] * rsig1[:nl1][::-1][jnp.newaxis, jnp.newaxis, :], axis=2)[:, :, ::-1]
+    cumulative_fluxse = jnp.cumsum(fluxse * rsig1[:nl1], axis=2)
 
-    # Subtract the cumulative fluxse from ttenvd for all k1 > k
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
-
 
     return utenvd, vtenvd, ttenvd, qtenvd
