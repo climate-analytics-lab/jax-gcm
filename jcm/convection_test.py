@@ -90,7 +90,7 @@ class TestConvectionUnit(unittest.TestCase):
         test_precnv = jnp.array(0.21752352)
         test_dfse = jnp.array([  0., 0., 0., 0. ,-29.774475, 402.0166, 171.78418, 0.])
         test_dfqa = jnp.array([ 0., 0., 0., 0.01235308,  0.07379276, -0.15330768, -0.08423203, -0.05377656])
-        print(cbmf[0,0])
+
         # Check that itop and qdif is not null.
         self.assertAlmostEqual(cbmf[0,0], test_cbmf, places=4)
         self.assertAlmostEqual(precnv[0,0], test_precnv, places=4)
