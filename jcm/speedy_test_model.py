@@ -3,9 +3,9 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import numpy as np
-from physics import get_physical_tendencies
+from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
-from held_suarez import HeldSuarezForcing
+from jcm.held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
