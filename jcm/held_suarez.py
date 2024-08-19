@@ -90,7 +90,7 @@ class HeldSuarezForcing:
         d_temperature = -self.kt() * (state.temperature - Teq)
 
         d_v_wind = -self.kv() * state.v_wind
-        d_u_wind = -self.kv() * state.v_wind
-        d_spec_humidity = 0 # just keep the same specific humidity?
+        d_u_wind = -self.kv() * state.u_wind
+        d_spec_humidity = jnp.zeros_like(state.temperature) # just keep the same specific humidity?
 
         return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity)
