@@ -11,6 +11,7 @@ from jcm.geometry import fsg, dhs
 import tree_math
 from jcm.params import ix, il, kx
 
+
 # Constants for large-scale condensation
 trlsc = 4.0   # Relaxation time (in hours) for specific humidity
 rhlsc = 0.9   # Maximum relative humidity threshold (at sigma=1)
@@ -26,20 +27,33 @@ class CondensationData:
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
 def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: PhysicsState):
+    """
+    Compute large-scale condensation and associated tendencies of temperature and moisture
+
+    Args:
+        psa: Normalized surface pressure
+        qa: Specific humidity [g/kg]
+        qsat: Saturation specific humidity [g/kg]
+        iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation
+
+    Returns:
+        iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation
+        precls: Precipitation due to large-scale condensation
+        dtlsc: Temperature tendency due to large-scale condensation
+        dqlsc: Specific humidity tendency due to large-scale condensation
+
+    """
+    # 1. Initialization
     humidity = physics_data.humidity
     conv = physics_data.convection
-
-    ix, il, _ = humidity.qa.shape
-
-    # 1. Initialization
-
+    
     # Initialize outputs
     dtlsc = jnp.zeros_like(humidity.qa)
     dqlsc = jnp.zeros_like(humidity.qa)
-    precls = jnp.zeros((ix, il))
-
+    
     # Constants for computation
     qsmax = 10.0
+
     rtlsc = 1.0 / (trlsc * 3600.0)
     tfact = alhc / cp
     prg = p0 / grav
@@ -52,31 +66,26 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     
     # Compute sig2, rhref, and dqmax arrays
     sig2 = fsg**2.0
+    
     rhref = rhlsc + drhlsc * (sig2 - 1.0)
-    rhref = rhref.at[-1].set(jnp.maximum(rhref[-1], rhblsc))
+    rhref = jnp.maximum(rhref, rhblsc)
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array
-    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * humidity.qsat - humidity.qa
+    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * humidity.qsat[..., :] - humidity.qa[..., :]
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = jnp.where(negative_dqa_mask, dqa * rtlsc, dqlsc)
-    dtlsc = jnp.where(negative_dqa_mask, tfact * jnp.minimum(-dqlsc, dqmax[jnp.newaxis, jnp.newaxis, :] * psa2[:, :, jnp.newaxis]), dtlsc)
+    dqlsc = dqlsc.at[..., 1:].set(jnp.where(negative_dqa_mask[..., 1:], dqa[..., 1:] * rtlsc, 0.0))
+    dtlsc = dtlsc.at[..., 1:].set(jnp.where(negative_dqa_mask[..., 1:], tfact * jnp.minimum(-dqlsc[..., 1:], dqmax[jnp.newaxis, jnp.newaxis, 1:] * psa2[:, :, jnp.newaxis]), 0.))
 
-    # Update itop
-    def update_iptop(iptop, indices, values):
-        for idx, val in zip(zip(*indices), values):
-            iptop = iptop.at[idx[:2]].set(jnp.minimum(iptop[idx[:2]], val)) # should this be iptop=? or can we just use iptop.at[idx[:2]].set(val)?
-        return iptop
-
-    iptop_update_indices = jnp.where(negative_dqa_mask)
-    iptop = update_iptop(conv.iptop, iptop_update_indices, iptop_update_indices[2])
+    # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
+    iptop = jnp.minimum(jnp.argmin(dqa[..., 1:]>=0, axis=2)+1, conv.iptop)
 
     # Large-scale precipitation
     pfact = dhs * prg
-    precls -= jnp.sum(pfact[jnp.newaxis, jnp.newaxis, :] * dqlsc, axis=2)
-    precls *= conv.psa
+    precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
+    precls *= humidity.psa
 
     condensation_out = CondensationData(precls, dtlsc, dqlsc)   
     conv_out = ConvectionData()
