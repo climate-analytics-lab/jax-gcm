@@ -60,9 +60,8 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
     # Z, X, Y
     t_spectral = state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
-    
     q_spectral = state.tracers['specific_humidity']
-    
+
     t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
         (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
     )
