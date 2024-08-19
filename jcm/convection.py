@@ -230,7 +230,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # since convection doesn't generate new tendencies, just return PhysicsTendency instance that is all 0's
 
     convection_out = ConvectionData(conv.psa,conv.se,iptop,cbmf,precnv,dfse,dfqa)
-    physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon, physics_data.humidity)
+    physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

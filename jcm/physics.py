@@ -13,6 +13,7 @@ from shortwave_radiation import SWRadiationData
 from mod_radcon import ModRadConData
 from convection import ConvectionData
 from humidity import HumidityData
+from large_scale_condensation import CondensationData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
@@ -35,6 +36,7 @@ class PhysicsData:
     convection = ConvectionData()
     mod_radcon = ModRadConData()
     humidity = HumidityData()
+    condensation = CondensationData()
 
     def initialize(self):
         a = 1

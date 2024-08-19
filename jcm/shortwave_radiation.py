@@ -96,7 +96,7 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     swrad_out.zenit = zenit
     swrad_out.stratz = stratz
 
-    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity)
+    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data
@@ -201,7 +201,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     swrad_out.clstr = clstr
     swrad_out.qcloud = qcloud
 
-    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity)
+    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data
