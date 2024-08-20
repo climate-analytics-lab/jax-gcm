@@ -5,7 +5,7 @@ from jcm.physical_constants import epssw
 from jcm.params import il, ix
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.geometry import sia, coa, fmask
-from jcm.data import tyear # maybe this can come from somewhere else? this is where it comes from in speedy fortran
+from jcm.date import tyear # maybe this can come from somewhere else? like the model instance tracks it? it comes from date.f90 in speedy
 import tree_math
 
 @tree_math.struct
