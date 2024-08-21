@@ -38,7 +38,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
 
     #### We define cp and alhc within functions
     cp = 1004.0  # Specific heat capacity at constant pressure
-    alhc = 2.5e6  # Latent heat of condensation (J/kg)
+    alhc = 2501.0  # Latent heat of condensation (kJ/kg)
 
     ix, il, kx = se.shape
     
@@ -58,11 +58,13 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     fvdiq = cvdi / trvdi
     fvdise = cvdi / (trvds * cp)
     
+    sigh = sigh[1:] # weirdly enough this is what fixes it..
     rsig = 1.0 / dhs
-    rsig1 = 1.0 / (1.0 - sigh) ### In f90, rsig1 miss kx value Yu Liang
+    rsig1 = 1.0 / (1.0 - sigh)
+    rsig1 = rsig1.at[-1].set(0.0) # the fortran code does this for some reason
     
     # Step 2: Shallow convection
-    drh0 = rhgrad * (fsg[kx - 1] - sigh[nl1 - 1])  # 
+    drh0 = rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
     fvdiq2 = fvdiq * sigh[nl1 -1]
 
     # Calculate dmse and drh arrays
@@ -73,7 +75,7 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     fcnv = jnp.ones((ix, il))
 
     # Apply condition where icnv > 0 and set fcnv to redshc
-    fcnv = jnp.where(icnv > 0, redshc, fcnv)
+    fcnv = jnp.where(jnp.logical_and(icnv > 0, dmse >= 0), redshc, fcnv)
 
     # Calculate fluxse where dmse >= 0.0
     fluxse = jnp.where(dmse >= 0.0, fcnv * fshcse * dmse, 0)

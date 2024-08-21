@@ -26,10 +26,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
             relative_humidity_max_gradient: float = 0.5
             dry_static_energy_min_gradient: float = 0.1 
 
-        utenvd, vtenvd, ttenvd, qtenvd = vertical_diffusion.get_tend_comparison(se, rh, qa, qsat, phi, icnv, DiffusionConstants(), fsg, dhs, sigh)
+        utenvd, vtenvd, ttenvd, qtenvd = vertical_diffusion.get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv, DiffusionConstants(), fsg, dhs, sigh)
         np.testing.assert_array_almost_equal(utenvd[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
         np.testing.assert_array_almost_equal(vtenvd[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
-        np.testing.assert_array_almost_equal(ttenvd[20, 20], np.asarray([2.78098343e-04,  1.39862327e-04,  8.50690984e-05,  3.73100365e-05, 3.67983118e-06, -2.65383233e-05, -6.18272700e-05, -3.07837272e-04]))
-        ##  ttenvd at the the second sigma level gives  inf, which might be due to the Step 3: Damping of super-adiabatic lapse rate
-        np.testing.assert_array_almost_equal(qtenvd[20, 20], np.asarray([0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411857e-06,  7.24205452e-06,  1.30163929e-05, -4.72222055e-05]))
+        np.testing.assert_array_almost_equal(ttenvd[20, 20], np.asarray([-2.4538091e-04, -3.8170350e-05,  4.4986453e-05,  1.0326448e-04, 1.3632278e-04,  1.5194372e-04,  1.4609606e-04,  2.5449507e-04]))
+        np.testing.assert_array_almost_equal(qtenvd[20, 20], np.asarray([0.0000000e+00,  0.0000000e+00, -8.6116625e-06,  6.4587462e-06, 0.0000000e+00,  0.0000000e+00, -4.4515664e-06,  5.7870352e-06]))
 
+        np.testing.assert_array_almost_equal(ttenvd[40, 40], np.asarray([-2.4538091e-04, -3.8170350e-05,  4.4986453e-05,  1.0326448e-04, 1.3632278e-04,  1.5194372e-04,  1.4609606e-04,  2.5449507e-04]))
+        np.testing.assert_array_almost_equal(qtenvd[40, 40], np.asarray( [ 0.0000000e+00,  0.0000000e+00, -8.6116625e-06,  6.4587462e-06, 0.0000000e+00,  0.0000000e+00, -4.4515664e-06,  5.7870352e-06]))
