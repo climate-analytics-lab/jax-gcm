@@ -31,6 +31,5 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         np.testing.assert_array_almost_equal(vtenvd[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
         np.testing.assert_array_almost_equal(ttenvd[20, 20], np.asarray([-2.4538091e-04, -3.8170350e-05,  4.4986453e-05,  1.0326448e-04, 1.3632278e-04,  1.5194372e-04,  1.4609606e-04,  2.5449507e-04]))
         np.testing.assert_array_almost_equal(qtenvd[20, 20], np.asarray([0.0000000e+00,  0.0000000e+00, -8.6116625e-06,  6.4587462e-06, 0.0000000e+00,  0.0000000e+00, -4.4515664e-06,  5.7870352e-06]))
-
         np.testing.assert_array_almost_equal(ttenvd[40, 40], np.asarray([-2.4538091e-04, -3.8170350e-05,  4.4986453e-05,  1.0326448e-04, 1.3632278e-04,  1.5194372e-04,  1.4609606e-04,  2.5449507e-04]))
         np.testing.assert_array_almost_equal(qtenvd[40, 40], np.asarray( [ 0.0000000e+00,  0.0000000e+00, -8.6116625e-06,  6.4587462e-06, 0.0000000e+00,  0.0000000e+00, -4.4515664e-06,  5.7870352e-06]))
