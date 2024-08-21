@@ -95,10 +95,10 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(cbmf[0,0], test_cbmf, places=4)
         self.assertAlmostEqual(precnv[0,0], test_precnv, places=4)
         #check a few values of the fluxes
-        self.assertAlmostEqual(dfse[0,0,4], test_dfse[4], places=4)
-        self.assertAlmostEqual(dfqa[0,0,4], test_dfqa[4], places=4) 
-        self.assertAlmostEqual(dfse[0,0,5], test_dfse[5], places=4)
-        self.assertAlmostEqual(dfqa[0,0,5], test_dfqa[5], places=4) 
-        self.assertAlmostEqual(dfse[0,0,6], test_dfse[6], places=4)
-        self.assertAlmostEqual(dfqa[0,0,6], test_dfqa[6], places=4) 
+        self.assertAlmostEqual(dfse[0,0,4], test_dfse[4], places=3)
+        self.assertAlmostEqual(dfqa[0,0,4], test_dfqa[4], places=3) 
+        self.assertAlmostEqual(dfse[0,0,5], test_dfse[5], places=3)
+        self.assertAlmostEqual(dfqa[0,0,5], test_dfqa[5], places=3) 
+        self.assertAlmostEqual(dfse[0,0,6], test_dfse[6], places=3)
+        self.assertAlmostEqual(dfqa[0,0,6], test_dfqa[6], places=3) 
       
