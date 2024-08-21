@@ -57,11 +57,12 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv,
     
     fvdiq = cvdi / trvdi
     fvdise = cvdi / (trvds * cp)
-    
-    sigh = sigh[1:] # weirdly enough this is what fixes it..
+
+    sigh = sigh[1:]
+
     rsig = 1.0 / dhs
     rsig1 = 1.0 / (1.0 - sigh)
-    rsig1 = rsig1.at[-1].set(0.0) # the fortran code does this for some reason
+    rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
     drh0 = rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
