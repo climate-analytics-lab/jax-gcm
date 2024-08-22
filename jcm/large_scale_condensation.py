@@ -33,8 +33,8 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     Args:
         psa: Normalized surface pressure - state.surface_pressure
         qa: Specific humidity [g/kg] - state.specific_humidity
-        qsat: Saturation specific humidity [g/kg]
-        iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation
+        qsat: Saturation specific humidity [g/kg] - humidity.qsat
+        iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop
 
     Returns:
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation

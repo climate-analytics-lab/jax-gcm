@@ -12,8 +12,8 @@ from jcm.geometry import fsg
 
 @tree_math.struct
 class HumidityData:
-    rh = jnp.zeros((ix,il,kx))
-    qsat = jnp.zeros((ix,il,kx))
+    rh = jnp.zeros((ix,il,kx)) # relative humidity
+    qsat = jnp.zeros((ix,il,kx)) # saturation specific humidity
 
 #def spec_hum_to_rel_hum(ta, ps, sig, qa):
 def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
