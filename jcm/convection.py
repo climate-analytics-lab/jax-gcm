@@ -20,13 +20,23 @@ smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-ba
 
 @tree_math.struct
 class ConvectionData:
-    # psa = jnp.zeros((ix,il)) # normalized surface pressure
-    se = jnp.zeros((ix,il,kx)) # dry static energy
-    iptop = jnp.zeros((ix,il),dtype=int) # Top of convection (layer index)
-    cbmf = jnp.zeros((ix,il)) # Cloud-base mass flux
-    precnv = jnp.zeros((ix,il)) # Convective precipitation [g/(m^2 s)]
-    dfse = jnp.zeros((ix,il,kx)) # Net flux of dry static energy into each atmospheric layer
-    dfqa = jnp.zeros((ix,il,kx)) #Net flux of specific humidity into each atmospheric layer
+    # psa: jnp.ndarray # normalized surface pressure -- #FIXME: this file needs normalized surface pressure, not surface_pressure. psa needs to be computed from state.surface_pressure
+    se: jnp.ndarray # dry static energy
+    iptop: jnp.ndarray # Top of convection (layer index)
+    cbmf: jnp.ndarray # Cloud-base mass flux
+    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
+    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
+    dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
+
+    def __init__(self, state_param) -> None:
+        ix, il, kx = state_param.shape
+        self.psa = jnp.zeros((ix,il))
+        self.se = jnp.zeros((ix,il,kx))
+        self.iptop = jnp.zeros((ix,il),dtype=int) 
+        self.cbmf = jnp.zeros((ix,il)) 
+        self.precnv = jnp.zeros((ix,il)) 
+        self.dfse = jnp.zeros((ix,il,kx))
+        self.dfqa = jnp.zeros((ix,il,kx)) 
 
 if wvi[0, 1] == 0.:
     """

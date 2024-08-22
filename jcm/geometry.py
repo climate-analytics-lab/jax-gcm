@@ -48,7 +48,7 @@ def initialize_geometry():
 
     coriol = 2.0 * omega * sia
 
-    # optionally introduce fmask? it normally gets set in boundaries.f90, but until we have land we won't have that?
+    # optionally introduce fmask? it normally gets set in boundaries.f90, but until we have land do we have that?
 
     return hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol
 

@@ -31,7 +31,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
-        psa: Normalized surface pressure - state.surface_pressure
+        psa: Normalized surface pressure - state.surface_pressure -- # FIXME: the state is not normalized surface pressure, this should be fixed (could be conv.psa)
         qa: Specific humidity [g/kg] - state.specific_humidity
         qsat: Saturation specific humidity [g/kg] - humidity.qsat
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop
