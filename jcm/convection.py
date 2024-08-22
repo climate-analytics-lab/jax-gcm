@@ -28,15 +28,24 @@ class ConvectionData:
     dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
     dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
 
-    def __init__(self, state_param) -> None:
-        ix, il, kx = state_param.shape
-        self.psa = jnp.zeros((ix,il))
-        self.se = jnp.zeros((ix,il,kx))
-        self.iptop = jnp.zeros((ix,il),dtype=int) 
-        self.cbmf = jnp.zeros((ix,il)) 
-        self.precnv = jnp.zeros((ix,il)) 
-        self.dfse = jnp.zeros((ix,il,kx))
-        self.dfqa = jnp.zeros((ix,il,kx)) 
+    def __init__(self, se: jnp.ndarray, iptop:jnp.ndarray, cbmf:jnp.ndarray, precnv:jnp.ndarray, dfse:jnp.ndarray, dfqa:jnp.ndarray, state_param:jnp.ndarray, initialize: bool=False) -> None:
+        if (initialize):
+            ix, il, kx = state_param.shape
+            # self.psa = jnp.zeros((ix,il))
+            self.se = jnp.zeros((ix,il,kx))
+            self.iptop = jnp.zeros((ix,il),dtype=int) 
+            self.cbmf = jnp.zeros((ix,il)) 
+            self.precnv = jnp.zeros((ix,il)) 
+            self.dfse = jnp.zeros((ix,il,kx))
+            self.dfqa = jnp.zeros((ix,il,kx))
+        else:
+            # self.psa = psa
+            self.se = se
+            self.iptop = iptop
+            self.cbmf = cbmf
+            self.precnv = precnv
+            self.dfse = dfse
+            self.dfqa = dfqa
 
 if wvi[0, 1] == 0.:
     """
