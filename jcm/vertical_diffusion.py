@@ -2,9 +2,8 @@ import jax.numpy as jnp
 from jax import jit
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
-import tree_math
 from jcm.params import ix, il, kx
-
+from jcm.physics import PhysicsData, PhysicsState, PhysicsTendencies
 
 trshc = jnp.array(6.0)  # Relaxation time (in hours) for shallow convection
 trvdi = jnp.array(24.0)  # Relaxation time (in hours) for moisture diffusion
@@ -13,22 +12,18 @@ redshc = jnp.array(0.5)  # Reduction factor of shallow convection in areas of de
 rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
 segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
-# will be returned as part of PhysicsData once function is refactored
-@tree_math.struct
-class VerticalDiffusionData:
-    utenvd = jnp.zeros((ix,il,kx))
-    vtenvd = jnp.zeros((ix,il,kx))
-    ttenvd = jnp.zeros((ix,il,kx))
-    qtenvd = jnp.zeros((ix,il,kx))
-
 @jit
-def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv):
-    # Initialize output arrays for tendencies
-    utenvd = jnp.zeros((ix,il,kx))
-    vtenvd = jnp.zeros((ix,il,kx))
-    ttenvd = jnp.zeros((ix,il,kx))
-    qtenvd = jnp.zeros((ix,il,kx))
+# def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv):
+def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     
+    se = physics_data.convection.se
+    rh = physics_data.humidity.rh
+    qsat = physics_data.humidity.qsat
+    qa = state.specifc_humidity
+    phi = state.geopotential
+
+    icnv = kx - physics_data.convection.iptop
+
     nl1 = kx - 1
     cshc = dhs[kx - 1] / 3600.0
     cvdi = (sigh[nl1-1] - sigh[0]) / ((nl1 - 1) * 3600.0)
@@ -115,4 +110,8 @@ def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv):
     
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
     
-    return utenvd, vtenvd, ttenvd, qtenvd
+
+    physics_tendencies = PhysicsTendencies(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
+
+    # have not updated physics_data, can just return the instance we were passed 
+    return physics_tendencies, physics_data

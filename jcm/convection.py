@@ -28,18 +28,6 @@ class ConvectionData:
     dfse = jnp.zeros((ix,il,kx)) # Net flux of dry static energy into each atmospheric layer
     dfqa = jnp.zeros((ix,il,kx)) #Net flux of specific humidity into each atmospheric layer
 
-
-@tree_math.struct
-class ConvectionData:
-    # psa = jnp.zeros((ix,il)) # normalized surface pressure
-    se = jnp.zeros((ix,il,kx)) # dry static energy
-    iptop = jnp.zeros((ix,il),dtype=int) # Top of convection (layer index)
-    cbmf = jnp.zeros((ix,il)) # Cloud-base mass flux
-    precnv = jnp.zeros((ix,il)) # Convective precipitation [g/(m^2 s)]
-    dfse = jnp.zeros((ix,il,kx)) # Net flux of dry static energy into each atmospheric layer
-    dfqa = jnp.zeros((ix,il,kx)) #Net flux of specific humidity into each atmospheric layer
-
-
 if wvi[0, 1] == 0.:
     """
     wvi is the weights for vertical interpolation. It's calculated in physics f90, but doesn't seem to be calculated in new code. Below is the code I used to 
