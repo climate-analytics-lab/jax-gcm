@@ -1,8 +1,8 @@
 from speedy_test_model import SpeedyTestModel
 import argparse
-from dinosaur.xarray_utils import data_to_xarray
-from dinosaur import primitive_equations_states, coordinate_systems
+from dinosaur import primitive_equations_states
 from dataclasses import asdict
+
 def parse_args():
     # optional arguments
     parser = argparse.ArgumentParser(description="Instantiate and run SpeedyModel.")
@@ -30,7 +30,7 @@ if __name__ == "__main__":
                 model.coords, model.physics_specs)}
     # Use the initial state to call unroll
     final_state, predictions = model.unroll(state)
-    print(type(asdict(predictions)))
+    
     ds = model.data_to_xarray(asdict(predictions))
     ds.to_netcdf("model_state.nc")
     
