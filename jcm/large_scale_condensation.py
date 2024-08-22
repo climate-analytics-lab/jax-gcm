@@ -31,8 +31,8 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
-        psa: Normalized surface pressure
-        qa: Specific humidity [g/kg]
+        psa: Normalized surface pressure - state.surface_pressure
+        qa: Specific humidity [g/kg] - state.specific_humidity
         qsat: Saturation specific humidity [g/kg]
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation
 
@@ -48,8 +48,8 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     conv = physics_data.convection
     
     # Initialize outputs
-    dtlsc = jnp.zeros_like(humidity.qa)
-    dqlsc = jnp.zeros_like(humidity.qa)
+    dtlsc = jnp.zeros_like(state.specific_humidity)
+    dqlsc = jnp.zeros_like(state.specific_humidity)
     
     # Constants for computation
     qsmax = 10.0
@@ -58,7 +58,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     tfact = alhc / cp
     prg = p0 / grav
 
-    psa2 = conv.psa ** 2.0
+    psa2 = state.surface_pressure ** 2.0
 
     # Tendencies of temperature and moisture
     # NB. A maximum heating rate is imposed to avoid grid-point-storm 
@@ -72,7 +72,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array
-    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * humidity.qsat[..., :] - humidity.qa[..., :]
+    dqa = rhref[jnp.newaxis, jnp.newaxis, :] * humidity.qsat[..., :] - state.specific_humidity[..., :]
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
@@ -85,7 +85,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     # Large-scale precipitation
     pfact = dhs * prg
     precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
-    precls *= humidity.psa
+    precls *= state.surface_pressure
 
     condensation_out = CondensationData(precls, dtlsc, dqlsc)   
     conv_out = ConvectionData()

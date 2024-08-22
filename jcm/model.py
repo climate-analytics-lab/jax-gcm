@@ -10,6 +10,7 @@ from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_
 from jcm.surface_fluxes import get_surface_fluxes
 from jcm.vertical_diffusion import get_vertical_diffusion_tend
 from dinosaur.time_integration import ExplicitODE
+from jcm.humidity import spec_hum_to_rel_hum
 
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
@@ -76,6 +77,7 @@ class SpeedyModel:
             physics_specs)
 
         physics_terms = [
+            spec_hum_to_rel_hum, # there needs to be a call to spec_hum_to_rel_hum here (see physics.f90 line 117)
             get_convection_tendencies, #FIXME: convert physics functions to use data class' as input/output
             get_large_scale_condensation_tendencies,
             clouds,

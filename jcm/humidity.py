@@ -6,33 +6,44 @@ saturation specific humidity.
 
 import jax.numpy as jnp
 import tree_math
+from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
 from params import ix, il, kx
+from jcm.geometry import fsg
 
 @tree_math.struct
 class HumidityData:
     rh = jnp.zeros((ix,il,kx))
-    qa = jnp.zeros((ix,il,kx)) # this is also known as qg in physics.f90
     qsat = jnp.zeros((ix,il,kx))
 
-def spec_hum_to_rel_hum(ta, ps, sig, qa):
+#def spec_hum_to_rel_hum(ta, ps, sig, qa):
+def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
     """
     Converts specific humidity to relative humidity, and also returns saturation 
      specific humidity.
 
     Args:
-        ta: Absolute temperature [K]
-        ps: Normalized pressure (p/1000 hPa)
-        sig: Sigma level
-        qa: Specific humidity
+        ta: Absolute temperature [K] - PhysicsState.temperature
+        ps: Normalized pressure (p/1000 hPa) - PhysicsState.surface_pressure
+        sig: Sigma level - fsg from jcm.geometry
+        qa: Specific humidity - PhysicsState.specific_humidity
 
     Returns:
         rh: Relative humidity
         qsat: Saturation specific humidity
     """
 
-    qsat = get_qsat(ta, ps, sig)
-    rh = qa / qsat
-    return rh, qsat
+    # vectorize get_qsat to be over all sigma levels instead of taking sig as an input - doing this will break existing tests which used to be for one sigma level at a time
+    get_qsat_lambda = lambda ta, ps, fsg: get_qsat(ta, ps, fsg)
+    map_qsat = jnp.vmap(get_qsat_lambda, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for arguments ta, ps and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
+    qsat = map_qsat(state.temperature, state.surface_pressure, fsg) #need to check that this produces ix x il x kx array
+
+    rh = state.specific_humidity / qsat
+    
+    humidity_out = HumidityData(rh=rh, qsat=qsat)
+    physics_data = PhysicsData(physics_data.shortwave_rad, physics_data.convection, physics_data.modradcon, humidity_out, physics_data.condensation)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    return physics_tendencies, physics_data
 
 
 def rel_hum_to_spec_hum(ta, ps, sig, rh):

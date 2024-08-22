@@ -109,7 +109,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
-        qa: Specific humidity [g/kg] - PhysicsData.Convection
+        qa: Specific humidity [g/kg] - PhysicsState.specific_humidity
         rh: Relative humidity - PhysicsData.Humidity
         precnv: Convection precipitation - PhysicsData.Convection
         precls: Large-scale condensational precipitation - PhysicsData.Condensation
@@ -162,7 +162,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
 
     #Second for loop (three levels)
     drh = humidity.rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (humidity.qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (state.specific_humidity[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
 
@@ -179,7 +179,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     icltop = jnp.minimum(conv.iptop, icltop)
 
     # 2.  Equivalent specific humidity of clouds
-    qcloud = humidity.qa[:,:,nl1]
+    qcloud = state.specific_humidity[:,:,nl1]
 
     # 3. Stratiform clouds at the top of PBL
     clfact = 1.2
