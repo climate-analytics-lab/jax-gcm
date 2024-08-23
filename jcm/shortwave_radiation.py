@@ -49,6 +49,7 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     absaer =  0.033 # Absorptivity of aerosols (visible band)
     abswv1 =  0.022 # Absorptivity of water vapour
     abswv2 = 15.000 # Absorptivity of water vapour
+
     nl1 = kx - 1
 
     fband2 = 0.05
@@ -121,14 +122,14 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     # scan alert!
 
     # here's the function that will compute the flux
-    propagate_flux = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
+    propagate_flux_1 = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
     
     # transpose because scan uses the first axis
     flux_1_t = jnp.moveaxis(flux_1, 2, 0)
 
     # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        lambda carry, i: (propagate_flux(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration,
+        lambda carry, i: (propagate_flux_1(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration,
                                                         #I'm just returning the output for both?
         flux_1_t[1], #initial value
         jnp.moveaxis(tau2, 2, 0)[2:kx]) #pass tau2 directly rather than indexing
@@ -142,30 +143,46 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     dfabs = dfabs.at[:, :, 2:kx].set(flux_1[:, :, 1:kx-1] * (1 - tau2[:, :, 2:kx, 2]) * (1 - tau2[:, :, 2:kx, 0]))
     tau2 = tau2.at[:, :, 2:kx, 2].set(flux_1[:, :, 1:kx-1] * tau2[:, :, 2:kx,2])
 
-    #return fsfcd, fsfc, ftop, dfabs
+    flux_2 = flux_2.at[:,:,1].set(flux_2[:,:,0])
+    propagate_flux_2 = lambda flux, tau: flux * tau[:, :, 1]
+    flux_2_t = jnp.moveaxis(flux_2, 2, 0)
+    _, flux_2_scan = lax.scan(
+        lambda carry, i: (propagate_flux_2(carry, i),)*2,
+        flux_2_t[1],
+        jnp.moveaxis(tau2, 2, 0)[2:kx])
+    flux_2 = flux_2.at[:,:,2:kx].set(
+        jnp.moveaxis(flux_2_scan, 0, 2)
+    )
+    dfabs = dfabs.at[:,:,2:kx].set(dfabs[:,:,2:kx] + flux_2[:,:,1:k-1]*(1 - tau2[:,:,2:kx,1]))
 
-    #     do k = 2, kx
-    #         dfabs(:,:,k) = dfabs(:,:,k) + flux(:,:,2)
-    #         flux(:,:,2)  = tau2(:,:,k,2)*flux(:,:,2)
-    #         dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,2)
-    #     end do
+    # 4. Shortwave upward flux
 
-    #     ! 4. Shortwave upward flux
-    #     ! 4.1  Absorption and reflection at the surface
-    #     fsfcd       = flux(:,:,1) + flux(:,:,2)
-    #     flux(:,:,1) = flux(:,:,1)*albsfc
-    #     fsfc        = fsfcd - flux(:,:,1)
+    # 4.1  Absorption and reflection at the surface
+    fsfcd = flux_1[:,:,kx-1] + flux_2[:,:,kx-1]
+    flux_1 = flux_1.at[:,:,kx-1].set(flux_1[:,:,kx-1]*albsfc)
+    fsfc = fsfcd - flux_1[:,:,kx-1]
 
-    #     ! 4.2  Absorption of upward flux
-    #     do k=kx,1,-1
-    #         dfabs(:,:,k) = dfabs(:,:,k) + flux(:,:,1)
-    #         flux(:,:,1)  = tau2(:,:,k,1)*flux(:,:,1)
-    #         dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
-    #         flux(:,:,1)  = flux(:,:,1) + tau2(:,:,k,3)
-    #     end do
+    # 4.2  Absorption of upward flux
 
-    #     ! 4.3  Net solar radiation = incoming - outgoing
-    #     ftop = ftop - flux(:,:,1)
+    # Might be able to fold one of these steps into the code below
+    k = kx - 1
+    dfabs = dfabs.at[:,:,k].set(dfabs[:,:,k] + flux_1[:,:,k]*(1 - tau2[:,:,k,0]))
+    flux_1 = flux_1.at[:,:,k].set(tau2[:,:,k,0]*flux_1[:,:,k] + tau2[:,:,k,2])
+
+    propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
+    flux_1_t = jnp.moveaxis(flux_1, 2, 0)
+    _, flux_1_scan = lax.scan(
+        lambda carry, i: (propagate_flux_up(carry, i),)*2,
+        flux_1_t[kx-2],
+        jnp.moveaxis(tau2, 2, 0)[kx-2::-1])
+    flux_1 = flux_1.at[:,:,kx-2::-1].set(
+        jnp.moveaxis(flux_1_scan, 0, 2)
+    )
+    
+    dfabs = dfabs.at[:,:,:kx-1].set(dfabs[:,:,:kx-1] + flux_1[:,:,1:kx]*(1 - tau2[:,:,:kx-1,0]))
+
+    # 4.3  Net solar radiation = incoming - outgoing
+    ftop = ftop - flux_1[:,:,0]
 
     #     ! 5.  Initialization of longwave radiation model
     #     ! 5.1  Longwave transmissivity:
@@ -212,6 +229,8 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     #     stratc(:,:,1) = stratz*psa
     #     stratc(:,:,2) = eps1*psa
     # end
+
+    return  fsfcd, fsfc, ftop, dfabs
 
 
 
