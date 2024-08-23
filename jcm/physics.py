@@ -48,6 +48,15 @@ class PhysicsData:
         self.humidity = HumidityData(nodal_shape, node_levels)
         self.condensation = CondensationData(nodal_shape, node_levels)
 
+    def copy(self,shortwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None):
+        return PhysicsData(
+            shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
+            convection if convection is not None else self.convection,
+            mod_radcon if mod_radcon is not None else self.mod_radcon,
+            humidity if humidity is not None else self.humidity,
+            condensation if condensation is not None else self.condensation
+        )
+
 @tree_math.struct
 class PhysicsTendency:
     u_wind: jnp.ndarray
