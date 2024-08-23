@@ -4,16 +4,45 @@ import jax.numpy as jnp
 # importing custom functions from library
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
-# These have not yet been defined - TS 08/14/24
-#from jcm.mod_radcon import emisfc, alb_l, alb_s, snowc
-#from jcm.land_model import stl_am, soilw_am
+from jcm.mod_radcon import emisfc, alb_l, alb_s, snowc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
-from jcm.params import ix, iy, il, kx
+from jcm.params import ix, il, kx
+#from jcm.land_model import stl_am, soilw_am
+
+# constants for surface fluxes
+fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
+
+# Weight for near-sfc temperature extrapolation (0-1) :
+# 1 : linear extrapolation from two lowest levels
+# 0 : constant potential temperature ( = lowest level)
+ftemp0 = 1.0
+
+# Weight for near-sfc specific humidity extrapolation (0-1) :
+# 1 : extrap. with constant relative hum. ( = lowest level)
+# 0 : constant specific hum. ( = lowest level)
+fhum0 = 0.0
+
+cdl = 2.4e-3   # Drag coefficient for momentum over land
+cds = 1.0e-3   # Drag coefficient for momentum over sea
+chl = 1.2e-3   # Heat exchange coefficient over land
+chs = 0.9e-3   # Heat exchange coefficient over sea
+vgust = 5.0    # Wind speed for sub-grid-scale gusts
+ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
+dtheta = 3.0   # Potential temp. gradient for stability correction
+fstab = 0.67   # Amplitude of stability correction (fraction)
+clambda = 7.0  # Heat conductivity in skin-to-root soil layer
+clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
 lscasym = True   # true : use an asymmetric stability coefficient
 lskineb = True   # true : redefine skin temp. from energy balance
 
+hdrag = 2000.0 # Height scale for orographic correction
 
+# Placeholders for boundary conditions
+fmask_fill = 0.0
+phi0_fill = 0.0
+stl_am_fill = 288.0
+soilw_am_fill = 2.0
 
 # import types
 
@@ -57,51 +86,35 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     -------
 
     '''
-
-    # Issue 27, requires land_model -  https://github.com/climate-analytics-lab/jax-gcm/issues/29
-    lfluxland = False
-    emisfc = 0.98  # Longwave surface emissivity, taken from mod_radcon and will be removed when that function is working
-    ks = 2 # Defined in the lfluxland functions
-    slru_shape = list(phi0.shape)
-    slru_shape.append(3)
-    slru = jnp.zeros(slru_shape)
-    shf = jnp.zeros(slru_shape)
-    evap = jnp.zeros(slru_shape)
-    slru_shape[-1] = 2
-    qsat0 = jnp.zeros(slru_shape)
-    slru_shape[-1] = 3
-    
-    # Continue original code 
+    # Aquaplanet settings - TODO: move this into physics initialization
+    phi0 = jnp.full(phi0.shape, phi0_fill)
     forog = set_orog_land_sfc_drag(phi0)
+    fmask = jnp.full(fmask.shape, fmask_fill)
+    stl_am = jnp.full((ix, il), stl_am_fill)
+    soilw_am = jnp.full((ix, il), soilw_am_fill)
 
-    lscasym = True   # true : use an asymmetric stability coefficient
-    lskineb = True   # true : redefine skin temp. from energy balance
+    # Initialize variables
+    ustr = jnp.zeros((ix, il, 3))
+    vstr = jnp.zeros((ix, il, 3))
+    shf = jnp.zeros((ix, il, 3))
+    evap = jnp.zeros((ix, il, 3))
+    slru = jnp.zeros((ix, il, 3))
+    hfluxn = jnp.zeros((ix, il, 2))
+    tsfc = jnp.zeros((ix, il))
+    tskin = jnp.zeros((ix, il))
+    u0 = jnp.zeros((ix, il))
+    v0 = jnp.zeros((ix, il))
+    t0 = jnp.zeros((ix, il))
 
-
-
-    # constants for sufrace fluxes
-    fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
-
-    # Weight for near-sfc temperature extrapolation (0-1) :
-    # 1 : linear extrapolation from two lowest levels
-    # 0 : constant potential temperature ( = lowest level)
-    ftemp0 = 1.0
-
-    # Weight for near-sfc specific humidity extrapolation (0-1) :
-    # 1 : extrap. with constant relative hum. ( = lowest level)
-    # 0 : constant specific hum. ( = lowest level)
-    fhum0 = 0.0
-
-    cdl = 2.4e-3   # Drag coefficient for momentum over land
-    cds = 1.0e-3   # Drag coefficient for momentum over sea
-    chl = 1.2e-3   # Heat exchange coefficient over land
-    chs = 0.9e-3   # Heat exchange coefficient over sea
-    vgust = 5.0    # Wind speed for sub-grid-scale gusts
-    ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
-    dtheta = 3.0   # Potential temp. gradient for stability correction
-    fstab = 0.67   # Amplitude of stability correction (fraction)
-    clambda = 7.0  # Heat conductivity in skin-to-root soil layer
-    clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
+    t1 = jnp.zeros((ix, il, 2))
+    q1 = jnp.zeros((ix, il, 2))
+    t2 = jnp.zeros((ix, il, 2))
+    qsat0 = jnp.zeros((ix, il, 2))
+    denvvs = jnp.zeros((ix, il, 3))
+    dslr = jnp.zeros((ix, il))
+    dtskin = jnp.zeros((ix, il))
+    clamb = jnp.zeros((ix, il))
+    tsk3 = jnp.zeros((ix, il))
 
     esbc  = emisfc*sbc
     ghum0 = 1.0 - fhum0
@@ -110,167 +123,141 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # Land surface
     ##########################################################
 
-    # initializing variables
-    t1 = jnp.zeros([*phi0.shape,2])
-    denvvs = jnp.zeros([*phi0.shape,2])
+    # 1. Extrapolation of wind, temp, hum. and density to the surface
 
+    # 1.1 Wind components
+    u0 = fwind0*ua[:,:,-1]
+    v0 = fwind0*va[:,:,-1]
+
+    gtemp0 = 1.0 - ftemp0
+    rcp = 1.0/cp 
+    nl1 = kx-2             # original code had kx-1 which works for 1 based indexing but not 2
+
+    # substituting the for loop at line 109
+    # Temperature difference between lowest level and sfc
+    # line 112
+    dt1 = wvi[-1,1]*(ta[:,:,-1] - ta[:,:,nl1])
     
-    q1 = jnp.zeros([*phi0.shape,2])
+    # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
+    # line 115 - 116
+    t1 = t1.at[:,:,0].add(ta[:,:,-1] + dt1)
+    t1 = t1.at[:,:,1].set(t1[:,:,0] - jnp.multiply(phi0,dt1)/(rgas*288.0*sigl[-1]))
 
-    lscasym, lskineb = True, True
-    esbc  = emisfc * sbc
-    ghum0 = 1.0 - fhum0
+    # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
+    # line 119 - 120
+    t2 = t2.at[:,:,1].set(ta[:,:,-1] + rcp*phi[:,:,-1])
+    t2 = t2.at[:,:,0].set(t2[:,:,1] - rcp*phi0)
+
+    # lines 124 - 137
+    t1.at[:,:,0].set(jnp.where(ta[:,:,-1] > ta[:,:,nl1], ftemp0*t1[:,:,0] + gtemp0*t2[:,:,0], ta[:,:,-1]))
+    t1.at[:,:,1].set(jnp.where(ta[:,:,-1] > ta[:,:,nl1], ftemp0*t1[:,:,1] + gtemp0*t2[:,:,0], ta[:,:,-1]))
     
-    # Ouptut Variables
-    shf = jnp.zeros(())
+    # Initialize variable
+    t0 = t1[:,:,1] + jnp.multiply(fmask,(t1[:,:,0] - t1[:,:,1]))
 
-    if lfluxland:
+    # line 140
+    # denvvs(:,:,0) = (p0*psa/(rgas*t0))*sqrt(u0**2.0 + v0**2.0 + vgust**2.0)
+    denvvs = denvvs.at[:,:,0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + vgust**2))
 
-        raise NotImplementedError
+    # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes 
+    # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
 
-        # 1. Extrapolation of wind, temp, hum. and density to the surface
+    # Vectorized computation using JAX arrays
+    tskin = stl_am + ctday * jnp.sqrt(coa) * ssrd * (1.0 - alb_l) * psa
 
-        # 1.1 Wind components
-        u0 = fwind0*ua[:,:,-1]
-        v0 = fwind0*va[:,:,-1]
+    # 2.2 Stability Correlation
+    rdth  = fstab / dtheta
+    if lscasym: astab = 0.5
+    else: astab = 1.0
 
-        gtemp0 = 1.0 - ftemp0
-        rcp = 1.0/cp 
-        nl1 = kx-2             # original code had kx-1 which works for 1 based indexing but not 2
+    dthl = jnp.where(
+        tskin > t2[:, :, 1], 
+        jnp.minimum(dtheta, tskin - t2[:, :, 0]), 
+        jnp.maximum(-dtheta, astab * (tskin - t2[:, :, 0]))
+    )
 
-        # substituting the for loop at line 109
-        # Temperature difference between lowest level and sfc
-        # line 112
-        dt1 = wvi[-1,1]*(ta[:,:,-1] - ta[:,:,nl1])
+    denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
 
-        # print(dt1.shape) # 48 x 96
-        # print(ta.shape) # 48 x 96 x 8 
-        # print(phi0) # 48 x 96
-        # print(t1.shape)
+    # 2.3 Computing Wind Stress
+    cdldv = cdl * denvvs[:, :, 0] * forog
+    ustr = ustr.at[:, :, 0].set(-cdldv * ua[:, :, kx-1])
+    vstr = vstr.at[:, :, 0].set(-cdldv * va[:, :, kx-1])
 
-        
-        # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
-        # line 115 - 116
-        t1 = t1.at[:,:,0].add(ta[:,:,-1] + dt1)
-        t1 = t1.at[:,:,1].set(t1[:,:,0] - jnp.multiply(phi0,dt1)/(rgas*288.0*sigl[-1]))
+    # 2.4 Computing Sensible Heat Flux
+    chlcp = chl * cp
+    shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
 
-        # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
-        # line 119 - 120
-        t2 = t2.at[:,:,1].set(ta[:,:,-1] + rcp*phi[:,:,-1])
-        t2 = t2.at[:,:,0].set(t2[:,:,1] - rcp*phi0)
+    # 2.5 Computing Evaporation
+    if fhum0 > 0.0:
+        q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, 0], psa, 1.0, rh[:, :, kx-1])
+        q1 = q1.at[:, :, 0].set(fhum0*q1_val + ghum0*qa[:, :, kx-1])
+        qsat0 = qsat0.at[:, :, 0].set(qsat0_val)
+    else:
+        q1 = q1.at[:, :, 0].set(qa[:, :, kx-1])
 
-        # lines 124 - 137
-        t1.at[:,:,0].set(jnp.where(ta[:,:,kx] > ta[:,:,nl1], ftemp0*t1[:,:,0] + gtemp0*t2[:,:,0], ta[:,:,-1]))
-        t1.at[:,:,1].set(jnp.where(ta[:,:,kx] > ta[:,:,nl1], ftemp0*t1[:,:,1] + gtemp0*t2[:,:,0], ta[:,:,kx]))
-        # Initialize variable
-        t0 = t1[:,:,1] + jnp.multiply(fmask,(t1[:,:,0] - t1[:,:,1]))
+    qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
-        # line 140
-        # denvvs(:,:,0) = (p0*psa/(rgas*t0))*sqrt(u0**2.0 + v0**2.0 + vgust**2.0)
-        denvvs = denvvs.at[:,:,0].set(jnp.multiply(jnp.divide(p0*psa,rgas*t0),\
-                     jnp.sqrt(jnp.square(u0) + jnp.square(v0) + jnp.square(vgust))))
+    evap = evap.at[:, :, 0].set(chl * denvvs[:, :, 1] *\
+                jnp.maximum(0.0, soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
 
-        # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes 
-        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
+    # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
+    # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
+    tsk3 = tskin ** 3.0
+    dslr = 4.0 * esbc * tsk3
+    slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
-        # Vectorized computation using JAX arrays
-        tskin = stl_am + ctday * jnp.sqrt(coa) * ssrd * (1.0 - alb_l) * psa
-
-        # 2.2 Stability Correlation
-        rdth  = fstab / dtheta
-        if lscasym: astab = 0.5
-        else: astab = 1.0
-
-        dthl = jnp.where(
-            tskin > t2[:, :, 1], 
-            jnp.minimum(dtheta, tskin - t2[:, :, 0]), 
-            jnp.maximum(-dtheta, astab * (tskin - t2[:, :, 0]))
-        )
-
-        denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
-
-        # 2.3 Computing Wind Stress
-        cdldv = cdl * denvvs[:, :, 0] * forog
-        ustr = ustr.at[:, :, 0].set(-cdldv * ua[:, :, kx-1])
-        vstr = vstr.at[:, :, 0].set(-cdldv * va[:, :, kx-1])
-
-        # 2.4 Computing Sensible Heat Flux
-        chlcp = chl * cp
-        shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
-
-        # 2.5 Computing Evaporation
-        if fhum0 > 0.0:
-            rel_hum_to_spec_hum(t1, psa, 1.0, rh[:, :, kx-1], q1, qsat0[:, :, 0])
-            q1 = q1.at[:, :, 0].set(fhum0 * q1[:, :, 0] + ghum0 * qa[:, :, kx-1])
-        else: q1 = q1.at[:, :, 0].set(qa[:, :, kx-1])
-
-        qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
-
-        evap = evap.at[:, :, 0].set(chl * denvvs[:, :, 1] *\
-                    jnp.maximum(0.0, soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
-
-        # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
-        # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
-        tsk3 = tskin ** 3.0
-        dslr = 4.0 * esbc * tsk3
-        slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
-
-        hfluxn = hfluxn[:, :, 0].set(
-                        ssrd * (1.0 - alb_l) + slrd -\
-                            (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
-                    )
-
-        # 3.2 Re-definition of skin temperature from energy balance
-        if lskineb:
-            # Compute net heat flux including flux into ground
-            clamb = clambda + (snowc * (clambsn - clambda))
-            hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
-            dtskin = tskin + 1.0
-
-            # Compute d(Evap) for a 1-degree increment of Tskin
-            qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
-            qsat0 = qsat0.at[:, :, 1].set(
-                    jnp.where(
-                        evap[:, :, 1] > 0.0,
-                        soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
-                        0.0
-                    )
+    hfluxn = hfluxn[:, :, 0].set(
+                    ssrd * (1.0 - alb_l) + slrd -\
+                        (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                 )
 
-            # Redefine skin temperature to balance the heat budget
-            dtskin = hfluxn[:, :, 0] / (clamb + dslr + (chl * denvvs[:, :, 0] * (cp + (alhc * qsat0[:, :, 1]))))
-            tskin = tskin + dtskin
+    # 3.2 Re-definition of skin temperature from energy balance
+    if lskineb:
+        # Compute net heat flux including flux into ground
+        clamb = clambda + (snowc * (clambsn - clambda))
+        hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
+        dtskin = tskin + 1.0
 
-            # Add linear corrections to heat fluxes
-            shf = shf.at[:, :, 0].set(shf[:, :, 0] + chlcp*denvvs[:, :, 1]*dtskin)
-            evap = evap.at[:, :, 0].set(evap[:, :, 0] + chl*denvvs[:, :, 1]*qsat0[:, :, 1]*dtskin)
-            slru = slru.at[:, :, 0].set(slru[:, :, 0] + dslr*dtskin)
-            hfluxn = hfluxn.at[:, :, 0].set(clamb*(tskin - stl_am))
-
-            rdth  = fstab / dtheta
-            if lscasym: astab = 0.5 # To get smaller dS/dT in stable conditions
-            else: astab = 1.0
-
-            dths = jnp.where(
-                tsea > t2[:, :, 1],
-                jnp.minimum(dtheta, tsea - t2[:, :, 1]),
-                jnp.maximum(-dtheta, astab * (tsea - t2[:, :, 1]))
+        # Compute d(Evap) for a 1-degree increment of Tskin
+        qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
+        qsat0 = qsat0.at[:, :, 1].set(
+                jnp.where(
+                    evap[:, :, 1] > 0.0,
+                    soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
+                    0.0
+                )
             )
-            
-            denvvs[:, :, 2] = denvvs[:, :, 0] * (1.0 + dths * rdth)
 
-            if fhum0 > 0.0:
-                rel_hum_to_spec_hum(t1[:, :, 1], psa, 1.0, rh[:, :, kx-1], q1[:, :, 1], qsat0[:, :, 1])
-                q1.at[:, :, 1] = fhum0 * q1[:, :, 1] + ghum0 * qa[:, :, kx-1]
-            else:
-                q1[:, :, 1] = qa[:, :, kx-1]
+        # Redefine skin temperature to balance the heat budget
+        dtskin = hfluxn[:, :, 0] / (clamb + dslr + (chl * denvvs[:, :, 0] * (cp + (alhc * qsat0[:, :, 1]))))
+        tskin = tskin + dtskin
 
-            # 4.2 Wind Stress
-            ks = 2
+        # Add linear corrections to heat fluxes
+        shf = shf.at[:, :, 0].set(shf[:, :, 0] + chlcp*denvvs[:, :, 1]*dtskin)
+        evap = evap.at[:, :, 0].set(evap[:, :, 0] + chl*denvvs[:, :, 1]*qsat0[:, :, 1]*dtskin)
+        slru = slru.at[:, :, 0].set(slru[:, :, 0] + dslr*dtskin)
+        hfluxn = hfluxn.at[:, :, 0].set(clamb*(tskin - stl_am))
 
-            cdsdv = cds * denvvs[:, :, ks]
-            ustr = ustr.at[:, :, 2].set(-cdsdv * ua[:, :, kx-1])
-            vstr = vstr.at[:, :, 2].set(-cdsdv*va[:, :, kx-1])
+        dths = jnp.where(
+            tsea > t2[:, :, 1],
+            jnp.minimum(dtheta, tsea - t2[:, :, 1]),
+            jnp.maximum(-dtheta, astab * (tsea - t2[:, :, 1]))
+        )
+        
+        denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
+
+        if fhum0 > 0.0:
+            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, 1], psa, 1.0, rh[:, :, kx-1])
+            q1, qsat0 = q1.at[:, :, 1].set(fhum0*q1_val + ghum0*qa[:, :, kx-1]), qsat0.at[:, :, 1].set(qsat0_val)
+        else:
+            q1 = q1.at[:, :, 1].set(qa[:, :, kx-1])
+
+        # 4.2 Wind Stress
+        ks = 2
+
+        cdsdv = cds * denvvs[:, :, ks-1]
+        ustr = ustr.at[:, :, 1].set(-cdsdv * ua[:, :, kx-1])
+        vstr = vstr.at[:, :, 1].set(-cdsdv*va[:, :, kx-1])
 
     ##########################################################
     # Sea Surface
@@ -294,41 +281,27 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # evap_0 = jnp.zeros_like(evap_1)
     # evap = stack_matrices(evap_0, evap_1)
 
-    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
-    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
-    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
+    # 4.3 Sensible heat flux
+    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks-1] * (tsea - t1[:, :, 1]))
 
-    """
-        Defining:
-            1. Emission of lw radiation from the surface    
-            2. Net Heat Fluxes into sea surface
-    """
+    # 4.4 Evaporation
+    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
+    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks-1] * (qsat0[:, :, 1] - q1[:, :, 1]))
+    
+    # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
     hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + (alhc * evap[:, :, 1]))
 
-    """
-        Using a land-sea mask to compute a weighted average of surface fluxes and temperatures.
-    """
-    if lfluxland:
-        raise NotImplementedError
+    # Weighted average of surface fluxes and temperatures according to land-sea mask
+    ustr.at[:, :, 2].add(fmask * (ustr[:, :, 0] - ustr[:, :, 1]))
+    vstr.at[:, :, 2].add(fmask * (vstr[:, :, 0] - vstr[:, :, 1]))
+    shf.at[:, :, 2].add( fmask * (shf[:, :, 0]  - shf[:, :, 1]))
+    evap.at[:, :, 2].add(fmask * (evap[:, :, 0] - evap[:, :, 1]))
+    slru.at[:, :, 2].add(fmask * (slru[:, :, 0] - slru[:, :, 1]))
 
-        ustr.at[:, :, 2].add(fmask * (ustr[:, :, 0] - ustr[:, :, 1]))
-        vstr.at[:, :, 2].add(fmask * (vstr[:, :, 0] - vstr[:, :, 1]))
-        shf.at[:, :, 2].add( fmask * (shf[:, :, 0]  - shf[:, :, 1]))
-        evap.at[:, :, 2].add(fmask * (evap[:, :, 0] - evap[:, :, 1]))
-        slru.at[:, :, 2].add(fmask * (slru[:, :, 0] - slru[:, :, 1]))
-
-        tsfc  = tsea + fmask * (stl_am - tsea)
-        tskin = tsea + fmask * (tskin  - tsea)
-        t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
-
-    ustr = jnp.nan
-    vstr = jnp.nan
-    tsfc = jnp.nan
-    tskin = jnp.nan
-    u0 = jnp.nan
-    v0 = jnp.nan
-    t0 = jnp.nan
+    tsfc  = tsea + fmask * (stl_am - tsea)
+    tskin = tsea + fmask * (tskin  - tsea)
+    t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
     return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
 
@@ -341,11 +314,9 @@ def set_orog_land_sfc_drag(phi0):
         - Array used for calculating the forog
     '''
 
-    hdrag = 2000.0 # Height scale for orographic correction
     rhdrag = 1/(grav*hdrag)
 
-    # setting creating values for forog
-    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.where(phi0 > 0, phi0, 0)))
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phi0, 0.0)*rhdrag))
 
     return forog
 
