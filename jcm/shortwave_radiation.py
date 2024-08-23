@@ -119,20 +119,27 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     # 3.3 Absorption and reflection in the troposphere
     
     # scan alert!
-    tau2_0_t = jnp.moveaxis(tau2[:,:,:,0], 2, 0)
-    tau2_2_t = jnp.moveaxis(tau2[:,:,:,2], 2, 0)
-    flux_1_t = jnp.moveaxis(flux_1, 2, 0) 
-    def helper(carry, i):
-        return (carry * tau2_0_t[i] * (1 - tau2_2_t[i]),)*2
+
+    # here's the function that will compute the flux
+    propagate_flux = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
+    
+    # transpose because scan uses the first axis
+    flux_1_t = jnp.moveaxis(flux_1, 2, 0)
+
+    # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        helper,
-        flux_1_t[1],
-        jnp.arange(2, kx))
+        lambda carry, i: (propagate_flux(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration,
+                                                        #I'm just returning the output for both?
+        flux_1_t[1], #initial value
+        jnp.moveaxis(tau2, 2, 0)[2:kx]) #pass tau2 directly rather than indexing
+    
+    # put results in flux_1
     flux_1 = flux_1.at[:,:,2:kx].set(
         jnp.moveaxis(flux_1_scan, 0, 2)
     )
 
-    dfabs[:, :, 2:kx] = flux_1[:, :, 1:kx-1] * (1 - tau2[:, :, 2:kx, 2]) * (1 - tau2[:, :, 2:kx, 0])
+    # at each k, dfabs and tau2 only depend on the updated value of flux_1 and the non-updated value of tau2
+    dfabs = dfabs.at[:, :, 2:kx].set(flux_1[:, :, 1:kx-1] * (1 - tau2[:, :, 2:kx, 2]) * (1 - tau2[:, :, 2:kx, 0]))
     tau2 = tau2.at[:, :, 2:kx, 2].set(flux_1[:, :, 1:kx-1] * tau2[:, :, 2:kx,2])
 
     #return fsfcd, fsfc, ftop, dfabs
