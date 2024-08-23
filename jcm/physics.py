@@ -35,15 +35,18 @@ class PhysicsState:
 
 @tree_math.struct
 class PhysicsData:
-    shortwave_rad = SWRadiationData()
-    convection = ConvectionData()
-    mod_radcon = ModRadConData()
-    humidity = HumidityData()
-    condensation = CondensationData()
+    shortwave_rad: SWRadiationData
+    convection: ConvectionData
+    mod_radcon: ModRadConData
+    humidity: HumidityData
+    condensation: CondensationData
 
-    def initialize(self):
-        a = 1
-        # option to call initialization members to something specific here if necessary (if we can't start with zeros)
+    def __init__(self, nodal_shape, node_levels) -> None:
+        self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
+        self.convection = ConvectionData(nodal_shape, node_levels)
+        self.mod_radcon = ModRadConData(nodal_shape, node_levels)
+        self.humidity = HumidityData(nodal_shape, node_levels)
+        self.condensation = CondensationData(nodal_shape, node_levels)
 
 @tree_math.struct
 class PhysicsTendency:
@@ -139,7 +142,7 @@ def get_physical_tendencies(
         jnp.zeros_like(physics_state.u_wind),
         jnp.zeros_like(physics_state.u_wind))
     
-    data = PhysicsData()
+    data = PhysicsData(state.temperature.shape[0:1],state.temperature.shape[2])
     # optionally initialize the physics data here if it needs to be 
 
     for term in physics_terms:

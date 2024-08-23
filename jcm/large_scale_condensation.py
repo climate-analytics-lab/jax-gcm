@@ -31,7 +31,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
-        psa: Normalized surface pressure - state.surface_pressure -- # FIXME: the state is not normalized surface pressure, this should be fixed (could be conv.psa)
+        psa: Normalized surface pressure - convection.psa
         qa: Specific humidity [g/kg] - state.specific_humidity
         qsat: Saturation specific humidity [g/kg] - humidity.qsat
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop
@@ -58,7 +58,7 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     tfact = alhc / cp
     prg = p0 / grav
 
-    psa2 = state.surface_pressure ** 2.0
+    psa2 = conv.psa ** 2.0
 
     # Tendencies of temperature and moisture
     # NB. A maximum heating rate is imposed to avoid grid-point-storm 
@@ -85,13 +85,12 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     # Large-scale precipitation
     pfact = dhs * prg
     precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
-    precls *= state.surface_pressure
+    precls *= conv.psa
 
     condensation_out = CondensationData(precls, dtlsc, dqlsc)   
     conv_out = ConvectionData()
     conv_out = conv 
     conv_out.iptop = iptop
-
     physics_data = PhysicsData(physics_data.shortwave_rad, conv_out, physics_data.modradcon, physics_data.humidity, condensation_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     

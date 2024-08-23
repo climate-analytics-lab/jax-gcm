@@ -20,7 +20,7 @@ smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-ba
 
 @tree_math.struct
 class ConvectionData:
-    # psa: jnp.ndarray # normalized surface pressure -- #FIXME: this file needs normalized surface pressure, not surface_pressure. psa needs to be computed from state.surface_pressure
+    psa: jnp.ndarray # normalized surface pressure 
     se: jnp.ndarray # dry static energy
     iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
@@ -28,24 +28,29 @@ class ConvectionData:
     dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
     dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
 
-    def __init__(self, se: jnp.ndarray, iptop:jnp.ndarray, cbmf:jnp.ndarray, precnv:jnp.ndarray, dfse:jnp.ndarray, dfqa:jnp.ndarray, state_param:jnp.ndarray, initialize: bool=False) -> None:
-        if (initialize):
-            ix, il, kx = state_param.shape
-            # self.psa = jnp.zeros((ix,il))
-            self.se = jnp.zeros((ix,il,kx))
-            self.iptop = jnp.zeros((ix,il),dtype=int) 
-            self.cbmf = jnp.zeros((ix,il)) 
-            self.precnv = jnp.zeros((ix,il)) 
-            self.dfse = jnp.zeros((ix,il,kx))
-            self.dfqa = jnp.zeros((ix,il,kx))
-        else:
-            # self.psa = psa
-            self.se = se
-            self.iptop = iptop
-            self.cbmf = cbmf
-            self.precnv = precnv
-            self.dfse = dfse
-            self.dfqa = dfqa
+    def __init__(self, nodal_shape, node_levels) -> None:
+        self.psa = jnp.zeros((nodal_shape))
+        self.se = jnp.zeros((nodal_shape, node_levels))
+        self.iptop = jnp.zeros((nodal_shape),dtype=int)
+        self.cbmf = jnp.zeros((nodal_shape))
+        self.precnv = jnp.zeros((nodal_shape))
+        self.dfse = jnp.zeros((nodal_shape, node_levels))
+        self.dfqa = jnp.zeros((nodal_shape, node_levels))
+
+    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None):
+        # does this work? or does it call the constructor... if so i can add se=None etc to the constructor and do the same thing - if none overwrite with zeros of nodal_shape
+        return ConvectionData(
+            psa=psa if psa is not None else self.psa,
+            se=se if se is not None else self.se,
+            iptop=iptop if iptop is not None else self.iptop,
+            cbmf=cbmf if cbmf is not None else self.cbmf,
+            precnv=precnv if precnv is not None else self.precnv,
+            dfse=dfse if dfse is not None else self.dfse,
+            dfqa=dfqa if dfqa is not None else self.dfqa
+        )
+        # alternatively 
+        # if se:
+        #    self.se = se
 
 if wvi[0, 1] == 0.:
     """
@@ -161,14 +166,16 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     qa = state.specific_humidity
     qsat = humidity.qsat
     _, _, kx = se.shape
-
+    psa = state.surface_pressure #FIXME: normalized surface pressure should be computed from state.surface_pressure, in physics.f90:104 its exp(surface_pressure)??
+    # psa = jnp.exp(state.surface_pressure) 
+    
     # 1. Initialization of output and workspace arrays
 
     dfse = jnp.zeros_like(se)
     dfqa = jnp.zeros_like(physics_data.state.specific_humidity)
 
-    cbmf = jnp.zeros_like(state.surface_pressure)
-    precnv = jnp.zeros_like(state.surface_pressure)
+    cbmf = jnp.zeros_like(psa)
+    precnv = jnp.zeros_like(psa)
 
     #keep indexing consistent with original Speedy
     nl1 = kx - 1 
@@ -184,7 +191,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     rdps=2.0/(1.0 - psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(state.surface_pressure, se, state.specific_humidity, humidity.qsat)
+    iptop, qdif = diagnose_convection(psa, se, state.specific_humidity, humidity.qsat)
 
     # 3. Convection over selected grid-points
     mask = iptop < kx
@@ -199,7 +206,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     sb = se[:, :, k1] + wvi[k1, 1] * (se[:, :, k] - se[:, :, k1])
     qb = jnp.minimum(state.specific_humidity[:, :, k1] + wvi[k1, 1] * (state.specific_humidity[:, :, k] - state.specific_humidity[:, :, k1]), state.specific_humidity[:, :, k])
     
-    fpsa = state.surface_pressure * jnp.minimum(1.0, (state.surface_pressure - psmin) * rdps)
+    fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
     cbmf = jnp.where(mask, fmass, cbmf)
 
@@ -217,7 +224,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
 
     # 3.2 intermediate layers (entrainment)
     #start by making entrainment profile:
-    enmass = entr[jnp.newaxis, jnp.newaxis, :] * state.surface_pressure[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
+    enmass = entr[jnp.newaxis, jnp.newaxis, :] * psa[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
 
     #now get mass entrainment 
     """
@@ -303,7 +310,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # pass on the rest of physics_data that was not updated or needed in this function
     # since convection doesn't generate new tendencies, just return PhysicsTendency instance that is all 0's
 
-    convection_out = ConvectionData(se,iptop,cbmf,precnv,dfse,dfqa)
+    convection_out = ConvectionData(psa,se,iptop,cbmf,precnv,dfse,dfqa)
     physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     

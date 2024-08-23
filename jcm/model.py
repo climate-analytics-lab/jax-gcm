@@ -78,7 +78,7 @@ class SpeedyModel:
 
         #FIXME: convert physics functions to use data class' as input/output
         physics_terms = [
-            spec_hum_to_rel_hum, # this could become a member function of the model and relative humidity and qsat would become state variables
+            spec_hum_to_rel_hum, # this could get called in get_physics_tendencies before looping over the physics terms
             get_convection_tendencies,
             get_large_scale_condensation_tendencies,
             clouds,

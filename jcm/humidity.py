@@ -23,7 +23,7 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
 
     Args:
         ta: Absolute temperature [K] - PhysicsState.temperature
-        ps: Normalized pressure (p/1000 hPa) - PhysicsState.surface_pressure
+        ps: Normalized pressure (p/1000 hPa) - Convection.psa
         sig: Sigma level - fsg from jcm.geometry
         qa: Specific humidity - PhysicsState.specific_humidity
 
@@ -35,7 +35,7 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
     # vectorize get_qsat to be over all sigma levels instead of taking sig as an input - doing this will break existing tests which used to be for one sigma level at a time
     get_qsat_lambda = lambda ta, ps, fsg: get_qsat(ta, ps, fsg)
     map_qsat = jnp.vmap(get_qsat_lambda, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for arguments ta, ps and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
-    qsat = map_qsat(state.temperature, state.surface_pressure, fsg) #need to check that this produces ix x il x kx array
+    qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg) #need to check that this produces ix x il x kx array
 
     rh = state.specific_humidity / qsat
     
