@@ -1,5 +1,5 @@
-import jax
 import jax.numpy as jnp
+from jax import jit
 
 # importing custom functions from library
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
@@ -46,7 +46,7 @@ soilw_am_fill = 2.0
 
 # import types
 
-@jax.jit
+@jit
 def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
                  tsea, ssrd, slrd, lfluxland):
     '''
@@ -87,11 +87,11 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     '''
     # Aquaplanet settings - TODO: move this into physics initialization
-    phi0 = jnp.full(phi0.shape, phi0_fill)
-    forog = set_orog_land_sfc_drag(phi0)
     fmask = jnp.full(fmask.shape, fmask_fill)
     stl_am = jnp.full((ix, il), stl_am_fill)
     soilw_am = jnp.full((ix, il), soilw_am_fill)
+    phi0 = jnp.full(phi0.shape, phi0_fill)
+    forog = set_orog_land_sfc_drag(phi0)
 
     # Initialize variables
     ustr = jnp.zeros((ix, il, 3))
@@ -126,38 +126,38 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     # 1. Extrapolation of wind, temp, hum. and density to the surface
 
     # 1.1 Wind components
-    u0 = fwind0*ua[:,:,-1]
-    v0 = fwind0*va[:,:,-1]
+    u0 = fwind0*ua[:, :, kx-1]
+    v0 = fwind0*va[:, :, kx-1]
 
     gtemp0 = 1.0 - ftemp0
     rcp = 1.0/cp 
-    nl1 = kx-2             # original code had kx-1 which works for 1 based indexing but not 2
+    nl1 = kx-1
 
     # substituting the for loop at line 109
     # Temperature difference between lowest level and sfc
     # line 112
-    dt1 = wvi[-1,1]*(ta[:,:,-1] - ta[:,:,nl1])
+    dt1 = wvi[kx-1, 1]*(ta[:, :, kx-1] - ta[:, :, nl1-1])
     
     # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
     # line 115 - 116
-    t1 = t1.at[:,:,0].add(ta[:,:,-1] + dt1)
-    t1 = t1.at[:,:,1].set(t1[:,:,0] - jnp.multiply(phi0,dt1)/(rgas*288.0*sigl[-1]))
+    t1 = t1.at[:, :, 0].add(ta[:, :, kx-1] + dt1)
+    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*sigl[kx-1]))
 
     # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
     # line 119 - 120
-    t2 = t2.at[:,:,1].set(ta[:,:,-1] + rcp*phi[:,:,-1])
-    t2 = t2.at[:,:,0].set(t2[:,:,1] - rcp*phi0)
+    t2 = t2.at[:, :, 1].set(ta[:, :, kx-1] + rcp*phi[:, :, kx-1])
+    t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
 
     # lines 124 - 137
-    t1.at[:,:,0].set(jnp.where(ta[:,:,-1] > ta[:,:,nl1], ftemp0*t1[:,:,0] + gtemp0*t2[:,:,0], ta[:,:,-1]))
-    t1.at[:,:,1].set(jnp.where(ta[:,:,-1] > ta[:,:,nl1], ftemp0*t1[:,:,1] + gtemp0*t2[:,:,0], ta[:,:,-1]))
+    t1 = jnp.where((ta[:, :, kx-1] > ta[:, :, nl1-1])[:, :, jnp.newaxis],
+                   ftemp0*t1 + gtemp0*t2,
+                   ta[:, :, kx-1][:, :, jnp.newaxis])
     
-    # Initialize variable
-    t0 = t1[:,:,1] + jnp.multiply(fmask,(t1[:,:,0] - t1[:,:,1]))
+    t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
     # line 140
     # denvvs(:,:,0) = (p0*psa/(rgas*t0))*sqrt(u0**2.0 + v0**2.0 + vgust**2.0)
-    denvvs = denvvs.at[:,:,0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + vgust**2))
+    denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + vgust**2))
 
     # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes 
     # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
@@ -206,7 +206,7 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     dslr = 4.0 * esbc * tsk3
     slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
-    hfluxn = hfluxn[:, :, 0].set(
+    hfluxn = hfluxn.at[:, :, 0].set(
                     ssrd * (1.0 - alb_l) + slrd -\
                         (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                 )
@@ -248,7 +248,8 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
         if fhum0 > 0.0:
             q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, 1], psa, 1.0, rh[:, :, kx-1])
-            q1, qsat0 = q1.at[:, :, 1].set(fhum0*q1_val + ghum0*qa[:, :, kx-1]), qsat0.at[:, :, 1].set(qsat0_val)
+            q1 = q1.at[:, :, 1].set(fhum0*q1_val + ghum0*qa[:, :, kx-1])
+            qsat0 = qsat0.at[:, :, 1].set(qsat0_val)
         else:
             q1 = q1.at[:, :, 1].set(qa[:, :, kx-1])
 
@@ -257,29 +258,11 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
         cdsdv = cds * denvvs[:, :, ks-1]
         ustr = ustr.at[:, :, 1].set(-cdsdv * ua[:, :, kx-1])
-        vstr = vstr.at[:, :, 1].set(-cdsdv*va[:, :, kx-1])
+        vstr = vstr.at[:, :, 1].set(-cdsdv * va[:, :, kx-1])
 
     ##########################################################
     # Sea Surface
     ##########################################################    
-
-    # @jax.jit
-    # def stack_matrices(matrix1, matrix2):
-    #     return jnp.vstack((matrix1.reshape((1, *matrix1.shape)), matrix2.reshape((1, *matrix2.shape)))).reshape((*matrix1.shape, 2))
-    
-    # # Defining Sensible Heat Flux
-    # shf_1 = chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1])
-    # shf_0 = jnp.zeros_like(shf_1)
-    # shf = stack_matrices(shf_0, shf_1)
-
-    # # Defining Evaporation
-    # qsat0_1 = get_qsat(tsea, psa, 1.0)
-    # qsat0_0 = jnp.zeros_like(qsat0_1)
-    # qsat0 = stack_matrices(qsat0_0, qsat0_1)
-    
-    # evap_1 = chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1])
-    # evap_0 = jnp.zeros_like(evap_1)
-    # evap = stack_matrices(evap_0, evap_1)
 
     # 4.3 Sensible heat flux
     shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks-1] * (tsea - t1[:, :, 1]))
@@ -290,18 +273,16 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + (alhc * evap[:, :, 1]))
+    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
-    ustr.at[:, :, 2].add(fmask * (ustr[:, :, 0] - ustr[:, :, 1]))
-    vstr.at[:, :, 2].add(fmask * (vstr[:, :, 0] - vstr[:, :, 1]))
-    shf.at[:, :, 2].add( fmask * (shf[:, :, 0]  - shf[:, :, 1]))
-    evap.at[:, :, 2].add(fmask * (evap[:, :, 0] - evap[:, :, 1]))
-    slru.at[:, :, 2].add(fmask * (slru[:, :, 0] - slru[:, :, 1]))
+    weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
+    for var in [ustr, vstr, shf, evap, slru]:
+        var = var.at[:, :, 2].set(weighted_average(var))
+    t0 = weighted_average(t1)
 
     tsfc  = tsea + fmask * (stl_am - tsea)
     tskin = tsea + fmask * (tskin  - tsea)
-    t0    = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
     return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
 
