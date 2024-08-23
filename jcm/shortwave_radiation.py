@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
+from jax import lax
 from jcm.physical_constants import epssw
 from jcm.params import il, ix
 from jcm.geometry import sia, coa
@@ -20,6 +21,9 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
                              pdata: PhysicsData):
     from jcm.params import ix, il, kx 
     from geometry import fsg, dhs
+    from mod_radcon import epslw, albsfc, stratc
+    # f90 changes the values of these two so we have to watch out for that)
+    # from mod_radcon import tau2, flux 
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -89,31 +93,49 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     tau2 = tau2.at[:,:,kx- 1,1].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
     tau2 = tau2.at[:, :, 1:kx - 1, 2].set(jnp.exp(-psaz[:, :, None] * dhs[1:kx - 1] * abswv2 * qa[:, :, 1:kx-1]))
 
+    # 3. Shortwave downward flux
+    # 3.1 Initialization of fluxes
+    
+    fsfc = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
+    dfabs = jnp.zeros((ix,il,kx)) # Flux of short-wave radiation absorbed in each atmospheric layer
+    ftop = swdata.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
+    flux_1, flux_2 = jnp.zeros((ix, il, kx)), jnp.zeros((ix, il, kx))
+    flux_1 = flux_1.at[:,:,0].set(swdata.fsol*fband1)
+    flux_2 = flux_2.at[:,:,0].set(swdata.fsol*fband2)
+
+    # 3.2 Ozone and dry-air absorption in the stratosphere
+    k = 0
+    dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozupp * psa))
+    dfabs = dfabs.at[:, :, k].set(dfabs[:, :, k] - flux_1[:, :, k])
+
+    k = 1
+    flux_1 = flux_1.at[:, :, k].set(flux_1[:, :, k - 1])
+    dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozone * psa))
+    dfabs = dfabs.at[:, :, k].set(dfabs[:, :, k] - flux_1[:, :, k])
+    
+    # 3.3 Absorption and reflection in the troposphere
+    
+    # scan alert!
+    tau2_0_t = jnp.moveaxis(tau2[:,:,:,0], 2, 0)
+    tau2_2_t = jnp.moveaxis(tau2[:,:,:,2], 2, 0)
+    flux_1_t = jnp.moveaxis(flux_1, 2, 0) 
+    def helper(carry, i):
+        return (carry * tau2_0_t[i] * (1 - tau2_2_t[i]),)*2
+    _, flux_1_scan = lax.scan(
+        helper,
+        flux_1_t[1],
+        jnp.arange(2, kx))
+    flux_1 = flux_1.at[:,:,2:kx].set(
+        jnp.moveaxis(flux_1_scan, 0, 2)
+    )
+
+    dfabs[:, :, 2:kx] = flux_1[:, :, 1:kx-1] * (1 - tau2[:, :, 2:kx, 2]) * (1 - tau2[:, :, 2:kx, 0])
+    tau2 = tau2.at[:, :, 2:kx, 2].set(flux_1[:, :, 1:kx-1] * tau2[:, :, 2:kx,2])
 
     #return fsfcd, fsfc, ftop, dfabs
-    
-    
-
-    #     ! 3.2 Ozone and dry-air absorption in the stratosphere
-    #     k = 1
-    #     dfabs(:,:,k) = flux(:,:,1)
-    #     flux(:,:,1)  = tau2(:,:,k,1)*(flux(:,:,1) - ozupp*psa)
-    #     dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
-
-    #     k = 2
-    #     dfabs(:,:,k) = flux(:,:,1)
-    #     flux(:,:,1)  = tau2(:,:,k,1)*(flux(:,:,1) - ozone*psa)
-    #     dfabs(:,:,k) = dfabs(:,:,k) - flux(:,:,1)
-
-    #     ! 3.3  Absorption and reflection in the troposphere
-    #     do k = 3, kx
-    #         tau2(:,:,k,3) = flux(:,:,1)*tau2(:,:,k,3)
-    #         flux (:,:,1)  = flux(:,:,1) - tau2(:,:,k,3)
-    #         dfabs(:,:,k)  = flux(:,:,1)
-    #         flux (:,:,1)  = tau2(:,:,k,1)*flux(:,:,1)
-    #         dfabs(:,:,k)  = dfabs(:,:,k) - flux(:,:,1)
-    #     end do
 
     #     do k = 2, kx
     #         dfabs(:,:,k) = dfabs(:,:,k) + flux(:,:,2)
