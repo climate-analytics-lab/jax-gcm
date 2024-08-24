@@ -203,8 +203,8 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     absorptivity = jnp.stack([
         ablwin * jnp.ones_like(qa),
         ablco2 * jnp.ones_like(qa),
-        abswv1 * qa,
-        abswv2 * qa
+        ablwv1 * qa,
+        ablwv2 * qa
     ], axis=-1)
 
     # Upper stratosphere (k = 0): no water vapor
@@ -215,7 +215,7 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     k_values = jnp.arange(kx)[None, None, :, None]
-    acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (abscl1, abscl2))
+    acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (ablcl1, ablcl2))
     absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(k_values > icltop, acloud1, acloud2))
     absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], acloud2))
 
