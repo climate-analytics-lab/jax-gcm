@@ -41,14 +41,25 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     #     integer :: i, j, k
     #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
     '''
+    # Shortwave radiation and cloud constants
     albcl   = 0.43  # Cloud albedo (for cloud cover = 1)
     albcls  = 0.50  # Stratiform cloud albedo (for st. cloud cover = 1)
-    abscl1 =  0.015 # Absorptivity of clouds (visible band, maximum value)
-    abscl2 =  0.15  # Absorptivity of clouds
+    
+    # Shortwave absorptivities (for dp = 10^5 Pa)
     absdry =  0.033 # Absorptivity of dry air (visible band)
     absaer =  0.033 # Absorptivity of aerosols (visible band)
     abswv1 =  0.022 # Absorptivity of water vapour
     abswv2 = 15.000 # Absorptivity of water vapour
+    abscl1 =  0.015 # Absorptivity of clouds (visible band, maximum value)
+    abscl2 =  0.15  # Absorptivity of clouds
+
+    # Longwave absorptivities (for dp = 10^5 Pa)
+    ablwin = 0.3   # Absorptivity of air in "window" band
+    ablco2 = 6.0   # Absorptivity of air in CO2 band
+    ablwv1 = 0.7   # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
+    ablwv2 = 50.0  # Absorptivity of water vapour in H2O band 2 (strong) (for dq = 1 g/kg)
+    ablcl1 = 12.0  # Absorptivity of "thick" clouds in window band (below cloud top)
+    ablcl2 = 0.6   # Absorptivity of "thin" upper clouds in window and H2O bands
 
     nl1 = kx - 1
 
@@ -184,52 +195,37 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     # 4.3  Net solar radiation = incoming - outgoing
     ftop = ftop - flux_1[:,:,0]
 
-    #     ! 5.  Initialization of longwave radiation model
-    #     ! 5.1  Longwave transmissivity:
-    #     ! function of layer mass, abs. humidity and cloud cover.
+    # 5. Initialization of longwave radiation model
+    # 5.1 Longwave transmissivity:
+    # function of layer mass, abs. humidity and cloud cover.
 
-    #     ! Cloud-free levels (stratosphere + PBL)
-    #     k = 1
-    #     tau2(:,:,k,1) = exp(-psa*dhs(k)*ablwin)
-    #     tau2(:,:,k,2) = exp(-psa*dhs(k)*ablco2)
-    #     tau2(:,:,k,3) = 1.0
-    #     tau2(:,:,k,4) = 1.0
+    # Base absorption factors: TODO initialize these elsewhere
+    absorption_factors = jnp.stack([
+        ablwin * jnp.ones_like(qa),
+        ablco2 * jnp.ones_like(qa),
+        abswv1 * qa,
+        abswv2 * qa
+    ], axis=-1)
 
-    #     do k = 2, kx, kx - 2
-    #         tau2(:,:,k,1) = exp(-psa*dhs(k)*ablwin)
-    #         tau2(:,:,k,2) = exp(-psa*dhs(k)*ablco2)
-    #         tau2(:,:,k,3) = exp(-psa*dhs(k)*ablwv1*qa(:,:,k))
-    #         tau2(:,:,k,4) = exp(-psa*dhs(k)*ablwv2*qa(:,:,k))
-    #     end do
+    # Upper stratosphere: no water vapor
+    absorption_factors = absorption_factors.at[:, :, 0, 2:].set(0)
+    
+    # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1) are unchanged
 
-    #     ! Cloudy layers (free troposphere)
-    #     acloud = cloudc * ablcl2
+    # Cloudy layers: free troposphere (2 <= k <= kx - 2)
+    k_values = jnp.arange(kx)[None, None, :, None]
+    acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (abscl1, abscl2))
+    absorption_factors = absorption_factors.at[:, :, 2:kx-1, 0].add(jnp.where(k_values > icltop, acloud1, acloud2))
+    absorption_factors = absorption_factors.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorption_factors[:, :, 2:kx-1, 2:], acloud2))
 
-    #     do k = 3, nl1
-    #         do i = 1, ix
-    #             do j = 1, il
-    #                  deltap = psa(i,j)*dhs(k)
-
-    #                  if (k < icltop(i,j)) then
-    #                    acloud1 = acloud(i,j)
-    #                  else
-    #                    acloud1 = ablcl1*cloudc(i,j)
-    #                  endif
-
-    #                  tau2(i,j,k,1) = exp(-deltap*(ablwin+acloud1))
-    #                  tau2(i,j,k,2) = exp(-deltap*ablco2)
-    #                  tau2(i,j,k,3) = exp(-deltap*max(ablwv1*qa(i,j,k), acloud(i,j)))
-    #                  tau2(i,j,k,4) = exp(-deltap*max(ablwv2*qa(i,j,k), acloud(i,j)))
-    #             end do
-    #         end do
-    #     end do
-
-    #     ! 5.2  Stratospheric correction terms
-    #     eps1 = epslw/(dhs(1) + dhs(2))
-    #     stratc(:,:,1) = stratz*psa
-    #     stratc(:,:,2) = eps1*psa
-    # end
-
+    # Compute transmissivity
+    tau2 = jnp.exp(-absorption_factors*psa*dhs[None, None, :, None])
+    
+    # 5.2  Stratospheric correction terms
+    eps1 = epslw/(dhs[0] + dhs[1])
+    stratc = stratc.at[:,:,0].set(SWRadiationData.stratz*psa)
+    stratc = stratc.at[:,:,1].set(eps1*psa)
+    
     return  fsfcd, fsfc, ftop, dfabs
 
 
