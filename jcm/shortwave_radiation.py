@@ -120,13 +120,13 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     k = 0
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
     flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozupp * psa))
-    dfabs = dfabs.at[:, :, k].set(dfabs[:, :, k] - flux_1[:, :, k])
+    dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
 
     k = 1
     flux_1 = flux_1.at[:, :, k].set(flux_1[:, :, k - 1])
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
     flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozone * psa))
-    dfabs = dfabs.at[:, :, k].set(dfabs[:, :, k] - flux_1[:, :, k])
+    dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
     
     # 3.3 Absorption and reflection in the troposphere
     
@@ -152,7 +152,7 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     # at each k, dfabs and tau2 only depend on the updated value of flux_1 and the non-updated value of tau2
     dfabs = dfabs.at[:, :, 2:kx].set(flux_1[:, :, 1:kx-1] * (1 - tau2[:, :, 2:kx, 2]) * (1 - tau2[:, :, 2:kx, 0]))
-    tau2 = tau2.at[:, :, 2:kx, 2].set(flux_1[:, :, 1:kx-1] * tau2[:, :, 2:kx,2])
+    tau2 = tau2.at[:, :, 2:kx, 2].multiply(flux_1[:, :, 1:kx-1])
 
     flux_2 = flux_2.at[:,:,1].set(flux_2[:,:,0])
     propagate_flux_2 = lambda flux, tau: flux * tau[:, :, 1]
@@ -164,20 +164,20 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     flux_2 = flux_2.at[:,:,2:kx].set(
         jnp.moveaxis(flux_2_scan, 0, 2)
     )
-    dfabs = dfabs.at[:,:,2:kx].set(dfabs[:,:,2:kx] + flux_2[:,:,1:k-1]*(1 - tau2[:,:,2:kx,1]))
+    dfabs = dfabs.at[:,:,2:kx].add(flux_2[:,:,1:k-1]*(1 - tau2[:,:,2:kx,1]))
 
     # 4. Shortwave upward flux
 
     # 4.1  Absorption and reflection at the surface
     fsfcd = flux_1[:,:,kx-1] + flux_2[:,:,kx-1]
-    flux_1 = flux_1.at[:,:,kx-1].set(flux_1[:,:,kx-1]*albsfc)
+    flux_1 = flux_1.at[:,:,kx-1].multiply(albsfc)
     fsfc = fsfcd - flux_1[:,:,kx-1]
 
     # 4.2  Absorption of upward flux
 
     # Might be able to fold one of these steps into the code below
     k = kx - 1
-    dfabs = dfabs.at[:,:,k].set(dfabs[:,:,k] + flux_1[:,:,k]*(1 - tau2[:,:,k,0]))
+    dfabs = dfabs.at[:,:,k].add(flux_1[:,:,k]*(1 - tau2[:,:,k,0]))
     flux_1 = flux_1.at[:,:,k].set(tau2[:,:,k,0]*flux_1[:,:,k] + tau2[:,:,k,2])
 
     propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
@@ -190,7 +190,7 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
         jnp.moveaxis(flux_1_scan, 0, 2)
     )
     
-    dfabs = dfabs.at[:,:,:kx-1].set(dfabs[:,:,:kx-1] + flux_1[:,:,1:kx]*(1 - tau2[:,:,:kx-1,0]))
+    dfabs = dfabs.at[:,:,:kx-1].add(flux_1[:,:,1:kx]*(1 - tau2[:,:,:kx-1,0]))
 
     # 4.3  Net solar radiation = incoming - outgoing
     ftop = ftop - flux_1[:,:,0]
@@ -199,27 +199,28 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorption factors: TODO initialize these elsewhere
-    absorption_factors = jnp.stack([
+    # Base absorptivities: TODO initialize these elsewhere?
+    absorptivity = jnp.stack([
         ablwin * jnp.ones_like(qa),
         ablco2 * jnp.ones_like(qa),
         abswv1 * qa,
         abswv2 * qa
     ], axis=-1)
 
-    # Upper stratosphere: no water vapor
-    absorption_factors = absorption_factors.at[:, :, 0, 2:].set(0)
+    # Upper stratosphere (k = 0): no water vapor
+    absorptivity = absorptivity.at[:, :, 0, 2:].set(0)
     
-    # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1) are unchanged
+    # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1)
+    #   Leave absorptivity unchanged
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     k_values = jnp.arange(kx)[None, None, :, None]
     acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (abscl1, abscl2))
-    absorption_factors = absorption_factors.at[:, :, 2:kx-1, 0].add(jnp.where(k_values > icltop, acloud1, acloud2))
-    absorption_factors = absorption_factors.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorption_factors[:, :, 2:kx-1, 2:], acloud2))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(k_values > icltop, acloud1, acloud2))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], acloud2))
 
     # Compute transmissivity
-    tau2 = jnp.exp(-absorption_factors*psa*dhs[None, None, :, None])
+    tau2 = jnp.exp(-absorptivity*psa*dhs[None, None, :, None])
     
     # 5.2  Stratospheric correction terms
     eps1 = epslw/(dhs[0] + dhs[1])
