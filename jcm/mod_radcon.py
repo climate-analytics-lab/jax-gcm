@@ -1,6 +1,5 @@
 import jax.numpy as jnp
 import tree_math
-from params import ix, il, kx
 
 # Radiation and cloud constants
 # Albedo values
