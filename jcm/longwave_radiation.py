@@ -1,21 +1,27 @@
 import jax.numpy as jnp
-from physical_constants import sbc, wvi
-from mod_radcon import epslw, emisfc, fband, tau2, st4a, flux, stratc
-from geometry import dhs
-from params import ix, il, iy, kx
-import os
-import jax
+from jcm.physical_constants import sbc, wvi
+from jcm.mod_radcon import epslw, emisfc, fband, tau2, stratc
+from jcm.geometry import dhs
+from jcm.params import ix, il, iy, kx
 nband = 4
 
-# wvi = jnp.zeros((kx, 2)) # Weights for vertical interpolation
-# tau2 = jnp.zeros((ix, il, kx, 4))     # Transmissivity of atmospheric layers
-# st4a = jnp.zeros((ix, il, kx, 2))     # Blackbody emission from full and half atmospheric levels
-# stratc = jnp.zeros((ix, il, 2))       # Stratospheric correction term
-# flux = jnp.zeros((ix, il, 4))         # Radiative flux in different spectral bands
-
-os.environ['JAX_PLATFORMS'] = 'cpu'
 
 def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
+
+    """
+    Calculate the downward longwave radiation fluxes
+    
+    Args:
+        ta: Absolute temperature
+        fband: Energy fraction emitted in each LW band = f(T)
+        st4a: Blackbody emission from full and half atmospheric levels
+        flux: Radiative flux in different spectral bands
+
+    Returns:
+        fsfcd: Downward flux of long-wave radiation at the surface
+        dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+    
+    """
 
     nl1 = kx - 1
     # Temperature at level boundaries
@@ -69,15 +75,28 @@ def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
     fsfcd = fsfcd + corlw
     return fsfcd, dfabs
 
-def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs):
-    # ta(ix,il,kx)    !! Absolute temperature
-    # ts(ix,il)       !! Surface temperature
-    # fsfcd(ix,il)    !! Downward flux of long-wave radiation at the surface
-    # fsfcu(ix,il)    !! Surface blackbody emission
-    # fsfc(ix,il)     !! Net upward flux of long-wave radiation at the surface
-    # ftop(ix,il)     !! Outgoing flux of long-wave radiation at the top of the atmosphere
-    # dfabs(ix,il,kx) !! Flux of long-wave radiation absorbed in each atmospheric layer
+def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs, st4a):
+    """
+    Calculate the upward longwave radiation fluxes
     
+    Args:
+        ta: Absolute temperature
+        ts: Surface temperature
+        fsfcd: Downward flux of long-wave radiation at the surface
+        fsfcu: Surface blackbody emission
+        fsfc: Net upward flux of long-wave radiation at the surface
+        ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
+        dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+        st4a: Blackbody emission from full and half atmospheric levels
+    
+    Returns:
+        fsfc: Net upward flux of long-wave radiation at the surface
+        ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
+        dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+        st4a: Blackbody emission from full and half atmospheric levels
+    
+    """
+
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - fsfcd
 
@@ -118,7 +137,14 @@ def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs):
 
     return fsfc, ftop, dfabs, st4a
 
-def radset(fband):
+
+def radset():
+    """
+    Set the energy fraction emitted in each LW band = f(T)
+    """
+    
+    fband = jnp.zeros((301, nband))  # Example shape (100:400, 4)
+
     eps1 = 1.0 - epslw
 
     for jtemp in range(100, 220):
@@ -137,40 +163,4 @@ def radset(fband):
 
     return fband
 
-def initialize_arrays(ix, il, kx):
-    # Initialize arrays
-    ta = jnp.zeros((ix, il, kx))
-    fsfcd = jnp.zeros((ix, il))
-    dfabs = jnp.zeros((ix, il, kx))
-
-    # Set the min and max values
-    min_val = 130.0
-    max_val = 250.0
-    
-    # Calculate step size
-    total_elements = ix * il * kx
-    step_size = (max_val - min_val) / (total_elements - 1)
-    print(step_size)
-
-    # Create a range of values and reshape to match the ta array shape
-    values = jnp.arange(min_val, max_val + step_size, step_size)
-    ta = ta.at[:,:,:].set(jnp.reshape(values, (ix, il, kx)))
-    for k in range(kx):
-        for j in range(il):
-            for i in range(ix):
-                val = i + (j)*ix + (k)*ix*il
-                ta = ta.at[i,j,k].set(min_val + step_size*val)
-    
-    return ta, fsfcd, dfabs
-
-# Example usage
-# ix, il, kx = 96, 48, 8  # Define dimensions
-ta, fsfcd, dfabs = initialize_arrays(ix, il, kx)
-
-print(ta[0,0,:,])
-
-fband = radset(fband)
-fsfcd, dfabs = get_downward_longwave_rad_fluxes(ta, fband, st4a, flux)
-
-print(fsfcd[:5, :5])
 

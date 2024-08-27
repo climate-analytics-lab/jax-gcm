@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+from jcm.params import ix, il, kx
 
 # Radiation and cloud constants
 # Albedo values
