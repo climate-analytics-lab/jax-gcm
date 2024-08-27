@@ -10,16 +10,74 @@ import tree_math
 
 @tree_math.struct
 class SWRadiationData:
-    qcloud = jnp.zeros((ix,il))
-    fsol= jnp.zeros((ix,il))
-    ozone = jnp.zeros((ix,il))
-    ozupp = jnp.zeros((ix,il))
-    zenit = jnp.zeros((ix,il))
-    stratz = jnp.zeros((ix,il))
-    gse = jnp.zeros((ix,il))
-    icltop = jnp.zeros((ix,il))
-    cloudc = jnp.zeros((ix,il))
-    cloudstr = jnp.zeros((ix,il))
+    qcloud: jnp.ndarray
+    fsol: jnp.ndarray
+    ozone: jnp.ndarray
+    ozupp: jnp.ndarray
+    zenit: jnp.ndarray
+    stratz: jnp.ndarray
+    gse: jnp.ndarray
+    icltop: jnp.ndarray
+    cloudc: jnp.ndarray
+    cloudstr: jnp.ndarray
+
+    def __init__(self, nodal_shape, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None) -> None:
+        if qcloud is not None:
+            self.qcloud = qcloud
+        else:
+            self.qcloud = jnp.zeros((nodal_shape))
+        if fsol is not None:
+            self.fsol = fsol
+        else:
+            self.fsol = jnp.zeros((nodal_shape))
+        if ozone is not None:
+            self.ozone = ozone
+        else:
+            self.ozone = jnp.zeros((nodal_shape))
+        if ozupp is not None:
+            self.ozupp = ozupp
+        else:
+            self.ozupp = jnp.zeros((nodal_shape))
+        if zenit is not None:
+            self.zenit = zenit
+        else:
+            self.zenit = jnp.zeros((nodal_shape))
+        if stratz is not None:
+            self.stratz = stratz
+        else:
+            self.stratz = jnp.zeros((nodal_shape))
+        if gse is not None:
+            self.gse = gse
+        else:
+            self.gse = jnp.zeros((nodal_shape))
+        if icltop is not None:
+            self.icltop = icltop
+        else:
+            self.icltop = jnp.zeros((nodal_shape))
+        if cloudc is not None:
+            self.cloudc = cloudc
+        else:
+            self.cloudc = jnp.zeros((nodal_shape))
+        if cloudstr is not None:
+            self.cloudstr = cloudstr
+        else:
+            self.cloudstr = jnp.zeros((nodal_shape))
+
+
+    def copy(self, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None):
+        return SWRadiationData(
+            self.cloudc.shape,
+            qcloud=qcloud if qcloud is not None else self.qcloud,
+            fsol=fsol if fsol is not None else self.fsol,
+            ozone=ozone if ozone is not None else self.ozone,
+            ozupp=ozupp if ozupp is not None else self.ozupp,
+            zenit=zenit if zenit is not None else self.zenit,
+            stratz=stratz if stratz is not None else self.stratz,
+            gse=gse if gse is not None else self.gse,
+            icltop=icltop if icltop is not None else self.icltop,
+            cloudc=cloudc if cloudc is not None else self.cloudc,
+            cloudstr=cloudstr if cloudstr is not None else self.cloudstr
+        )
 
 @jit
 def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
@@ -88,15 +146,8 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
 
     fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(sia, coa, topsr)
 
-    swrad_out = SWRadiationData()
-    swrad_out = physics_data.shortwave_rad
-    swrad_out.fsol = fsol
-    swrad_out.ozupp = ozupp
-    swrad_out.ozone = ozone
-    swrad_out.zenit = zenit
-    swrad_out.stratz = stratz
-
-    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
+    swrad_out = physics_data.shortwave_rad.copy(fsol=fsol, ozupp=ozupp, ozone=ozone, zenit=zenit, stratz=stratz)
+    physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data
@@ -194,14 +245,8 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + fmask * (clstrl - clstr)
 
-    swrad_out = SWRadiationData()
-    swrad_out = swrad
-    swrad_out.icltop = icltop
-    swrad_out.cloudc = cloudc
-    swrad_out.clstr = clstr
-    swrad_out.qcloud = qcloud
-
-    physics_data = PhysicsData(swrad_out, physics_data.convection, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
+    swrad_out = physics_data.swrad.copy(icltop=icltop, cloudc=cloudc, clstr=clstr, qcloud=qcloud) 
+    physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

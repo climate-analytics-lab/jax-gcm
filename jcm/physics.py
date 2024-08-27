@@ -41,15 +41,32 @@ class PhysicsData:
     humidity: HumidityData
     condensation: CondensationData
 
-    def __init__(self, nodal_shape, node_levels) -> None:
-        self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
-        self.convection = ConvectionData(nodal_shape, node_levels)
-        self.mod_radcon = ModRadConData(nodal_shape, node_levels)
-        self.humidity = HumidityData(nodal_shape, node_levels)
-        self.condensation = CondensationData(nodal_shape, node_levels)
+    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None) -> None:
+        if shortwave_rad is not None:
+            self.shortwave_rad = shortwave_rad
+        else:
+            self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
+        if convection is not None:
+            self.convection = convection
+        else:
+            self.convection = ConvectionData(nodal_shape, node_levels)
+        if mod_radcon is not None:
+            self.mod_radcon = mod_radcon
+        else:
+            self.mod_radcon = ModRadConData(nodal_shape, node_levels)
+        if humidity is not None:
+            self.humidity = humidity
+        else:
+            self.humidity = HumidityData(nodal_shape)
+        if condensation is not None:
+            self.condensation = condensation
+        else:
+            self.condensation = CondensationData(nodal_shape, node_levels)
 
     def copy(self,shortwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None):
         return PhysicsData(
+            (0,0),
+            0,
             shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             convection if convection is not None else self.convection,
             mod_radcon if mod_radcon is not None else self.mod_radcon,

@@ -12,8 +12,27 @@ from jcm.geometry import fsg
 
 @tree_math.struct
 class HumidityData:
-    rh = jnp.zeros((ix,il,kx)) # relative humidity
-    qsat = jnp.zeros((ix,il,kx)) # saturation specific humidity
+    rh: jnp.ndarray # relative humidity
+    qsat: jnp.ndarray # saturation specific humidity
+
+    def __init__(self, nodal_shape, node_levels, rh=None, qsat=None) -> None:
+        if rh is not None:
+            self.rh = rh
+        else:
+            self.rh = jnp.zeros((nodal_shape+(node_levels,)))
+        if qsat is not None:
+            self.qsat = qsat
+        else:
+            self.qsat = jnp.zeros((nodal_shape+(node_levels,)))
+
+
+    def copy(self, rh=None, qsat=None):
+        return HumidityData(
+            self.rh.shape[0:1],
+            self.rh.shape[2],
+            rh=rh if rh is not None else self.rh, 
+            qsat=qsat if qsat is not None else self.qsat
+        )
 
 #def spec_hum_to_rel_hum(ta, ps, sig, qa):
 def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
@@ -39,8 +58,8 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
 
     rh = state.specific_humidity / qsat
     
-    humidity_out = HumidityData(rh=rh, qsat=qsat)
-    physics_data = PhysicsData(physics_data.shortwave_rad, physics_data.convection, physics_data.modradcon, humidity_out, physics_data.condensation)
+    humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
+    physics_data = physics_data.copy(humidity=humidity_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

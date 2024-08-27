@@ -28,18 +28,40 @@ class ConvectionData:
     dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
     dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
 
-    def __init__(self, nodal_shape, node_levels) -> None:
-        self.psa = jnp.zeros((nodal_shape))
-        self.se = jnp.zeros((nodal_shape, node_levels))
-        self.iptop = jnp.zeros((nodal_shape),dtype=int)
-        self.cbmf = jnp.zeros((nodal_shape))
-        self.precnv = jnp.zeros((nodal_shape))
-        self.dfse = jnp.zeros((nodal_shape, node_levels))
-        self.dfqa = jnp.zeros((nodal_shape, node_levels))
+    def __init__(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None) -> None:
+        if psa is not None:
+            self.psa = psa
+        else:
+            self.psa = jnp.zeros((nodal_shape))
+        if se is not None:
+            self.se = se
+        else:
+            self.se = jnp.zeros((nodal_shape + (node_levels,)))
+        if iptop is not None:
+            self.iptop = iptop
+        else:
+            self.iptop = jnp.zeros((nodal_shape),dtype=int)
+        if cbmf is not None:
+            self.cbmf = cbmf
+        else:
+            self.cbmf = jnp.zeros((nodal_shape))
+        if precnv is not None:
+            self.precnv = precnv
+        else:
+            self.precnv = jnp.zeros((nodal_shape))
+        if dfse is not None:
+            self.dfse = dfse
+        else:
+            self.dfse = jnp.zeros((nodal_shape + (node_levels,)))
+        if dfqa is not None:
+            self.dfqa = dfqa
+        else:
+            self.dfqa = jnp.zeros((nodal_shape + (node_levels,)))
 
     def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None):
-        # does this work? or does it call the constructor... if so i can add se=None etc to the constructor and do the same thing - if none overwrite with zeros of nodal_shape
         return ConvectionData(
+            self.psa.shape, 
+            self.se.shape[-1], 
             psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
             iptop=iptop if iptop is not None else self.iptop,
@@ -48,9 +70,7 @@ class ConvectionData:
             dfse=dfse if dfse is not None else self.dfse,
             dfqa=dfqa if dfqa is not None else self.dfqa
         )
-        # alternatively 
-        # if se:
-        #    self.se = se
+    
 
 if wvi[0, 1] == 0.:
     """
@@ -310,8 +330,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # pass on the rest of physics_data that was not updated or needed in this function
     # since convection doesn't generate new tendencies, just return PhysicsTendency instance that is all 0's
 
-    convection_out = ConvectionData(psa,se,iptop,cbmf,precnv,dfse,dfqa)
-    physics_data = PhysicsData(physics_data.shortwave_rad, convection_out, physics_data.modradcon, physics_data.humidity, physics_data.condensation)
+    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv, dfse=dfse, dfqa=dfqa)
+    physics_data = physics_data.copy(convection=convection_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

@@ -20,9 +20,32 @@ rhblsc = 0.95 # Relative humidity threshold for boundary layer
 
 @tree_math.struct
 class CondensationData:
-    precls = jnp.zeros((ix,il))
-    dtlsc = jnp.zeros((ix,il,kx))
-    dqlsc = jnp.zeros((ix,il,kx))
+    precls: jnp.ndarray
+    dtlsc: jnp.ndarray
+    dqlsc: jnp.ndarray
+    
+    def __init__(self, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None) -> None:
+        if precls is not None:
+            self.precls = precls
+        else:
+            self.precls = jnp.zeros((nodal_shape))
+        if dtlsc is not None:
+            self.dtlsc = dtlsc
+        else:
+            self.dtlsc = jnp.zeros((nodal_shape+(node_levels,)))
+        if dqlsc is not None:
+            self.dqlsc = dqlsc
+        else:
+            self.dqlsc = jnp.zeros((nodal_shape+(node_levels,)))
+
+    def copy(self, precls=None, dtlsc=None, dqlsc=None):
+        return CondensationData(
+            self.precls.shape,
+            0,
+            precls=precls if precls is not None else self.precls, 
+            dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
+            dqlsc=dqlsc if dqlsc is not None else self.dqlsc
+        )
 
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
@@ -87,11 +110,9 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
     precls *= conv.psa
 
-    condensation_out = CondensationData(precls, dtlsc, dqlsc)   
-    conv_out = ConvectionData()
-    conv_out = conv 
-    conv_out.iptop = iptop
-    physics_data = PhysicsData(physics_data.shortwave_rad, conv_out, physics_data.modradcon, physics_data.humidity, condensation_out)
+    condensation_out = physics_data.condensation.copy(precls=precls, dtlsc=dtlsc, dqlsc=dqlsc)
+    convection_out = physics_data.convection.copy(iptop=iptop)
+    physics_data = physics_data.copy(condensation=condensation_out, convection=convection_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data
