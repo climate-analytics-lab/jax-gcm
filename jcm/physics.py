@@ -14,6 +14,7 @@ from mod_radcon import ModRadConData
 from convection import ConvectionData
 from humidity import HumidityData
 from large_scale_condensation import CondensationData
+from longwave_radiation import LWRadiationData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.sigma_coordinates import SigmaCoordinates
@@ -36,16 +37,21 @@ class PhysicsState:
 @tree_math.struct
 class PhysicsData:
     shortwave_rad: SWRadiationData
+    longwave_rad: LWRadiationData
     convection: ConvectionData
     mod_radcon: ModRadConData
     humidity: HumidityData
     condensation: CondensationData
 
-    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None) -> None:
+    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None) -> None:
         if shortwave_rad is not None:
             self.shortwave_rad = shortwave_rad
         else:
             self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
+        if longwave_rad is not None:
+            self.longwave_rad = longwave_rad
+        else:
+            self.longwave_rad = LWRadiationData(nodal_shape, node_levels)
         if convection is not None:
             self.convection = convection
         else:
@@ -63,11 +69,12 @@ class PhysicsData:
         else:
             self.condensation = CondensationData(nodal_shape, node_levels)
 
-    def copy(self,shortwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None):
+    def copy(self,shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None):
         return PhysicsData(
             (0,0),
             0,
             shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
+            longwave_rad if longwave_rad is not None else self.longwave_rad,
             convection if convection is not None else self.convection,
             mod_radcon if mod_radcon is not None else self.mod_radcon,
             humidity if humidity is not None else self.humidity,
