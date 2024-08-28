@@ -7,7 +7,6 @@ saturation specific humidity.
 import jax.numpy as jnp
 import tree_math
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
-from jcm.params import ix, il, kx
 from jcm.geometry import fsg
 
 @tree_math.struct

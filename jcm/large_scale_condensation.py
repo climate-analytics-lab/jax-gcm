@@ -9,7 +9,6 @@ from jcm.convection import ConvectionData
 from jcm.physical_constants import p0, cp, alhc, grav
 from jcm.geometry import fsg, dhs
 import tree_math
-from jcm.params import ix, il, kx
 
 
 # Constants for large-scale condensation

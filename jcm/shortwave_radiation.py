@@ -2,7 +2,6 @@ import jax.numpy as jnp
 from jax import jit
 from jax import vmap
 from jcm.physical_constants import epssw
-from jcm.params import il, ix
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.geometry import sia, coa, fmask
 from jcm.date import tyear # maybe this can come from somewhere else? like the model instance tracks it? it comes from date.f90 in speedy
@@ -101,6 +100,7 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     zenit : jnp.ndarray
         The Zenit angle
     """
+    ix, il, _ = state.temperature.shape
 
     # Alpha = year phase (0 - 2pi, 0 = winter solstice = 22 Dec)
     alpha = 4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)

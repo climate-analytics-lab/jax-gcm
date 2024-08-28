@@ -2,14 +2,9 @@ import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi
 from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
-# from jcm.params import ix, il, iy, kx
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
 import tree_math
 nband = 4
-
-'''
-        real(kind=8), intent(in)    :: fsfcu(ix,il)    !! Surface blackbody emission
-'''
 
 #FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
 @tree_math.struct
@@ -134,9 +129,9 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     
     Args:
         ta: Absolute temperature
-        ts: Surface temperature - FIXME: NEED surface temperature
+        ts: Surface temperature - surface_fluxes.ts
         fsfcd: Downward flux of long-wave radiation at the surface
-        fsfcu: Surface blackbody emission - slru from surface fluxes (FIXME: currently in auxiliaries.py, should be owned by surface fluxes)
+        fsfcu: Surface blackbody emission - slru from surface fluxes (FIXME: currently in auxiliaries.py, should probably be owned by surface fluxes)
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
@@ -159,7 +154,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     stratc = physics_data.mod_radcon.stratc
 
     fsfcu = physics_data.surface_fluxes.slru[:,:,2] # FIXME: slru should be owned by surface fluxes, no idea why this is hard coded to 2, see physics.f90:180
-    ts = physics_data.surface_fluxes.ts # called tsfc in surface_fluxes.f90ß
+    ts = physics_data.surface_fluxes.ts # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - fsfcd
     

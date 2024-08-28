@@ -9,7 +9,6 @@ from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
 from jcm.geometry import dhs, fsg
 import tree_math
-from jcm.params import ix, il, kx
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
 trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
