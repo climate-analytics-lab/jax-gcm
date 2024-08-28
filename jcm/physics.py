@@ -9,12 +9,12 @@ import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from shortwave_radiation import SWRadiationData
-from mod_radcon import ModRadConData
-from convection import ConvectionData
-from humidity import HumidityData
-from large_scale_condensation import CondensationData
-from longwave_radiation import LWRadiationData
+from jcm.shortwave_radiation import SWRadiationData
+from jcm.mod_radcon import ModRadConData
+from jcm.convection import ConvectionData
+from jcm.humidity import HumidityData
+from jcm.large_scale_condensation import CondensationData
+from jcm.longwave_radiation import LWRadiationData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.sigma_coordinates import SigmaCoordinates
