@@ -42,7 +42,7 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
     Args:
         ta: Absolute temperature [K] - PhysicsState.temperature
         ps: Normalized pressure (p/1000 hPa) - Convection.psa
-        sig: Sigma level - fsg from jcm.geometry
+        sig: Sigma level - fsg from jcm.geometry 
         qa: Specific humidity - PhysicsState.specific_humidity
 
     Returns:
