@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 import tree_math
-from params import ix, il, kx
+from jcm.params import ix, il, kx
 
 @tree_math.struct
 class ModRadConData:

@@ -101,3 +101,7 @@ class SpeedyTestModel:
             inner_steps=self.inner_steps))
         return integrate_fn(state)
 
+    def data_to_xarray(self, data):
+        from dinosaur.xarray_utils import data_to_xarray
+        
+        return data_to_xarray(data, coords=self.coords, times=self.times)
