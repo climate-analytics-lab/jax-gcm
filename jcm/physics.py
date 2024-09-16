@@ -9,9 +9,7 @@ import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from shortwave_radiation import SWRadiationData
-from mod_radcon import ModRadConData
-from convection import ConvectionData
+from jcm.mod_radcon import ModRadConData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.sigma_coordinates import SigmaCoordinates
@@ -20,6 +18,27 @@ from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal, Grid
 from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations, PrimitiveEquationsSpecs
 from dinosaur import primitive_equations_states
+
+@tree_math.struct
+class ConvectionData:
+    psa: jnp.ndarray # normalized surface pressure
+    se: jnp.ndarray # dry static energy
+    qa: jnp.ndarray # specific humidity
+    qsat: jnp.ndarray # saturation specific humidity
+    itop: jnp.ndarray # Top of convection (layer index)
+    cbmf: jnp.ndarray # Cloud-base mass flux
+    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
+    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
+    dfqa: jnp.ndarray # Net flux of specific humidity into each atmospheric layer
+
+@tree_math.struct
+class SWRadiationData:
+    qcloud: jnp.ndarray
+    fsol: jnp.ndarray
+    ozone: jnp.ndarray
+    ozupp: jnp.ndarray
+    zenit: jnp.ndarray
+    stratz: jnp.ndarray
 
 @tree_math.struct
 class PhysicsState:
@@ -44,7 +63,6 @@ class PhysicsTendency:
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
-
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """

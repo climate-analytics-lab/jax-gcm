@@ -20,18 +20,6 @@ rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
-@tree_math.struct
-class ConvectionData:
-    psa: jnp.ndarray # normalized surface pressure
-    se: jnp.ndarray # dry static energy
-    qa: jnp.ndarray # specific humidity
-    qsat: jnp.ndarray # saturation specific humidity
-    itop: jnp.ndarray # Top of convection (layer index)
-    cbmf: jnp.ndarray # Cloud-base mass flux
-    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
-    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
-    dfqa: jnp.ndarray # Net flux of specific humidity into each atmospheric layer
-
 if wvi[0, 1] == 0.:
     """
     wvi is the weights for vertical interpolation. It's calculated in physics f90, but doesn't seem to be calculated in new code. Below is the code I used to 

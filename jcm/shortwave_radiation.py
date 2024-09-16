@@ -2,26 +2,23 @@ import jax.numpy as jnp
 from jax import jit
 from jax import vmap
 from jax import lax
-from jcm.physical_constants import epssw
+from jcm.physical_constants import epssw, solc
 from jcm.params import il, ix
 from jcm.geometry import sia, coa
 import tree_math
 from jcm.physics import PhysicsData
+from jcm.physics import SWRadiationData
 
-@tree_math.struct
-class SWRadiationData:
-    qcloud: jnp.ndarray
-    fsol: jnp.ndarray
-    ozone: jnp.ndarray
-    ozupp: jnp.ndarray
-    zenit: jnp.ndarray
-    stratz: jnp.ndarray
-
-def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiationData, 
-                             pdata: PhysicsData):
+@jit
+def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiationData):
     from jcm.params import ix, il, kx 
-    from geometry import fsg, dhs
-    from mod_radcon import epslw, albsfc, stratc
+    from jcm.geometry import fsg, dhs
+    import jcm.mod_radcon as mod_radcon
+    mod_radcon_values = mod_radcon.ModRadConData()
+    epslw = mod_radcon_values.epslw
+    albsfc = mod_radcon_values.albsfc
+    stratc = mod_radcon_values.stratc
+    # from jcm.mod_radcon import epslw, albsfc, stratc
     # f90 changes the values of these two so we have to watch out for that)
     # from mod_radcon import tau2, flux 
     ''''
@@ -65,13 +62,15 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     fband2 = 0.05
     fband1 = 1.0 - fband2
-    #  Initialization
-    tau2 = pdata.mod_radcon.tau2*0.0
 
-    mask = icltop <= kx  # Create a mask where icltop <= kx
-    clamped_icltop = jnp.clip(icltop - 1, 0, tau2.shape[2] - 1) # Clamp icltop - 1 to be within the valid index range for tau2
-    tau2 = tau2.at[:, :, clamped_icltop, 2].set(
-        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
+    # swdata = pdata.swdata
+    #  Initialization
+    tau2 = jnp.zeros((ix, il, kx, 4)) #pdata.mod_radcon.tau2*0.0
+
+    mask = icltop < kx  # Create a mask where icltop <= kx
+    clamped_icltop = jnp.clip(icltop, 0, tau2.shape[2] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
+    tau2 = tau2.at[:, :, clamped_icltop - 1, 2].set(
+        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop - 1, 2])   # Start with tau2 and update the values where the mask is true
     )
     tau2 = tau2.at[:, :, kx - 1, 2].set(albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
 
@@ -82,28 +81,21 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     acloud = cloudc*jnp.minimum(abscl1*swdata.qcloud, abscl2)
     tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*absdry))
 
-    # Create an array for all k values
-    k_values = jnp.arange(1, nl1 + 1)
-    # Compute abs1 for all k values at once
-    abs1 = absdry + absaer * fsg[1:nl1 + 1]**2  # Vectorized abs1 calculation for all k
-    # Expand dimensions of arrays for broadcasting
-    k_broadcasted = k_values[None, None, :]
-    icltop_expanded = icltop[:, :, None]  # Expand icltop to match dimensions of k
-    dhs_expanded = dhs[None, None, 1:nl1 + 1]
-    qa_expanded = qa[:, :, 1:nl1 + 1]
-    # Create a mask where k >= icltop
-    mask = k_broadcasted >= icltop_expanded
-    # Compute the common part of the expression
-    common_expr = -psaz[:, :, None] * dhs_expanded * (abs1 + abswv1 * qa_expanded)
-    # Compute tau2 with the cloud term added only where mask is true
-    tau2_cloud = jnp.exp(common_expr + acloud[:, :, None])
-    tau2_no_cloud = jnp.exp(common_expr)
-    # Use the mask to combine the two conditions
-    tau2 = tau2.at[:, :, 1:nl1 + 1, 1].set(jnp.where(mask, tau2_cloud, tau2_no_cloud))
+    abs1 = absdry + absaer * fsg[1:nl1] ** 2
+    cloudy = jnp.arange(1, nl1)[None, None, :] >= icltop[:, :, None]
+    
+    tau2 = tau2.at[:, :, 1:nl1, 0].set(
+        jnp.exp(-psaz[:, :, None] * dhs[None, None, 1:nl1] * (
+            abs1[None, None, :] +
+            abswv1 * qa[:, :, 1:nl1] +
+            cloudy * acloud[:, :, None]
+        ))
+    )
 
-    abs1_star = absdry + absaer*fsg[kx - 1]**2
-    tau2 = tau2.at[:,:,kx- 1,1].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
-    tau2 = tau2.at[:, :, 1:kx - 1, 2].set(jnp.exp(-psaz[:, :, None] * dhs[1:kx - 1] * abswv2 * qa[:, :, 1:kx-1]))
+    abs1 = absdry + absaer*fsg[kx - 1]**2
+    tau2 = tau2.at[:,:,kx-1,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
+
+    tau2 = tau2.at[:,:,1:kx,1].set(jnp.exp(-psaz[:, :, None]*dhs[None, None, 1:kx]*abswv2*qa[:,:,1:kx]))
 
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
@@ -160,11 +152,11 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     _, flux_2_scan = lax.scan(
         lambda carry, i: (propagate_flux_2(carry, i),)*2,
         flux_2_t[1],
-        jnp.moveaxis(tau2, 2, 0)[2:kx])
-    flux_2 = flux_2.at[:,:,2:kx].set(
+        jnp.moveaxis(tau2, 2, 0)[1:kx])
+    flux_2 = flux_2.at[:,:,1:kx].set(
         jnp.moveaxis(flux_2_scan, 0, 2)
     )
-    dfabs = dfabs.at[:,:,2:kx].add(flux_2[:,:,1:k-1]*(1 - tau2[:,:,2:kx,1]))
+    dfabs = dfabs.at[:,:,1:kx].add(flux_2[:,:,:kx-1]*(1 - tau2[:,:,1:kx,1])) # changed k to kx double check this
 
     # 4. Shortwave upward flux
 
@@ -175,22 +167,23 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     # 4.2  Absorption of upward flux
 
-    # Might be able to fold one of these steps into the code below
-    k = kx - 1
-    dfabs = dfabs.at[:,:,k].add(flux_1[:,:,k]*(1 - tau2[:,:,k,0]))
-    flux_1 = flux_1.at[:,:,k].set(tau2[:,:,k,0]*flux_1[:,:,k] + tau2[:,:,k,2])
+    for k in reversed(range(1, kx)):
+        flux_1 = flux_1.at[:,:,k-1].set(tau2[:,:,k,0]*flux_1[:,:,k] + tau2[:,:,k,2])
 
-    propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
-    flux_1_t = jnp.moveaxis(flux_1, 2, 0)
-    _, flux_1_scan = lax.scan(
-        lambda carry, i: (propagate_flux_up(carry, i),)*2,
-        flux_1_t[kx-2],
-        jnp.moveaxis(tau2, 2, 0)[kx-2::-1])
-    flux_1 = flux_1.at[:,:,kx-2::-1].set(
-        jnp.moveaxis(flux_1_scan, 0, 2)
-    )
-    
-    dfabs = dfabs.at[:,:,:kx-1].add(flux_1[:,:,1:kx]*(1 - tau2[:,:,:kx-1,0]))
+    # propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
+
+    # _, flux_1_scan = lax.scan(
+    #     lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
+    #     jnp.moveaxis(flux_1, 2, 0)[-1],
+    #     jnp.moveaxis(tau2, 2, 0)[1:kx][::-1]
+    # )
+
+    # flux_1 = flux_1.at[:, :, :-1].set(jnp.moveaxis(flux_1_scan, 0, 2))
+        
+    dfabs = dfabs.at[:,:,:].add(flux_1*(1 - tau2[:,:,:,0]))
+
+    flux_1 = flux_1.at[:, :, 1:].set(flux_1[:, :, :-1])
+    flux_1 = flux_1.at[:,:,0].set(tau2[:,:,0,0]*flux_1[:,:,0] + tau2[:,:,0,2])
 
     # 4.3  Net solar radiation = incoming - outgoing
     ftop = ftop - flux_1[:,:,0]
@@ -214,22 +207,20 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     #   Leave absorptivity unchanged
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
-    k_values = jnp.arange(kx)[None, None, :, None]
     acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (ablcl1, ablcl2))
-    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(k_values > icltop, acloud1, acloud2))
-    absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], acloud2))
+
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[None, None, :] > icltop[:, :, None], acloud1.reshape(96, 48, 1), acloud2.reshape(96, 48, 1)))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, 5, 2))))
 
     # Compute transmissivity
-    tau2 = jnp.exp(-absorptivity*psa*dhs[None, None, :, None])
+    tau2 = jnp.exp(-absorptivity*psa[:, :, None, None]*dhs[None, None, :, None])
     
     # 5.2  Stratospheric correction terms
     eps1 = epslw/(dhs[0] + dhs[1])
-    stratc = stratc.at[:,:,0].set(SWRadiationData.stratz*psa)
+    stratc = stratc.at[:,:,0].set(swdata.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
-    
+
     return  fsfcd, fsfc, ftop, dfabs
-
-
 
 @jit
 def get_zonal_average_fields(tyear):
@@ -270,7 +261,7 @@ def get_zonal_average_fields(tyear):
 
     # Solar radiation at the top
     topsr = jnp.zeros(il)
-    topsr = solar(tyear)
+    topsr = solar(tyear, 4.0*solc)
     
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
@@ -300,7 +291,7 @@ def get_zonal_average_fields(tyear):
 
     return fsol, ozupp, ozone, zenit, stratz
     
-
+@jit
 def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     #import params as p 
     from jcm.params import kx 
@@ -354,14 +345,14 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
 
     #Second for loop (three levels)
     drh = rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
-    cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
+    mask = (drh > cloudc[:, :, None]) & (qa[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
+    cloudc_update = jnp.where(mask, drh, cloudc[:, :, None])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
 
     # Update icltop where the mask is True
     k_indices = jnp.arange(2, kx-2)  # Generate the k indices (since range starts from 2)
-    icltop_update = jnp.where(mask, k_indices, icltop[:, :, jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
-    icltop = jnp.where(cloudc[:, :, jnp.newaxis] == cloudc_update, icltop_update, icltop[:, :, jnp.newaxis]).max(axis=2)
+    icltop_update = jnp.where(mask, k_indices, icltop[:, :, None])  # Use the mask to update icltop only where the cloudc was updated
+    icltop = jnp.where(cloudc[:, :, None] == cloudc_update, icltop_update, icltop[:, :, None]).max(axis=2)
 
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
@@ -388,7 +379,8 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
 
     return icltop, cloudc, clstr, qcloud
 
-def solar(tyear):
+@jit
+def solar(tyear, csol=4.0*solc):
     """
     Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
     
@@ -401,7 +393,6 @@ def solar(tyear):
         Daily-average insolation at the top of the atmosphere for each latitude band.
     """
     from jcm.geometry import coa, sia
-    csol = 1368.0
     
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
