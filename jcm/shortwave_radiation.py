@@ -167,18 +167,13 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     # 4.2  Absorption of upward flux
 
-    for k in reversed(range(1, kx)):
-        flux_1 = flux_1.at[:,:,k-1].set(tau2[:,:,k,0]*flux_1[:,:,k] + tau2[:,:,k,2])
-
-    # propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
-
-    # _, flux_1_scan = lax.scan(
-    #     lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
-    #     jnp.moveaxis(flux_1, 2, 0)[-1],
-    #     jnp.moveaxis(tau2, 2, 0)[1:kx][::-1]
-    # )
-
-    # flux_1 = flux_1.at[:, :, :-1].set(jnp.moveaxis(flux_1_scan, 0, 2))
+    propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
+    _, flux_1_scan = lax.scan(
+        lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
+        jnp.moveaxis(flux_1, 2, 0)[-1],
+        jnp.moveaxis(tau2, 2, 0)[1:kx][::-1]
+    )
+    flux_1 = flux_1.at[:, :, :-1].set(jnp.moveaxis(flux_1_scan[::-1], 0, 2))
         
     dfabs = dfabs.at[:,:,:].add(flux_1*(1 - tau2[:,:,:,0]))
 
