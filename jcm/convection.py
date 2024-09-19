@@ -4,14 +4,12 @@ Parametrization of convection. Convection is modelled using a simplified
 version of the Tiedke (1993) mass-flux convection scheme.
 '''
 
-import jax
 import jax.numpy as jnp
-from jcm.physics import PhysicsState
+import jax
 
 from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
 from jcm.geometry import dhs, fsg
 
-import tree_math
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
 trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
@@ -111,7 +109,7 @@ def diagnose_convection(psa, se, qa, qsat):
 
     return itop, qdif
 
-def get_convection_tendencies(physics_data):
+def get_convection_tendencies(psa, se, qa, qsat):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
@@ -129,11 +127,6 @@ def get_convection_tendencies(physics_data):
     dfqa: Net flux of specific humidity into each atmospheric layer
 
     """
-    conv = physics_data.convection
-    psa = conv.psa
-    se = conv.se
-    qa = conv.qa
-    qsat = conv.qsat
     _, _, kx = se.shape
 
     # 1. Initialization of output and workspace arrays
@@ -157,7 +150,7 @@ def get_convection_tendencies(physics_data):
     rdps=2.0/(1.0 - psmin)
 
     # 2. Check of conditions for convection
-    itop, qdif = diagnose_convection(conv.psa, conv.se, conv.qa, conv.qsat)
+    itop, qdif = diagnose_convection(psa, se, qa, qsat)
 
     # 3. Convection over selected grid-points
     mask = itop < kx
@@ -272,15 +265,4 @@ def get_convection_tendencies(physics_data):
     dfse = dfse.at[i,j,k].set(fus_new[i,j, k +1] - fds_new[i,j, k+1] + alhc * precnv)
     dfqa = dfqa.at[i,j,k].set(fuq_new[i,j,k+1] - fdq_new[i,j,k+1] - precnv)
 
-    convection_out = ConvectionData(psa, se, qa, qsat, itop, cbmf, precnv, dfse, dfqa)
-    return PhysicsState(convection=convection_out)
-
-    psa: jnp.ndarray # normalized surface pressure
-    se: jnp.ndarray # dry static energy
-    qa: jnp.ndarray # specific humidity
-    qsat: jnp.ndarray # saturation specific humidity
-    itop: jnp.ndarray # Top of convection (layer index)
-    cbmf: jnp.ndarray # Cloud-base mass flux
-    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
-    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
-    dfqa: jnp.ndarray # Net flux of specific humidity into each atmospheric layer
+    return itop, dfse, dfqa, cbmf, precnv
