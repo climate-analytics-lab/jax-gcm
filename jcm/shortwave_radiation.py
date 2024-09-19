@@ -5,8 +5,6 @@ from jax import lax
 from jcm.physical_constants import epssw, solc
 from jcm.params import il, ix
 from jcm.geometry import sia, coa
-import tree_math
-from jcm.physics import PhysicsData
 from jcm.physics import SWRadiationData
 
 @jit

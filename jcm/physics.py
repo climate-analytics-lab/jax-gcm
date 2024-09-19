@@ -9,7 +9,6 @@ import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.mod_radcon import ModRadConData
 
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.sigma_coordinates import SigmaCoordinates
@@ -36,14 +35,7 @@ class PhysicsState:
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
     surface_pressure: jnp.ndarray
-    # relative_humidity: jnp.ndarray
-
-@tree_math.struct
-class PhysicsData:
-    shortwave_rad: SWRadiationData
-    convection: ConvectionData
-    mod_radcon: ModRadConData
-    
+    # relative_humidity: jnp.ndarray   
 
 @tree_math.struct
 class PhysicsTendency:
