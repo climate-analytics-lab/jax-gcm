@@ -3,22 +3,25 @@ from jax import jit
 from jax import vmap
 from jax import lax
 from jcm.physical_constants import epssw, solc
-from jcm.params import il, ix
-from jcm.geometry import sia, coa
+from jcm.params import il, ix, kx
+from jcm.geometry import sia, coa, fsg, dhs
 from jcm.physics import SWRadiationData
+import jcm.mod_radcon as mod_radcon
+
+sw_data = SWRadiationData(
+    qcloud=jnp.zeros((ix, il)),
+    fsol=jnp.zeros((ix, il)),
+    ozone=jnp.zeros((ix, il)),
+    ozupp=jnp.zeros((ix, il)),
+    zenit=jnp.zeros((ix, il)),
+    stratz=jnp.zeros((ix, il))
+)
 
 @jit
-def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiationData):
-    from jcm.params import ix, il, kx 
-    from jcm.geometry import fsg, dhs
-    import jcm.mod_radcon as mod_radcon
-    mod_radcon_values = mod_radcon.ModRadConData()
-    epslw = mod_radcon_values.epslw
-    albsfc = mod_radcon_values.albsfc
-    stratc = mod_radcon_values.stratc
-    # from jcm.mod_radcon import epslw, albsfc, stratc
-    # f90 changes the values of these two so we have to watch out for that)
-    # from mod_radcon import tau2, flux 
+def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
+    # mod_radcon inputs
+    epslw = mod_radcon.epslw
+    albsfc = mod_radcon.mod_radcon_data.albsfc
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -61,10 +64,8 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     fband2 = 0.05
     fband1 = 1.0 - fband2
 
-    # swdata = pdata.swdata
     #  Initialization
-    tau2 = jnp.zeros((ix, il, kx, 4)) #pdata.mod_radcon.tau2*0.0
-
+    tau2 = jnp.zeros((ix, il, kx, 4))
     mask = icltop < kx  # Create a mask where icltop <= kx
     clamped_icltop = jnp.clip(icltop, 0, tau2.shape[2] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
     tau2 = tau2.at[:, :, clamped_icltop, 2].set(
@@ -75,8 +76,8 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     # 2. Shortwave transmissivity:
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
-    psaz = psa*swdata.zenit
-    acloud = cloudc*jnp.minimum(abscl1*swdata.qcloud, abscl2)
+    psaz = psa*sw_data.zenit
+    acloud = cloudc*jnp.minimum(abscl1*sw_data.qcloud, abscl2)
     tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*absdry))
 
     abs1 = absdry + absaer * fsg[1:nl1] ** 2
@@ -100,22 +101,22 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     
     fsfc = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
     dfabs = jnp.zeros((ix,il,kx)) # Flux of short-wave radiation absorbed in each atmospheric layer
-    ftop = swdata.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
+    ftop = sw_data.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
     flux_1, flux_2 = jnp.zeros((ix, il, kx)), jnp.zeros((ix, il, kx))
-    flux_1 = flux_1.at[:,:,0].set(swdata.fsol*fband1)
-    flux_2 = flux_2.at[:,:,0].set(swdata.fsol*fband2)
+    flux_1 = flux_1.at[:,:,0].set(sw_data.fsol*fband1)
+    flux_2 = flux_2.at[:,:,0].set(sw_data.fsol*fband2)
 
     # 3.2 Ozone and dry-air absorption in the stratosphere
     k = 0
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
-    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozupp * psa))
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - sw_data.ozupp * psa))
     dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
 
     k = 1
     flux_1 = flux_1.at[:, :, k].set(flux_1[:, :, k - 1])
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
-    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - swdata.ozone * psa))
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - sw_data.ozone * psa))
     dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
     
     # 3.3 Absorption and reflection in the troposphere
@@ -210,9 +211,14 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
     
     # 5.2  Stratospheric correction terms
     eps1 = epslw/(dhs[0] + dhs[1])
-    stratc = stratc.at[:,:,0].set(swdata.stratz*psa)
+    stratc = jnp.zeros((ix, il, 2))
+    stratc = stratc.at[:,:,0].set(sw_data.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
 
+    mod_radcon.mod_radcon_data.tau2 = tau2
+    mod_radcon.mod_radcon_data.stratc = stratc
+    mod_radcon.mod_radcon_data.flux = mod_radcon.mod_radcon_data.flux.at[:,:,0].set(flux_1[:,:,0]).at[:,:,1].set(flux_2[:,:,kx-1])
+    
     return  fsfcd, fsfc, ftop, dfabs
 
 @jit
@@ -282,10 +288,20 @@ def get_zonal_average_fields(tyear):
 
     fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(sia, coa, topsr)
 
+    global sw_data
+    sw_data = SWRadiationData(
+        qcloud=sw_data.qcloud,
+        fsol=fsol,
+        ozone=ozone,
+        ozupp=ozupp,
+        zenit=zenit,
+        stratz=stratz
+    )
+
     return fsol, ozupp, ozone, zenit, stratz
     
 @jit
-def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
+def clouds(qa, rh, precnv, precls, iptop, gse, fmask):
     #import params as p 
     from jcm.params import kx 
     '''
@@ -370,6 +386,9 @@ def clouds(qa ,rh,precnv,precls,iptop,gse,fmask):
     clstrl = jnp.maximum(clstr, clsminl) * rh[:, :, kx - 1]
     clstr = clstr + fmask * (clstrl - clstr)
 
+    global sw_data
+    sw_data.qcloud = qcloud
+
     return icltop, cloudc, clstr, qcloud
 
 @jit
@@ -385,7 +404,6 @@ def solar(tyear, csol=4.0*solc):
     topsr : array-like
         Daily-average insolation at the top of the atmosphere for each latitude band.
     """
-    from jcm.geometry import coa, sia
     
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)

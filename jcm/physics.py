@@ -28,6 +28,21 @@ class SWRadiationData:
     stratz: jnp.ndarray
 
 @tree_math.struct
+class ModRadConData:
+    # Radiative properties of the surface (updated in fordate)
+    # Albedo and snow cover arrays
+    alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
+    alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
+    albsfc: jnp.ndarray # Combined surface albedo (land + sea)
+    snowc: jnp.ndarray  # Effective snow cover (fraction)
+
+    # Transmissivity and blackbody radiation (updated in radsw/radlw)
+    tau2: jnp.ndarray   # Transmissivity of atmospheric layers
+    st4a: jnp.ndarray   # Blackbody emission from full and half atmospheric levels
+    stratc: jnp.ndarray # Stratospheric correction term
+    flux: jnp.ndarray   # Radiative flux in different spectral bands
+
+@tree_math.struct
 class PhysicsState:
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
