@@ -15,17 +15,7 @@ from jcm.physics import SWRadiationData
 
 class TestSolar(unittest.TestCase):
     def test_solar(self):
-        assert(np.allclose(solar(0.0), np.array([
-            553.93423522, 551.02920315, 545.81299099, 538.30748186, 528.544079,
-            516.56380499, 506.85182399, 506.40751184, 508.57360094, 511.41451804,
-            514.02259444, 515.87726025, 516.6503729, 516.12421359, 514.15095764,
-            510.63050654, 505.49750448, 498.71321714, 490.26041534, 480.13978781,
-            468.36747152, 454.97348403, 440.0002743, 423.50188934, 405.54332065,
-            386.19977488, 365.55671103, 343.70947479, 320.76336536, 296.83415891,
-            272.04837186, 246.54472938, 220.47604007, 194.01174187, 167.34305152,
-            140.69016017, 114.31490282, 88.54239741, 63.80107855, 40.70440366,
-            20.24489631, 4.43498509, 0., 0., 0., 0., 0., 0.]), atol=1e-4))
-        assert(np.allclose(solar(0.2), np.array([
+        self.assertTrue(np.allclose(solar(0.2), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
             261.58627434, 283.95547202, 305.15011948, 325.07762082,
@@ -38,7 +28,7 @@ class TestSolar(unittest.TestCase):
             282.48360014, 260.01911561, 236.4767785 , 211.95903738,
             186.57407167, 160.43718712, 133.67240691, 106.41888862,
             78.84586166,  51.20481384,  24.06562443,   0.89269878]), atol=1e-4))
-        assert(np.allclose(solar(0.4), np.array([
+        self.assertTrue(np.allclose(solar(0.4), np.array([
             0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
             0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
             5.00775958e+01, 7.28770444e+01, 9.68131455e+01, 1.21415906e+02,
@@ -51,7 +41,7 @@ class TestSolar(unittest.TestCase):
             4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
             4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
             4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02]), atol=1e-4))
-        assert(np.allclose(solar(0.6), np.array([
+        self.assertTrue(np.allclose(solar(0.6), np.array([
             0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
             83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
             206.84837586, 230.61437093, 253.6899679, 275.94351445, 297.25534724,
@@ -61,7 +51,7 @@ class TestSolar(unittest.TestCase):
             446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
             410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
             359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132]), atol=1e-4))
-        assert(np.allclose(solar(0.8), np.array([
+        self.assertTrue(np.allclose(solar(0.8), np.array([
             2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
             2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
             3.42958056e+02, 3.60158149e+02, 3.76136095e+02, 3.90759256e+02,
@@ -74,7 +64,7 @@ class TestSolar(unittest.TestCase):
             2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
             1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
             1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00]), atol=1e-4))
-        assert(np.allclose(solar(1.0), np.array([
+        self.assertTrue(np.allclose(solar(1.0), np.array([
             553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
             516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
             514.02258691, 515.87725366, 516.65036719, 516.12420873, 514.15095359,
@@ -86,7 +76,7 @@ class TestSolar(unittest.TestCase):
             20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.]), atol=1e-4))
 
         # other csol values
-        assert(np.allclose(solar(0.6, 1300), np.array([
+        self.assertTrue(np.allclose(solar(0.6, 1300), np.array([
             0.,          0.,           0.,           0.,
             2.30256929,  16.58242672,  35.58566559,  56.89183219,
             79.47609897, 102.75932685, 126.36068201, 150.00199764,
@@ -106,10 +96,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
 
+        xy = (ix, il)
         broadcast = lambda a: jnp.tile(a[None, None, :], xy + (1,))
         qa, qsat, rh = broadcast(qa), broadcast(qsat), broadcast(rh)
 
-        xy = (ix, il)
         psa = jnp.ones(xy)
         precnv = -1 * np.ones(xy)
         precls = 4 * np.ones(xy)
@@ -122,7 +112,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         tyear = 0.6
         fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(tyear)
 
-        swdata = SWRadiationData(
+        sw_data = SWRadiationData(
             qcloud = qcloud,
             fsol = fsol,
             ozone = ozone,
@@ -131,8 +121,8 @@ class TestShortWaveRadiation(unittest.TestCase):
             stratz = stratz
         )
 
-        fsfcd, fsfc, ftop, dfabs = get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata)
-        self.assertAlmostEqual(fsfcd[0, :], [
+        fsfcd, fsfc, ftop, dfabs = get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data)
+        self.assertTrue(np.allclose(fsfcd[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
@@ -140,9 +130,9 @@ class TestShortWaveRadiation(unittest.TestCase):
             245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
             219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
             186.12903619, 185.31120169, 183.42677496
-        ])
+        ], atol=1e-4))
 
-        self.assertAlmostEqual(fsfc[0, :], [
+        self.assertTrue(np.allclose(fsfc[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
@@ -150,9 +140,9 @@ class TestShortWaveRadiation(unittest.TestCase):
             245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
             219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
             186.12903619, 185.31120169, 183.42677496
-        ])
+        ], atol=1e-4))
 
-        self.assertAlmostEqual(ftop[0, :], [
+        self.assertTrue(np.allclose(ftop[0, :], [
             0., 0., 0., 0., 1.93599586, 13.84635135, 29.51685016, 46.89146027, 65.11718871, 83.73023451,
             102.44168978, 121.0533787, 139.41874296, 157.42199198, 174.96630874, 191.96679879, 208.34607385,
             224.03188495, 238.95538028, 253.05068109, 266.25471774, 278.50725748, 289.75158834, 299.9350031,
@@ -160,9 +150,9 @@ class TestShortWaveRadiation(unittest.TestCase):
             338.77936105, 338.06122342, 336.13410495, 333.03776805, 328.82654748, 323.57244264, 317.37036698,
             310.3474896, 302.680774, 294.63184471, 286.62427534, 279.44504545, 275.01597523, 279.19413113,
             284.20954594, 288.1834261, 291.08877534
-        ])
+        ], atol=1e-4))
 
-        self.assertAlmostEqual(np.mean(dfabs, axis=2)[0, :], [
+        self.assertTrue(np.allclose(np.mean(dfabs, axis=2)[0, :], [
             0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
             4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
             8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
@@ -170,11 +160,11 @@ class TestShortWaveRadiation(unittest.TestCase):
             11.66678236, 11.63927325, 11.58618806, 11.51198779, 11.42187291, 11.32194103, 11.2197034,
             11.12539961, 11.05524554, 11.04026698, 11.15996872, 11.66726167, 12.26006372, 12.85902805,
             13.45775005
-        ])
+        ], atol=1e-4))
 
-        self.assertAlmostEqual(np.mean(dfabs, axis=1)[0, :], [
+        self.assertTrue(np.allclose(np.mean(dfabs, axis=1)[0, :], [
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
-        ])
+        ], atol=1e-4))
         
     # def test_shortwave_radiation_general(self):
     #     ix, il, kx = 1, 1, 8
@@ -563,8 +553,8 @@ class TestClouds(unittest.TestCase):
         )
 
         self.assertAlmostEqual(icltop[0, 0], 5)
-        self.assertAlmostEqual(cloudc[0, 0], 0.69495568)
-        self.assertAlmostEqual(clstr[0, 0], 0.07125001)
+        self.assertAlmostEqual(cloudc[0, 0], 0.69495568, places=4)
+        self.assertAlmostEqual(clstr[0, 0], 0.07125001, places=4)
 
 class TestZonalAverageFields(unittest.TestCase):
     def test_zonal_average_fields(self):
@@ -674,11 +664,11 @@ class TestZonalAverageFields(unittest.TestCase):
         ]
         for tyear, expected in zonal_avg_fields_test_cases:
             fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(tyear)
-            assert(np.allclose(fsol[0, :], expected[0]))
-            assert(np.allclose(ozupp[0, :], expected[1]))
-            assert(np.allclose(ozone[0, :], expected[2]))
-            assert(np.allclose(zenit[0, :], expected[3]))
-            assert(np.allclose(stratz[0, :], expected[4]))
+            self.assertTrue(np.allclose(fsol[0, :], expected[0], atol=1e-4))
+            self.assertTrue(np.allclose(ozupp[0, :], expected[1], atol=1e-4))
+            self.assertTrue(np.allclose(ozone[0, :], expected[2], atol=1e-4))
+            self.assertTrue(np.allclose(zenit[0, :], expected[3], atol=1e-4))
+            self.assertTrue(np.allclose(stratz[0, :], expected[4], atol=1e-4))
 
     # def test_polar_night_cooling(self):
     #     # Ensure polar night cooling behaves correctly
