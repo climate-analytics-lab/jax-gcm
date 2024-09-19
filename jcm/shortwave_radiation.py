@@ -69,8 +69,8 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     mask = icltop < kx  # Create a mask where icltop <= kx
     clamped_icltop = jnp.clip(icltop, 0, tau2.shape[2] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
-    tau2 = tau2.at[:, :, clamped_icltop - 1, 2].set(
-        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop - 1, 2])   # Start with tau2 and update the values where the mask is true
+    tau2 = tau2.at[:, :, clamped_icltop, 2].set(
+        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
     )
     tau2 = tau2.at[:, :, kx - 1, 2].set(albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
 
@@ -167,21 +167,29 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, swdata: SWRadiation
 
     # 4.2  Absorption of upward flux
 
-    propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
-    _, flux_1_scan = lax.scan(
-        lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
-        jnp.moveaxis(flux_1, 2, 0)[-1],
-        jnp.moveaxis(tau2, 2, 0)[1:kx][::-1]
-    )
-    flux_1 = flux_1.at[:, :, :-1].set(jnp.moveaxis(flux_1_scan[::-1], 0, 2))
+    flux_1b = flux_1[:, :, kx - 1]
+    for k in reversed(range(kx)):
+        dfabs = dfabs.at[:, :, k].add(flux_1b)
+        flux_1b = tau2[:, :, k, 0] * flux_1b
+        dfabs = dfabs.at[:, :, k].add(-flux_1b)
+        flux_1b = flux_1b + tau2[:, :, k, 2]
+    ftop = ftop - flux_1b
+
+    # propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
+    # _, flux_1_scan = lax.scan(
+    #     lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
+    #     jnp.moveaxis(flux_1, 2, 0)[-1],
+    #     jnp.moveaxis(tau2, 2, 0)[1:kx][::-1]
+    # )
+    # flux_1 = flux_1.at[:, :, :-1].set(jnp.moveaxis(flux_1_scan[::-1], 0, 2))
         
-    dfabs = dfabs.at[:,:,:].add(flux_1*(1 - tau2[:,:,:,0]))
+    # dfabs = dfabs.at[:,:,:].add(flux_1*(1 - tau2[:,:,:,0]))
 
-    flux_1 = flux_1.at[:, :, 1:].set(flux_1[:, :, :-1])
-    flux_1 = flux_1.at[:,:,0].set(tau2[:,:,0,0]*flux_1[:,:,0] + tau2[:,:,0,2])
+    # flux_1 = flux_1.at[:, :, 1:].set(flux_1[:, :, :-1])
+    # flux_1 = flux_1.at[:,:,0].set(tau2[:,:,0,0]*flux_1[:,:,0] + tau2[:,:,0,2])
 
-    # 4.3  Net solar radiation = incoming - outgoing
-    ftop = ftop - flux_1[:,:,0]
+    # # 4.3  Net solar radiation = incoming - outgoing
+    # ftop = ftop - flux_1[:,:,0]
 
     # 5. Initialization of longwave radiation model
     # 5.1 Longwave transmissivity:
