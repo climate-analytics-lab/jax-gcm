@@ -38,9 +38,9 @@ lskineb = True   # true : redefine skin temp. from energy balance
 
 hdrag = 2000.0 # Height scale for orographic correction
 
-# Placeholders for boundary conditions
-stl_am_fill = 288.0
-soilw_am_fill = 0.5 # not sure about this one
+# Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
+stl_am = jnp.full((ix, il), 288.0)
+soilw_am = jnp.full((ix, il), 0.5)
 
 # import types
 
@@ -84,9 +84,6 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     -------
 
     '''
-    # Aquaplanet settings - TODO: move this into physics initialization or something
-    stl_am = jnp.full((ix, il), stl_am_fill)
-    soilw_am = jnp.full((ix, il), soilw_am_fill)
     forog = set_orog_land_sfc_drag(phi0)
 
     # Initialize variables
