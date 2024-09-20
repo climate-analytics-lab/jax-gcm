@@ -284,7 +284,7 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
 
-
+@jit
 def set_orog_land_sfc_drag(phi0):
     '''
     Parameters
