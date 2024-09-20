@@ -4,6 +4,35 @@ import jax.numpy as jnp
 import csv
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
+    def test_updated_surface_flux(self):
+        xy, xyz = (96, 48), (96, 48, 8)
+        psa = jnp.ones(xy)
+        ua = jnp.ones(xyz)
+        va = jnp.ones(xyz)
+        ta = jnp.ones(xyz) * 300
+        qa = jnp.ones(xyz) # change this to realistic values
+        rh = jnp.ones(xyz) * 0.5 # change this to realistic values   
+        phi = jnp.ones(xyz) * jnp.arange(8)[None, None, :]
+        phi0 = jnp.zeros(xy)
+        fmask = jnp.zeros(xy)
+        tsea = jnp.ones(xy) * 300
+        ssrd = jnp.ones(xy) # change this to realistic values
+        slrd = jnp.ones(xy) # change this to realistic values
+        lfluxland = True
+
+        ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0 = get_surface_fluxes(psa, ua, va, ta, qa, rh, phi, phi0, fmask, tsea, ssrd, slrd, lfluxland)
+        
+        self.assertTrue(jnp.allclose(ustr[0, 0, :], jnp.array([-0.01443884, -0.00601151, -0.00601151]), atol=1e-4))
+        self.assertTrue(jnp.allclose(vstr[0, 0, :], jnp.array([-0.01443884, -0.00601151, -0.00601151]), atol=1e-4))
+        self.assertTrue(jnp.allclose(shf[0, 0, :], jnp.array([-82.38233, 0.0, 0.0]), atol=1e-4))
+        self.assertTrue(jnp.allclose(evap[0, 0, :], jnp.array([-0.00865615, 0.11504626, 0.11504626]), atol=1e-4))
+        self.assertTrue(jnp.allclose(slru[0, 0, :], jnp.array([263.12296, 450.08463, 450.08463]), atol=1e-4))
+        self.assertTrue(jnp.allclose(hfluxn[0, 0, :], jnp.array([-157.09177, -160.35394]), atol=1e-4))
+        self.assertTrue(jnp.allclose(tsfc[0, 0], 300.0, atol=1e-4))
+        self.assertTrue(jnp.allclose(tskin[0, 0], 300.0, atol=1e-4))
+        self.assertTrue(jnp.allclose(u0[0, 0], 0.949999988079071, atol=1e-4))
+        self.assertTrue(jnp.allclose(v0[0, 0], 0.949999988079071, atol=1e-4))
+        self.assertTrue(jnp.allclose(t0[0, 0], 300.0, atol=1e-4))
 
     def test_surface_fluxes_test1(self):
         il, ix, kx = 96, 48, 8
@@ -380,34 +409,34 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertAlmostEqual(jnp.min(t0),test_data["t0"][1])
         self.assertAlmostEqual(jnp.mean(t0),test_data["t0"][2])
 
-    # def test_surface_fluxes_drag_test(self):
-    #     il, ix, kx = 96, 48, 8
+    def test_surface_fluxes_drag_test(self):
+        il, ix, kx = 96, 48, 8
 
-    #     hdrag = 2000.0 # Height scale for orographic correction        
-    #     grav = 9.81 # gravity constant
-    #     phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
+        hdrag = 2000.0 # Height scale for orographic correction        
+        grav = 9.81 # gravity constant
+        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
 
-    #     forog_test = jnp.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
+        forog_test = jnp.zeros((ix,il)) # Time-invariant fields (initial. in SFLSET)
 
-    #     with open("jcm/test_files/surface_flux_drag_test.csv", mode='r') as file:
-    #         reader = csv.reader(file)
+        with open("jcm/test_files/surface_flux_drag_test.csv", mode='r') as file:
+            reader = csv.reader(file)
         
-    #         # Read the header (keys)
-    #         keys = next(reader)
+            # Read the header (keys)
+            keys = next(reader)
         
-    #         # Initialize an empty dictionary with keys
-    #         test_data = {key: [] for key in keys}
+            # Initialize an empty dictionary with keys
+            test_data = {key: [] for key in keys}
         
-    #         # Read the rows and append values to the dictionary
-    #         for row in reader:
-    #             for i, value in enumerate(row):
-    #                 test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
+            # Read the rows and append values to the dictionary
+            for row in reader:
+                for i, value in enumerate(row):
+                    test_data[keys[i]].append(float(value) if value.replace('.','',1).isdigit() else value)
         
-    #         # Convert lists to JAX arrays
-    #         test_data = {key: jnp.array(value) for key, value in test_data.items()}
+            # Convert lists to JAX arrays
+            test_data = {key: jnp.array(value) for key, value in test_data.items()}
     
-    #     forog_test = set_orog_land_sfc_drag( phi0 )
+        forog_test = set_orog_land_sfc_drag( phi0 )
         
-    #     self.assertAlmostEqual(jnp.max(forog_test),test_data["forog"][0])
-    #     self.assertAlmostEqual(jnp.min(forog_test),test_data["forog"][1])
-    #     self.assertAlmostEqual(jnp.mean(forog_test),test_data["forog"][2])
+        self.assertAlmostEqual(jnp.max(forog_test),test_data["forog"][0])
+        self.assertAlmostEqual(jnp.min(forog_test),test_data["forog"][1])
+        self.assertAlmostEqual(jnp.mean(forog_test),test_data["forog"][2])

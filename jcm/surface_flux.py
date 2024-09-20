@@ -42,7 +42,7 @@ hdrag = 2000.0 # Height scale for orographic correction
 fmask_fill = 0.0
 phi0_fill = 0.0
 stl_am_fill = 288.0
-soilw_am_fill = 2.0
+soilw_am_fill = 0.5 # not sure about this one
 
 # import types
 
@@ -86,7 +86,7 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     -------
 
     '''
-    # Aquaplanet settings - TODO: move this into physics initialization
+    # Aquaplanet settings - TODO: move this into physics initialization or something
     fmask = jnp.full(fmask.shape, fmask_fill)
     stl_am = jnp.full((ix, il), stl_am_fill)
     soilw_am = jnp.full((ix, il), soilw_am_fill)
@@ -156,7 +156,6 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
     # line 140
-    # denvvs(:,:,0) = (p0*psa/(rgas*t0))*sqrt(u0**2.0 + v0**2.0 + vgust**2.0)
     denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + vgust**2))
 
     # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes 
@@ -222,14 +221,14 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
         qsat0 = qsat0.at[:, :, 1].set(
                 jnp.where(
-                    evap[:, :, 1] > 0.0,
+                    evap[:, :, 0] > 0.0,
                     soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
                     0.0
                 )
             )
 
         # Redefine skin temperature to balance the heat budget
-        dtskin = hfluxn[:, :, 0] / (clamb + dslr + (chl * denvvs[:, :, 0] * (cp + (alhc * qsat0[:, :, 1]))))
+        dtskin = hfluxn[:, :, 0] / (clamb + dslr + (chl * denvvs[:, :, 1] * (cp + (alhc * qsat0[:, :, 1]))))
         tskin = tskin + dtskin
 
         # Add linear corrections to heat fluxes
@@ -256,20 +255,22 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         # 4.2 Wind Stress
         ks = 2
 
-        cdsdv = cds * denvvs[:, :, ks-1]
+        cdsdv = cds * denvvs[:, :, ks]
         ustr = ustr.at[:, :, 1].set(-cdsdv * ua[:, :, kx-1])
         vstr = vstr.at[:, :, 1].set(-cdsdv * va[:, :, kx-1])
 
     ##########################################################
     # Sea Surface
-    ##########################################################    
+    ##########################################################
+
+    ks = 2
 
     # 4.3 Sensible heat flux
-    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks-1] * (tsea - t1[:, :, 1]))
+    shf = shf.at[:, :, 1].set(chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
 
     # 4.4 Evaporation
     qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
-    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks-1] * (qsat0[:, :, 1] - q1[:, :, 1]))
+    evap = evap.at[:, :, 1].set(chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
@@ -277,8 +278,12 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
-    for var in [ustr, vstr, shf, evap, slru]:
-        var = var.at[:, :, 2].set(weighted_average(var))
+    ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
+    vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
+    shf = shf.at[:, :, 2].set(weighted_average(shf))
+    evap = evap.at[:, :, 2].set(weighted_average(evap))
+    slru = slru.at[:, :, 2].set(weighted_average(slru))
+
     t0 = weighted_average(t1)
 
     tsfc  = tsea + fmask * (stl_am - tsea)
