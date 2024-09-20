@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi
-from jcm.mod_radcon import epslw, emisfc, fband, tau2, stratc
+from jcm.mod_radcon import epslw, emisfc, fband, mod_radcon_data
 from jcm.geometry import dhs
 from jcm.params import ix, il, iy, kx
 nband = 4
@@ -22,7 +22,8 @@ def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
     
     """
-
+    tau2 = mod_radcon_data.tau2
+    
     nl1 = kx - 1
     # Temperature at level boundaries
     st4a = st4a.at[:,:,:nl1,0].set(ta[:,:,:nl1]+wvi[:nl1,1]*(ta[:,:,1:nl1+1]-ta[:,:,:nl1]))
@@ -96,6 +97,8 @@ def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs, st4a
         st4a: Blackbody emission from full and half atmospheric levels
     
     """
+    tau2 = mod_radcon_data.tau2
+    stratc = mod_radcon_data.stratc
 
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - fsfcd

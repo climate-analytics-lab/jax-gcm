@@ -2,10 +2,9 @@ import unittest
 import pytest
 import jax.numpy as jnp
 import numpy as np
-from numpy.testing import assert_array_almost_equal
 from jax import random
 
-from jcm.shortwave_radiation import get_zonal_average_fields, solar, clouds, get_shortwave_rad_fluxes
+from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
 from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix, kx
 from jcm.geometry import sia
