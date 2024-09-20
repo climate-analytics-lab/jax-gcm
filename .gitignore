@@ -157,3 +157,7 @@ cython_debug/
 # IDE folders
 .idea/
 .vscode/
+
+#MacOS files
+.DS_Store
+notebooks/model_state.nc
