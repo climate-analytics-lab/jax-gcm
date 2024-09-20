@@ -693,8 +693,9 @@ class TestZonalAverageFields(unittest.TestCase):
 
     def test_random_input_consistency(self):
         # Check that random inputs produce consistent outputs
-        tyear = random.uniform(0, 1)  # Generate a random year between 0 and 1
-        
+        key = random.PRNGKey(0)
+        tyear = random.uniform(key, shape=(), minval=0, maxval=1)  # Generate a random year between 0 and 1
+
         fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(tyear)
         
         # Ensure outputs are consistent and within expected ranges
