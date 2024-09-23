@@ -29,7 +29,7 @@ chs = 0.9e-3   # Heat exchange coefficient over sea
 vgust = 5.0    # Wind speed for sub-grid-scale gusts
 ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
 dtheta = 3.0   # Potential temp. gradient for stability correction
-fstab = 0.67   # Amplitude of stability correction (fraction)
+fstab = 0.67   # Amplitude of stability correction (fraction) - TODO: double check whether shortwave_radiation has to modify this
 clambda = 7.0  # Heat conductivity in skin-to-root soil layer
 clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 
@@ -41,8 +41,6 @@ hdrag = 2000.0 # Height scale for orographic correction
 # Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
 stl_am = jnp.full((ix, il), 288.0)
 soilw_am = jnp.full((ix, il), 0.5)
-
-# import types
 
 @jit
 def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
