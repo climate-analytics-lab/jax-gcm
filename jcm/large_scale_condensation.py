@@ -8,43 +8,12 @@ from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.convection import ConvectionData
 from jcm.physical_constants import p0, cp, alhc, grav
 from jcm.geometry import fsg, dhs
-import tree_math
-
 
 # Constants for large-scale condensation
 trlsc = 4.0   # Relaxation time (in hours) for specific humidity
 rhlsc = 0.9   # Maximum relative humidity threshold (at sigma=1)
 drhlsc = 0.1  # Vertical range of relative humidity threshold
 rhblsc = 0.95 # Relative humidity threshold for boundary layer
-
-@tree_math.struct
-class CondensationData:
-    precls: jnp.ndarray
-    dtlsc: jnp.ndarray
-    dqlsc: jnp.ndarray
-    
-    def __init__(self, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None) -> None:
-        if precls is not None:
-            self.precls = precls
-        else:
-            self.precls = jnp.zeros((nodal_shape))
-        if dtlsc is not None:
-            self.dtlsc = dtlsc
-        else:
-            self.dtlsc = jnp.zeros((nodal_shape+(node_levels,)))
-        if dqlsc is not None:
-            self.dqlsc = dqlsc
-        else:
-            self.dqlsc = jnp.zeros((nodal_shape+(node_levels,)))
-
-    def copy(self, precls=None, dtlsc=None, dqlsc=None):
-        return CondensationData(
-            self.precls.shape,
-            0,
-            precls=precls if precls is not None else self.precls, 
-            dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
-            dqlsc=dqlsc if dqlsc is not None else self.dqlsc
-        )
 
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture

@@ -5,33 +5,8 @@ saturation specific humidity.
 '''
 
 import jax.numpy as jnp
-import tree_math
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
 from jcm.geometry import fsg
-
-@tree_math.struct
-class HumidityData:
-    rh: jnp.ndarray # relative humidity
-    qsat: jnp.ndarray # saturation specific humidity
-
-    def __init__(self, nodal_shape, node_levels, rh=None, qsat=None) -> None:
-        if rh is not None:
-            self.rh = rh
-        else:
-            self.rh = jnp.zeros((nodal_shape+(node_levels,)))
-        if qsat is not None:
-            self.qsat = qsat
-        else:
-            self.qsat = jnp.zeros((nodal_shape+(node_levels,)))
-
-
-    def copy(self, rh=None, qsat=None):
-        return HumidityData(
-            self.rh.shape[0:1],
-            self.rh.shape[2],
-            rh=rh if rh is not None else self.rh, 
-            qsat=qsat if qsat is not None else self.qsat
-        )
 
 #def spec_hum_to_rel_hum(ta, ps, sig, qa):
 def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):

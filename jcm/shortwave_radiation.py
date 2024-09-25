@@ -3,86 +3,14 @@ from jax import jit
 from jax import vmap
 from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
-from jcm.geometry import sia, coa, fmask
+from jcm.geometry import sia, coa, fmask, fsg, dhs
 from jcm.date import tyear # maybe this can come from somewhere else? like the model instance tracks it? it comes from date.f90 in speedy
-import tree_math
+from jax import lax
 
-@tree_math.struct
-class SWRadiationData:
-    qcloud: jnp.ndarray
-    fsol: jnp.ndarray
-    ozone: jnp.ndarray
-    ozupp: jnp.ndarray
-    zenit: jnp.ndarray
-    stratz: jnp.ndarray
-    gse: jnp.ndarray
-    icltop: jnp.ndarray
-    cloudc: jnp.ndarray
-    cloudstr: jnp.ndarray
-
-    def __init__(self, nodal_shape, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None) -> None:
-        if qcloud is not None:
-            self.qcloud = qcloud
-        else:
-            self.qcloud = jnp.zeros((nodal_shape))
-        if fsol is not None:
-            self.fsol = fsol
-        else:
-            self.fsol = jnp.zeros((nodal_shape))
-        if ozone is not None:
-            self.ozone = ozone
-        else:
-            self.ozone = jnp.zeros((nodal_shape))
-        if ozupp is not None:
-            self.ozupp = ozupp
-        else:
-            self.ozupp = jnp.zeros((nodal_shape))
-        if zenit is not None:
-            self.zenit = zenit
-        else:
-            self.zenit = jnp.zeros((nodal_shape))
-        if stratz is not None:
-            self.stratz = stratz
-        else:
-            self.stratz = jnp.zeros((nodal_shape))
-        if gse is not None:
-            self.gse = gse
-        else:
-            self.gse = jnp.zeros((nodal_shape))
-        if icltop is not None:
-            self.icltop = icltop
-        else:
-            self.icltop = jnp.zeros((nodal_shape))
-        if cloudc is not None:
-            self.cloudc = cloudc
-        else:
-            self.cloudc = jnp.zeros((nodal_shape))
-        if cloudstr is not None:
-            self.cloudstr = cloudstr
-        else:
-            self.cloudstr = jnp.zeros((nodal_shape))
-
-
-    def copy(self, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None):
-        return SWRadiationData(
-            self.cloudc.shape,
-            qcloud=qcloud if qcloud is not None else self.qcloud,
-            fsol=fsol if fsol is not None else self.fsol,
-            ozone=ozone if ozone is not None else self.ozone,
-            ozupp=ozupp if ozupp is not None else self.ozupp,
-            zenit=zenit if zenit is not None else self.zenit,
-            stratz=stratz if stratz is not None else self.stratz,
-            gse=gse if gse is not None else self.gse,
-            icltop=icltop if icltop is not None else self.icltop,
-            cloudc=cloudc if cloudc is not None else self.cloudc,
-            cloudstr=cloudstr if cloudstr is not None else self.cloudstr
-        )
+# check fmask (where it comes from, whether it's defined properly) - check any "using" statements in the fortran code to make sure we've caught any variables that should be updated
 
 @jit
-def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
-    # mod_radcon inputs
-    epslw = mod_radcon.epslw
-    albsfc = mod_radcon.mod_radcon_data.albsfc
+def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -100,6 +28,18 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
     #     integer :: i, j, k
     #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
     '''
+
+    ix, il, kx = state.temperature.shape
+    psa = physics_data.convection.psa
+    qa = state.specific_humidity
+    icltop = physics_data.shortwave_rad.icltop
+    cloudc = physics_data.shortwave_rad.cloudc
+    clstr = physics_data.shortwave_rad.cloudstr
+
+    # mod_radcon inputs
+    epslw = physics_data.mod_radcon.epslw
+    albsfc = physics_data.mod_radcon.albsfc
+
     # Shortwave radiation and cloud constants
     albcl   = 0.43  # Cloud albedo (for cloud cover = 1)
     albcls  = 0.50  # Stratiform cloud albedo (for st. cloud cover = 1)
@@ -132,13 +72,14 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
     tau2 = tau2.at[:, :, clamped_icltop, 2].set(
         jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
     )
+    
     tau2 = tau2.at[:, :, kx - 1, 2].set(albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
 
     # 2. Shortwave transmissivity:
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
-    psaz = psa*sw_data.zenit
-    acloud = cloudc*jnp.minimum(abscl1*sw_data.qcloud, abscl2)
+    psaz = psa*physics_data.shortwave_rad.zenit
+    acloud = cloudc*jnp.minimum(abscl1*physics_data.shortwave_rad.qcloud, abscl2)
     tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*absdry))
 
     abs1 = absdry + absaer * fsg[1:nl1] ** 2
@@ -162,22 +103,22 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
     
     fsfc = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
     dfabs = jnp.zeros((ix,il,kx)) # Flux of short-wave radiation absorbed in each atmospheric layer
-    ftop = sw_data.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
+    ftop = physics_data.shortwave_rad.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
     flux_1, flux_2 = jnp.zeros((ix, il, kx)), jnp.zeros((ix, il, kx))
-    flux_1 = flux_1.at[:,:,0].set(sw_data.fsol*fband1)
-    flux_2 = flux_2.at[:,:,0].set(sw_data.fsol*fband2)
+    flux_1 = flux_1.at[:,:,0].set(physics_data.shortwave_rad.fsol*fband1)
+    flux_2 = flux_2.at[:,:,0].set(physics_data.shortwave_rad.fsol*fband2)
 
     # 3.2 Ozone and dry-air absorption in the stratosphere
     k = 0
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
-    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - sw_data.ozupp * psa))
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - physics_data.shortwave_rad.ozupp * psa))
     dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
 
     k = 1
     flux_1 = flux_1.at[:, :, k].set(flux_1[:, :, k - 1])
     dfabs = dfabs.at[:, :, k].set(flux_1[:, :, k])
-    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - sw_data.ozone * psa))
+    flux_1 = flux_1.at[:, :, k].set(tau2[:, :, k, 0] * (flux_1[:, :, k] - physics_data.shortwave_rad.ozone * psa))
     dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
     
     # 3.3 Absorption and reflection in the troposphere
@@ -273,14 +214,18 @@ def get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data):
     # 5.2  Stratospheric correction terms
     eps1 = epslw/(dhs[0] + dhs[1])
     stratc = jnp.zeros((ix, il, 2))
-    stratc = stratc.at[:,:,0].set(sw_data.stratz*psa)
+    stratc = stratc.at[:,:,0].set(physics_data.shortwave_rad.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
 
-    mod_radcon.mod_radcon_data.tau2 = tau2
-    mod_radcon.mod_radcon_data.stratc = stratc
-    mod_radcon.mod_radcon_data.flux = mod_radcon.mod_radcon_data.flux.at[:,:,0].set(flux_1[:,:,0]).at[:,:,1].set(flux_2[:,:,kx-1])
-    
-    return  fsfcd, fsfc, ftop, dfabs
+    flux = physics_data.mod_radcon.flux.at[:,:,0].set(flux_1[:,:,0]).at[:,:,1].set(flux_2[:,:,kx-1])
+    mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
+    longwave_rad_out = physics_data.longwave_rad.copy(fsfc=fsfc, ftop=ftop, dfabs=dfabs,fsfcd=fsfcd)
+    physics_data = physics_data.copy(longwave_rad=longwave_rad_out, mod_radcon=mod_radcon_out)
+
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+
+    return physics_tendencies, physics_data
+
 
 @jit
 def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):

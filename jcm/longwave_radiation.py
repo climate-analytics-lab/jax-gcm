@@ -3,46 +3,7 @@ from jcm.physical_constants import sbc, wvi
 from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
-import tree_math
 nband = 4
-
-#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
-@tree_math.struct
-class LWRadiaitonData:
-    fsfcd: jnp.ndarray
-    dfabs: jnp.ndarray
-    ftop: jnp.ndarray
-    fsfc: jnp.ndarray
-    
-    def __init__(self, nodal_shape, node_levels, fsfcd=None, dfabs=None, ftop=None, fsfc=None) -> None:
-        if fsfcd is not None:
-            self.fsfcd = fsfcd
-        else:
-            self.fsfcd = jnp.zeros((nodal_shape))
-        if dfabs is not None:
-            self.dfabs = dfabs
-        else:
-            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
-        if ftop is not None:
-            self.ftop = ftop
-        else:
-            self.ftop = jnp.zeros((nodal_shape))
-        if fsfc is not None:
-            self.fsfc = fsfc
-        else:
-            self.fsfc = jnp.zeros((nodal_shape))
-
-
-
-    def copy(self, fsfcd=None, dfabs=None, ftop=None, fsfc=None):
-        return LWRadiaitonData(
-            (0,0), 
-            0, 
-            fsfcd=fsfcd if fsfcd is not None else self.fsfcd,
-            dfabs=dfabs if dfabs is not None else self.dfabs,
-            ftop=ftop if ftop is not None else self.ftop,
-            fsfc=fsfc if fsfc is not None else self.fsfc
-        )
 
 def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
 

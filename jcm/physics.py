@@ -9,20 +9,10 @@ import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.shortwave_radiation import SWRadiationData
-from jcm.mod_radcon import ModRadConData
-from jcm.convection import ConvectionData
-from jcm.humidity import HumidityData
-from jcm.large_scale_condensation import CondensationData
-from jcm.longwave_radiation import LWRadiationData
+from jcm.physics_data import LWRadiationData, SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData
 
-from dinosaur.coordinate_systems import CoordinateSystem
-from dinosaur.sigma_coordinates import SigmaCoordinates
-from dinosaur.scales import units
-
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal, Grid
-from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations, PrimitiveEquationsSpecs
-from dinosaur import primitive_equations_states
+from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
+from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
 
 @tree_math.struct
 class PhysicsState:

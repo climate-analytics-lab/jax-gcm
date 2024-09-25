@@ -8,7 +8,6 @@ import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
 from jcm.geometry import dhs, fsg
-import tree_math
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
 trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
@@ -16,60 +15,6 @@ rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for s
 rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
-
-@tree_math.struct
-class ConvectionData:
-    psa: jnp.ndarray # normalized surface pressure 
-    se: jnp.ndarray # dry static energy
-    iptop: jnp.ndarray # Top of convection (layer index)
-    cbmf: jnp.ndarray # Cloud-base mass flux
-    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
-    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
-    dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
-
-    def __init__(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None) -> None:
-        if psa is not None:
-            self.psa = psa
-        else:
-            self.psa = jnp.zeros((nodal_shape))
-        if se is not None:
-            self.se = se
-        else:
-            self.se = jnp.zeros((nodal_shape + (node_levels,)))
-        if iptop is not None:
-            self.iptop = iptop
-        else:
-            self.iptop = jnp.zeros((nodal_shape),dtype=int)
-        if cbmf is not None:
-            self.cbmf = cbmf
-        else:
-            self.cbmf = jnp.zeros((nodal_shape))
-        if precnv is not None:
-            self.precnv = precnv
-        else:
-            self.precnv = jnp.zeros((nodal_shape))
-        if dfse is not None:
-            self.dfse = dfse
-        else:
-            self.dfse = jnp.zeros((nodal_shape + (node_levels,)))
-        if dfqa is not None:
-            self.dfqa = dfqa
-        else:
-            self.dfqa = jnp.zeros((nodal_shape + (node_levels,)))
-
-    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None):
-        return ConvectionData(
-            self.psa.shape, 
-            self.se.shape[-1], 
-            psa=psa if psa is not None else self.psa,
-            se=se if se is not None else self.se,
-            iptop=iptop if iptop is not None else self.iptop,
-            cbmf=cbmf if cbmf is not None else self.cbmf,
-            precnv=precnv if precnv is not None else self.precnv,
-            dfse=dfse if dfse is not None else self.dfse,
-            dfqa=dfqa if dfqa is not None else self.dfqa
-        )
-    
 
 if wvi[0, 1] == 0.:
     """
