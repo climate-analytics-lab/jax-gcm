@@ -5,6 +5,8 @@ import tree_math
 class SWRadiationData:
     qcloud: jnp.ndarray
     fsol: jnp.ndarray
+    ssrd: jnp.ndarray
+    ssr: jnp.ndarray
     ozone: jnp.ndarray
     ozupp: jnp.ndarray
     zenit: jnp.ndarray
@@ -13,8 +15,10 @@ class SWRadiationData:
     icltop: jnp.ndarray
     cloudc: jnp.ndarray
     cloudstr: jnp.ndarray
+    ftop: jnp.ndarray
+    fdabs: jnp.ndarray
 
-    def __init__(self, nodal_shape, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None) -> None:
+    def __init__(self, nodal_shape, node_levels, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None) -> None:
         if qcloud is not None:
             self.qcloud = qcloud
         else:
@@ -23,6 +27,14 @@ class SWRadiationData:
             self.fsol = fsol
         else:
             self.fsol = jnp.zeros((nodal_shape))
+        if ssrd is not None:
+            self.ssrd = ssrd
+        else:
+            self.ssrd = jnp.zeros((nodal_shape))
+        if ssr is not None:
+            self.ssr = ssr
+        else:
+            self.ssr = jnp.zeros((nodal_shape))
         if ozone is not None:
             self.ozone = ozone
         else:
@@ -55,36 +67,6 @@ class SWRadiationData:
             self.cloudstr = cloudstr
         else:
             self.cloudstr = jnp.zeros((nodal_shape))
-
-
-    def copy(self, qcloud=None, fsol=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None):
-        return SWRadiationData(
-            self.cloudc.shape,
-            qcloud=qcloud if qcloud is not None else self.qcloud,
-            fsol=fsol if fsol is not None else self.fsol,
-            ozone=ozone if ozone is not None else self.ozone,
-            ozupp=ozupp if ozupp is not None else self.ozupp,
-            zenit=zenit if zenit is not None else self.zenit,
-            stratz=stratz if stratz is not None else self.stratz,
-            gse=gse if gse is not None else self.gse,
-            icltop=icltop if icltop is not None else self.icltop,
-            cloudc=cloudc if cloudc is not None else self.cloudc,
-            cloudstr=cloudstr if cloudstr is not None else self.cloudstr
-        )
-    
-#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
-@tree_math.struct
-class LWRadiationData:
-    fsfcd: jnp.ndarray
-    dfabs: jnp.ndarray
-    ftop: jnp.ndarray
-    fsfc: jnp.ndarray
-    
-    def __init__(self, nodal_shape, node_levels, fsfcd=None, dfabs=None, ftop=None, fsfc=None) -> None:
-        if fsfcd is not None:
-            self.fsfcd = fsfcd
-        else:
-            self.fsfcd = jnp.zeros((nodal_shape))
         if dfabs is not None:
             self.dfabs = dfabs
         else:
@@ -93,19 +75,61 @@ class LWRadiationData:
             self.ftop = ftop
         else:
             self.ftop = jnp.zeros((nodal_shape))
-        if fsfc is not None:
-            self.fsfc = fsfc
-        else:
-            self.fsfc = jnp.zeros((nodal_shape))
 
-    def copy(self, fsfcd=None, dfabs=None, ftop=None, fsfc=None):
+
+    def copy(self, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+        return SWRadiationData(
+            self.cloudc.shape,
+            qcloud=qcloud if qcloud is not None else self.qcloud,
+            fsol=fsol if fsol is not None else self.fsol,
+            ssrd=ssrd if ssrd is not None else self.ssrd,
+            ssr=ssr if ssr is not None else self.ssr,
+            ozone=ozone if ozone is not None else self.ozone,
+            ozupp=ozupp if ozupp is not None else self.ozupp,
+            zenit=zenit if zenit is not None else self.zenit,
+            stratz=stratz if stratz is not None else self.stratz,
+            gse=gse if gse is not None else self.gse,
+            icltop=icltop if icltop is not None else self.icltop,
+            cloudc=cloudc if cloudc is not None else self.cloudc,
+            cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
+            ftop=ftop if ftop is not None else self.ftop,
+            dfabs=dfabs if dfabs is not None else self.dfabs
+        )
+    
+#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
+@tree_math.struct
+class LWRadiationData:
+    slrd: jnp.ndarray
+    dfabs: jnp.ndarray
+    ftop: jnp.ndarray
+    slr: jnp.ndarray
+    
+    def __init__(self, nodal_shape, node_levels, slrd=None, dfabs=None, ftop=None, slr=None) -> None:
+        if slrd is not None:
+            self.slrd = slrd
+        else:
+            self.slrd = jnp.zeros((nodal_shape))
+        if dfabs is not None:
+            self.dfabs = dfabs
+        else:
+            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
+        if ftop is not None:
+            self.ftop = ftop
+        else:
+            self.ftop = jnp.zeros((nodal_shape))
+        if slr is not None:
+            self.slr = slr
+        else:
+            self.slr = jnp.zeros((nodal_shape))
+
+    def copy(self, slrd=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
             (0,0), 
             0, 
-            fsfcd=fsfcd if fsfcd is not None else self.fsfcd,
+            slrd=slrd if slrd is not None else self.slrd,
             dfabs=dfabs if dfabs is not None else self.dfabs,
             ftop=ftop if ftop is not None else self.ftop,
-            fsfc=fsfc if fsfc is not None else self.fsfc
+            slr=slr if slr is not None else self.slr
         )
 
 @tree_math.struct
@@ -285,3 +309,111 @@ class HumidityData:
             qsat=qsat if qsat is not None else self.qsat
         )
 
+'''
+real(kind=8), intent(out) :: ustr(ix,il,3) !! u-stress
+real(kind=8), intent(out) :: vstr(ix,il,3) !! v-stress
+real(kind=8), intent(out) :: shf(ix,il,3)  !! Sensible heat flux
+real(kind=8), intent(out) :: evap(ix,il,3) !! Evaporation
+real(kind=8), intent(out) :: slru(ix,il,3) !! Upward flux of long-wave radiation at the surface
+real(kind=8), intent(out) :: hfluxn(ix,il,2) !! Net downward heat flux
+real(kind=8), intent(out) :: tsfc(ix,il)   !! Surface temperature
+real(kind=8), intent(out) :: tskin(ix,il)  !! Skin surface temperature
+real(kind=8), intent(out) :: u0(ix,il) !! Near-surface u-wind
+real(kind=8), intent(out) :: v0(ix,il) !! Near-surface v-wind
+real(kind=8), intent(out) :: t0(ix,il) !! Near-surface temperature
+'''
+@tree_math.struct
+class SurfaceFluxData:
+    # Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
+    stl_am: jnp.ndarray
+    soilw_am: jnp.ndarray
+    lfluxland: jnp.bool
+    ustr: jnp.ndarray
+    vstr: jnp.ndarray
+    shf: jnp.ndarray
+    evap: jnp.ndarray
+    slru: jnp.ndarray
+    hfluxn: jnp.ndarray
+    tsfc: jnp.ndarray
+    tskin: jnp.ndarray
+    u0: jnp.ndarray
+    v0: jnp.ndarray
+    t0: jnp.ndarray
+
+    def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None) -> None:
+        if stl_am is not None:
+            self.stl_am = stl_am
+        else:
+            self.stl_am = jnp.full((nodal_shape), 288.0)
+        if soilw_am is not None:
+            self.soilw_am = soilw_am
+        else:
+            self.soilw_am = jnp.full((nodal_shape), 0.5)
+        if lfluxland is not None:
+            self.lfluxland = lfluxland
+        else:
+            self.lfluxland = True
+        if ustr is not None:
+            self.ustr = ustr
+        else:
+            self.ustr = jnp.zeros((nodal_shape)+(3,))
+        if vstr is not None:
+            self.vstr = vstr
+        else:
+            self.vstr = jnp.zeros((nodal_shape)+(3,))
+        if shf is not None:
+            self.shf = shf
+        else:
+            self.shf = jnp.zeros((nodal_shape)+(3,))
+        if evap is not None:
+            self.evap = evap
+        else:
+            self.evap = jnp.zeros((nodal_shape)+(3,))
+        if slru is not None:
+            self.slru = slru
+        else:
+            self.slru = jnp.zeros((nodal_shape)+(3,))
+        if hfluxn is not None:
+            self.hfluxn = hfluxn
+        else:
+            self.hfluxn = jnp.zeros((nodal_shape)+(2,))
+        if tsfc is not None:
+            self.tsfc = tsfc
+        else:
+            self.tsfc = jnp.zeros((nodal_shape))
+        if tskin is not None:
+            self.tskin = tskin
+        else:
+            self.tskin = jnp.zeros((nodal_shape))
+        if u0 is not None:
+            self.u0 = u0
+        else:
+            self.u0 = jnp.zeros((nodal_shape))
+        if v0 is not None:
+            self.v0 = v0
+        else:
+            self.v0 = jnp.zeros((nodal_shape))
+        if t0 is not None:
+            self.t0 = t0
+        else:
+            self.t0 = jnp.zeros((nodal_shape))
+
+    
+    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+        return SurfaceFluxData(
+            self.stl_am.shape,
+            stl_am=stl_am if stl_am is not None else self.stl_am,
+            soilw_am=soilw_am if soilw_am is not None else self.soilw_am,
+            lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
+            ustr=ustr if ustr is not None else self.ustr,
+            vstr=vstr if vstr is not None else self.vstr,
+            shf=shf if shf is not None else self.shf,
+            evap=evap if evap is not None else self.evap,
+            slru=slru if slru is not None else self.slru,
+            hfluxn=hfluxn if hfluxn is not None else self.hfluxn,
+            tsfc=tsfc if tsfc is not None else self.tsfc,
+            tskin=tskin if tskin is not None else self.tskin,
+            u0=u0 if u0 is not None else self.u0,
+            v0=v0 if v0 is not None else self.v0,
+            t0=t0 if t0 is not None else self.t0
+        )

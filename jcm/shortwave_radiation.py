@@ -3,7 +3,8 @@ from jax import jit
 from jax import vmap
 from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
-from jcm.geometry import sia, coa, fmask, fsg, dhs
+from jcm.geometry import sia, coa, fsg, dhs
+from jcm.boundaries import fmask
 from jcm.date import tyear # maybe this can come from somewhere else? like the model instance tracks it? it comes from date.f90 in speedy
 from jax import lax
 
@@ -17,9 +18,9 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     icltop(ix,il)    # Cloud top level
     cloudc(ix,il)    # Total cloud cover
     clstr(ix,il)     # Stratiform cloud cover
-    fsfcd(ix,il)    # Total downward flux of short-wave radiation at
+    ssrd(ix,il)    # Total downward flux of short-wave radiation at
                                             # the surface
-    fsfc(ix,il)     # Net downward flux of short-wave radiation at the
+    ssr(ix,il)     # Net downward flux of short-wave radiation at the
                                             # surface
     ftop(ix,il)     # Net downward flux of short-wave radiation at the
                                             # top of the atmosphere
@@ -101,7 +102,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
     
-    fsfc = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
+    ssr = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
     dfabs = jnp.zeros((ix,il,kx)) # Flux of short-wave radiation absorbed in each atmospheric layer
     ftop = physics_data.shortwave_rad.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
@@ -162,9 +163,9 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     # 4. Shortwave upward flux
 
     # 4.1  Absorption and reflection at the surface
-    fsfcd = flux_1[:,:,kx-1] + flux_2[:,:,kx-1]
+    ssrd = flux_1[:,:,kx-1] + flux_2[:,:,kx-1]
     flux_1 = flux_1.at[:,:,kx-1].multiply(albsfc)
-    fsfc = fsfcd - flux_1[:,:,kx-1]
+    ssr = ssrd - flux_1[:,:,kx-1]
 
     # 4.2  Absorption of upward flux
 
@@ -219,8 +220,8 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
 
     flux = physics_data.mod_radcon.flux.at[:,:,0].set(flux_1[:,:,0]).at[:,:,1].set(flux_2[:,:,kx-1])
     mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
-    longwave_rad_out = physics_data.longwave_rad.copy(fsfc=fsfc, ftop=ftop, dfabs=dfabs,fsfcd=fsfcd)
-    physics_data = physics_data.copy(longwave_rad=longwave_rad_out, mod_radcon=mod_radcon_out)
+    shortwave_rad_out = physics_data.shortwave_rad.copy(ssr=ssr, ftop=ftop, dfabs=dfabs, ssrd=ssrd)
+    physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 

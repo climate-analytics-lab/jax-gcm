@@ -2,12 +2,14 @@ import jax.numpy as jnp
 from jax import jit
 
 # importing custom functions from library
+from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
-from jcm.mod_radcon import emisfc, alb_l, alb_s, snowc
+from jcm.boundaries import fmask, phi0
+from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
-from jcm.params import ix, il, kx
 #from jcm.land_model import stl_am, soilw_am
+from jcm.sea_model import tsea
 
 # constants for surface fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -38,20 +40,12 @@ lskineb = True   # true : redefine skin temp. from energy balance
 
 hdrag = 2000.0 # Height scale for orographic correction
 
-# Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
-stl_am = jnp.full((ix, il), 288.0)
-soilw_am = jnp.full((ix, il), 0.5)
-
 @jit
-def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
-                 tsea, ssrd, slrd, lfluxland=True):
+def get_surface_flux(physics_data: PhysicsData, state: PhysicsState):
     '''
 
     Parameters
     ----------
-    il - latitude
-    ix - longitudes
-
     psa : 2D array
         - Normalised surface pressure
     ua : 3D array
@@ -72,41 +66,33 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         - Fractional land-sea mask
     tsea : 2D array
         - Sea-surface temperature
-    ssrd : 2D array
+    ssrd : 2D array 
         - Downward flux of short-wave radiation at the surface
-    slrd : 2D array
+    slrd : 2D array 
         - Downward flux of long-wave radiation at the surface
     lfluxland : boolean
 
-    Returns
-    -------
-
     '''
+    stl_am = physics_data.surface_flux.stl_am
+    soilw_am = physics_data.surface_flux.soilw_am
+    _, _, kx = state.temperature.shape
+
+    psa = physics_data.convection.psa
+    ua = state.u_wind
+    va = state.v_wind
+    ta = state.temperature
+    qa = state.specific_humidity
+    phi = state.geopotential
+
+    lfluxland = physics_data.surface_flux.lfluxland
+    ssrd = physics_data.shortwave_rad_fluxes.ssrd
+    slrd = physics_data.downward_longwave_rad_fluxes.slrd
+
+    rh = physics_data.humidity.rh
+
     forog = set_orog_land_sfc_drag(phi0)
 
     # Initialize variables
-    ustr = jnp.zeros((ix, il, 3))
-    vstr = jnp.zeros((ix, il, 3))
-    shf = jnp.zeros((ix, il, 3))
-    evap = jnp.zeros((ix, il, 3))
-    slru = jnp.zeros((ix, il, 3))
-    hfluxn = jnp.zeros((ix, il, 2))
-    tsfc = jnp.zeros((ix, il))
-    tskin = jnp.zeros((ix, il))
-    u0 = jnp.zeros((ix, il))
-    v0 = jnp.zeros((ix, il))
-    t0 = jnp.zeros((ix, il))
-
-    t1 = jnp.zeros((ix, il, 2))
-    q1 = jnp.zeros((ix, il, 2))
-    t2 = jnp.zeros((ix, il, 2))
-    qsat0 = jnp.zeros((ix, il, 2))
-    denvvs = jnp.zeros((ix, il, 3))
-    dslr = jnp.zeros((ix, il))
-    dtskin = jnp.zeros((ix, il))
-    clamb = jnp.zeros((ix, il))
-    tsk3 = jnp.zeros((ix, il))
-
     esbc  = emisfc*sbc
     ghum0 = 1.0 - fhum0
 
@@ -156,7 +142,7 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + ctday * jnp.sqrt(coa) * ssrd * (1.0 - alb_l) * psa
+        tskin = stl_am + ctday * jnp.sqrt(coa) * ssrd * (1.0 - physics_data.mod_radcon.alb_l) * psa
 
         # 2.2 Stability Correlation
         rdth  = fstab / dtheta
@@ -200,14 +186,14 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
         slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
         hfluxn = hfluxn.at[:, :, 0].set(
-                        ssrd * (1.0 - alb_l) + slrd -\
+                        ssrd * (1.0 - physics_data.mod_radcon.alb_l) + slrd -\
                             (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                     )
 
         # 3.2 Re-definition of skin temperature from energy balance
         if lskineb:
             # Compute net heat flux including flux into ground
-            clamb = clambda + (snowc * (clambsn - clambda))
+            clamb = clambda + (physics_data.mod_radcon.snowc * (clambsn - clambda))
             hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
             dtskin = tskin + 1.0
 
@@ -268,7 +254,7 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - physics_data.mod_radcon.alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     if lfluxland:
@@ -283,8 +269,12 @@ def get_surface_fluxes(psa, ua, va, ta, qa, rh , phi, phi0, fmask,  \
 
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
+    
+    surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, slru=slru, hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
+    physics_data = physics_data.copy(surface_flux=surface_flux_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 
-    return ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
+    return physics_tendencies, physics_data
 
 @jit
 def set_orog_land_sfc_drag(phi0):
