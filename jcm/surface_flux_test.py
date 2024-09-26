@@ -28,7 +28,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData(xy,8,ssrd=ssrd)
         lw_rad = LWRadiationData(xy,8,slrd=slrd)
         sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,sw_radiation=sw_rad,lw_radiation=lw_rad, sea_model=sea_data)
+        physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,lw_radiation=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(physics_data, state)
         sflux_data = physics_data.surface_flux
