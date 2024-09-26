@@ -131,6 +131,7 @@ class SWRadiationData:
     def copy(self, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             self.cloudc.shape,
+            0,
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
             ssrd=ssrd if ssrd is not None else self.ssrd,
