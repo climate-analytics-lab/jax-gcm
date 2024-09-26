@@ -6,7 +6,7 @@ from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.geometry import sia, coa, fsg, dhs
 from jax import lax
 
-@jit
+# @jit
 def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
@@ -224,7 +224,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     return physics_tendencies, physics_data
 
 
-@jit
+# @jit
 def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
@@ -298,7 +298,7 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     
     return physics_tendencies, physics_data
     
-@jit
+# @jit
 def clouds(physics_data: PhysicsData, state: PhysicsState):
     #import params as p 
     '''
