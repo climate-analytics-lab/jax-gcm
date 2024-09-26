@@ -21,7 +21,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         slrd = 400 * jnp.ones(xy)
         lfluxland = True
 
-        # handle tsea 
         state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
         sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
         hum_data = HumidityData(xy,8,rh=rh)
@@ -47,21 +46,36 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.isclose(sflux_data.t0[0, 0], 290.0, atol=1e-4))
 
     def test_surface_fluxes_test1(self):
-        il, ix, kx = 96, 48, 8
-        psa = jnp.ones((il, ix)) #surface pressure
-        ua = jnp.ones(((il, ix, kx))) #zonal wind
-        va = jnp.ones(((il, ix, kx))) #meridional wind
-        ta = 288. * jnp.ones(((il, ix, kx))) #temperature
-        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
-        rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
-        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
-        fmask = 0.5 * jnp.ones((il, ix)) #land fraction mask
-        tsea = 290. * jnp.ones((il, ix)) #ssts
-        ssrd = 400. * jnp.ones((il, ix)) #surface downward shortwave
-        slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
+        ix, il, kx = 96, 48, 8
+        xy = (ix,il)
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
+            
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,ssrd,slrd,lfluxland)
+        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
+        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData(xy,8,rh=rh)
+        conv_data = ConvectionData(xy,8,psa=psa)
+        sw_rad = SWRadiationData(xy,8,ssrd=ssrd)
+        lw_rad = LWRadiationData(xy,8,slrd=slrd)
+        sea_data = SeaModelData(xy,tsea=tsea)
+        physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,sw_radiation=sw_rad,lw_radiation=lw_rad, sea_model=sea_data)
 
+        _, physics_data = get_surface_fluxes(physics_data, state)
+        sflux_data = physics_data.surface_flux
+
+        # FIXME: these are in the order of the old outputs and need to be renaped to be checked against the members of surfacefluxdata
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
             4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
             9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
@@ -71,9 +85,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             [-9.61105898e-03,-9.61105898e-03, 5.54379463e+01, 3.52742635e-02,
             4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
             9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
-            
-        vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,ssrd,slrd,lfluxland)
-
+        
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
@@ -81,19 +93,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test2(self):
-        il, ix, kx = 96, 48, 8
-        psa = jnp.ones((il, ix)) #surface pressure
-        ua = jnp.ones(((il, ix, kx))) #zonal wind
-        va = jnp.ones(((il, ix, kx))) #meridional wind
-        ta = 288. * jnp.ones(((il, ix, kx))) #temperature
-        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
-        rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
-        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
-        fmask = 0.5 * jnp.ones((il, ix)) #land fraction mask
-        tsea = 290. * jnp.ones((il, ix)) #ssts
-        ssrd = 400. * jnp.ones((il, ix)) #surface downward shortwave
-        slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
+        ix, il, kx = 96, 48, 8
+        psa = jnp.ones((ix, il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
@@ -115,19 +127,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test3(self):
-        il, ix, kx = 96, 48, 8
-        psa = jnp.ones((il, ix)) #surface pressure
-        ua = jnp.ones(((il, ix, kx))) #zonal wind
-        va = jnp.ones(((il, ix, kx))) #meridional wind
-        ta = 288. * jnp.ones(((il, ix, kx))) #temperature
-        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
-        rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
-        phi0 = -10. * jnp.ones((il, ix)) #surface geopotential
-        fmask = 0.5 * jnp.ones((il, ix)) #land fraction mask
-        tsea = 290. * jnp.ones((il, ix)) #ssts
-        ssrd = 400. * jnp.ones((il, ix)) #surface downward shortwave
-        slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
+        ix, il, kx = 96, 48, 8
+        psa = jnp.ones((ix, il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.05182373e+02, 4.66440842e-02,
@@ -149,19 +161,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test4(self):
-        il, ix, kx = 96, 48, 8
-        psa = jnp.ones((il, ix)) #surface pressure
-        ua = jnp.ones(((il, ix, kx))) #zonal wind
-        va = jnp.ones(((il, ix, kx))) #meridional wind
-        ta = 300. * jnp.ones(((il, ix, kx))) #temperature
-        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
-        rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
-        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
-        fmask = 0.5 * jnp.ones((il, ix)) #land fraction mask
-        tsea = 290. * jnp.ones((il, ix)) #ssts
-        ssrd = 400. * jnp.ones((il, ix)) #surface downward shortwave
-        slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
+        ix, il, kx = 96, 48, 8
+        psa = jnp.ones((ix, il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 300. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
         test_data = jnp.array([[-1.98534015e-03,-1.98534015e-03, 3.40381584e+01, 2.68966686e-02,
@@ -183,19 +195,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test5(self):
-        il, ix, kx = 96, 48, 8
-        psa = jnp.ones((il, ix)) #surface pressure
-        ua = jnp.ones(((il, ix, kx))) #zonal wind
-        va = jnp.ones(((il, ix, kx))) #meridional wind
-        ta = 285. * jnp.ones(((il, ix, kx))) #temperature
-        qa = 5. * jnp.ones(((il, ix, kx))) #temperature
-        rh = 0.8 * jnp.ones(((il, ix, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((il, ix, kx))) #geopotential
-        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
-        fmask = 0.5 * jnp.ones((il, ix)) #land fraction mask
-        tsea = 290. * jnp.ones((il, ix)) #ssts
-        ssrd = 400. * jnp.ones((il, ix)) #surface downward shortwave
-        slrd = 400. * jnp.ones((il, ix)) #surface downward longwave
+        ix, il, kx = 96, 48, 8
+        psa = jnp.ones((ix, il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 285. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
         test_data = jnp.array([[-6.3609974e-03,-6.3609974e-03, 1.5656566e+02, 5.3803049e-02,
@@ -217,9 +229,9 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_drag_test(self):
-        il, ix, kx = 96, 48, 8
+        ix, il, kx = 96, 48, 8
 
-        phi0 = 500. * jnp.ones((il, ix)) #surface geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
 
         forog_test = set_orog_land_sfc_drag( phi0 )
         
