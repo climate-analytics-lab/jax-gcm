@@ -44,7 +44,7 @@ class TestHumidityUnit(unittest.TestCase):
         humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx,psa=pressure)
         physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg)
+        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
         self.assertIsNotNone(physics_data.humidity.rh)
@@ -84,7 +84,7 @@ class TestHumidityUnit(unittest.TestCase):
         humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx,psa=pressure)
         physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg)
+        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)

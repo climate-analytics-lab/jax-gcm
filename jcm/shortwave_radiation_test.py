@@ -115,7 +115,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData(xy, kx, gse=gse)
         date_data = DateData(tyear=tyear)
 
-        physics_data = PhysicsData(surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=jnp.zeros_like(qa), surface_pressure=jnp.zeros(xy))
 
         _, physics_data = clouds(physics_data, state)
@@ -181,7 +181,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         date_data = DateData(tyear=tyear)
-        physics_data = PhysicsData(date=date_data)
+        physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(physics_data, state)
         

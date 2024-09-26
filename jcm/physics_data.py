@@ -31,7 +31,7 @@ class SWRadiationData:
     cloudc: jnp.ndarray
     cloudstr: jnp.ndarray
     ftop: jnp.ndarray
-    fdabs: jnp.ndarray
+    dfabs: jnp.ndarray
 
     def __init__(self, nodal_shape, node_levels, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None) -> None:
         if qcloud is not None:
