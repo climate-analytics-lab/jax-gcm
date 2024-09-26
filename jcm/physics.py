@@ -121,7 +121,7 @@ def get_physical_tendencies(
     # optionally initialize the physics data here if it needs to be 
 
     for term in physics_terms:
-        tend, data = term(physics_state, data)
+        tend, data = term(data, physics_state)
         physics_tendency += tend
 
     #physics_tendency = sum(term(physics_state) for term in physics_terms)
