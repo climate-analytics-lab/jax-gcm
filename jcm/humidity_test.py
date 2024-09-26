@@ -24,13 +24,13 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values")
 
         # Edge case: Very low temperature
-        temp = jnp.array([[[100] * 96] * 48])
+        temp = jnp.ones((96,48))*100
         qsat = humidity.get_qsat(temp, pressure, sigma)
         self.assertIsNotNone(qsat)
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at low temperature")
 
         # Edge case: Very high temperature
-        temp = jnp.array([[[350] * 96] * 48])
+        temp = jnp.ones((96,48))*350
         qsat = humidity.get_qsat(temp, pressure, sigma)
         self.assertIsNotNone(qsat)
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at high temperature")
