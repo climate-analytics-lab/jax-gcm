@@ -4,11 +4,7 @@ from jax import vmap
 from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.geometry import sia, coa, fsg, dhs
-from jcm.boundaries import fmask
-from jcm.date import tyear # maybe this can come from somewhere else? like the model instance tracks it? it comes from date.f90 in speedy
 from jax import lax
-
-# check fmask (where it comes from, whether it's defined properly) - check any "using" statements in the fortran code to make sure we've caught any variables that should be updated
 
 @jit
 def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
@@ -253,7 +249,7 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
     ix, il, _ = state.temperature.shape
 
     # Alpha = year phase (0 - 2pi, 0 = winter solstice = 22 Dec)
-    alpha = 4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)
+    alpha = 4.0 * jnp.arcsin(1.0) * (physics_data.date.tyear + 10.0 / 365.0)
     dalpha = 0.0
 
     coz1 = jnp.maximum(0.0, jnp.cos(alpha - dalpha))
@@ -268,7 +264,7 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
 
     # Solar radiation at the top
     topsr = jnp.zeros(il)
-    topsr = solar(tyear,4*solc)
+    topsr = solar(physics_data.date.tyear,4*solc)
     
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
@@ -305,7 +301,6 @@ def get_zonal_average_fields(physics_data: PhysicsData, state: PhysicsState):
 @jit
 def clouds(physics_data: PhysicsData, state: PhysicsState):
     #import params as p 
-    from jcm.params import kx 
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -331,6 +326,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     conv = physics_data.convection
     condensation = physics_data.condensation
     swrad = physics_data.shortwave_rad
+    kx = state.temperature.shape[2]
 
     # Constants
     rhcl1   = 0.30  # Relative humidity threshold corresponding to cloud cover = 0
@@ -393,7 +389,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
-    clstr = clstr + fmask * (clstrl - clstr)
+    clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
 
     swrad_out = physics_data.swrad.copy(icltop=icltop, cloudc=cloudc, clstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

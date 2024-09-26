@@ -5,11 +5,10 @@ to the specific physics being used.
 '''
 
 from collections import abc
-import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.physics_data import LWRadiationData, SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData
+from jcm.physics_data import LWRadiationData, SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData, DateData
 
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
@@ -33,8 +32,9 @@ class PhysicsData:
     humidity: HumidityData
     condensation: CondensationData
     surface_flux: SurfaceFluxData
+    date: DateData
 
-    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None) -> None:
+    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None) -> None:
         if shortwave_rad is not None:
             self.shortwave_rad = shortwave_rad
         else:
@@ -63,8 +63,12 @@ class PhysicsData:
             self.surface_flux = surface_flux
         else:
             self.surface_flux = SurfaceFluxData(nodal_shape)
+        if date is not None:
+            self.date = date
+        else:
+            self.date = DateData()
 
-    def copy(self,shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None):
+    def copy(self,shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None):
         return PhysicsData(
             (0,0),
             0,
@@ -74,7 +78,8 @@ class PhysicsData:
             mod_radcon if mod_radcon is not None else self.mod_radcon,
             humidity if humidity is not None else self.humidity,
             condensation if condensation is not None else self.condensation,
-            surface_flux if surface_flux is not None else self.surface_flux
+            surface_flux if surface_flux is not None else self.surface_flux,
+            date if date is not None else self.date
         )
 
 @tree_math.struct

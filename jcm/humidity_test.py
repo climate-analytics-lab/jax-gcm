@@ -4,7 +4,7 @@ from jcm.convection import ConvectionData
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency 
 from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
-# (see the note about the test for spec_hum_to_rel_hum)
+# spec_hum_to_rel_hum no longer takes sigma as an argument. it does all sigma levels
 
 class TestHumidityUnit(unittest.TestCase):
 
@@ -39,7 +39,6 @@ class TestHumidityUnit(unittest.TestCase):
     def test_spec_hum_to_rel_hum(self):
         temp = self.temp_standard
         pressure = self.pressure_standard
-        sigma = self.sigma # FIXME: spec_hum_to_rel_hum no longer takes sigma, it does all sigma levels, this needs to be changed
         qg = self.qg_standard
 
         humidity_data = humidity.HumidityData((96,48), kx)

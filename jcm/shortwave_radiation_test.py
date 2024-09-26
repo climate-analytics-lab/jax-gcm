@@ -1,5 +1,4 @@
 import unittest
-import pytest
 import jax.numpy as jnp
 import numpy as np
 from jax import random
@@ -9,6 +8,8 @@ from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix, kx
 from jcm.geometry import sia
 from jcm.physics import SWRadiationData
+from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
+from jcm.physics_data import LWRadiationData, SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData, DateData 
 
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
@@ -105,23 +106,23 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * np.ones(xy)
         gse = .01 * np.ones(xy)
         fmask = .7 * np.ones(xy)
-
-        icltop, cloudc, clstr, qcloud = clouds(qa, rh, precnv, precls, iptop, gse, fmask)
-
         tyear = 0.6
-        fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(tyear)
 
-        sw_data = SWRadiationData(
-            qcloud = qcloud,
-            fsol = fsol,
-            ozone = ozone,
-            ozupp = ozupp,
-            zenit = zenit,
-            stratz = stratz
-        )
+        surface_flux = SurfaceFluxData(xy,fmask=fmask)
+        humidity = HumidityData(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData(xy, kx, psa=psa, iptop=iptop, precnv=precnv)
+        condensation = CondensationData(xy, kx, precls=precls)
+        sw_data = SWRadiationData(xy, kx, gse=gse)
+        date_data = DateData(tyear=tyear)
 
-        fsfcd, fsfc, ftop, dfabs = get_shortwave_rad_fluxes(psa, qa, icltop, cloudc, clstr, sw_data=sw_data)
-        self.assertTrue(np.allclose(fsfcd[0, :], [
+        physics_data = PhysicsData(surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=jnp.zeros_like(qa), surface_pressure=jnp.zeros(xy))
+
+        _, physics_data = clouds(physics_data, state)
+        _, physics_data = get_zonal_average_fields(physics_data, state)
+        _, physics_data = get_shortwave_rad_fluxes(physics_data, state)
+        
+        self.assertTrue(np.allclose(sw_data.ssrd[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
@@ -131,7 +132,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             186.12903619, 185.31120169, 183.42677496
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(fsfc[0, :], [
+        self.assertTrue(np.allclose(sw_data.ssr[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
@@ -141,7 +142,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             186.12903619, 185.31120169, 183.42677496
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(ftop[0, :], [
+        self.assertTrue(np.allclose(sw_data.ftop[0, :], [
             0., 0., 0., 0., 1.93599586, 13.84635135, 29.51685016, 46.89146027, 65.11718871, 83.73023451,
             102.44168978, 121.0533787, 139.41874296, 157.42199198, 174.96630874, 191.96679879, 208.34607385,
             224.03188495, 238.95538028, 253.05068109, 266.25471774, 278.50725748, 289.75158834, 299.9350031,
@@ -151,7 +152,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             284.20954594, 288.1834261, 291.08877534
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(np.mean(dfabs, axis=2)[0, :], [
+        self.assertTrue(np.allclose(np.mean(sw_data.dfabs, axis=2)[0, :], [
             0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
             4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
             8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
@@ -161,73 +162,93 @@ class TestShortWaveRadiation(unittest.TestCase):
             13.45775005
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(np.mean(dfabs, axis=1)[0, :], [
+        self.assertTrue(np.allclose(np.mean(sw_data.dfabs, axis=1)[0, :], [
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
         ], atol=1e-4))
 
 
-    def setUp(self):
-        # Set up test case with known inputs
-        self.tyear = 0.25  # Example time of the year (spring equinox)
-        self.solc = solc
-        self.il = il
-        self.ix = ix
-        self.epssw = epssw
+    # def setUp(self):
+    #     # Set up test case with known inputs
+    #     self.tyear = 0.25  # Example time of the year (spring equinox)
+    #     self.solc = solc
+    #     self.il = il
+    #     self.ix = ix
+    #     self.epssw = epssw
 
     def test_output_shapes(self):
         # Ensure that the output shapes are correct
-        fsol, ozupp, ozone, stratz, zenit = get_zonal_average_fields(
-            self.tyear
-        )
+        tyear = 0.25
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        date_data = DateData(tyear=tyear)
+        physics_data = PhysicsData(date=date_data)
+        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        _, physics_data = get_zonal_average_fields(physics_data, state)
         
-        self.assertEqual(fsol.shape, (self.ix, self.il))
-        self.assertEqual(ozupp.shape, (self.ix, self.il))
-        self.assertEqual(ozone.shape, (self.ix, self.il))
-        self.assertEqual(stratz.shape, (self.ix, self.il))
-        self.assertEqual(zenit.shape, (self.ix, self.il))
+        self.assertEqual(physics_data.shortwave_rad.fsol.shape, (self.ix, self.il))
+        self.assertEqual(physics_data.shortwave_rad.ozupp.shape, (self.ix, self.il))
+        self.assertEqual(physics_data.shortwave_rad.ozone.shape, (self.ix, self.il))
+        self.assertEqual(physics_data.shortwave_rad.stratz.shape, (self.ix, self.il))
+        self.assertEqual(physics_data.shortwave_rad.zenit.shape, (self.ix, self.il))
 
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
-        fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
-            self.tyear
-        )
-        
-        topsr = solar(self.tyear)
-        self.assertTrue(jnp.allclose(fsol[:, 0], topsr[0]))
+        tyear = 0.25
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        date_data = DateData(tyear=tyear)
+        physics_data = PhysicsData(date=date_data)
+        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        _, physics_data = get_zonal_average_fields(physics_data, state)
+
+        topsr = solar(tyear)
+        self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
-        fsol, ozupp, ozone, zenit, stratz, = get_zonal_average_fields(
-            self.tyear
-        )
-        
+        tyear = 0.25
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        date_data = DateData(tyear=tyear)
+        physics_data = PhysicsData(date=date_data)
+        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        _, physics_data = get_zonal_average_fields(physics_data, state)
+
         fs0 = 6.0
-        self.assertTrue(jnp.all(stratz >= 0))
-        self.assertTrue(jnp.all(jnp.maximum(fs0 - fsol, 0) == stratz))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
+        self.assertTrue(jnp.all(jnp.maximum(fs0 - physics_data.shortwave_rad.fsol, 0) == physics_data.shortwave_rad.stratz))
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
-        fsol, ozupp, ozone, zenit, stratz = get_zonal_average_fields(
-            self.tyear
-        )
-        
+        tyear = 0.25
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        date_data = DateData(tyear=tyear)
+        physics_data = PhysicsData(date=date_data)
+        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        _, physics_data = get_zonal_average_fields(physics_data, state)
+
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
-        expected_ozone = 0.4 * self.epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (self.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
+        expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         print
-        self.assertTrue(jnp.allclose(ozone[:, 0], fsol[:, 0] * expected_ozone[0]))
+        self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
     def test_random_input_consistency(self):
-        # Check that random inputs produce consistent outputs
-        key = random.PRNGKey(0)
+        # # Check that random inputs produce consistent outputs
+        # key = random.PRNGKey(0)
         
-        fsol, ozupp, ozone, zenit, stratz= get_zonal_average_fields(
-            self.tyear
-        )
+        tyear = 0.25
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        date_data = DateData(tyear=tyear)
+        physics_data = PhysicsData(date=date_data)
+        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        _, physics_data = get_zonal_average_fields(physics_data, state)
         
         # Ensure outputs are consistent and within expected ranges
-        self.assertTrue(jnp.all(fsol >= 0))
-        self.assertTrue(jnp.all(ozupp >= 0))
-        self.assertTrue(jnp.all(ozone >= 0))
-        self.assertTrue(jnp.all(stratz >= 0))
-        self.assertTrue(jnp.all(zenit >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.ozupp >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.ozone >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.zenit >= 0))

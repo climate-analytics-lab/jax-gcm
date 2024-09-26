@@ -2,6 +2,21 @@ import jax.numpy as jnp
 import tree_math
 
 @tree_math.struct
+class DateData:
+    tyear: jnp.ndarray
+
+    def __init__(self, tyear=None) -> None:
+        if tyear is not None:
+            self.tyear = tyear
+        else:
+            self.tyear = jnp.zeros((1))
+
+    def copy(self, tyear=None):
+        return DateData(
+            tyear if tyear is not None else self.tyear
+        )
+    
+@tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray
     fsol: jnp.ndarray
@@ -309,19 +324,6 @@ class HumidityData:
             qsat=qsat if qsat is not None else self.qsat
         )
 
-'''
-real(kind=8), intent(out) :: ustr(ix,il,3) !! u-stress
-real(kind=8), intent(out) :: vstr(ix,il,3) !! v-stress
-real(kind=8), intent(out) :: shf(ix,il,3)  !! Sensible heat flux
-real(kind=8), intent(out) :: evap(ix,il,3) !! Evaporation
-real(kind=8), intent(out) :: slru(ix,il,3) !! Upward flux of long-wave radiation at the surface
-real(kind=8), intent(out) :: hfluxn(ix,il,2) !! Net downward heat flux
-real(kind=8), intent(out) :: tsfc(ix,il)   !! Surface temperature
-real(kind=8), intent(out) :: tskin(ix,il)  !! Skin surface temperature
-real(kind=8), intent(out) :: u0(ix,il) !! Near-surface u-wind
-real(kind=8), intent(out) :: v0(ix,il) !! Near-surface v-wind
-real(kind=8), intent(out) :: t0(ix,il) !! Near-surface temperature
-'''
 @tree_math.struct
 class SurfaceFluxData:
     # Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
@@ -339,8 +341,9 @@ class SurfaceFluxData:
     u0: jnp.ndarray
     v0: jnp.ndarray
     t0: jnp.ndarray
+    fmask: jnp.ndarray
 
-    def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None) -> None:
+    def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None) -> None:
         if stl_am is not None:
             self.stl_am = stl_am
         else:
@@ -397,9 +400,13 @@ class SurfaceFluxData:
             self.t0 = t0
         else:
             self.t0 = jnp.zeros((nodal_shape))
+        if fmask is not None:
+            self.fmask = fmask
+        else:
+            self.fmask = jnp.zeros((nodal_shape))
 
     
-    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None):
         return SurfaceFluxData(
             self.stl_am.shape,
             stl_am=stl_am if stl_am is not None else self.stl_am,
@@ -415,5 +422,6 @@ class SurfaceFluxData:
             tskin=tskin if tskin is not None else self.tskin,
             u0=u0 if u0 is not None else self.u0,
             v0=v0 if v0 is not None else self.v0,
-            t0=t0 if t0 is not None else self.t0
+            t0=t0 if t0 is not None else self.t0,
+            fmask=fmask if fmask is not None else self.fmask
         )

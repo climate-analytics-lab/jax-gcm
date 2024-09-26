@@ -5,7 +5,7 @@ from jax import jit
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
-from jcm.boundaries import fmask, phi0
+from jcm.boundaries import phi0
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 #from jcm.land_model import stl_am, soilw_am
@@ -83,6 +83,7 @@ def get_surface_flux(physics_data: PhysicsData, state: PhysicsState):
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
+    fmask = physics_data.surface_flux.fmask
 
     lfluxland = physics_data.surface_flux.lfluxland
     ssrd = physics_data.shortwave_rad_fluxes.ssrd
