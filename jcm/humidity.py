@@ -5,7 +5,8 @@ saturation specific humidity.
 '''
 
 import jax.numpy as jnp
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 from jcm.geometry import fsg
 import jax 
 

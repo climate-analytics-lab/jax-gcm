@@ -2,7 +2,8 @@ import jax.numpy as jnp
 from jax import jit
 
 # importing custom functions from library
-from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
+from jcm.physics import PhysicsTendency, PhysicsState
+from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
 # from jcm.boundaries import phi0

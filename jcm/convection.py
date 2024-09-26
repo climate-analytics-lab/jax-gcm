@@ -5,7 +5,8 @@ version of the Tiedke (1993) mass-flux convection scheme.
 '''
 import jax
 import jax.numpy as jnp
-from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
+from jcm.physics import PhysicsTendency, PhysicsState
+from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
 from jcm.geometry import dhs, fsg
 

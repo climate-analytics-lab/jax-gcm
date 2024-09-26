@@ -2,7 +2,8 @@ import jax.numpy as jnp
 from jax import jit
 from jax import vmap
 from jcm.physical_constants import epssw, solc
-from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
+from jcm.physics import PhysicsTendency, PhysicsState
+from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
 from jcm.mod_radcon import epslw
 from jax import lax

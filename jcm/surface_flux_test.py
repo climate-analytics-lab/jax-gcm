@@ -1,6 +1,6 @@
 import unittest
 from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
-from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData
+from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
 from jcm.physics import PhysicsData, PhysicsState
 import jax.numpy as jnp
 

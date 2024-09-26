@@ -7,9 +7,8 @@ from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get
 from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix, kx
 from jcm.geometry import sia
-from jcm.physics import SWRadiationData
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
-from jcm.physics_data import LWRadiationData, SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData, DateData 
+from jcm.physics import PhysicsState
+from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData, DateData, PhysicsData
 
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 

@@ -448,3 +448,68 @@ class SurfaceFluxData:
             fmask=fmask if fmask is not None else self.fmask,
             phi0=phi0 if phi0 is not None else self.phi0
         )
+    
+@tree_math.struct
+class PhysicsData:
+    shortwave_rad: SWRadiationData
+    longwave_rad: LWRadiationData
+    convection: ConvectionData
+    mod_radcon: ModRadConData
+    humidity: HumidityData
+    condensation: CondensationData
+    surface_flux: SurfaceFluxData
+    date: DateData
+    sea_model: SeaModelData
+
+    def __init__(self, nodal_shape, node_levels,shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None) -> None:
+        if longwave_rad is not None:
+            self.longwave_rad = longwave_rad
+        else:
+            self.longwave_rad = LWRadiationData(nodal_shape, node_levels)
+        if shortwave_rad is not None:
+            self.shortwave_rad = shortwave_rad
+        else:
+            self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
+        if convection is not None:
+            self.convection = convection
+        else:
+            self.convection = ConvectionData(nodal_shape, node_levels)
+        if mod_radcon is not None:
+            self.mod_radcon = mod_radcon
+        else:
+            self.mod_radcon = ModRadConData(nodal_shape, node_levels)
+        if humidity is not None:
+            self.humidity = humidity
+        else:
+            self.humidity = HumidityData(nodal_shape, node_levels)
+        if condensation is not None:
+            self.condensation = condensation
+        else:
+            self.condensation = CondensationData(nodal_shape, node_levels)
+        if surface_flux is not None:
+            self.surface_flux = surface_flux
+        else:
+            self.surface_flux = SurfaceFluxData(nodal_shape)
+        if date is not None:
+            self.date = date
+        else:
+            self.date = DateData()
+        if sea_model is not None:
+            self.sea_model = sea_model
+        else:
+            self.sea_model = SeaModelData(nodal_shape)
+
+    def copy(self,shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+        return PhysicsData(
+            (0,0),
+            0,
+            shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
+            longwave_rad if longwave_rad is not None else self.longwave_rad,
+            convection if convection is not None else self.convection,
+            mod_radcon if mod_radcon is not None else self.mod_radcon,
+            humidity if humidity is not None else self.humidity,
+            condensation if condensation is not None else self.condensation,
+            surface_flux if surface_flux is not None else self.surface_flux,
+            date if date is not None else self.date,
+            sea_model if sea_model is not None else self.sea_model
+        )

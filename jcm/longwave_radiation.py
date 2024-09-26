@@ -2,7 +2,8 @@ import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi
 from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 nband = 4
 
 def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):

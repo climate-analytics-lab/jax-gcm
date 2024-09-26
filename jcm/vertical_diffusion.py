@@ -3,7 +3,8 @@ from jax import jit
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
 from jcm.params import ix, il, kx
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 
 trshc = jnp.array(6.0)  # Relaxation time (in hours) for shallow convection
 trvdi = jnp.array(24.0)  # Relaxation time (in hours) for moisture diffusion
