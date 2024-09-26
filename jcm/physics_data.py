@@ -118,14 +118,14 @@ class SWRadiationData:
             self.cloudstr = cloudstr
         else:
             self.cloudstr = jnp.zeros((nodal_shape))
-        if dfabs is not None:
-            self.dfabs = dfabs
-        else:
-            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
         if ftop is not None:
             self.ftop = ftop
         else:
             self.ftop = jnp.zeros((nodal_shape))
+        if dfabs is not None:
+            self.dfabs = dfabs
+        else:
+            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
 
 
     def copy(self, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):

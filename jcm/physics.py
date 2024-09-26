@@ -35,14 +35,14 @@ class PhysicsData:
     date: DateData
 
     def __init__(self, nodal_shape, node_levels,shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None) -> None:
-        if shortwave_rad is not None:
-            self.shortwave_rad = shortwave_rad
-        else:
-            self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
         if longwave_rad is not None:
             self.longwave_rad = longwave_rad
         else:
             self.longwave_rad = LWRadiationData(nodal_shape, node_levels)
+        if shortwave_rad is not None:
+            self.shortwave_rad = shortwave_rad
+        else:
+            self.shortwave_rad = SWRadiationData(nodal_shape, node_levels)
         if convection is not None:
             self.convection = convection
         else:
