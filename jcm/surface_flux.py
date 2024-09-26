@@ -86,8 +86,8 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     fmask = physics_data.surface_flux.fmask
 
     lfluxland = physics_data.surface_flux.lfluxland
-    ssrd = physics_data.shortwave_rad_fluxes.ssrd
-    slrd = physics_data.downward_longwave_rad_fluxes.slrd
+    ssrd = physics_data.shortwave_rad.ssrd
+    slrd = physics_data.longwave_rad.slrd
 
     rh = physics_data.humidity.rh
     phi0 = physics_data.surface_flux.phi0
