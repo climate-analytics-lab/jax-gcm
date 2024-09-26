@@ -86,7 +86,7 @@ class TestHumidityUnit(unittest.TestCase):
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
-        qa, _ = humidity.rel_hum_to_spec_hum(temp, pressure, sigma, physics_data.humidity.rh)
+        qa, _ = humidity.rel_hum_to_spec_hum(temp, pressure, sigma, physics_data.humidity.rh[:,:,sigma])
 
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
