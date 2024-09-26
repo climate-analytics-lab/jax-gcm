@@ -3,7 +3,7 @@ from jax import jit
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
 from jcm.params import ix, il, kx
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendencies
+from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
 
 trshc = jnp.array(6.0)  # Relaxation time (in hours) for shallow convection
 trvdi = jnp.array(24.0)  # Relaxation time (in hours) for moisture diffusion
@@ -111,7 +111,7 @@ def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
     
 
-    physics_tendencies = PhysicsTendencies(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
 
     # have not updated physics_data, can just return the instance we were passed 
     return physics_tendencies, physics_data
