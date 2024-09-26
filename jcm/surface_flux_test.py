@@ -1,7 +1,6 @@
 import unittest
 from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 import jax.numpy as jnp
-import csv
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
     def test_updated_surface_flux(self):

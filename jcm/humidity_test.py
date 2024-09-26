@@ -1,8 +1,8 @@
 import unittest
 from jcm import humidity
-from jcm.convection import ConvectionData
+from jcm.physics_data import ConvectionData
 import jax.numpy as jnp
-from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency 
+from jcm.physics import PhysicsData, PhysicsState
 from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
 # spec_hum_to_rel_hum no longer takes sigma as an argument. it does all sigma levels
 

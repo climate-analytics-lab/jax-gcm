@@ -5,7 +5,6 @@ Parametrization of large-scale condensation.
 
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
-from jcm.convection import ConvectionData
 from jcm.physical_constants import p0, cp, alhc, grav
 from jcm.geometry import fsg, dhs
 

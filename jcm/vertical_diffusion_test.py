@@ -1,5 +1,5 @@
 import unittest
-from jcm import vertical_diffusion
+from jcm.vertical_diffusion import get_vertical_diffusion_tend
 import jax.numpy as jnp
 import numpy as np
 
@@ -13,7 +13,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         phi = jnp.ones((96,48))[:,:,jnp.newaxis] * jnp.linspace(150000,0,8)[jnp.newaxis, jnp.newaxis, :]
         icnv = jnp.ones((96,48))*6
         
-        utenvd, vtenvd, ttenvd, qtenvd = vertical_diffusion.get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
+        utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
         np.testing.assert_array_almost_equal(utenvd[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
         np.testing.assert_array_almost_equal(vtenvd[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
         np.testing.assert_array_almost_equal(ttenvd[20, 20], np.asarray([-2.4538091e-04, -3.8170350e-05,  4.4986453e-05,  1.0326448e-04, 1.3632278e-04,  1.5194372e-04,  1.4609606e-04,  2.5449507e-04]))
