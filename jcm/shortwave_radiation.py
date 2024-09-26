@@ -391,7 +391,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
 
-    swrad_out = physics_data.shortwave_rad.copy(icltop=icltop, cloudc=cloudc, clstr=clstr, qcloud=qcloud) 
+    swrad_out = physics_data.shortwave_rad.copy(icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
