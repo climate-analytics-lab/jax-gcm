@@ -4,6 +4,7 @@ from jax import vmap
 from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.geometry import sia, coa, fsg, dhs
+from jcm.mod_radcon import epslw
 from jax import lax
 
 # @jit
@@ -34,7 +35,6 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     clstr = physics_data.shortwave_rad.cloudstr
 
     # mod_radcon inputs
-    epslw = physics_data.mod_radcon.epslw
     albsfc = physics_data.mod_radcon.albsfc
 
     # Shortwave radiation and cloud constants
