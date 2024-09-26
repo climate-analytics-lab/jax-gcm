@@ -206,7 +206,7 @@ class ModRadConData:
 
     def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
-            self.albl.shape, 
+            self.alb_l.shape, 
             0, # this value isn't necessary since we will pass through values for each member of the struct
             fband=fband if fband is not None else self.fband,
             alb_l=alb_l if alb_l is not None else self.alb_l,
