@@ -1,5 +1,7 @@
 import unittest
 from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
+from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData
+from jcm.physics import PhysicsData, PhysicsState
 import jax.numpy as jnp
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
@@ -12,26 +14,37 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         qa = jnp.ones(xyz)
         rh = jnp.ones(xyz) * 0.5   
         phi = jnp.ones(xyz) * (jnp.arange(8))[None, None, ::-1]
-        phi0 = jnp.zeros(xy)
+        phi0 = jnp.zeros(xy) 
         fmask = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones(xy) * 292
+        tsea = jnp.ones(xy) * 292 # this needs to overwrite what is in sea_model? 
         ssrd = 400 * jnp.ones(xy)
         slrd = 400 * jnp.ones(xy)
         lfluxland = True
 
-        ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0 = get_surface_fluxes(psa, ua, va, ta, qa, rh, phi, phi0, fmask, tsea, ssrd, slrd, lfluxland)
-        
-        self.assertTrue(jnp.allclose(ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
-        self.assertTrue(jnp.allclose(vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
-        self.assertTrue(jnp.allclose(shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
-        self.assertTrue(jnp.allclose(evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
-        self.assertTrue(jnp.allclose(slru[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
-        self.assertTrue(jnp.allclose(hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
-        self.assertTrue(jnp.isclose(tsfc[0, 0], 290.0, atol=1e-4))
-        self.assertTrue(jnp.isclose(tskin[0, 0], 297.22821044921875, atol=1e-4))
-        self.assertTrue(jnp.isclose(u0[0, 0], 0.949999988079071, atol=1e-4))
-        self.assertTrue(jnp.isclose(v0[0, 0], 0.949999988079071, atol=1e-4))
-        self.assertTrue(jnp.isclose(t0[0, 0], 290.0, atol=1e-4))
+        # handle tsea 
+        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
+        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData(xy,8,rh=rh)
+        conv_data = ConvectionData(xy,8,psa=psa)
+        sw_rad = SWRadiationData(xy,8,ssrd=ssrd)
+        lw_rad = LWRadiationData(xy,8,slrd=slrd)
+        sea_data = SeaModelData(xy,tsea=tsea)
+        physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,sw_radiation=sw_rad,lw_radiation=lw_rad, sea_model=sea_data)
+
+        _, physics_data = get_surface_fluxes(physics_data, state)
+        sflux_data = physics_data.surface_flux
+
+        self.assertTrue(jnp.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.slru[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
+        self.assertTrue(jnp.isclose(sflux_data.tsfc[0, 0], 290.0, atol=1e-4))
+        self.assertTrue(jnp.isclose(sflux_data.tskin[0, 0], 297.22821044921875, atol=1e-4))
+        self.assertTrue(jnp.isclose(sflux_data.u0[0, 0], 0.949999988079071, atol=1e-4))
+        self.assertTrue(jnp.isclose(sflux_data.v0[0, 0], 0.949999988079071, atol=1e-4))
+        self.assertTrue(jnp.isclose(sflux_data.t0[0, 0], 290.0, atol=1e-4))
 
     def test_surface_fluxes_test1(self):
         il, ix, kx = 96, 48, 8

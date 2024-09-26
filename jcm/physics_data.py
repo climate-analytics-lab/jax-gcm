@@ -220,6 +220,22 @@ class ModRadConData:
         )
 
 @tree_math.struct
+class SeaModelData:
+    tsea: jnp.ndarray
+    
+    def __init__(self, nodal_shape, tsea=None) -> None:
+        if tsea is not None:
+            self.tsea = tsea
+        else:
+            self.tsea = jnp.zeros((nodal_shape))
+
+    def copy(self, tsea=None):
+        return CondensationData(
+            self.tsea.shape,
+            tsea=tsea if tsea is not None else self.tsea, 
+        )
+
+@tree_math.struct
 class CondensationData:
     precls: jnp.ndarray
     dtlsc: jnp.ndarray
@@ -343,9 +359,9 @@ class SurfaceFluxData:
     v0: jnp.ndarray
     t0: jnp.ndarray
     fmask: jnp.ndarray
-    phi: jnp.ndarray
+    phi0: jnp.ndarray
 
-    def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi=None) -> None:
+    def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None) -> None:
         if stl_am is not None:
             self.stl_am = stl_am
         else:
@@ -406,13 +422,13 @@ class SurfaceFluxData:
             self.fmask = fmask
         else:
             self.fmask = jnp.zeros((nodal_shape))
-        if phi is not None:
-            self.phi = phi
+        if phi0 is not None:
+            self.phi0 = phi0
         else:
-            self.phi = jnp.zeros((nodal_shape))
+            self.phi0 = jnp.zeros((nodal_shape))
 
     
-    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi=None):
+    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
         return SurfaceFluxData(
             self.stl_am.shape,
             stl_am=stl_am if stl_am is not None else self.stl_am,
@@ -430,5 +446,5 @@ class SurfaceFluxData:
             v0=v0 if v0 is not None else self.v0,
             t0=t0 if t0 is not None else self.t0,
             fmask=fmask if fmask is not None else self.fmask,
-            phi=phi if phi is not None else self.phi
+            phi0=phi0 if phi0 is not None else self.phi0
         )

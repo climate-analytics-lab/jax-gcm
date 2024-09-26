@@ -9,7 +9,7 @@ from jcm.geometry import coa
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 #from jcm.land_model import stl_am, soilw_am
-from jcm.sea_model import tsea
+# from jcm.sea_model import tsea
 
 # constants for surface fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -91,6 +91,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
 
     rh = physics_data.humidity.rh
     phi0 = physics_data.surface_flux.phi0
+    tsea = physics_data.sea_model.tsea
 
     forog = set_orog_land_sfc_drag(phi0)
 
