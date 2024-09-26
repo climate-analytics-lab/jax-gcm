@@ -40,9 +40,8 @@ class TestHumidityUnit(unittest.TestCase):
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx, psa=pressure)
-        physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
+        physics_data = PhysicsData((96,48), kx, convection=convection_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
@@ -80,17 +79,16 @@ class TestHumidityUnit(unittest.TestCase):
         qg = self.qg_standard
         sigma = self.sigma
 
-        humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx, psa=pressure)
-        physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
+        physics_data = PhysicsData((96,48), kx, convection=convection_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
-        qa, _ = humidity.rel_hum_to_spec_hum(temp, pressure, sigma, physics_data.humidity.rh[:,:,sigma])
+        qa, _ = humidity.rel_hum_to_spec_hum(temp[:,:,sigma], pressure, sigma, physics_data.humidity.rh[:,:,sigma])
 
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
-        self.assertTrue(jnp.allclose(qa, qg, atol=tolerance), "QA should be close to the original QG when converted from RH")
+        self.assertTrue(jnp.allclose(qa, qg[:,:,sigma], atol=tolerance), "QA should be close to the original QG when converted from RH")
 
 if __name__ == '__main__':
     unittest.main()
