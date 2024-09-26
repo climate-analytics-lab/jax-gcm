@@ -1,6 +1,6 @@
 import unittest
 from jcm import humidity
-from jcm.physics_data import ConvectionData
+from jcm.physics_data import ConvectionData, HumidityData
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsState
 from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
@@ -41,7 +41,7 @@ class TestHumidityUnit(unittest.TestCase):
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        humidity_data = humidity.HumidityData((96,48), kx)
+        humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx,psa=pressure)
         physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg)
@@ -81,7 +81,7 @@ class TestHumidityUnit(unittest.TestCase):
         sigma = self.sigma
         qg = self.qg_standard
         
-        humidity_data = humidity.HumidityData((96,48), kx)
+        humidity_data = HumidityData((96,48), kx)
         convection_data = ConvectionData((96,48), kx,psa=pressure)
         physics_data = PhysicsData((96,48), kx, convection=convection_data, humidity=humidity_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg)
