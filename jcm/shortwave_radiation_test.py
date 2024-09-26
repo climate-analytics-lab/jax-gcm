@@ -167,13 +167,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         ], atol=1e-4))
 
 
-    # def setUp(self):
-    #     # Set up test case with known inputs
-    #     self.tyear = 0.25  # Example time of the year (spring equinox)
-    #     self.solc = solc
-    #     self.il = il
-    #     self.ix = ix
-    #     self.epssw = epssw
+    def setUp(self):
+        # Set up test case with known inputs
+        # self.tyear = 0.25  # Example time of the year (spring equinox)
+        self.solc = solc
+        self.il = il
+        self.ix = ix
+        self.epssw = epssw
 
     def test_output_shapes(self):
         # Ensure that the output shapes are correct
