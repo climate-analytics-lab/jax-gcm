@@ -16,6 +16,42 @@ class DateData:
             tyear if tyear is not None else self.tyear
         )
     
+#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
+@tree_math.struct
+class LWRadiationData:
+    slrd: jnp.ndarray
+    dfabs: jnp.ndarray
+    ftop: jnp.ndarray
+    slr: jnp.ndarray
+    
+    def __init__(self, nodal_shape, node_levels, slrd=None, dfabs=None, ftop=None, slr=None) -> None:
+        if slrd is not None:
+            self.slrd = slrd
+        else:
+            self.slrd = jnp.zeros((nodal_shape))
+        if dfabs is not None:
+            self.dfabs = dfabs
+        else:
+            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
+        if ftop is not None:
+            self.ftop = ftop
+        else:
+            self.ftop = jnp.zeros((nodal_shape))
+        if slr is not None:
+            self.slr = slr
+        else:
+            self.slr = jnp.zeros((nodal_shape))
+
+    def copy(self, slrd=None, dfabs=None, ftop=None, slr=None):
+        return LWRadiationData(
+            (0,0), 
+            0, 
+            slrd=slrd if slrd is not None else self.slrd,
+            dfabs=dfabs if dfabs is not None else self.dfabs,
+            ftop=ftop if ftop is not None else self.ftop,
+            slr=slr if slr is not None else self.slr
+        )
+
 @tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray
@@ -111,42 +147,6 @@ class SWRadiationData:
             dfabs=dfabs if dfabs is not None else self.dfabs
         )
     
-#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
-@tree_math.struct
-class LWRadiationData:
-    slrd: jnp.ndarray
-    dfabs: jnp.ndarray
-    ftop: jnp.ndarray
-    slr: jnp.ndarray
-    
-    def __init__(self, nodal_shape, node_levels, slrd=None, dfabs=None, ftop=None, slr=None) -> None:
-        if slrd is not None:
-            self.slrd = slrd
-        else:
-            self.slrd = jnp.zeros((nodal_shape))
-        if dfabs is not None:
-            self.dfabs = dfabs
-        else:
-            self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
-        if ftop is not None:
-            self.ftop = ftop
-        else:
-            self.ftop = jnp.zeros((nodal_shape))
-        if slr is not None:
-            self.slr = slr
-        else:
-            self.slr = jnp.zeros((nodal_shape))
-
-    def copy(self, slrd=None, dfabs=None, ftop=None, slr=None):
-        return LWRadiationData(
-            (0,0), 
-            0, 
-            slrd=slrd if slrd is not None else self.slrd,
-            dfabs=dfabs if dfabs is not None else self.dfabs,
-            ftop=ftop if ftop is not None else self.ftop,
-            slr=slr if slr is not None else self.slr
-        )
-
 @tree_math.struct
 class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
