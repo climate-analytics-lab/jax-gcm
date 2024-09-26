@@ -176,7 +176,7 @@ def get_physical_tendencies(
         jnp.zeros_like(physics_state.u_wind),
         jnp.zeros_like(physics_state.u_wind))
     
-    data = PhysicsData(state.temperature.shape[0:1],state.temperature.shape[2])
+    data = PhysicsData(physics_state.temperature.shape[0:1],physics_state.temperature.shape[2])
     # optionally initialize the physics data here if it needs to be 
 
     for term in physics_terms:
