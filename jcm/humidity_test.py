@@ -3,9 +3,8 @@ from jcm import humidity
 from jcm.physics_data import ConvectionData, HumidityData
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsState
-from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
+# from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
 # spec_hum_to_rel_hum no longer takes sigma as an argument. it does all sigma levels
-
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
@@ -37,6 +36,7 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at high temperature")
 
     def test_spec_hum_to_rel_hum(self):
+        kx = 1 # this works if fsg is not intialized?
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
@@ -76,6 +76,7 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue(((physics_data.humidity.rh >= 0) & (physics_data.humidity.rh <= 1)).all(), "Relative humidity should be between 0 and 1 at very high pressures")
 
     def test_rel_hum_to_spec_hum(self):
+        kx = 1 # this works if fsg is not intialized?
         temp = self.temp_standard
         pressure = self.pressure_standard
         sigma = self.sigma
