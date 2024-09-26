@@ -54,7 +54,7 @@ class PhysicsData:
         if humidity is not None:
             self.humidity = humidity
         else:
-            self.humidity = HumidityData(nodal_shape)
+            self.humidity = HumidityData(nodal_shape, node_levels)
         if condensation is not None:
             self.condensation = condensation
         else:
