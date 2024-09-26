@@ -28,9 +28,9 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
     """
 
     # vectorize get_qsat to be over all sigma levels instead of taking sig as an input - doing this will break existing tests which used to be for one sigma level at a time
-    get_qsat_lambda = lambda ta, ps, fsg: get_qsat(ta, ps, fsg)
-    map_qsat = jax.vmap(get_qsat_lambda, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for arguments ta, ps and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
-    qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg) #need to check that this produces ix x il x kx array
+    get_qsat_lambda = lambda ta, ps, fg: get_qsat(ta, ps, fg)
+    map_qsat = jax.vmap(get_qsat_lambda, in_axes=(2, None, 0), out_axes=2) # mapping over dim 2 for argument ta, none for argument psa, and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
+    qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg) 
 
     rh = state.specific_humidity / qsat
     
@@ -88,9 +88,11 @@ def get_qsat(ta, ps, sig):
                       e0 * jnp.exp(c2 * (ta - t0) / (ta - t2)))
     
     # If sig > 0, P = Ps * sigma, otherwise P = Ps(1) = const.
-    if sig <= 0.0:
-        qsat = 622.0 * qsat / (ps[0, 0] - 0.378 * qsat)
-    else:
-        qsat = 622.0 * qsat / (sig * ps - 0.378 * qsat)
+    # this used to use a comparison like 'if sig <= 0.0' that failed with vmap. Even though sig is a scalar 
+    # because we are looping over sigma levels, vmap does not see it as a scalar - it is doing something funky
+    # behind the scene where it still considers it a vector. A comparison with 0.0 fails for something that vmap
+    # considers to be a vector.
+    qsat = jnp.where(sig <= 0.0, 622.0 * qsat / (ps[0,0] - 0.378 * qsat), 
+                      622.0 * qsat / (sig * ps - 0.378 * qsat))
 
     return qsat
