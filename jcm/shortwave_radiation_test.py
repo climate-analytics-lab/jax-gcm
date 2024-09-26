@@ -197,7 +197,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         date_data = DateData(tyear=tyear)
-        physics_data = PhysicsData(date=date_data)
+        physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(physics_data, state)
 
@@ -210,7 +210,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         date_data = DateData(tyear=tyear)
-        physics_data = PhysicsData(date=date_data)
+        physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(physics_data, state)
 
@@ -224,7 +224,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         date_data = DateData(tyear=tyear)
-        physics_data = PhysicsData(date=date_data)
+        physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(physics_data, state)
 
@@ -242,7 +242,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         date_data = DateData(tyear=tyear)
-        physics_data = PhysicsData(date=date_data)
+        physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(physics_data, state)
         
