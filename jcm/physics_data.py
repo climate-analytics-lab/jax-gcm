@@ -165,15 +165,15 @@ class ModRadConData:
     flux: jnp.ndarray         # Radiative flux in different spectral bands
 
 
-    def __init__(self, nodal_shape, node_levels, fband=None,albl=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
+    def __init__(self, nodal_shape, node_levels, fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
         if fband is not None:
             self.fband = fband
         else:
             self.fband = jnp.zeros((301,4))
-        if albl is not None:
-            self.albl = albl
+        if alb_l is not None:
+            self.alb_l = alb_l
         else:
-            self.albl = jnp.zeros((nodal_shape))
+            self.alb_l = jnp.zeros((nodal_shape))
         if alb_s is not None:
             self.alb_s = alb_s
         else:
@@ -203,12 +203,12 @@ class ModRadConData:
         else:
             self.flux = jnp.zeros((nodal_shape+(4,)))
 
-    def copy(self,fband=None,albl=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             self.albl.shape, 
             0, # this value isn't necessary since we will pass through values for each member of the struct
             fband=fband if fband is not None else self.fband,
-            albl=albl if albl is not None else self.albl,
+            alb_l=alb_l if alb_l is not None else self.alb_l,
             alb_s=alb_s if alb_s is not None else self.alb_s,
             albsfc=albsfc if albsfc is not None else self.albsfc,
             snowc=snowc if snowc is not None else self.snowc,

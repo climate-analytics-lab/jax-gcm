@@ -7,6 +7,7 @@ saturation specific humidity.
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsState, PhysicsTendency
 from jcm.geometry import fsg
+import jax 
 
 #def spec_hum_to_rel_hum(ta, ps, sig, qa):
 def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
@@ -27,7 +28,7 @@ def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
 
     # vectorize get_qsat to be over all sigma levels instead of taking sig as an input - doing this will break existing tests which used to be for one sigma level at a time
     get_qsat_lambda = lambda ta, ps, fsg: get_qsat(ta, ps, fsg)
-    map_qsat = jnp.vmap(get_qsat_lambda, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for arguments ta, ps and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
+    map_qsat = jax.vmap(get_qsat_lambda, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for arguments ta, ps and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
     qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg) #need to check that this produces ix x il x kx array
 
     rh = state.specific_humidity / qsat
