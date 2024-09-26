@@ -5,7 +5,7 @@ from jax import jit
 from jcm.physics import PhysicsData, PhysicsTendency, PhysicsState
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
-from jcm.boundaries import phi0
+# from jcm.boundaries import phi0
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 #from jcm.land_model import stl_am, soilw_am
@@ -90,6 +90,7 @@ def get_surface_flux(physics_data: PhysicsData, state: PhysicsState):
     slrd = physics_data.downward_longwave_rad_fluxes.slrd
 
     rh = physics_data.humidity.rh
+    phi0 = physics_data.surface_flux.phi0
 
     forog = set_orog_land_sfc_drag(phi0)
 
