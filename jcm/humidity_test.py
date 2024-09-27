@@ -3,6 +3,7 @@ from jcm import humidity
 from jcm.physics_data import ConvectionData, HumidityData
 import jax.numpy as jnp
 from jcm.physics import PhysicsData, PhysicsState
+from jcm.geometry import fsg
 from jcm.params import kx #FIXME: doing this because we need to have the same number of levels as fsg, need to call intialize_geometry() 
 # spec_hum_to_rel_hum no longer takes sigma as an argument. it does all sigma levels
 class TestHumidityUnit(unittest.TestCase):
@@ -77,21 +78,16 @@ class TestHumidityUnit(unittest.TestCase):
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
-        sigma = self.sigma
 
         convection_data = ConvectionData((96,48), kx, psa=pressure)
         physics_data = PhysicsData((96,48), kx, convection=convection_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
-        print(physics_data.humidity.qsat[1,1,4])
-        qa, qsat = humidity.rel_hum_to_spec_hum(temp[:,:,sigma], pressure, sigma, physics_data.humidity.rh[:,:,sigma])
-        print(qsat[1,1])
-        print(qa[1,1])
-        print(qg[1,1,4])
+        qa, qsat = humidity.rel_hum_to_spec_hum(temp[:,:,0], pressure, fsg[0], physics_data.humidity.rh[:,:,0])
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
-        self.assertTrue(jnp.allclose(qa, qg[:,:,sigma], atol=tolerance), "QA should be close to the original QG when converted from RH")
+        self.assertTrue(jnp.allclose(qa, qg[:,:,0], atol=tolerance), "QA should be close to the original QG when converted from RH")
 
 if __name__ == '__main__':
     unittest.main()
