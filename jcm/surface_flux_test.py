@@ -45,52 +45,55 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.isclose(sflux_data.v0[0, 0], 0.949999988079071, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.t0[0, 0], 290.0, atol=1e-4))
 
-    # def test_surface_fluxes_test1(self):
-    #     ix, il, kx = 96, 48, 8
-    #     xy = (ix,il)
-    #     psa = jnp.ones((ix,il)) #surface pressure
-    #     ua = jnp.ones(((ix, il, kx))) #zonal wind
-    #     va = jnp.ones(((ix, il, kx))) #meridional wind
-    #     ta = 288. * jnp.ones(((ix, il, kx))) #temperature
-    #     qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-    #     rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-    #     phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
-    #     phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-    #     fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-    #     tsea = 290. * jnp.ones((ix, il)) #ssts
-    #     ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
-    #     slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
-    #     lfluxland=True
+    def test_surface_fluxes_test1(self):
+        ix, il, kx = 96, 48, 8
+        xy = (ix,il)
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        ssrd = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
+        lfluxland=True
             
-    #     # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,ssrd,slrd,lfluxland)
-    #     state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-    #     sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-    #     hum_data = HumidityData(xy,8,rh=rh)
-    #     conv_data = ConvectionData(xy,8,psa=psa)
-    #     sw_rad = SWRadiationData(xy,8,ssrd=ssrd)
-    #     lw_rad = LWRadiationData(xy,8,slrd=slrd)
-    #     sea_data = SeaModelData(xy,tsea=tsea)
-    #     physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,sw_radiation=sw_rad,lw_radiation=lw_rad, sea_model=sea_data)
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,ssrd,slrd,lfluxland)
+        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
+        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData(xy,8,rh=rh)
+        conv_data = ConvectionData(xy,8,psa=psa)
+        sw_rad = SWRadiationData(xy,8,ssrd=ssrd)
+        lw_rad = LWRadiationData(xy,8,slrd=slrd)
+        sea_data = SeaModelData(xy,tsea=tsea)
+        physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-    #     _, physics_data = get_surface_fluxes(physics_data, state)
-    #     sflux_data = physics_data.surface_flux
+        _, physics_data = get_surface_fluxes(physics_data, state)
+        sflux_data = physics_data.surface_flux
 
-    #     # FIXME: these are in the order of the old outputs and need to be renaped to be checked against the members of surfacefluxdata
-    #     test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
-    #         4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
-    #         9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-    #         [-1.50404554e-02,-1.50404554e-02, 7.55662489e+00, 2.64080837e-02,
-    #         3.93007751e+02, 1.06054558e+02, 2.89000000e+02, 2.96575317e+02,
-    #         9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-    #         [-9.61105898e-03,-9.61105898e-03, 5.54379463e+01, 3.52742635e-02,
-    #         4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
-    #         9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
+        # old outputs: ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
+        test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
+            4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
+            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
+            [-1.50404554e-02,-1.50404554e-02, 7.55662489e+00, 2.64080837e-02,
+            3.93007751e+02, 1.06054558e+02, 2.89000000e+02, 2.96575317e+02,
+            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
+            [-9.61105898e-03,-9.61105898e-03, 5.54379463e+01, 3.52742635e-02,
+            4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
+            9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
         
-    #     self.assertTrue(jnp.allclose(
-    #         jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-    #         test_data.T,
-    #         rtol=1e-5
-    #     ))
+        # pulling the subset of return values to be testsed against the test data
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+
+        self.assertTrue(jnp.allclose(
+            jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
+            test_data.T,
+            rtol=2e-5
+        ))
 
     # def test_surface_fluxes_test2(self):
     #     ix, il, kx = 96, 48, 8
