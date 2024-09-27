@@ -1,7 +1,7 @@
 import unittest
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.physics_data import PhysicsData, CondensationData, HumidityData, ConvectionData
-from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
+from jcm.physics import PhysicsState
 import jax.numpy as jnp
 import numpy as np
 

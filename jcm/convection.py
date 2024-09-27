@@ -112,7 +112,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
     Args:
-    psa: Normalised surface pressure [p/p0] - state.surface_pressure
+    psa: Normalised surface pressure [p/p0] 
     se: Dry static energy [c_p.T + g.z]
     qa: Specific humidity [g/kg] - state.specific_humidity
     qsat: Saturation specific humidity [g/kg] - humidity.qsat
@@ -131,13 +131,12 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     qa = state.specific_humidity
     qsat = humidity.qsat
     _, _, kx = se.shape
-    psa = state.surface_pressure #FIXME: normalized surface pressure should be computed from state.surface_pressure, in physics.f90:104 its exp(surface_pressure)??
-    # psa = jnp.exp(state.surface_pressure) 
+    psa = conv.psa
     
     # 1. Initialization of output and workspace arrays
 
     dfse = jnp.zeros_like(se)
-    dfqa = jnp.zeros_like(physics_data.state.specific_humidity)
+    dfqa = jnp.zeros_like(state.specific_humidity)
 
     cbmf = jnp.zeros_like(psa)
     precnv = jnp.zeros_like(psa)
