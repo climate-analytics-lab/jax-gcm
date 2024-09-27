@@ -75,7 +75,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     '''
     stl_am = physics_data.surface_flux.stl_am
     soilw_am = physics_data.surface_flux.soilw_am
-    _, _, kx = state.temperature.shape
+    ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa
     ua = state.u_wind
@@ -98,6 +98,18 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     # Initialize variables
     esbc  = emisfc*sbc
     ghum0 = 1.0 - fhum0
+
+    ustr = jnp.zeros((ix, il, 3))
+    vstr = jnp.zeros((ix, il, 3))
+    shf = jnp.zeros((ix, il, 3))
+    evap = jnp.zeros((ix, il, 3))
+    slru = jnp.zeros((ix, il, 3))
+    hfluxn = jnp.zeros((ix, il, 2))
+    t1 = jnp.zeros((ix, il, 2))
+    q1 = jnp.zeros((ix, il, 2))
+    t2 = jnp.zeros((ix, il, 2))
+    qsat0 = jnp.zeros((ix, il, 2))
+    denvvs = jnp.zeros((ix, il, 3))
 
     ##########################################################
     # Land surface
