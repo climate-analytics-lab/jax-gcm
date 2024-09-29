@@ -2,7 +2,6 @@ import jax.numpy as jnp
 from jax import jit
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
-from jcm.params import ix, il, kx
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
@@ -13,17 +12,20 @@ redshc = jnp.array(0.5)  # Reduction factor of shallow convection in areas of de
 rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
 segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
-@jit
-# def get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv):
+# @jit
 def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     
     se = physics_data.convection.se
     rh = physics_data.humidity.rh
     qsat = physics_data.humidity.qsat
-    qa = state.specifc_humidity
+    qa = state.specific_humidity
     phi = state.geopotential
 
-    icnv = kx - physics_data.convection.iptop
+    ix, il, kx = state.temperature.shape
+    icnv = kx - physics_data.convection.iptop - 1 # this comes from physics.f90:132
+
+    ttenvd = jnp.zeros((ix,il,kx))
+    qtenvd = jnp.zeros((ix,il,kx))
 
     nl1 = kx - 1
     cshc = dhs[kx - 1] / 3600.0
@@ -97,7 +99,6 @@ def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     qtenvd = qtenvd.at[:, :, k_range].add(fluxq * rsig[k_range][jnp.newaxis, jnp.newaxis, :])
     qtenvd = qtenvd.at[:, :, k_range + 1].add(-fluxq * rsig[k_range + 1][jnp.newaxis, jnp.newaxis, :])
 
-    
     # Step 4: Damping of super-adiabatic lapse rate
     se0 = se[:, :, 1:nl1+1] + segrad * (phi[:, :, :nl1] - phi[:, :, 1:nl1+1])
 
@@ -111,7 +112,6 @@ def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
     
-
     physics_tendencies = PhysicsTendency(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
 
     # have not updated physics_data, can just return the instance we were passed 
