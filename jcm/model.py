@@ -75,7 +75,6 @@ class SpeedyModel:
             self.coords,
             physics_specs)
 
-        #FIXME: convert physics functions to use data class' as input/output
         physics_terms = [
             spec_hum_to_rel_hum, # this could get called in get_physics_tendencies before looping over the physics terms
             get_convection_tendencies,

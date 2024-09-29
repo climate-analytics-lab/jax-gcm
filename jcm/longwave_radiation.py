@@ -160,8 +160,6 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     
     return physics_tendencies, physics_data
 
-
-
 def radset(physics_data: PhysicsData):
     """
     Set the energy fraction emitted in each LW band = f(T)
