@@ -91,9 +91,9 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     
     Args:
         ta: Absolute temperature
-        ts: Surface temperature - surface_fluxes.ts
+        ts: Surface temperature - surface_fluxes.tsfc
         slrd: Downward flux of long-wave radiation at the surface
-        fsfcu: Surface blackbody emission - slru from surface fluxes (FIXME: currently in auxiliaries.py, should probably be owned by surface fluxes)
+        fsfcu: Surface blackbody emission - taken from slru from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
@@ -106,7 +106,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     """
     _, _, kx = state.temperature.shape
     ta = state.temperature
-    dfabs = physics_data.longwave_rad.dfab
+    dfabs = physics_data.longwave_rad.dfabs
     slrd = physics_data.longwave_rad.slrd
 
     fband = physics_data.mod_radcon.fband
@@ -115,8 +115,8 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_fluxes.slru[:,:,2] # FIXME: slru should be owned by surface fluxes, no idea why this is hard coded to 2, see physics.f90:180
-    ts = physics_data.surface_fluxes.ts # called tsfc in surface_fluxes.f90
+    fsfcu = physics_data.surface_fluxes.slru[:,:,2] 
+    ts = physics_data.surface_fluxes.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - slrd
     
@@ -126,9 +126,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     flux = flux.at[:,:,:].set(fband[ts_rounded[:,:]-100,:] * fsfcu[:,:] + refsfc * flux[:,:,:])
 
     # Troposphere
-
     # correction for 'black' band
-
     dfabs[:,:,-1] = dfabs[:,:,-1] + epslw * fsfcu
 
     for jb in range(nband):
@@ -160,7 +158,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
-    return physics_data, physics_tendencies
+    return physics_tendencies, physics_data
 
 
 
