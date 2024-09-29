@@ -120,9 +120,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     dfabs = dfabs.at[:, :, k].add(- flux_1[:, :, k])
     
     # 3.3 Absorption and reflection in the troposphere
-    
     # scan alert!
-
     # here's the function that will compute the flux
     propagate_flux_1 = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
     
@@ -131,8 +129,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
 
     # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        lambda carry, i: (propagate_flux_1(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration,
-                                                        #I'm just returning the output for both?
+        lambda carry, i: (propagate_flux_1(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
         flux_1_t[1], #initial value
         jnp.moveaxis(tau2, 2, 0)[2:kx]) #pass tau2 directly rather than indexing
     
@@ -398,7 +395,7 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
     
     return physics_tendencies, physics_data
 
-@jit
+# @jit
 def solar(tyear, csol=4.0*solc):
 
     """
