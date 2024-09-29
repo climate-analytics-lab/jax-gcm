@@ -16,7 +16,6 @@ class DateData:
             tyear if tyear is not None else self.tyear
         )
     
-#FIXME: fband should be moved here from mod_radcon.py? since this is where it is used and set?
 @tree_math.struct
 class LWRadiationData:
     slrd: jnp.ndarray

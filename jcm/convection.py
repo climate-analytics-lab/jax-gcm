@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
+from jcm.physical_constants import p0, alhc, wvi, grav
 from jcm.geometry import dhs, fsg
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection

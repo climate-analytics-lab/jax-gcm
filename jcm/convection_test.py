@@ -1,44 +1,10 @@
 import unittest
 from jcm.convection import diagnose_convection, get_convection_tendencies
-from jax import random
 import jax.numpy as jnp
 from jcm.physics import PhysicsState
 from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
 
 class TestConvectionUnit(unittest.TestCase):
-    """
-    def test_diagnose_convection(self):
-        key = random.PRNGKey(0)
-        ix, il, kx = 4, 4, 10
-        psa = random.uniform(key, (ix, il))
-        se = random.uniform(key, (ix, il, kx))
-        qa = random.uniform(key, (ix, il, kx))
-        qsat = random.uniform(key, (ix, il, kx))
-
-        itop, qdif = diagnose_convection(psa, se, qa, qsat)
-
-        # Check that itop and qdif is not null.
-        self.assertIsNotNone(itop)
-        self.assertIsNotNone(qdif)
-    
-    def test_get_convective_tendencies(self):
-        key = random.PRNGKey(0)
-        ix, il, kx = 4, 4, 10
-        psa = random.uniform(key, (ix, il))
-        se = random.uniform(key, (ix, il, kx))
-        qa = random.uniform(key, (ix, il, kx))
-        qsat = random.uniform(key, (ix, il, kx))
-
-        itop, dfse, dfqa, cbmf, precnv = get_convection_tendencies(psa, se, qa, qsat)
-
-        # Check that  dfse, dfqa, cbmf and precnv is not null.
-        self.assertIsNotNone(itop)
-        self.assertIsNotNone(dfse)
-        self.assertIsNotNone(dfqa)
-        self.assertIsNotNone(cbmf)
-        self.assertIsNotNone(precnv)
-    """
-
     def test_diagnose_convection_moist_adiabat(self):
         il, ix, kx = 96, 48, 8
 
@@ -65,14 +31,6 @@ class TestConvectionUnit(unittest.TestCase):
         il, ix, kx = 96, 48, 8
 
         psa = jnp.ones((il, ix)) #normalized surface pressure
-
-        hsg = jnp.array([0.000, 0.050, 0.140, 0.260, 0.420, 0.600, 0.770, 0.900, 1.000])
-        # # Layer thicknesses and full (u,v,T) levels
-        # dhs = hsg[1:] - hsg[:-1]
-        # fsg = 0.5 * (hsg[1:] + hsg[:-1])
-
-        # sigl = jnp.log(fsg)
-        # sigh = hsg[1:]
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.])

@@ -6,11 +6,8 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
 from jcm.geometry import coa
-# from jcm.boundaries import phi0
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
-#from jcm.land_model import stl_am, soilw_am
-# from jcm.sea_model import tsea
 
 # constants for surface fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind

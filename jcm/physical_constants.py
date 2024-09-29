@@ -4,7 +4,6 @@ For storing and initializing physical constants.
 '''
 
 import jax.numpy as jnp
-
 from jcm.params import kx
 
 # Physical constants for dynamics

@@ -1,14 +1,13 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jax import random
 
 from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
 from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix, kx
 from jcm.geometry import sia
 from jcm.physics import PhysicsState
-from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, ModRadConData, SurfaceFluxData, DateData, PhysicsData
+from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
 
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
@@ -168,7 +167,6 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def setUp(self):
         # Set up test case with known inputs
-        # self.tyear = 0.25  # Example time of the year (spring equinox)
         self.solc = solc
         self.il = il
         self.ix = ix
@@ -233,10 +231,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         print
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
-    def test_random_input_consistency(self):
-        # # Check that random inputs produce consistent outputs
-        # key = random.PRNGKey(0)
-        
+    def test_random_input_consistency(self):     
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)

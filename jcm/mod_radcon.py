@@ -1,4 +1,3 @@
-import jax.numpy as jnp
 
 # Radiation and cloud constants
 # Albedo values
