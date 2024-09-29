@@ -29,7 +29,7 @@ chs = 0.9e-3   # Heat exchange coefficient over sea
 vgust = 5.0    # Wind speed for sub-grid-scale gusts
 ctday = 1.0e-2 # Daily-cycle correction (dTskin/dSSRad)
 dtheta = 3.0   # Potential temp. gradient for stability correction
-fstab = 0.67   # Amplitude of stability correction (fraction) - TODO: double check whether shortwave_radiation has to modify this
+fstab = 0.67   # Amplitude of stability correction (fraction)
 clambda = 7.0  # Heat conductivity in skin-to-root soil layer
 clambsn = 7.0  # Heat conductivity in soil for snow cover = 1
 

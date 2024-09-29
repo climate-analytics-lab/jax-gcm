@@ -342,7 +342,7 @@ class HumidityData:
 
 @tree_math.struct
 class SurfaceFluxData:
-    # Placeholders for land surface boundary conditions - TODO: move this into physics initialization or something
+    # TODO: check if any of these (fmask, phi0) need to be initialized and/or should be moved somewhere else
     stl_am: jnp.ndarray
     soilw_am: jnp.ndarray
     lfluxland: jnp.bool

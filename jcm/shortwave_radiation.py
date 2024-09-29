@@ -183,7 +183,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorptivities: TODO initialize these elsewhere?
+    # Base absorptivities
     absorptivity = jnp.stack([
         ablwin * jnp.ones_like(qa),
         ablco2 * jnp.ones_like(qa),
