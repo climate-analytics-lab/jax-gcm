@@ -15,6 +15,20 @@ segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 # @jit
 def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     
+    '''
+    Inputs:
+        se(ix,il,kx)     !! Dry static energy
+        rh(ix,il,kx)     !! Relative humidity
+        qa(ix,il,kx)     !! Specific humidity [g/kg]
+        qsat(ix,il,kx)   !! Saturated specific humidity [g/kg]
+        phi(ix,il,kx)    !! Geopotential
+        icnv(ix,il)      !! Sigma-level index of deep convection
+        
+    Returns:
+        ttenvd(ix,il,kx) !! Temperature tendency
+        qtenvd(ix,il,kx) !! Specific humidity tendency
+    '''
+
     se = physics_data.convection.se
     rh = physics_data.humidity.rh
     qsat = physics_data.humidity.qsat

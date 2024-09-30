@@ -16,16 +16,10 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     icltop(ix,il)    # Cloud top level
     cloudc(ix,il)    # Total cloud cover
     clstr(ix,il)     # Stratiform cloud cover
-    ssrd(ix,il)    # Total downward flux of short-wave radiation at
-                                            # the surface
-    ssr(ix,il)     # Net downward flux of short-wave radiation at the
-                                            # surface
-    ftop(ix,il)     # Net downward flux of short-wave radiation at the
-                                            # top of the atmosphere
-    dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each
-                                            # atmospheric layer
-    #     integer :: i, j, k
-    #     real(kind=8) :: acloud(ix,il), psaz(ix,il), abs1, acloud1, deltap, eps1
+    ssrd(ix,il)    # Total downward flux of short-wave radiation at the surface
+    ssr(ix,il)     # Net downward flux of short-wave radiation at the surface
+    ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
+    dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
 
     ix, il, kx = state.temperature.shape
@@ -308,10 +302,9 @@ def clouds(physics_data: PhysicsData, state: PhysicsState):
         precnv: Convection precipitation - PhysicsData.Convection
         precls: Large-scale condensational precipitation - PhysicsData.Condensation
         iptop: Cloud top level - PhysicsData.Convection
-        gse: Vertical gradient of dry static energy - this gets created and set in phyiscs.f90 (line 147) - it is added to the shortwave rad dataclass 
+        gse: Vertical gradient of dry static energy - FIXME: this gets created and set in phyiscs.f90 (line 147) - it is added to the shortwave rad dataclass 
                                                         but the setting needs to be done in physics.py or updated to be done inside this function
-        fmask: Fraction land-sea mask - FIX ME! should this come from geometry.initialize()? It gets set on start up
-                                        See boundaries.f90:38 fmask = load_boundary_file("surface.nc", "lsm")
+        fmask: Fraction land-sea mask 
 
     Returns:
         icltop: Cloud top level

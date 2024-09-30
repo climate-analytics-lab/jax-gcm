@@ -25,12 +25,12 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        _, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
-        self.assertIsNotNone(physics_data.condensation.dtlsc)
-        self.assertIsNotNone(physics_data.condensation.dqlsc)
+        self.assertIsNotNone(physics_tendencies.tempearture)
+        self.assertIsNotNone(physics_tendencies.specific_humidity)
 
     def test_get_large_scale_condensation_tendencies_realistic(self):
         ix, il, kx = 1, 1, 8
@@ -52,11 +52,11 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        _, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
         
-        np.testing.assert_allclose(physics_data.condensation.dtlsc, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
+        np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]]]), atol=1e-4, rtol=0)
-        np.testing.assert_allclose(physics_data.condensation.dqlsc, jnp.asarray([[[ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
+        np.testing.assert_allclose(physics_tendencies.specific_humidity, jnp.asarray([[[ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00]]]), atol=1e-4, rtol=0)
         self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
         self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python

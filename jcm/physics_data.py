@@ -3,7 +3,7 @@ import tree_math
 
 @tree_math.struct
 class DateData:
-    tyear: jnp.ndarray
+    tyear: jnp.ndarray # Fractional time of year
 
     def __init__(self, tyear=None) -> None:
         if tyear is not None:
@@ -18,10 +18,10 @@ class DateData:
     
 @tree_math.struct
 class LWRadiationData:
-    slrd: jnp.ndarray
-    dfabs: jnp.ndarray
-    ftop: jnp.ndarray
-    slr: jnp.ndarray
+    slrd: jnp.ndarray # Downward flux of long-wave radiation at the surface
+    dfabs: jnp.ndarray # Flux of long-wave radiation absorbed in each atmospheric layer
+    # ftop: jnp.ndarray
+    # slr: jnp.ndarray
     
     def __init__(self, nodal_shape, node_levels, slrd=None, dfabs=None, ftop=None, slr=None) -> None:
         if slrd is not None:
@@ -53,20 +53,20 @@ class LWRadiationData:
 
 @tree_math.struct
 class SWRadiationData:
-    qcloud: jnp.ndarray
-    fsol: jnp.ndarray
-    ssrd: jnp.ndarray
-    ssr: jnp.ndarray
-    ozone: jnp.ndarray
-    ozupp: jnp.ndarray
-    zenit: jnp.ndarray
-    stratz: jnp.ndarray
-    gse: jnp.ndarray
-    icltop: jnp.ndarray
-    cloudc: jnp.ndarray
-    cloudstr: jnp.ndarray
-    ftop: jnp.ndarray
-    dfabs: jnp.ndarray
+    qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
+    fsol: jnp.ndarray # Solar radiation at the top
+    ssrd: jnp.ndarray # Total downward flux of short-wave radiation at the surface
+    ssr: jnp.ndarray # Net downward flux of short-wave radiation at the surface
+    ozone: jnp.ndarray # Ozone concentration in lower stratosphere
+    ozupp: jnp.ndarray# Ozone depth in upper stratosphere
+    zenit: jnp.ndarray # The Zenit angle
+    stratz: jnp.ndarray # Polar night cooling in the stratosphere
+    gse: jnp.ndarray # Vertical gradient of dry static energy
+    icltop: jnp.ndarray # Cloud top level
+    cloudc: jnp.ndarray # Total cloud cover
+    cloudstr: jnp.ndarray # Stratiform cloud cover
+    ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
+    dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
 
     def __init__(self, nodal_shape, node_levels, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None) -> None:
         if qcloud is not None:
@@ -217,10 +217,9 @@ class ModRadConData:
             stratc=stratc if stratc is not None else self.stratc,
             flux=flux if flux is not None else self.flux
         )
-
 @tree_math.struct
 class SeaModelData:
-    tsea: jnp.ndarray
+    tsea: jnp.ndarray # SST
     
     def __init__(self, nodal_shape, tsea=None) -> None:
         if tsea is not None:
@@ -236,10 +235,8 @@ class SeaModelData:
 
 @tree_math.struct
 class CondensationData:
-    precls: jnp.ndarray
-    dtlsc: jnp.ndarray
-    dqlsc: jnp.ndarray
-    
+    precls: jnp.ndarray # Precipitation due to large-scale condensation
+
     def __init__(self, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None) -> None:
         if precls is not None:
             self.precls = precls
@@ -271,7 +268,7 @@ class ConvectionData:
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
     dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
-    dfqa: jnp.ndarray #Net flux of specific humidity into each atmospheric layer
+    dfqa: jnp.ndarray # Net flux of specific humidity into each atmospheric layer
 
     def __init__(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None) -> None:
         if psa is not None:
@@ -343,22 +340,22 @@ class HumidityData:
 @tree_math.struct
 class SurfaceFluxData:
     # TODO: check if any of these (fmask, phi0) need to be initialized and/or should be moved somewhere else
-    stl_am: jnp.ndarray
-    soilw_am: jnp.ndarray
-    lfluxland: jnp.bool
-    ustr: jnp.ndarray
-    vstr: jnp.ndarray
-    shf: jnp.ndarray
-    evap: jnp.ndarray
-    slru: jnp.ndarray
-    hfluxn: jnp.ndarray
-    tsfc: jnp.ndarray
-    tskin: jnp.ndarray
-    u0: jnp.ndarray
-    v0: jnp.ndarray
-    t0: jnp.ndarray
-    fmask: jnp.ndarray
-    phi0: jnp.ndarray
+    stl_am: jnp.ndarray # Land surface temperature, should come from land_model.py
+    soilw_am: jnp.ndarray # Soil water availability, should come from land_model.py
+    lfluxland: jnp.bool # Land surface fluxes true or false, hard coded in physics.f90
+    ustr: jnp.ndarray # u-stress
+    vstr: jnp.ndarray # v-stress
+    shf: jnp.ndarray # Sensible heat flux
+    evap: jnp.ndarray # Evaporation
+    slru: jnp.ndarray # Upward flux of long-wave radiation at the surface
+    hfluxn: jnp.ndarray # Net downward heat flux
+    tsfc: jnp.ndarray # Surface temperature
+    tskin: jnp.ndarray # Skin surface temperature
+    u0: jnp.ndarray # Near-surface u-wind
+    v0: jnp.ndarray # Near-surface v-wind
+    t0: jnp.ndarray # Near-surface temperature
+    fmask: jnp.ndarray # Fractional land-sea mask, should come from boundaries.py 
+    phi0: jnp.ndarray # Surface geopotential (i.e. orography), should come from boundaries.py
 
     def __init__(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None) -> None:
         if stl_am is not None:
@@ -447,8 +444,8 @@ class SurfaceFluxData:
             fmask=fmask if fmask is not None else self.fmask,
             phi0=phi0 if phi0 is not None else self.phi0
         )
-    
-@tree_math.struct
+
+ @tree_math.struct
 class PhysicsData:
     shortwave_rad: SWRadiationData
     longwave_rad: LWRadiationData

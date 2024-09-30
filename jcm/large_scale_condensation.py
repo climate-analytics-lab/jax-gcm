@@ -78,9 +78,9 @@ def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: Ph
     precls = 0. - jnp.sum(pfact[jnp.newaxis, jnp.newaxis, 1:] * dqlsc[..., 1:], axis=2)
     precls *= conv.psa
 
-    condensation_out = physics_data.condensation.copy(precls=precls, dtlsc=dtlsc, dqlsc=dqlsc)
+    condensation_out = physics_data.condensation.copy(precls=precls)
     convection_out = physics_data.convection.copy(iptop=iptop)
     physics_data = physics_data.copy(condensation=condensation_out, convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),dtlsc, dqlsc)
     
     return physics_tendencies, physics_data
