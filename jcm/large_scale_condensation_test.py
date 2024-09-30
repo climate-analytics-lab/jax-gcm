@@ -29,7 +29,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
-        self.assertIsNotNone(physics_tendencies.tempearture)
+        self.assertIsNotNone(physics_tendencies.temperature)
         self.assertIsNotNone(physics_tendencies.specific_humidity)
 
     def test_get_large_scale_condensation_tendencies_realistic(self):
