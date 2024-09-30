@@ -445,7 +445,7 @@ class SurfaceFluxData:
             phi0=phi0 if phi0 is not None else self.phi0
         )
 
- @tree_math.struct
+@tree_math.struct
 class PhysicsData:
     shortwave_rad: SWRadiationData
     longwave_rad: LWRadiationData
