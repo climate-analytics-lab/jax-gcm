@@ -3,7 +3,7 @@ import tree_math
 
 @tree_math.struct
 class DateData:
-    tyear: jnp.ndarray # Fractional time of year
+    tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
 
     def __init__(self, tyear=None) -> None:
         if tyear is not None:
@@ -219,7 +219,7 @@ class ModRadConData:
         )
 @tree_math.struct
 class SeaModelData:
-    tsea: jnp.ndarray # SST
+    tsea: jnp.ndarray # SST, should come from sea_model.py
     
     def __init__(self, nodal_shape, tsea=None) -> None:
         if tsea is not None:
