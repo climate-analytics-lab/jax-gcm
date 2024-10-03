@@ -61,10 +61,10 @@ class TestConvectionUnit(unittest.TestCase):
 
         rhs = 1/physics_data.convection.psa
         test_ttend = test_dfse
-        test_ttend[1:] = test_dfse[1:] * rhs[0,0] * grdscp[1:]
+        test_ttend[1:] = test_dfse[1:] * rhs[0,0] * grdscp[1:-1]
 
         test_qtend = test_dfqa
-        test_qtend[1:] = test_dfqa[1:] * rhs[0,0] * grdsig[1:]
+        test_qtend[1:] = test_dfqa[1:] * rhs[0,0] * grdsig[1:-1]
 
         # Check that itop and qdif is not null.
         self.assertAlmostEqual(physics_data.convection.cbmf[0,0], test_cbmf, places=4)
