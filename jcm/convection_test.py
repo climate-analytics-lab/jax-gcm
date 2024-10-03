@@ -7,18 +7,18 @@ from jcm.physical_constants import grdscp, grdsig
 
 class TestConvectionUnit(unittest.TestCase):
     def test_diagnose_convection_moist_adiabat(self):
-        il, ix, kx = 96, 48, 8
+        ix, il, kx = 96, 48, 8
 
-        psa = jnp.ones((il, ix)) #normalized surface pressure
+        psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.])
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
 
-        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (il, ix, kx))
-        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (il, ix, kx))
-        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (il, ix, kx))
+        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
+        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
+        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
 
         itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
 
@@ -29,26 +29,26 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
      
     def test_get_convective_tendencies_moist_adiabat(self):
-        il, ix, kx = 96, 48, 8
+        ix, il, kx = 96, 48, 8
 
-        psa = jnp.ones((il, ix)) #normalized surface pressure
+        psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.])
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
 
-        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (il, ix, 1))
-        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (il, ix, 1))
-        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (il, ix, 1))
+        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
 
         convection = ConvectionData((ix, il), kx, psa=psa, se=se_broadcast)
         humidity = HumidityData((ix, il), kx, qsat=qsat_broadcast*1000.)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
-                             v_wind=jnp.zeros_like(qa),
-                             temperature=jnp.zeros_like(qa),
+        state = PhysicsState(u_wind=jnp.zeros_like(qa_broadcast),
+                             v_wind=jnp.zeros_like(qa_broadcast),
+                             temperature=jnp.zeros_like(qa_broadcast),
                              specific_humidity=qa_broadcast*1000.,
-                             geopotential=jnp.zeros_like(qa),
+                             geopotential=jnp.zeros_like(qa_broadcast),
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
 

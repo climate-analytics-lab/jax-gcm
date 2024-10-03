@@ -130,7 +130,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     se = conv.se
     qa = state.specific_humidity
     qsat = humidity.qsat
-    _, _, kx = se.shape
+    ix, il, kx = se.shape
     psa = conv.psa
     
     # 1. Initialization of output and workspace arrays
@@ -260,8 +260,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     k = iptop
 
     # Flux of convective precipitation
-    i = jnp.arange(96)[:, jnp.newaxis]  # Shape (96, 1)
-    j = jnp.arange(48)[jnp.newaxis, :]  # Shape (1, 48)
+    i = jnp.arange(ix)[:, jnp.newaxis]  # Shape (96, 1)
+    j = jnp.arange(il)[jnp.newaxis, :]  # Shape (1, 48)
 
     qsatb = qsat[j, j, k] + wvi[k, 1] *(qsat[i, j, k+1]-qsat[i,j, k])
     precnv = jnp.where(mask, jnp.maximum(fuq_new[i, j, k] - fmass_new[i, j, k] * qsatb, 0.0), precnv)
@@ -277,8 +277,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     rps = 1/psa 
     ttend = dfse 
     qtend = dfqa
-    ttend = ttend.at[:,:,1:].set(dfse[1:] * rps * grdscp[1:kx])
-    qtend = qtend.at[:,:,1:].set(dfqa[1:] * rps * grdsig[1:kx])
+    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps * grdscp[1:kx])
+    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps * grdsig[1:kx])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
