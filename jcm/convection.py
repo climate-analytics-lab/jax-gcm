@@ -272,7 +272,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
 
     # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
     # pass on the rest of physics_data that was not updated or needed in this function
-    # convection in Speedy generates net *flux* -- not tendencies, so we need to convert these to tendencies (dfse and dfqa) here
+    # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
+    # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
 
     rps = 1/psa 
     ttend = dfse 
