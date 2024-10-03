@@ -3,6 +3,7 @@ from jcm.convection import diagnose_convection, get_convection_tendencies
 import jax.numpy as jnp
 from jcm.physics import PhysicsState
 from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
+from jcm.physical_constants import grdscp, grdsig
 
 class TestConvectionUnit(unittest.TestCase):
     def test_diagnose_convection_moist_adiabat(self):
@@ -51,21 +52,29 @@ class TestConvectionUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
 
-        _, physics_data = get_convection_tendencies(physics_data,state)
+        physics_tendencies, physics_data = get_convection_tendencies(physics_data,state)
 
         test_cbmf = jnp.array(0.019614903)
         test_precnv = jnp.array(0.21752352)
         test_dfse = jnp.array([  0., 0., 0., 0. ,-29.774475, 402.0166, 171.78418, 0.])
         test_dfqa = jnp.array([ 0., 0., 0., 0.01235308,  0.07379276, -0.15330768, -0.08423203, -0.05377656])
 
+        rhs = 1/physics_data.convection.psa
+        test_ttend = test_dfse
+        test_ttend[:,:,1:] = test_dfse[:,:,1:] * rhs * grdscp[:,:,1:]
+
+        test_qtend = test_dfqa
+        test_qtend[:,:,1:] = test_dfqa[:,:,1:] * rhs * grdsig[:,:,1:]
+
         # Check that itop and qdif is not null.
         self.assertAlmostEqual(physics_data.convection.cbmf[0,0], test_cbmf, places=4)
         self.assertAlmostEqual(physics_data.convection.precnv[0,0], test_precnv, places=4)
+        
         #check a few values of the fluxes
-        self.assertAlmostEqual(physics_data.convection.dfse[0,0,4], test_dfse[4], places=2)
-        self.assertAlmostEqual(physics_data.convection.dfqa[0,0,4], test_dfqa[4], places=2) 
-        self.assertAlmostEqual(physics_data.convection.dfse[0,0,5], test_dfse[5], places=2)
-        self.assertAlmostEqual(physics_data.convection.dfqa[0,0,5], test_dfqa[5], places=2) 
-        self.assertAlmostEqual(physics_data.convection.dfse[0,0,6], test_dfse[6], places=2)
-        self.assertAlmostEqual(physics_data.convection.dfqa[0,0,6], test_dfqa[6], places=2) 
+        self.assertAlmostEqual(physics_tendencies.temperature[0,0,4], test_ttend[4], places=2)
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[0,0,4], test_qtend[4], places=2) 
+        self.assertAlmostEqual(physics_tendencies.temperature[0,0,5], test_ttend[5], places=2)
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[0,0,5], test_qtend[5], places=2) 
+        self.assertAlmostEqual(physics_tendencies.temperature[0,0,6], test_ttend[6], places=2)
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[0,0,6], test_qtend[6], places=2) 
       

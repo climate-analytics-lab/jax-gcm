@@ -267,10 +267,8 @@ class ConvectionData:
     iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
-    dfse: jnp.ndarray # Net flux of dry static energy into each atmospheric layer
-    dfqa: jnp.ndarray # Net flux of specific humidity into each atmospheric layer
 
-    def __init__(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None) -> None:
+    def __init__(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None) -> None:
         if psa is not None:
             self.psa = psa
         else:
@@ -291,16 +289,8 @@ class ConvectionData:
             self.precnv = precnv
         else:
             self.precnv = jnp.zeros((nodal_shape))
-        if dfse is not None:
-            self.dfse = dfse
-        else:
-            self.dfse = jnp.zeros((nodal_shape + (node_levels,)))
-        if dfqa is not None:
-            self.dfqa = dfqa
-        else:
-            self.dfqa = jnp.zeros((nodal_shape + (node_levels,)))
 
-    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None, dfse=None, dfqa=None):
+    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             self.psa.shape, 
             self.se.shape[-1], 
@@ -308,9 +298,7 @@ class ConvectionData:
             se=se if se is not None else self.se,
             iptop=iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
-            precnv=precnv if precnv is not None else self.precnv,
-            dfse=dfse if dfse is not None else self.dfse,
-            dfqa=dfqa if dfqa is not None else self.dfqa
+            precnv=precnv if precnv is not None else self.precnv
         )
 
 @tree_math.struct

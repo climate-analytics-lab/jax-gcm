@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, wvi, grav
+from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
 from jcm.geometry import dhs, fsg
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
@@ -272,10 +272,16 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
 
     # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
     # pass on the rest of physics_data that was not updated or needed in this function
-    # since convection doesn't generate new tendencies, just return PhysicsTendency instance that is all 0's
+    # convection in Speedy generates net *flux* -- not tendencies, so we need to convert these to tendencies (dfse and dfqa) here
 
-    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv, dfse=dfse, dfqa=dfqa)
+    rps = 1/psa 
+    ttend = dfse 
+    qtend = dfqa
+    ttend = ttend.at[:,:,1:].set(dfse[1:] * rps * grdscp[1:kx])
+    qtend = qtend.at[:,:,1:].set(dfqa[1:] * rps * grdsig[1:kx])
+
+    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),ttend,qtend)
     
     return physics_tendencies, physics_data
