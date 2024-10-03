@@ -277,8 +277,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     rps = 1/psa 
     ttend = dfse 
     qtend = dfqa
-    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps * grdscp[1:kx])
-    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps * grdsig[1:kx])
+    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps * grdscp[jnp.newaxis, jnp.newaxis, 1:])
+    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps * grdsig[jnp.newaxis, jnp.newaxis, 1:])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
