@@ -21,14 +21,7 @@ def initialize_arrays(ix, il, kx):
     total_elements = ix * il * kx
     step_size = (max_val - min_val) / (total_elements - 1)
 
-    # Create a range of values and reshape to match the ta array shape
-    values = jnp.arange(min_val, max_val + step_size, step_size)
-    ta = ta.at[:,:,:].set(jnp.reshape(values, (ix, il, kx)))
-    for k in range(kx):
-        for j in range(il):
-            for i in range(ix):
-                val = i + (j)*ix + (k)*ix*il
-                ta = ta.at[i,j,k].set(min_val + step_size*val)
+    ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((2, 1, 0))
     
     return ta, fsfcd, st4a, flux
 
