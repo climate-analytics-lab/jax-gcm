@@ -2,6 +2,7 @@ import dinosaur
 from dinosaur.scales import units
 import jax 
 import jax.numpy as jnp
+from jcm.physics_data import PhysicsData
 import numpy as np
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import coordinate_systems
@@ -85,7 +86,7 @@ class HeldSuarezForcing:
             cutoff[:, np.newaxis, np.newaxis] * np.cos(self.lat) ** 4
     )
 
-    def held_suarez_forcings(self, state: PhysicsState):
+    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData):
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
@@ -93,4 +94,4 @@ class HeldSuarezForcing:
         d_u_wind = -self.kv() * state.u_wind
         d_spec_humidity = jnp.zeros_like(state.temperature) # just keep the same specific humidity?
 
-        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity)
+        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity), physics_data

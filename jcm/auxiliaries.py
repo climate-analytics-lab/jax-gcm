@@ -17,9 +17,9 @@ snowcv = jnp.zeros((ix, il), dtype=p) # Convective precipitation [g/(m^2 s)], sn
 snowls = jnp.zeros((ix, il), dtype=p) # Large-scale precipitation [g/(m^2 s)], snow only
 cbmf = jnp.zeros((ix, il), dtype=p) # Cloud-base mass flux
 tsr = jnp.zeros((ix, il), dtype=p) # Top-of-atmosphere shortwave radiation (downward)
-ssrd = jnp.zeros((ix, il), dtype=p) # Surface shortwave radiation (downward-only)
+rsds = jnp.zeros((ix, il), dtype=p) # Surface shortwave radiation (downward-only)
 ssr = jnp.zeros((ix, il), dtype=p) # Surface shortwave radiation (net downward)
-slrd = jnp.zeros((ix, il), dtype=p) # Surface longwave radiation (downward-only)
+rlds = jnp.zeros((ix, il), dtype=p) # Surface longwave radiation (downward-only)
 slr = jnp.zeros((ix, il), dtype=p) # Surface longwave radiation (net upward)
 olr = jnp.zeros((ix, il), dtype=p) # Outgoing longwave radiation (upward)
 

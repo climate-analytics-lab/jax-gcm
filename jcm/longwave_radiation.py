@@ -1,27 +1,32 @@
 import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi
-from jcm.mod_radcon import epslw, emisfc, fband, tau2, stratc
+from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
-from jcm.params import ix, il, iy, kx
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 nband = 4
 
-
-def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
+def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
     """
     Calculate the downward longwave radiation fluxes
     
     Args:
-        ta: Absolute temperature
-        fband: Energy fraction emitted in each LW band = f(T)
-        st4a: Blackbody emission from full and half atmospheric levels
-        flux: Radiative flux in different spectral bands
+        ta: Absolute temperature - state.temperature
+        fband: Energy fraction emitted in each LW band = f(T) - modradcon.fband
+        st4a: Blackbody emission from full and half atmospheric levels - modradcon.st4a
+        flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
-        fsfcd: Downward flux of long-wave radiation at the surface
+        rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
-    
     """
+    ix, il, kx = state.temperature.shape
+    ta = state.temperature
+    fband = physics_data.mod_radcon.fband
+    st4a = physics_data.mod_radcon.st4a
+    flux = physics_data.mod_radcon.flux
+    tau2 = physics_data.mod_radcon.tau2
 
     nl1 = kx - 1
     # Temperature at level boundaries
@@ -45,7 +50,7 @@ def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
     st4a =  st4a.at[:,:,2:kx,1].set(4.0 * st3a * st4a[:,:,2:kx,1])
 
     # Initialization of fluxes
-    fsfcd = jnp.zeros((ix, il))
+    rlds = jnp.zeros((ix, il))
     dfabs = jnp.zeros((ix, il, kx))
 
     ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
@@ -68,47 +73,60 @@ def get_downward_longwave_rad_fluxes(ta, fband, st4a, flux):
             flux = flux.at[:, :, jb].set((tau2[:, :, k, jb] * flux[:, :, jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
             dfabs = dfabs.at[:, :, k].add(-flux[:, :, jb])
 
-    fsfcd = jnp.sum(emisfc * flux, axis=-1)
+    rlds = jnp.sum(emisfc * flux, axis=-1)
 
     corlw = epslw * emisfc * st4a[:,:,kx-1,0]
     dfabs = dfabs.at[:,:,kx-1].add(-corlw)
-    fsfcd = fsfcd + corlw
-    return fsfcd, dfabs
+    rlds = rlds + corlw
 
-def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs, st4a):
+    longwave_out = physics_data.longwave_rad.copy(rlds=rlds, dfabs=dfabs)
+    physics_data = physics_data.copy(longwave_rad=longwave_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+
+    return physics_tendencies, physics_data
+
+def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     """
     Calculate the upward longwave radiation fluxes
     
     Args:
         ta: Absolute temperature
-        ts: Surface temperature
-        fsfcd: Downward flux of long-wave radiation at the surface
-        fsfcu: Surface blackbody emission
-        fsfc: Net upward flux of long-wave radiation at the surface
-        ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
+        ts: Surface temperature - surface_fluxes.tsfc
+        rlds: Downward flux of long-wave radiation at the surface
+        fsfcu: Surface blackbody emission - taken from slru from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
-        st4a: Blackbody emission from full and half atmospheric levels
+        st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
     Returns:
         fsfc: Net upward flux of long-wave radiation at the surface
         ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
-        st4a: Blackbody emission from full and half atmospheric levels
+        st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
     """
+    _, _, kx = state.temperature.shape
+    ta = state.temperature
+    dfabs = physics_data.longwave_rad.dfabs
+    rlds = physics_data.longwave_rad.rlds
 
+    fband = physics_data.mod_radcon.fband
+    st4a = physics_data.mod_radcon.st4a
+    flux = physics_data.mod_radcon.flux
+    tau2 = physics_data.mod_radcon.tau2
+    stratc = physics_data.mod_radcon.stratc
+
+    fsfcu = physics_data.surface_fluxes.slru[:,:,2] 
+    ts = physics_data.surface_fluxes.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
-    fsfc = fsfcu - fsfcd
-
+    fsfc = fsfcu - rlds
+    
     ts_rounded = jnp.round(ts[:, :, :]).astype(int)  # Rounded ts
     ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
 
     flux = flux.at[:,:,:].set(fband[ts_rounded[:,:]-100,:] * fsfcu[:,:] + refsfc * flux[:,:,:])
 
     # Troposphere
-
     # correction for 'black' band
-
     dfabs[:,:,-1] = dfabs[:,:,-1] + epslw * fsfcu
 
     for jb in range(nband):
@@ -135,10 +153,14 @@ def get_upward_longwave_rad_fluxes(ta, ts, fsfcd, fsfcu, fsfc, ftop, dfabs, st4a
 
     ftop = jnp.sum(flux, axis = -1)
 
-    return fsfc, ftop, dfabs, st4a
+    longwave_out = physics_data.longwave_rad.copy(fsfc=fsfc, ftop=ftop, dfabs=dfabs)
+    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
+    physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    return physics_tendencies, physics_data
 
-
-def radset():
+def radset(physics_data: PhysicsData):
     """
     Set the energy fraction emitted in each LW band = f(T)
     """
@@ -161,6 +183,8 @@ def radset():
         fband = fband.at[:99, jb].set(fband[100, jb])
         fband = fband.at[221:300, jb].set(fband[220,jb])
 
-    return fband
+    modradcon_out = physics_data.mod_radcon.copy(fband=fband)
+    physics_data = physics_data.copy(mod_radcon=modradcon_out)
+    return physics_data
 
 

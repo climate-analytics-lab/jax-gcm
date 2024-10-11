@@ -3,13 +3,12 @@ Date: 2/11/2024
 Parametrization of convection. Convection is modelled using a simplified 
 version of the Tiedke (1993) mass-flux convection scheme.
 '''
-
-import jax.numpy as jnp
 import jax
-
-from jcm.physical_constants import p0, alhc, wvi, grav, sigl, sigh
+import jax.numpy as jnp
+from jcm.physics import PhysicsTendency, PhysicsState
+from jcm.physics_data import PhysicsData
+from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
 from jcm.geometry import dhs, fsg
-
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
 trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
@@ -48,13 +47,12 @@ def diagnose_convection(psa, se, qa, qsat):
     qsat: Saturation specific humidity [g/kg]
 
     Returns:
-    itop: Top of convection (layer index)
+    iptop: Top of convection (layer index)
     qdif: Excess humidity in convective gridboxes
 
     """
     ix, il, kx = se.shape
-
-    itop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize itop with nlp
+    iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
     qdif = jnp.zeros((ix, il), dtype=float)
 
     # Saturation moist static energy
@@ -95,43 +93,50 @@ def diagnose_convection(psa, se, qa, qsat):
     qthr1 = rhbl * qsat[:, :, kx-2]
     lqthr = (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1)
 
-    # Applying masks to itop and qdif
+    # Applying masks to iptop and qdif
     mask_ktop1_less_kx = ktop1 < kx
     mask_ktop2_less_kx = ktop2 < kx
 
     combined_mask1 = mask_ktop1_less_kx & mask_ktop2_less_kx
-    itop = jnp.where(combined_mask1, ktop1, itop)
+    iptop = jnp.where(combined_mask1, ktop1, iptop)
     qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
 
     combined_mask2 = mask_ktop1_less_kx & lqthr & ~combined_mask1
-    itop = jnp.where(combined_mask2, ktop1, itop)
+    iptop = jnp.where(combined_mask2, ktop1, iptop)
     qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
 
-    return itop, qdif
+    return iptop, qdif
 
-def get_convection_tendencies(psa, se, qa, qsat):
+def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
     Args:
-    psa: Normalised surface pressure [p/p0]
+    psa: Normalised surface pressure [p/p0] 
     se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg]
-    qsat: Saturation specific humidity [g/kg]
+    qa: Specific humidity [g/kg] - state.specific_humidity
+    qsat: Saturation specific humidity [g/kg] - humidity.qsat
 
     Returns:
-    itop: Top of convection (layer index)
+    iptop: Top of convection (layer index)
     cbmf: Cloud-base mass flux
     precnv: Convective precipitation [g/(m^2 s)]
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
 
     """
-    _, _, kx = se.shape
-
+    conv = physics_data.convection
+    humidity = physics_data.humidity
+    se = conv.se
+    qa = state.specific_humidity
+    qsat = humidity.qsat
+    ix, il, kx = se.shape
+    psa = conv.psa
+    
     # 1. Initialization of output and workspace arrays
+
     dfse = jnp.zeros_like(se)
-    dfqa = jnp.zeros_like(qa)
+    dfqa = jnp.zeros_like(state.specific_humidity)
 
     cbmf = jnp.zeros_like(psa)
     precnv = jnp.zeros_like(psa)
@@ -150,28 +155,28 @@ def get_convection_tendencies(psa, se, qa, qsat):
     rdps=2.0/(1.0 - psmin)
 
     # 2. Check of conditions for convection
-    itop, qdif = diagnose_convection(psa, se, qa, qsat)
+    iptop, qdif = diagnose_convection(psa, se, state.specific_humidity, humidity.qsat)
 
     # 3. Convection over selected grid-points
-    mask = itop < kx
+    mask = iptop < kx
     #3.1 Boundary layer (cloud base)
     k = kx - 1
     k1 = k - 1
 
     # Maximum specific humidity in the PBL
-    qmax = jnp.maximum(1.01 * qa[:, :, k], qsat[:, :, k])
+    qmax = jnp.maximum(1.01 * state.specific_humidity[:, :, -1], humidity.qsat[:, :, -1])
 
     # Dry static energy and moisture at upper boundary
     sb = se[:, :, k1] + wvi[k1, 1] * (se[:, :, k] - se[:, :, k1])
-    qb = jnp.minimum(qa[:, :, k1] + wvi[k1, 1] * (qa[:, :, k] - qa[:, :, k1]), qa[:, :, k])
+    qb = jnp.minimum(state.specific_humidity[:, :, k1] + wvi[k1, 1] * (state.specific_humidity[:, :, k] - state.specific_humidity[:, :, k1]), state.specific_humidity[:, :, k])
     
     fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
     cbmf = jnp.where(mask, fmass, cbmf)
 
     # Upward fluxes at upper boundary
-    fus = fmass*se[:, :, k]
-    fuq = fmass*qmax
+    fus = fmass * se[:, :, -1]
+    fuq = fmass * qmax
 
     # Downward fluxes at upper boundary
     fds = fmass*sb
@@ -226,15 +231,15 @@ def get_convection_tendencies(psa, se, qa, qsat):
     fds_new = fds_new.at[:, :, 1:kx-1].set(fmass_new[:, :, 1:kx-1]*sb)
     fdq_new = fdq_new.at[:, :, 1:kx-1].set(fmass_new[:, :, 1:kx-1]*qb)
 
-    #Now mask out all values above itop:
-    # Expand the itop array to match the shape of fus_new
-    expanded_itop = jnp.expand_dims(itop, axis=-1)
+    #Now mask out all values above iptop:
+    # Expand the iptop array to match the shape of fus_new
+    expanded_iptop = jnp.expand_dims(iptop, axis=-1)
     
     # Generate indices for the third dimension
     indices = jnp.arange(kx)
     
     # Create a boolean mask where we want to set values to 0
-    new_mask = indices > expanded_itop
+    new_mask = indices > expanded_iptop
     
     # Apply the mask to the fluxes
     fus_new_masked = fus_new * new_mask
@@ -252,11 +257,11 @@ def get_convection_tendencies(psa, se, qa, qsat):
     dfqa = dfqa.at[:, :, kx].add(-jnp.sum(fsq_vals, axis=-1))
 
     # 3.3 Top layer (condensation and detrainment)
-    k = itop
+    k = iptop
 
     # Flux of convective precipitation
-    i = jnp.arange(96)[:, jnp.newaxis]  # Shape (96, 1)
-    j = jnp.arange(48)[jnp.newaxis, :]  # Shape (1, 48)
+    i = jnp.arange(ix)[:, jnp.newaxis]  # Shape (96, 1)
+    j = jnp.arange(il)[jnp.newaxis, :]  # Shape (1, 48)
 
     qsatb = qsat[j, j, k] + wvi[k, 1] *(qsat[i, j, k+1]-qsat[i,j, k])
     precnv = jnp.where(mask, jnp.maximum(fuq_new[i, j, k] - fmass_new[i, j, k] * qsatb, 0.0), precnv)
@@ -265,4 +270,19 @@ def get_convection_tendencies(psa, se, qa, qsat):
     dfse = dfse.at[i,j,k].set(fus_new[i,j, k +1] - fds_new[i,j, k+1] + alhc * precnv)
     dfqa = dfqa.at[i,j,k].set(fuq_new[i,j,k+1] - fdq_new[i,j,k+1] - precnv)
 
-    return itop, dfse, dfqa, cbmf, precnv
+    # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
+    # pass on the rest of physics_data that was not updated or needed in this function
+    # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
+    # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
+
+    rps = 1/psa 
+    ttend = dfse 
+    qtend = dfqa
+    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:-1])
+    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:-1])
+
+    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
+    physics_data = physics_data.copy(convection=convection_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),ttend,qtend)
+    
+    return physics_tendencies, physics_data

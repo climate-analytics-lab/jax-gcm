@@ -5,18 +5,13 @@ to the specific physics being used.
 '''
 
 from collections import abc
-import numpy as np
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
+from jcm.physics_data import PhysicsData
 
-from dinosaur.coordinate_systems import CoordinateSystem
-from dinosaur.sigma_coordinates import SigmaCoordinates
-from dinosaur.scales import units
-
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal, Grid
-from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations, PrimitiveEquationsSpecs
-from dinosaur import primitive_equations_states
+from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
+from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
 
 @tree_math.struct
 class PhysicsState:
@@ -27,7 +22,6 @@ class PhysicsState:
     geopotential: jnp.ndarray
     surface_pressure: jnp.ndarray
     # relative_humidity: jnp.ndarray
-
 
 @tree_math.struct
 class PhysicsTendency:
@@ -59,7 +53,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         dynamics.coords.vertical,
     )
     # Z, X, Y
-    t_spectral = state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+    t_spectral = state.temperature_variation + dynamics.coords.horizontal.to_modal(dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis])
     q_spectral = state.tracers['specific_humidity']
 
     t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
@@ -115,7 +109,22 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
-    physics_tendency = sum(term(physics_state) for term in physics_terms)
+    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
+    # and implicitly passed to the next physics_term. tendencies are summed 
+    physics_tendency = PhysicsTendency(
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind),
+        jnp.zeros_like(physics_state.u_wind))
+    
+    data = PhysicsData(physics_state.temperature.shape[0:1],physics_state.temperature.shape[2])
+    # optionally initialize the physics data here if it needs to be 
+
+    for term in physics_terms:
+        tend, data = term(physics_state, data)
+        physics_tendency += tend
+
+    #physics_tendency = sum(term(physics_state) for term in physics_terms)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency

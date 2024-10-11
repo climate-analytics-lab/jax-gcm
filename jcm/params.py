@@ -3,8 +3,6 @@ Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 '''
 
-import jax
-
 # Model geometry parameters
 trunc = 30      # Spectral truncation total wavenumber
 ix = 96         # Number of longitudes
