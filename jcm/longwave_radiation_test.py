@@ -49,7 +49,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         # fortran values
         # print(fsfcd[:5, :5])
-        f90_slrd =[ [ 210.58037967609744, 210.59147844598601, 210.60257765343979, 210.61367729847015, 210.62477738108839],
+        f90_rlds =[ [ 210.58037967609744, 210.59147844598601, 210.60257765343979, 210.61367729847015, 210.62477738108839],
                 [ 211.64785852088454, 211.65899934932736, 211.67014061643681, 211.68128232222412, 211.69242446670108], 
                 [ 212.71938001172822, 212.73056300453399, 212.74174643710919, 212.75293030946537, 212.76411462161374],
                 [ 213.79495431257942, 213.80617957568973, 213.81740527967378, 213.82863142454275, 213.83985801030869],
@@ -59,7 +59,7 @@ class TestDownwardLongwave(unittest.TestCase):
         f90_dfabs = [  -3.5801730611349774, -17.861774929469838, -20.478947887745250, -17.260889773424999, -22.102412041367657, -27.772991217865744, -34.338080378956391, -71.309733057733894 ]
 
         # Note the transpose to match the fortran array order
-        assert_array_almost_equal(physics_data.longwave_rad.slrd[:5, :5], np.asarray(f90_slrd).T, decimal=4)
+        assert_array_almost_equal(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds).T, decimal=4)
         assert_array_almost_equal(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, decimal=4)
 
 

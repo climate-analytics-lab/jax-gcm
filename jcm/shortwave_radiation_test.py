@@ -120,7 +120,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         _, physics_data = get_zonal_average_fields(physics_data, state)
         _, physics_data = get_shortwave_rad_fluxes(physics_data, state)
         
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.ssrd[0, :], [
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,

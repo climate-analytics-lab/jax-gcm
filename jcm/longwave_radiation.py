@@ -18,7 +18,7 @@ def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsSt
         flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
-        slrd: Downward flux of long-wave radiation at the surface
+        rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
     """
     ix, il, kx = state.temperature.shape
@@ -50,7 +50,7 @@ def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsSt
     st4a =  st4a.at[:,:,2:kx,1].set(4.0 * st3a * st4a[:,:,2:kx,1])
 
     # Initialization of fluxes
-    slrd = jnp.zeros((ix, il))
+    rlds = jnp.zeros((ix, il))
     dfabs = jnp.zeros((ix, il, kx))
 
     ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
@@ -73,13 +73,13 @@ def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsSt
             flux = flux.at[:, :, jb].set((tau2[:, :, k, jb] * flux[:, :, jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
             dfabs = dfabs.at[:, :, k].add(-flux[:, :, jb])
 
-    slrd = jnp.sum(emisfc * flux, axis=-1)
+    rlds = jnp.sum(emisfc * flux, axis=-1)
 
     corlw = epslw * emisfc * st4a[:,:,kx-1,0]
     dfabs = dfabs.at[:,:,kx-1].add(-corlw)
-    slrd = slrd + corlw
+    rlds = rlds + corlw
 
-    longwave_out = physics_data.longwave_rad.copy(slrd=slrd, dfabs=dfabs)
+    longwave_out = physics_data.longwave_rad.copy(rlds=rlds, dfabs=dfabs)
     physics_data = physics_data.copy(longwave_rad=longwave_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 
@@ -92,7 +92,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     Args:
         ta: Absolute temperature
         ts: Surface temperature - surface_fluxes.tsfc
-        slrd: Downward flux of long-wave radiation at the surface
+        rlds: Downward flux of long-wave radiation at the surface
         fsfcu: Surface blackbody emission - taken from slru from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
@@ -107,7 +107,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     _, _, kx = state.temperature.shape
     ta = state.temperature
     dfabs = physics_data.longwave_rad.dfabs
-    slrd = physics_data.longwave_rad.slrd
+    rlds = physics_data.longwave_rad.rlds
 
     fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
@@ -118,7 +118,7 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     fsfcu = physics_data.surface_fluxes.slru[:,:,2] 
     ts = physics_data.surface_fluxes.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
-    fsfc = fsfcu - slrd
+    fsfc = fsfcu - rlds
     
     ts_rounded = jnp.round(ts[:, :, :]).astype(int)  # Rounded ts
     ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta

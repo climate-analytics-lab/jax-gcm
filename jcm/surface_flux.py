@@ -63,9 +63,9 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
         - Fractional land-sea mask
     tsea : 2D array
         - Sea-surface temperature
-    ssrd : 2D array 
+    rsds : 2D array 
         - Downward flux of short-wave radiation at the surface
-    slrd : 2D array 
+    rlds : 2D array 
         - Downward flux of long-wave radiation at the surface
     lfluxland : boolean
 
@@ -83,8 +83,8 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     fmask = physics_data.surface_flux.fmask
 
     lfluxland = physics_data.surface_flux.lfluxland
-    ssrd = physics_data.shortwave_rad.ssrd
-    slrd = physics_data.longwave_rad.slrd
+    rsds = physics_data.shortwave_rad.rsds
+    rlds = physics_data.longwave_rad.rlds
 
     rh = physics_data.humidity.rh
     phi0 = physics_data.surface_flux.phi0
@@ -154,7 +154,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + ctday * jnp.sqrt(coa) * ssrd * (1.0 - physics_data.mod_radcon.alb_l) * psa
+        tskin = stl_am + ctday * jnp.sqrt(coa) * rsds * (1.0 - physics_data.mod_radcon.alb_l) * psa
 
         # 2.2 Stability Correlation
         rdth  = fstab / dtheta
@@ -198,7 +198,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
         slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
         hfluxn = hfluxn.at[:, :, 0].set(
-                        ssrd * (1.0 - physics_data.mod_radcon.alb_l) + slrd -\
+                        rsds * (1.0 - physics_data.mod_radcon.alb_l) + rlds -\
                             (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                     )
 
@@ -266,7 +266,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(ssrd * (1.0 - physics_data.mod_radcon.alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - physics_data.mod_radcon.alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     if lfluxland:

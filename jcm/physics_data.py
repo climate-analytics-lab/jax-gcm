@@ -1,6 +1,9 @@
 import jax.numpy as jnp
 import tree_math
 
+n_temperatures = 301
+n_bands = 4
+
 @tree_math.struct
 class DateData:
     tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
@@ -18,16 +21,14 @@ class DateData:
     
 @tree_math.struct
 class LWRadiationData:
-    slrd: jnp.ndarray # Downward flux of long-wave radiation at the surface
+    rlds: jnp.ndarray # Downward flux of long-wave radiation at the surface
     dfabs: jnp.ndarray # Flux of long-wave radiation absorbed in each atmospheric layer
-    # ftop: jnp.ndarray
-    # slr: jnp.ndarray
     
-    def __init__(self, nodal_shape, node_levels, slrd=None, dfabs=None, ftop=None, slr=None) -> None:
-        if slrd is not None:
-            self.slrd = slrd
+    def __init__(self, nodal_shape, node_levels, rlds=None, dfabs=None, ftop=None, slr=None) -> None:
+        if rlds is not None:
+            self.rlds = rlds
         else:
-            self.slrd = jnp.zeros((nodal_shape))
+            self.rlds = jnp.zeros((nodal_shape))
         if dfabs is not None:
             self.dfabs = dfabs
         else:
@@ -41,11 +42,11 @@ class LWRadiationData:
         else:
             self.slr = jnp.zeros((nodal_shape))
 
-    def copy(self, slrd=None, dfabs=None, ftop=None, slr=None):
+    def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
             (0,0), 
             0, 
-            slrd=slrd if slrd is not None else self.slrd,
+            rlds=rlds if rlds is not None else self.rlds,
             dfabs=dfabs if dfabs is not None else self.dfabs,
             ftop=ftop if ftop is not None else self.ftop,
             slr=slr if slr is not None else self.slr
@@ -55,7 +56,7 @@ class LWRadiationData:
 class SWRadiationData:
     qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
     fsol: jnp.ndarray # Solar radiation at the top
-    ssrd: jnp.ndarray # Total downward flux of short-wave radiation at the surface
+    rsds: jnp.ndarray # Total downward flux of short-wave radiation at the surface
     ssr: jnp.ndarray # Net downward flux of short-wave radiation at the surface
     ozone: jnp.ndarray # Ozone concentration in lower stratosphere
     ozupp: jnp.ndarray# Ozone depth in upper stratosphere
@@ -68,7 +69,7 @@ class SWRadiationData:
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
 
-    def __init__(self, nodal_shape, node_levels, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None) -> None:
+    def __init__(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None) -> None:
         if qcloud is not None:
             self.qcloud = qcloud
         else:
@@ -77,10 +78,10 @@ class SWRadiationData:
             self.fsol = fsol
         else:
             self.fsol = jnp.zeros((nodal_shape))
-        if ssrd is not None:
-            self.ssrd = ssrd
+        if rsds is not None:
+            self.rsds = rsds
         else:
-            self.ssrd = jnp.zeros((nodal_shape))
+            self.rsds = jnp.zeros((nodal_shape))
         if ssr is not None:
             self.ssr = ssr
         else:
@@ -127,13 +128,13 @@ class SWRadiationData:
             self.dfabs = jnp.zeros((nodal_shape + (node_levels,)))
 
 
-    def copy(self, qcloud=None, fsol=None, ssrd=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             self.cloudc.shape,
             0,
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
-            ssrd=ssrd if ssrd is not None else self.ssrd,
+            rsds=rsds if rsds is not None else self.rsds,
             ssr=ssr if ssr is not None else self.ssr,
             ozone=ozone if ozone is not None else self.ozone,
             ozupp=ozupp if ozupp is not None else self.ozupp,
@@ -169,7 +170,7 @@ class ModRadConData:
         if fband is not None:
             self.fband = fband
         else:
-            self.fband = jnp.zeros((301,4))
+            self.fband = jnp.zeros((n_temperatures,n_bands))
         if alb_l is not None:
             self.alb_l = alb_l
         else:
