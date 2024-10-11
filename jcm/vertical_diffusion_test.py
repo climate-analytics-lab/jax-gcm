@@ -27,7 +27,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
-        physics_tendencies, _ = get_vertical_diffusion_tend(physics_data, state)
+        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data)
 
         np.testing.assert_array_almost_equal(physics_tendencies.u_wind[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))
         np.testing.assert_array_almost_equal(physics_tendencies.v_wind[20, 20], np.asarray([0., 0., 0., 0., 0., 0., 0., 0.]))

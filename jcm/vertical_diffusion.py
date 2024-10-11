@@ -13,7 +13,7 @@ rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
 segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
 # @jit
-def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
+def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     
     '''
     Inputs:

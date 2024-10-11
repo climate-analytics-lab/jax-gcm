@@ -25,7 +25,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
@@ -52,7 +52,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(physics_data, state)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
         
         np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]]]), atol=1e-4, rtol=0)

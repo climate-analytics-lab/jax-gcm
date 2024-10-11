@@ -116,9 +116,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=jnp.zeros_like(qa), surface_pressure=jnp.zeros(xy))
 
-        _, physics_data = clouds(physics_data, state)
-        _, physics_data = get_zonal_average_fields(physics_data, state)
-        _, physics_data = get_shortwave_rad_fluxes(physics_data, state)
+        _, physics_data = clouds(state, physics_data)
+        _, physics_data = get_zonal_average_fields(state, physics_data)
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data)
         
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
@@ -180,7 +180,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=tyear)
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
-        _, new_data = get_zonal_average_fields(physics_data, state)
+        _, new_data = get_zonal_average_fields(state, physics_data)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (self.ix, self.il))
         self.assertEqual(new_data.shortwave_rad.ozupp.shape, (self.ix, self.il))
@@ -196,7 +196,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=tyear)
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
-        _, physics_data = get_zonal_average_fields(physics_data, state)
+        _, physics_data = get_zonal_average_fields(state, physics_data)
 
         topsr = solar(tyear)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
@@ -209,7 +209,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=tyear)
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
-        _, physics_data = get_zonal_average_fields(physics_data, state)
+        _, physics_data = get_zonal_average_fields(state, physics_data)
 
         fs0 = 6.0
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
@@ -223,7 +223,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=tyear)
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
-        _, physics_data = get_zonal_average_fields(physics_data, state)
+        _, physics_data = get_zonal_average_fields(state, physics_data)
 
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
@@ -238,7 +238,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=tyear)
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
-        _, physics_data = get_zonal_average_fields(physics_data, state)
+        _, physics_data = get_zonal_average_fields(state, physics_data)
         
         # Ensure outputs are consistent and within expected ranges
         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))

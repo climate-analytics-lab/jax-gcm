@@ -10,7 +10,7 @@ from jcm.physics_data import PhysicsData
 from jcm.geometry import fsg
 import jax 
 
-def spec_hum_to_rel_hum(physics_data: PhysicsData, state: PhysicsState):
+def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     """
     Converts specific humidity to relative humidity, and also returns saturation 
      specific humidity.

@@ -107,7 +107,7 @@ def diagnose_convection(psa, se, qa, qsat):
 
     return iptop, qdif
 
-def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
+def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 

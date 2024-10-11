@@ -86,7 +86,7 @@ class HeldSuarezForcing:
             cutoff[:, np.newaxis, np.newaxis] * np.cos(self.lat) ** 4
     )
 
-    def held_suarez_forcings(self, physics_data: PhysicsData, state: PhysicsState):
+    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData):
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 

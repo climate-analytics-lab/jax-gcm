@@ -30,7 +30,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
         self.assertTrue(jnp.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
@@ -72,7 +72,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
         # old outputs: ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
@@ -122,7 +122,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
 
@@ -171,7 +171,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.05182373e+02, 4.66440842e-02,
@@ -219,7 +219,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
         test_data = jnp.array([[-1.98534015e-03,-1.98534015e-03, 3.40381584e+01, 2.68966686e-02,
@@ -266,7 +266,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData(xy,tsea=tsea)
         physics_data = PhysicsData(xy,8,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        _, physics_data = get_surface_fluxes(physics_data, state)
+        _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
         
         test_data = jnp.array([[-6.3609974e-03,-6.3609974e-03, 1.5656566e+02, 5.3803049e-02,

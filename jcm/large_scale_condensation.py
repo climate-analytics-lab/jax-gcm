@@ -17,7 +17,7 @@ rhblsc = 0.95 # Relative humidity threshold for boundary layer
 
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
-def get_large_scale_condensation_tendencies(physics_data: PhysicsData, state: PhysicsState):
+def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: PhysicsData):
     """
     Compute large-scale condensation and associated tendencies of temperature and moisture
 

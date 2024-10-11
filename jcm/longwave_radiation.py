@@ -6,7 +6,7 @@ from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 nband = 4
 
-def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
+def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
     """
     Calculate the downward longwave radiation fluxes
@@ -85,7 +85,7 @@ def get_downward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsSt
 
     return physics_tendencies, physics_data
 
-def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
+def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     """
     Calculate the upward longwave radiation fluxes
     
