@@ -1,0 +1,58 @@
+import unittest
+import numpy as np
+import jax.numpy as jnp
+from jcm.speedy_test_model import SpeedyTestModel
+from dinosaur import primitive_equations_states
+from dataclasses import asdict
+
+class TestModelUnit(unittest.TestCase):
+
+    def test_model_run(self):
+        layers = 8
+        model = SpeedyTestModel(
+            time_step=120,
+            save_interval=1,
+            total_time=4,
+            layers=layers
+        )
+    
+        state = model.get_initial_state()
+        state.tracers = {
+            'specific_humidity': primitive_equations_states.gaussian_scalar(
+                model.coords, model.physics_specs
+            )
+        }
+
+        modal_x = 85
+        modal_y = 44
+        modal_zxy = (layers, modal_x, modal_y)
+        output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
+    
+        final_state, predictions = model.unroll(state)
+
+        self.assertIsNotNone(final_state)
+        self.assertIsNotNone(predictions)
+
+        self.assertIsNotNone(final_state.divergence)
+        self.assertIsNotNone(final_state.vorticity)
+        self.assertIsNotNone(final_state.temperature_variation)
+        self.assertIsNotNone(final_state.log_surface_pressure)
+        self.assertIsNotNone(final_state.tracers['specific_humidity'])
+
+        self.assertIsNotNone(predictions.divergence)
+        self.assertIsNotNone(predictions.vorticity)
+        self.assertIsNotNone(predictions.temperature_variation)
+        self.assertIsNotNone(predictions.log_surface_pressure)
+        self.assertIsNotNone(predictions.tracers['specific_humidity'])
+
+        self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
+        self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
+        self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
+        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1, modal_x, modal_y))
+        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+
+        self.assertTupleEqual(predictions.divergence.shape, output_tzxy)
+        self.assertTupleEqual(predictions.vorticity.shape, output_tzxy)
+        self.assertTupleEqual(predictions.temperature_variation.shape, output_tzxy)
+        self.assertTupleEqual(predictions.log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
+        self.assertTupleEqual(predictions.tracers['specific_humidity'].shape, output_tzxy)
