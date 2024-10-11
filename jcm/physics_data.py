@@ -44,8 +44,8 @@ class LWRadiationData:
 
     def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
-            (0,0), 
-            0, 
+            nodal_shape=None, 
+            node_levels=None, 
             rlds=rlds if rlds is not None else self.rlds,
             dfabs=dfabs if dfabs is not None else self.dfabs,
             ftop=ftop if ftop is not None else self.ftop,
@@ -130,8 +130,8 @@ class SWRadiationData:
 
     def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
-            self.cloudc.shape,
-            0,
+            nodal_shape=None, 
+            node_levels=None, 
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
             rsds=rsds if rsds is not None else self.rsds,
@@ -206,8 +206,8 @@ class ModRadConData:
 
     def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
-            self.alb_l.shape, 
-            0, # this value isn't necessary since we will pass through values for each member of the struct
+            nodal_shape=None, 
+            node_levels=None, 
             fband=fband if fband is not None else self.fband,
             alb_l=alb_l if alb_l is not None else self.alb_l,
             alb_s=alb_s if alb_s is not None else self.alb_s,
@@ -254,8 +254,8 @@ class CondensationData:
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
         return CondensationData(
-            self.precls.shape,
-            0,
+            nodal_shape=None, 
+            node_levels=None, 
             precls=precls if precls is not None else self.precls, 
             dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
             dqlsc=dqlsc if dqlsc is not None else self.dqlsc
@@ -293,8 +293,8 @@ class ConvectionData:
 
     def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
-            self.psa.shape, 
-            self.se.shape[-1], 
+            nodal_shape=None, 
+            node_levels=None, 
             psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
             iptop=iptop if iptop is not None else self.iptop,
@@ -415,7 +415,7 @@ class SurfaceFluxData:
     
     def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
         return SurfaceFluxData(
-            self.stl_am.shape,
+            nodal_shape=None, 
             stl_am=stl_am if stl_am is not None else self.stl_am,
             soilw_am=soilw_am if soilw_am is not None else self.soilw_am,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
@@ -486,15 +486,15 @@ class PhysicsData:
 
     def copy(self,shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
         return PhysicsData(
-            (0,0),
-            0,
-            shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
-            longwave_rad if longwave_rad is not None else self.longwave_rad,
-            convection if convection is not None else self.convection,
-            mod_radcon if mod_radcon is not None else self.mod_radcon,
-            humidity if humidity is not None else self.humidity,
-            condensation if condensation is not None else self.condensation,
-            surface_flux if surface_flux is not None else self.surface_flux,
-            date if date is not None else self.date,
-            sea_model if sea_model is not None else self.sea_model
+            nodal_shape=None,
+            node_levels=None,
+            shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
+            longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
+            convection=convection if convection is not None else self.convection,
+            mod_radcon=mod_radcon if mod_radcon is not None else self.mod_radcon,
+            humidity=humidity if humidity is not None else self.humidity,
+            condensation=condensation if condensation is not None else self.condensation,
+            surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
+            date=date if date is not None else self.date,
+            sea_model=sea_model if sea_model is not None else self.sea_model
         )
