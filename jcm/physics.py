@@ -60,8 +60,9 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
     )
     
-    
+    # TODO: figure out why log_sp values are ~45 (isn't this extremely large?) as well as why setting p1 to 0 prevents this from causing infs
     sp = jnp.exp(log_sp)
+    
     physics_state = PhysicsState(u, v, t, q, phi, sp)
     return physics_state
 
@@ -119,6 +120,9 @@ def get_physical_tendencies(
     
     data = PhysicsData(physics_state.temperature.shape[0:1],physics_state.temperature.shape[2])
     # optionally initialize the physics data here if it needs to be 
+
+    # TODO: set data.convection.psa = physics_state.surface_pressure?
+    # should try and track differences in physics term values with and without it
 
     for term in physics_terms:
         tend, data = term(data, physics_state)

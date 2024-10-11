@@ -50,7 +50,7 @@ class SpeedyTestModel:
 
         # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
-        p1 = 5e3 * units.pascal
+        p1 = 0 * units.pascal
 
         self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
