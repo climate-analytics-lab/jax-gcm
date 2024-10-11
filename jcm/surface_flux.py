@@ -44,30 +44,30 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     Parameters
     ----------
     psa : 2D array
-        - Normalised surface pressure
+        - Normalised surface pressure, physics_data.convection.psa
     ua : 3D array
-        - u-wind
+        - u-wind, state.u_wind
     va : 3D array
-        - v-wind
+        - v-wind, state.v_wind
     ta :  3D array
-        - Temperature
+        - Temperature, state.temperature
     qa : 3D array
-        - Specific humidity [g/kg]
+        - Specific humidity [g/kg], state.specific_humidity
     rh : 3D array
-        - Relative humidity
+        - Relative humidity, physics_data.humidity.rh
     phi : 3D array
-        - Geopotential
+        - Geopotential, state.geopotential
     phi0 : 2D array
-        - Surface geopotential
+        - Surface geopotential, physics_data.surface_flux.phi0 
     fmask : 2D array
-        - Fractional land-sea mask
+        - Fractional land-sea mask, physics_data.surface_flux.fmask
     tsea : 2D array
-        - Sea-surface temperature
+        - Sea-surface temperature, physics_data.sea_model.tsea
     rsds : 2D array 
-        - Downward flux of short-wave radiation at the surface
+        - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array 
-        - Downward flux of long-wave radiation at the surface
-    lfluxland : boolean
+        - Downward flux of long-wave radiation at the surface, physics_data.longwave_rad.rlds
+    lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
     stl_am = physics_data.surface_flux.stl_am
@@ -87,8 +87,12 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     rlds = physics_data.longwave_rad.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = physics_data.surface_flux.phi0
+    phi0 = physics_data.surface_flux.phi0 # surface geopotentail
     tsea = physics_data.sea_model.tsea
+
+    snowc = physics_data.mod_radcon.snowc
+    alb_l = physics_data.mod_radcon.alb_l
+    alb_s = physics_data.mod_radcon.alb_s
 
     forog = set_orog_land_sfc_drag(phi0)
 
@@ -154,7 +158,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + ctday * jnp.sqrt(coa) * rsds * (1.0 - physics_data.mod_radcon.alb_l) * psa
+        tskin = stl_am + ctday * jnp.sqrt(coa) * rsds * (1.0 - alb_l) * psa
 
         # 2.2 Stability Correlation
         rdth  = fstab / dtheta
@@ -198,14 +202,14 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
         slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
         hfluxn = hfluxn.at[:, :, 0].set(
-                        rsds * (1.0 - physics_data.mod_radcon.alb_l) + rlds -\
+                        rsds * (1.0 - alb_l) + rlds -\
                             (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                     )
 
         # 3.2 Re-definition of skin temperature from energy balance
         if lskineb:
             # Compute net heat flux including flux into ground
-            clamb = clambda + (physics_data.mod_radcon.snowc * (clambsn - clambda))
+            clamb = clambda + (snowc * (clambsn - clambda))
             hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
             dtskin = tskin + 1.0
 
@@ -266,7 +270,7 @@ def get_surface_fluxes(physics_data: PhysicsData, state: PhysicsState):
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - physics_data.mod_radcon.alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     if lfluxland:
