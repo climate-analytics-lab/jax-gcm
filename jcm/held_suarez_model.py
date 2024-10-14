@@ -12,7 +12,7 @@ def convert_tendencies_to_equation(dynamics, physics_terms):
         return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
-class SpeedyTestModel:
+class HeldSuarezModel:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
 
@@ -50,7 +50,7 @@ class SpeedyTestModel:
 
         # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
-        p1 = 0 * units.pascal
+        p1 = 0 * units.pascal # TODO: set to 5 if possible
 
         self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,

@@ -1,15 +1,15 @@
 import unittest
 import numpy as np
 import jax.numpy as jnp
-from jcm.speedy_test_model import SpeedyTestModel
+from jcm.held_suarez_model import HeldSuarezModel
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
 
 class TestModelUnit(unittest.TestCase):
 
-    def test_model_run(self):
+    def test_held_suarez_model(self):
         layers = 8
-        model = SpeedyTestModel(
+        model = HeldSuarezModel(
             time_step=120,
             save_interval=1,
             total_time=4,

@@ -1,7 +1,8 @@
-import dinosaur
-from dinosaur.scales import units
 import jax
 import numpy as np
+import dinosaur
+from dinosaur.scales import units
+from dinosaur.time_integration import ExplicitODE
 from jcm.physics import get_physical_tendencies
 from jcm.convection import get_convection_tendencies
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
@@ -9,7 +10,6 @@ from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.surface_flux import get_surface_fluxes
 from jcm.vertical_diffusion import get_vertical_diffusion_tend
-from dinosaur.time_integration import ExplicitODE
 from jcm.humidity import spec_hum_to_rel_hum
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
@@ -56,7 +56,7 @@ class SpeedyModel:
 
         # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
-        p1 = 5e3 * units.pascal
+        p1 = 0 * units.pascal
 
         self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
