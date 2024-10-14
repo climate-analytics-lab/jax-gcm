@@ -5,6 +5,7 @@ from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
+from jcm.params import ix, il, kx
 from jcm.mod_radcon import epslw
 from jax import lax
 
@@ -22,7 +23,6 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
 
-    ix, il, kx = state.temperature.shape
     psa = physics_data.convection.psa
     qa = state.specific_humidity
     icltop = physics_data.shortwave_rad.icltop
@@ -194,7 +194,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     acloud1, acloud2 = (cloudc[:, :, None, None]*a for a in (ablcl1, ablcl2))
 
-    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[None, None, :] > icltop[:, :, None], acloud1.reshape(96, 48, 1), acloud2.reshape(96, 48, 1)))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[None, None, :] > icltop[:, :, None], acloud1.reshape(ix, il, 1), acloud2.reshape(ix, il, 1)))
     absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, 5, 2))))
 
     # Compute transmissivity

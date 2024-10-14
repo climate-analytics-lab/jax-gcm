@@ -81,9 +81,9 @@ class SpeedyModel:
             get_large_scale_condensation_tendencies,
             clouds,
             get_shortwave_rad_fluxes,
-            get_downward_longwave_rad_fluxes,
-            get_surface_fluxes, # In speedy this gets called again if air-sea coupling is on
-            get_upward_longwave_rad_fluxes,
+            # get_downward_longwave_rad_fluxes,
+            # get_surface_fluxes, # In speedy this gets called again if air-sea coupling is on
+            # get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend
         ]
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)

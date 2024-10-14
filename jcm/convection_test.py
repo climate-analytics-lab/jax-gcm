@@ -3,7 +3,7 @@ from jcm.convection import diagnose_convection, get_convection_tendencies
 import jax.numpy as jnp
 from jcm.physics import PhysicsState
 from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
-from jcm.physical_constants import grdscp, grdsig
+from jcm.geometry import grdscp, grdsig
 
 class TestConvectionUnit(unittest.TestCase):
     def test_diagnose_convection_moist_adiabat(self):

@@ -7,8 +7,8 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
-from jcm.geometry import dhs, fsg
+from jcm.physical_constants import p0, alhc, grav
+from jcm.geometry import dhs, fsg, wvi, grdscp, grdsig
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
 trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
@@ -51,7 +51,7 @@ def diagnose_convection(psa, se, qa, qsat):
     qdif: Excess humidity in convective gridboxes
 
     """
-    ix, il, kx = se.shape
+    ix, il, kx = qa.shape
     iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
     qdif = jnp.zeros((ix, il), dtype=float)
 
@@ -127,10 +127,10 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     """
     conv = physics_data.convection
     humidity = physics_data.humidity
-    se = conv.se
+    se = conv.se # TODO: is se being set anywhere?
     qa = state.specific_humidity
     qsat = humidity.qsat
-    ix, il, kx = se.shape
+    ix, il, kx = qa.shape
     psa = conv.psa
     
     # 1. Initialization of output and workspace arrays
@@ -148,6 +148,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
+    print(f'sentr: {sentr}')
     entr *= entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
@@ -171,6 +172,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     qb = jnp.minimum(state.specific_humidity[:, :, k1] + wvi[k1, 1] * (state.specific_humidity[:, :, k] - state.specific_humidity[:, :, k1]), state.specific_humidity[:, :, k])
     
     fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
+    print(f'min(qmax-qb) = {jnp.min(qmax - qb)}')
+    print(f'max qdif = {jnp.max(qdif**2)}')
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
     cbmf = jnp.where(mask, fmass, cbmf)
 
@@ -275,11 +278,12 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
     # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
 
+    print(f'min psa: {jnp.min(psa)}')
     rps = 1/psa 
     ttend = dfse 
     qtend = dfqa
-    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:-1])
-    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:-1])
+    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:]) # gridscp and grdsig is actually length kx
+    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)

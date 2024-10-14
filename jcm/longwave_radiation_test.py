@@ -1,7 +1,6 @@
 from numpy.testing import assert_array_almost_equal
 import unittest
 import jax.numpy as jnp
-from jcm.params import ix, il, kx
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState
@@ -28,7 +27,8 @@ def initialize_arrays(ix, il, kx):
 
 class TestDownwardLongwave(unittest.TestCase):
 
-    def test_downard_longwave_rad_fluxes(self):
+    def test_downward_longwave_rad_fluxes(self):
+        ix, il, kx = 96, 48, 8
         import numpy as np
 
         #FIXME: This array doens't need to be this big once we fix the interfaces

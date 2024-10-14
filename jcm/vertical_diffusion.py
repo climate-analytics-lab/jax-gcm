@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
-from jcm.physical_constants import cp, alhc, sigh
-from jcm.geometry import fsg, dhs
+from jcm.physical_constants import cp, alhc
+from jcm.geometry import fsg, dhs, sigh
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
@@ -52,7 +52,8 @@ def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
     fvdise = cvdi / (trvds * cp)
 
     rsig = 1.0 / dhs
-    rsig1 = 1.0 / (1.0 - sigh[1:])
+    rsig1 = jnp.zeros((kx,)) # TODO: might be able to skip this step if infs dont throw errors
+    rsig1 = rsig1.at[0:nl1].set(1.0 / (1.0 - sigh[1:(nl1+1)]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection

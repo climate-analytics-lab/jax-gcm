@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jax import jit
 
 from jcm.params import kx, il, iy
-from jcm.physical_constants import akap, omega
+from jcm.physical_constants import akap, omega, grav, p0, cp
 
 # Initializes all of the model geometry variables.
 @jit
@@ -48,6 +48,22 @@ def initialize_geometry():
 
     coriol = 2.0 * omega * sia
 
-    return hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol
+    # 1.2 Functions of sigma and latitude from physics.f90 initialization
+    sigl = jnp.log(fsg) # Logarithm of full-level sigma
+    sigh = hsg # Half-level sigma
+    grdsig = grav/(dhs*p0) # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
+    grdscp = grdsig/cp # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
+    
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    wvi = jnp.zeros((kx, 2)) # Weights for vertical interpolation
+    wvi = wvi.at[:-1,0].set(1./(sigl[1:]-sigl[:-1]))
+    wvi = wvi.at[:-1,1].set((jnp.log(sigh[1:-1])-sigl[:-1])*wvi[:-1,0])
+    wvi = wvi.at[-1, 0].set((jnp.log(0.99)-sigl[-1])*wvi[-2,0])
+    wvi = wvi.at[-1, 1].set(0.)
 
-hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol = initialize_geometry()
+    return hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol, sigl, sigh, grdsig, grdscp, wvi
+
+hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol, sigl, sigh, grdsig, grdscp, wvi = initialize_geometry()

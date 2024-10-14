@@ -1,7 +1,7 @@
 import jax.numpy as jnp
-from jcm.physical_constants import sbc, wvi
+from jcm.physical_constants import sbc
 from jcm.mod_radcon import epslw, emisfc
-from jcm.geometry import dhs
+from jcm.geometry import dhs, wvi
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 nband = 4
@@ -120,10 +120,10 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - slrd
     
-    ts_rounded = jnp.round(ts[:, :, :]).astype(int)  # Rounded ts
-    ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
+    ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
+    ta_rounded = jnp.round(ta).astype(int)  # Rounded ta
 
-    flux = flux.at[:,:,:].set(fband[ts_rounded[:,:]-100,:] * fsfcu[:,:] + refsfc * flux[:,:,:])
+    flux = flux.at.set(fband[ts_rounded-100,:] * fsfcu + refsfc * flux)
 
     # Troposphere
     # correction for 'black' band

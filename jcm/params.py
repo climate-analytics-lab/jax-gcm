@@ -5,8 +5,8 @@ For storing variables used by multiple physics schemes.
 
 # Model geometry parameters
 trunc = 30      # Spectral truncation total wavenumber
-ix = 96         # Number of longitudes
-iy = 24         # Number of latitudes in hemisphere
+ix = 128         # Number of longitudes
+iy = 32         # Number of latitudes in hemisphere
 il = 2 * iy     # Number of latitudes in full sphere
 kx = 8          # Number of vertical levels
 nx = trunc + 2  # Number of total wavenumbers for spectral storage arrays
