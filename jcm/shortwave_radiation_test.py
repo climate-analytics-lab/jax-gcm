@@ -228,7 +228,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)))  + 1.8 * flat2)
-        print
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
     def test_random_input_consistency(self):     

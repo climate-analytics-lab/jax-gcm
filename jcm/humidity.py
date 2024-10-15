@@ -83,8 +83,8 @@ def get_qsat(ta, ps, sig):
     # Computing qsat for each grid point
     # 1. Compute Qsat (g/kg) from T (degK) and normalized pres. P (= p/1000_hPa)
     
-    print(f'ta-t1: {jnp.sqrt(jnp.min((ta - t1)**2))}')
-    print(f'ta-t2: {jnp.sqrt(jnp.min((ta - t2)**2))}')
+    # print(f'ta-t1: {jnp.sqrt(jnp.min((ta - t1)**2))}')
+    # print(f'ta-t2: {jnp.sqrt(jnp.min((ta - t2)**2))}')
     qsat = jnp.where(ta >= t0, e0 * jnp.exp(c1 * (ta - t0) / (ta - t1)), 
                       e0 * jnp.exp(c2 * (ta - t0) / (ta - t2)))
     
@@ -93,8 +93,8 @@ def get_qsat(ta, ps, sig):
     # because we are looping over sigma levels, vmap does not see it as a scalar - it is doing something funky
     # behind the scene where it still considers it a vector. A comparison with 0.0 fails for something that vmap
     # considers to be a vector.
-    print(f'ps-.378qsat: {jnp.sqrt(jnp.min((ps[0,0] - 0.378 * qsat)**2))}')
-    print(f'sig*ps-.378qsat: {jnp.sqrt(jnp.min((sig * ps - 0.378 * qsat)**2))}')
+    # print(f'ps-.378qsat: {jnp.sqrt(jnp.min((ps[0,0] - 0.378 * qsat)**2))}')
+    # print(f'sig*ps-.378qsat: {jnp.sqrt(jnp.min((sig * ps - 0.378 * qsat)**2))}')
     qsat = jnp.where(sig <= 0.0, 622.0 * qsat / (ps[0,0] - 0.378 * qsat), 
                       622.0 * qsat / (sig * ps - 0.378 * qsat))
 

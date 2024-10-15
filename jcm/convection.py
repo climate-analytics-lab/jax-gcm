@@ -148,7 +148,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
-    print(f'sentr: {sentr}')
+    # print(f'sentr: {sentr}')
     entr *= entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
@@ -172,8 +172,8 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     qb = jnp.minimum(state.specific_humidity[:, :, k1] + wvi[k1, 1] * (state.specific_humidity[:, :, k] - state.specific_humidity[:, :, k1]), state.specific_humidity[:, :, k])
     
     fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
-    print(f'min(qmax-qb) = {jnp.min(qmax - qb)}')
-    print(f'max qdif = {jnp.max(qdif**2)}')
+    # print(f'min(qmax-qb) = {jnp.min(qmax - qb)}')
+    # print(f'max qdif = {jnp.max(qdif**2)}')
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
     cbmf = jnp.where(mask, fmass, cbmf)
 
@@ -278,7 +278,7 @@ def get_convection_tendencies(physics_data: PhysicsData, state: PhysicsState):
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
     # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
 
-    print(f'min psa: {jnp.min(psa)}')
+    # print(f'min psa: {jnp.min(psa)}')
     rps = 1/psa 
     ttend = dfse 
     qtend = dfqa
