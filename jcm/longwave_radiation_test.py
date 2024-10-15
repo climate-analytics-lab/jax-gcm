@@ -28,7 +28,7 @@ def initialize_arrays(ix, il, kx):
 
 class TestDownwardLongwave(unittest.TestCase):
 
-    def test_downard_longwave_rad_fluxes(self):
+    def test_downward_longwave_rad_fluxes(self):
         import numpy as np
 
         #FIXME: This array doens't need to be this big once we fix the interfaces

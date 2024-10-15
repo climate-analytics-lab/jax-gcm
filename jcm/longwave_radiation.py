@@ -53,8 +53,13 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     rlds = jnp.zeros((ix, il))
     dfabs = jnp.zeros((ix, il, kx))
 
-    ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
-    #stratosphere
+    # 3. Emission and absorption of longwave downward flux.
+    #    For downward emission, a correction term depending on the 
+    #    local temperature gradient and on the layer transmissivity is
+    #    added to the average (full-level) emission of each layer.
+    
+    # 3.1 Stratosphere
+    ta_rounded = jnp.round(ta).astype(int)
     k = 0
     for jb in range(2):
         emis = 1 - tau2[:,:,k,jb]
@@ -64,7 +69,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     
     flux = flux.at[:,:,2:nband].set(0.0)
 
-    #Troposhere
+    # 3.2 Troposhere
     for jb in range(nband):
         for k in range(1,kx):
             emis = 1 - tau2[:,:,k,jb]
