@@ -4,7 +4,6 @@ import numpy as np
 
 from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
 from jcm.physical_constants import solc, epssw
-from jcm.params import il, ix, kx
 from jcm.geometry import sia
 from jcm.physics import PhysicsState
 from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
@@ -90,6 +89,7 @@ class TestSolar(unittest.TestCase):
         
 class TestShortWaveRadiation(unittest.TestCase):
     def test_shortwave_radiation(self):
+        ix, il, kx = 96, 48, 8
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -168,12 +168,13 @@ class TestShortWaveRadiation(unittest.TestCase):
     def setUp(self):
         # Set up test case with known inputs
         self.solc = solc
-        self.il = il
-        self.ix = ix
+        self.il = 48
+        self.ix = 96
         self.epssw = epssw
 
     def test_output_shapes(self):
         # Ensure that the output shapes are correct
+        ix, il, kx = 96, 48, 8
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)
@@ -190,6 +191,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
+        ix, il, kx = 96, 48, 8
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)
@@ -203,6 +205,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
+        ix, il, kx = 96, 48, 8
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)
@@ -217,6 +220,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
+        ix, il, kx = 96, 48, 8
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)
@@ -230,7 +234,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
-    def test_random_input_consistency(self):     
+    def test_random_input_consistency(self):
+        ix, il, kx = 96, 48, 8 
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)

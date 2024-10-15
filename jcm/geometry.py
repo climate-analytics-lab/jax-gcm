@@ -11,7 +11,7 @@ from jcm.physical_constants import akap, omega, grav, p0, cp
 
 # Initializes all of the model geometry variables.
 @jit
-def initialize_geometry():
+def initialize_geometry(kx=kx, il=il, iy=iy):
     # Definition of model levels
     if kx == 5:
         hsg = jnp.array([0.000, 0.150, 0.350, 0.650, 0.900, 1.000])
