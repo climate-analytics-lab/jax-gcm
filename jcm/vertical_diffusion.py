@@ -43,7 +43,7 @@ def get_vertical_diffusion_tend(physics_data: PhysicsData, state: PhysicsState):
 
     nl1 = kx - 1
     cshc = dhs[kx - 1] / 3600.0
-    cvdi = (sigh[nl1-1] - sigh[0]) / ((nl1 - 1) * 3600.0)
+    cvdi = (sigh[nl1] - sigh[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / trshc
     fshcse = cshc / (trshc * cp)
