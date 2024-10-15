@@ -68,7 +68,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         t.transpose(1, 2, 0),
         q.transpose(1, 2, 0),
         phi.transpose(1, 2, 0), 
-        sp.transpose(1, 2, 0)
+        jnp.squeeze(sp.transpose(1, 2, 0))
     )
     return physics_state
 
