@@ -263,13 +263,13 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
     # pass on the rest of physics_data that was not updated or needed in this function
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
-    # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
+    # Another important note is that this goes from 2:kx in the fortran
 
     rps = 1/psa 
     ttend = dfse 
     qtend = dfqa
-    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:-1])
-    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:-1])
+    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:])
+    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
