@@ -1,10 +1,16 @@
 import unittest
+import jcm.params as params
 from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
 from jcm.physics import PhysicsData, PhysicsState
 import jax.numpy as jnp
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
+    def __init__(self):
+        params.ix = 96
+        params.il = 48
+        params.kx = 8
+
     def test_updated_surface_flux(self):
         xy, xyz = (96, 48), (96, 48, 8)
         psa = jnp.ones(xy)

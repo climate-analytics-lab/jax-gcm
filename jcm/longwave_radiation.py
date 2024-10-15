@@ -115,8 +115,8 @@ def get_upward_longwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsStat
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_fluxes.slru[:,:,2] 
-    ts = physics_data.surface_fluxes.tsfc # called tsfc in surface_fluxes.f90
+    fsfcu = physics_data.surface_flux.slru[:,:,2] 
+    ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - slrd
     
