@@ -6,10 +6,12 @@ from jcm.physics import PhysicsData, PhysicsState
 import jax.numpy as jnp
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
-    def __init__(self):
+    def __init__(self, methodName="runTest"):
         params.ix = 96
         params.il = 48
         params.kx = 8
+
+        super().__init__(methodName)
 
     def test_updated_surface_flux(self):
         xy, xyz = (96, 48), (96, 48, 8)
