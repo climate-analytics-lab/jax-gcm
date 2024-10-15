@@ -65,7 +65,7 @@ class HeldSuarezForcing:
       
     def equilibrium_temperature(self, nodal_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, np.newaxis, np.newaxis] * nodal_surface_pressure / self.p0
+            self.sigma[np.newaxis, np.newaxis, :] * nodal_surface_pressure / self.p0
         )
         temperature = p_over_p0**self.physics_specs.kappa * (
             self.maxT
