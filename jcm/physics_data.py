@@ -202,8 +202,8 @@ class HumidityData:
 
     def copy(self, rh=None, qsat=None):
         return HumidityData(
-            self.rh.shape[0:1],
-            self.rh.shape[2],
+            None,
+            None,
             rh=rh if rh is not None else self.rh, 
             qsat=qsat if qsat is not None else self.qsat
         )
