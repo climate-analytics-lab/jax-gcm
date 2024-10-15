@@ -73,7 +73,7 @@ def get_qsat(ta, ps, sig):
         qsat: Saturation specific humidity (g/kg)
     """
     
-    e0 = 3.81297673
+    e0 = 6.108e-3
     c1 = 17.269
     c2 = 21.875
     t0 = 273.16
