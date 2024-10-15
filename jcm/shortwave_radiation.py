@@ -5,7 +5,6 @@ from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
-from jcm.params import ix, il, kx
 from jcm.mod_radcon import epslw
 from jax import lax
 
@@ -22,6 +21,7 @@ def get_shortwave_rad_fluxes(physics_data: PhysicsData, state: PhysicsState):
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
+    ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa
     qa = state.specific_humidity
