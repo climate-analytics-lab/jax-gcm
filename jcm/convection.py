@@ -17,16 +17,6 @@ rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
-if wvi[0, 1] == 0.:
-    """
-    wvi is the weights for vertical interpolation. It's calculated in physics f90, but doesn't seem to be calculated in new code. Below is the code I used to 
-    calculate it offline, but sigl and sigh seem to be a bit different than in the original Speedy code. Hard coded the wvi values, but would be good to resolve this
-    """
-    #wvi = wvi.at[:-1, 0].set(1.0 / (sigl[1:] - sigl[:-1]))
-    #wvi = wvi.at[:-1, 1].set((jnp.log(sigh[:-1]) - sigl[:-1]) * wvi[:-1, 0])
-    #wvi = wvi.at[-1, 1].set((jnp.log(0.99) - sigl[-1]) * wvi[-2, 0])
-    wvi=jnp.array([[0.74906313, 0.519211  ],[1.3432906,  0.52088195], [1.8845587,  0.49444085],[2.4663029,  0.5211523 ],[3.3897371,  0.5508966 ],[5.0501776,  0.59072757],[7.7501183,  0.58097243],[0.,         0.31963795]])
-
 def diagnose_convection(psa, se, qa, qsat):
     """
     Diagnose convectively unstable gridboxes  
