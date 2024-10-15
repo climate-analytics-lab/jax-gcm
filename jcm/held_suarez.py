@@ -69,8 +69,8 @@ class HeldSuarezForcing:
         )
         temperature = p_over_p0**self.physics_specs.kappa * (
             self.maxT
-            - self.dTy * np.sin(self.lat[np.newaxis, np.newaxis, :]) ** 2
-            - self.dThz * jnp.log(p_over_p0) * np.cos(self.lat[np.newaxis, np.newaxis, :]) ** 2
+            - self.dTy * np.sin(self.lat[:, :, np.newaxis]) ** 2
+            - self.dThz * jnp.log(p_over_p0) * np.cos(self.lat[:, :, np.newaxis]) ** 2
         )
         return jnp.maximum(self.minT, temperature)
    
@@ -83,7 +83,7 @@ class HeldSuarezForcing:
     def kt(self):
         cutoff = np.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         return self.ka + (self.ks - self.ka) * (
-            cutoff[np.newaxis, np.newaxis, :] * np.cos(self.lat[np.newaxis, np.newaxis, :]) ** 4
+            cutoff[np.newaxis, np.newaxis, :] * np.cos(self.lat[:, :, np.newaxis]) ** 4
     )
 
     def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData):
