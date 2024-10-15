@@ -65,7 +65,7 @@ class HeldSuarezForcing:
       
     def equilibrium_temperature(self, nodal_surface_pressure):
         p_over_p0 = (
-            self.sigma[np.newaxis, np.newaxis, :] * nodal_surface_pressure / self.p0
+            self.sigma[np.newaxis, np.newaxis, :] * nodal_surface_pressure[:, :, np.newaxis] / self.p0
         )
         temperature = p_over_p0**self.physics_specs.kappa * (
             self.maxT
@@ -78,12 +78,12 @@ class HeldSuarezForcing:
         kv_coeff = self.kf * (
             np.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         )
-        return kv_coeff[:, np.newaxis, np.newaxis]
+        return kv_coeff[np.newaxis, np.newaxis, :]
 
     def kt(self):
         cutoff = np.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         return self.ka + (self.ks - self.ka) * (
-            cutoff[:, np.newaxis, np.newaxis] * np.cos(self.lat) ** 4
+            cutoff[np.newaxis, np.newaxis, :] * np.cos(self.lat) ** 4
     )
 
     def held_suarez_forcings(self, physics_data: PhysicsData, state: PhysicsState):
