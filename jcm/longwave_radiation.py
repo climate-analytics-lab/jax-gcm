@@ -120,15 +120,15 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_fluxes.slru[:,:,2] 
-    ts = physics_data.surface_fluxes.tsfc # called tsfc in surface_fluxes.f90
+    fsfcu = physics_data.surface_flux.slru[:,:,2] 
+    ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - rlds
     
     ts_rounded = jnp.round(ts[:, :, :]).astype(int)  # Rounded ts
     ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
 
-    flux = flux.at[:,:,:].set(fband[ts_rounded[:,:]-100,:] * fsfcu[:,:] + refsfc * flux[:,:,:])
+    flux = fband[ts_rounded-100,:] * fsfcu + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
