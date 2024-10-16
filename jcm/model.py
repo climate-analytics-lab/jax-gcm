@@ -15,7 +15,7 @@ from jcm.humidity import spec_hum_to_rel_hum
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
         return get_physical_tendencies(state, dynamics, physics_terms)
-    return ExplicitODE.from_function(physical_tendencies)
+    return ExplicitODE.from_functions(physical_tendencies)
 
 
 class SpeedyModel:
