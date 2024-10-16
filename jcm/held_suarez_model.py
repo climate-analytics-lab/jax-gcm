@@ -12,7 +12,7 @@ def convert_tendencies_to_equation(dynamics, physics_terms):
         return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
-class SpeedyTestModel:
+class HeldSuarezModel:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
 
