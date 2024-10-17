@@ -80,7 +80,8 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     rlds = rlds + corlw
 
     longwave_out = physics_data.longwave_rad.copy(rlds=rlds, dfabs=dfabs)
-    physics_data = physics_data.copy(longwave_rad=longwave_out)
+    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
+    physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 
     return physics_tendencies, physics_data
