@@ -26,8 +26,8 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
         qsat: Saturation specific humidity
     """
 
-    map_qsat = jax.vmap(get_qsat, in_axes=(2, 2, 0), out_axes=2) # mapping over dim 2 for argument ta, none for argument psa, and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
-    qsat = map_qsat(state.temperature, jnp.tile(physics_data.convection.psa[:, :, jnp.newaxis], (1,1,fsg.shape[0])), fsg)
+    map_qsat = jax.vmap(get_qsat, in_axes=(2, None, 0), out_axes=2) # mapping over dim 2 for argument ta, none for argument psa, and over dim 0 (the only dim) for fsg, mapping over dim 2 of the output
+    qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg)
 
     rh = state.specific_humidity / qsat
     
