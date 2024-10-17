@@ -52,7 +52,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     fvdise = cvdi / (trvds * cp)
 
     rsig = 1.0 / dhs
-    rsig1 = 1.0 / (1.0 - sigh[1:])
+    rsig1 = rsig1.at[:-1].set(1.0 / (1.0 - sigh[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
