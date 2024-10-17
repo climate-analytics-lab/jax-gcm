@@ -78,7 +78,7 @@ class HeldSuarezModel:
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
-        self.times = save_every * np.arange(1, self.outer_steps+1)
+        self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
         filters = [
