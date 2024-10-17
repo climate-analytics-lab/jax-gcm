@@ -1,4 +1,4 @@
-from speedy_test_model import SpeedyTestModel
+from held_suarez_model import HeldSuarezModel
 import argparse
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
@@ -16,7 +16,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    model = SpeedyTestModel(
+    model = HeldSuarezModel(
         time_step=args.time_step,
         save_interval=args.save_interval,
         total_time=args.total_time,
