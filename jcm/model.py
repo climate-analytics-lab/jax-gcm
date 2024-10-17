@@ -1,7 +1,7 @@
 import dinosaur
 from dinosaur.scales import units
 import jax
-import numpy as np
+import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from jcm.convection import get_convection_tendencies
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies

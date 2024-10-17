@@ -2,7 +2,7 @@
 import dinosaur
 from dinosaur.scales import units
 import jax
-import numpy as np
+import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from jcm.held_suarez import HeldSuarezForcing
