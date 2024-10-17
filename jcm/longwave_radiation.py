@@ -29,14 +29,23 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     tau2 = physics_data.mod_radcon.tau2
 
     nl1 = kx - 1
+
+    # 1. Blackbody emission from atmospheric levels.
+    # The linearized gradient of the blakbody emission is computed
+    # from temperatures at layer boundaries, which are interpolated
+    # assuming a linear dependence of T on log_sigma.
+    # Above the first (top) level, the atmosphere is assumed isothermal.
+    
     # Temperature at level boundaries
     st4a = st4a.at[:,:,:nl1,0].set(ta[:,:,:nl1]+wvi[:nl1,1]*(ta[:,:,1:nl1+1]-ta[:,:,:nl1]))
+    
+    # Mean temperature in stratospheric layers
     st4a = st4a.at[:,:,0,1].set(0.75 * ta[:,:,0] + 0.25 * st4a[:,:,0,0])
     st4a = st4a.at[:,:,1,1].set(0.50 * ta[:,:,1] + 0.25 * (st4a[:,:,0,0] + st4a[:,:,1,0]))
-    
-    anis = 1
 
     # Temperature gradient in tropospheric layers
+    anis = 1
+    
     st4a = st4a.at[:,:,2:nl1,1].set(0.5 * anis * jnp.maximum(st4a[:, :, 2:nl1, 0] - st4a[:, :, 1:nl1-1, 0], 0.0))
     st4a = st4a.at[:,:,kx-1,1].set(anis * jnp.maximum(ta[:,:,kx-1] - st4a[:,:,nl1-1,0], 0.0))
     
@@ -49,7 +58,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     st4a = st4a.at[:,:,2:kx,0].set(st3a * ta[:,:,2:kx])
     st4a =  st4a.at[:,:,2:kx,1].set(4.0 * st3a * st4a[:,:,2:kx,1])
 
-    # Initialization of fluxes
+    # 2. Initialization of fluxes
     rlds = jnp.zeros((ix, il))
     dfabs = jnp.zeros((ix, il, kx))
 
@@ -125,8 +134,8 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     refsfc = 1.0 - emisfc
     fsfc = fsfcu - rlds
     
-    ts_rounded = jnp.round(ts[:, :, :]).astype(int)  # Rounded ts
-    ta_rounded = jnp.round(ta[:, :, :]).astype(int)  # Rounded ta
+    ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
+    ta_rounded = jnp.round(ta).astype(int)  # Rounded ta
 
     flux = fband[ts_rounded-100,:] * fsfcu + refsfc * flux
 
