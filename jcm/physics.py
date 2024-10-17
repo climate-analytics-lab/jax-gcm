@@ -85,7 +85,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
         Dynamics tendencies
     """
 
-    vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(  # double check the math
+    vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(
         dynamics.coords.horizontal, physics_tendency.u_wind.transpose(2, 0, 1), physics_tendency.v_wind.transpose(2, 0, 1)
     )
     t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature.transpose(2, 0, 1))
