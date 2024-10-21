@@ -94,7 +94,8 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     rlds = rlds + corlw
 
     longwave_out = physics_data.longwave_rad.copy(rlds=rlds, dfabs=dfabs)
-    physics_data = physics_data.copy(longwave_rad=longwave_out)
+    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
+    physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 
     return physics_tendencies, physics_data
@@ -183,19 +184,17 @@ def radset(physics_data: PhysicsData):
 
     eps1 = 1.0 - epslw
 
-    for jtemp in range(100, 220):
-        fband_2 = (0.148 - 3.0e-6 * (jtemp + 100 - 247) ** 2) * eps1
-        fband_3 = (0.356 - 5.2e-6 * (jtemp + 100 - 282) ** 2) * eps1
-        fband_4 = (0.314 + 1.0e-5 * (jtemp + 100 - 315) ** 2) * eps1
-        fband_1 = eps1 - (fband_2 + fband_3 + fband_4)
-        fband = fband.at[jtemp, 1].set(fband_2)
-        fband = fband.at[jtemp, 2].set(fband_3)
-        fband = fband.at[jtemp, 3].set(fband_4)
-        fband = fband.at[jtemp, 0].set(fband_1)
-    
-    for jb in range(4):
-        fband = fband.at[:99, jb].set(fband[100, jb])
-        fband = fband.at[221:300, jb].set(fband[220,jb])
+    t_min, t_max = 200, 320
+    jtemp = jnp.arange(t_min, t_max + 1)
+    fband_2 = (0.148 - 3.0e-6 * (jtemp - 247) ** 2) * eps1
+    fband_3 = (0.356 - 5.2e-6 * (jtemp - 282) ** 2) * eps1
+    fband_4 = (0.314 + 1.0e-5 * (jtemp - 315) ** 2) * eps1
+    fband_1 = eps1 - (fband_2 + fband_3 + fband_4)
+    fband = fband.at[jtemp - 100, :4].set(jnp.stack((fband_1, fband_2, fband_3, fband_4), axis=-1))
+
+    jb = jnp.arange(4)
+    fband = fband.at[:(t_min - 100), jb].set(fband[t_min - 100, jb])
+    fband = fband.at[(t_max + 1 - 100):, jb].set(fband[t_max - 100, jb])
 
     modradcon_out = physics_data.mod_radcon.copy(fband=fband)
     physics_data = physics_data.copy(mod_radcon=modradcon_out)

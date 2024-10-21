@@ -2,7 +2,7 @@
 import dinosaur
 from dinosaur.scales import units
 import jax
-import numpy as np
+import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from jcm.held_suarez import HeldSuarezForcing
@@ -12,7 +12,7 @@ def convert_tendencies_to_equation(dynamics, physics_terms):
         return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
-class SpeedyTestModel:
+class HeldSuarezModel:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
 
@@ -78,7 +78,7 @@ class SpeedyTestModel:
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
-        self.times = save_every * np.arange(1, self.outer_steps+1)
+        self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
         filters = [
