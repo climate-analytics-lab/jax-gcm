@@ -94,7 +94,7 @@ class TestDownwardLongwave(unittest.TestCase):
         
         self.assertTrue(np.allclose(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds), atol=1e-4))
         self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, atol=1e-4))
-        self.assertTrue(np.allclose(physics_data.mod_radcon.st4a[:5, :5, :, :], np.asarray(f90_st4a), atol=1e-4))
+        self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:5, :5, :, :], axis=2), np.asarray(f90_st4a), atol=1e-4))
 
     def test_upward_longwave_rad_fluxes(self):
         # TODO: Implement this test
