@@ -58,9 +58,41 @@ class TestDownwardLongwave(unittest.TestCase):
         # print(dfabs[0, 0, :])   
         f90_dfabs = [  -3.5801730611349774, -17.861774929469838, -20.478947887745250, -17.260889773424999, -22.102412041367657, -27.772991217865744, -34.338080378956391, -71.309733057733894 ]
 
+        # print(np.mean(mod_radcon.st4a[:5,:5,:,:], axis=2))
+        f90_st4a = [[[76.11271,13.08427],
+                     [76.58848,13.14281],
+                     [77.06654,13.20152],
+                     [77.54689,13.26041],
+                     [78.02956,13.31949]],
+ 
+                     [[76.11766,13.08487],
+                     [76.59345,13.14342],
+                     [77.07153,13.20214],
+                     [77.55191,13.26103],
+                     [78.0346 ,13.3201 ]],
+ 
+                     [[76.1226 ,13.08549],
+                     [76.59841,13.14403],
+                     [77.07652,13.20274],
+                     [77.55693,13.26164],
+                     [78.03964,13.32072]],
+ 
+                     [[76.12754,13.0861 ],
+                     [76.60338,13.14464],
+                     [77.08152,13.20336],
+                     [77.56194,13.26225],
+                     [78.04468,13.32133]],
+ 
+                     [[76.13249,13.0867 ],
+                     [76.60836,13.14525],
+                     [77.08651,13.20398],
+                     [77.56696,13.26287],
+                     [78.04972,13.32195]]]
+
         # Note the transpose to match the fortran array order
         assert_array_almost_equal(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds).T, decimal=4)
         assert_array_almost_equal(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, decimal=4)
+        assert_array_almost_equal(jnp.mean(physics_data.mod_radcon.st4a[:5,:5,:,:], axis=2), np.asarray(f90_st4a), decimal=4)
 
 
     def test_upward_longwave_rad_fluxes(self):
