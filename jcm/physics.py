@@ -62,15 +62,18 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     
     
     sp = jnp.exp(log_sp)
-    physics_state = PhysicsState(u, v, t, q, phi, sp)
+    physics_state = PhysicsState(
+        u.transpose(1, 2, 0),
+        v.transpose(1, 2, 0),
+        t.transpose(1, 2, 0),
+        q.transpose(1, 2, 0),
+        phi.transpose(1, 2, 0), 
+        jnp.squeeze(sp.transpose(1, 2, 0))
+    )
     return physics_state
 
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
-
-    vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(  # double check the math
-        dynamics.coords.horizontal, physics_tendency.u_wind, physics_tendency.v_wind
-    )
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -81,8 +84,12 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature)
-    q_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.specific_humidity)
+
+    vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(
+        dynamics.coords.horizontal, physics_tendency.u_wind.transpose(2, 0, 1), physics_tendency.v_wind.transpose(2, 0, 1)
+    )
+    t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature.transpose(2, 0, 1))
+    q_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.specific_humidity.transpose(2, 0, 1))
     
     log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
@@ -117,7 +124,7 @@ def get_physical_tendencies(
         jnp.zeros_like(physics_state.u_wind),
         jnp.zeros_like(physics_state.u_wind))
     
-    data = PhysicsData(physics_state.temperature.shape[0:1],physics_state.temperature.shape[2])
+    data = PhysicsData(physics_state.temperature.shape[0:2],physics_state.temperature.shape[2])
     # optionally initialize the physics data here if it needs to be 
 
     for term in physics_terms:

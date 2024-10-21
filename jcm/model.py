@@ -1,7 +1,7 @@
 import dinosaur
 from dinosaur.scales import units
 import jax
-import numpy as np
+import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from jcm.convection import get_convection_tendencies
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
@@ -15,7 +15,7 @@ from jcm.humidity import spec_hum_to_rel_hum
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
         return get_physical_tendencies(state, dynamics, physics_terms)
-    return ExplicitODE.from_function(physical_tendencies)
+    return ExplicitODE.from_functions(physical_tendencies)
 
 
 class SpeedyModel:
@@ -91,7 +91,7 @@ class SpeedyModel:
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
-        self.times = save_every * np.arange(1, self.outer_steps+1)
+        self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
         filters = [

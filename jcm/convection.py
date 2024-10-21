@@ -260,8 +260,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     k = iptop
 
     # Flux of convective precipitation
-    i = jnp.arange(ix)[:, jnp.newaxis]  # Shape (96, 1)
-    j = jnp.arange(il)[jnp.newaxis, :]  # Shape (1, 48)
+    i = jnp.arange(ix)[:, jnp.newaxis]  # Shape (ix, 1)
+    j = jnp.arange(il)[jnp.newaxis, :]  # Shape (1, il)
 
     qsatb = qsat[j, j, k] + wvi[k, 1] *(qsat[i, j, k+1]-qsat[i,j, k])
     precnv = jnp.where(mask, jnp.maximum(fuq_new[i, j, k] - fmass_new[i, j, k] * qsatb, 0.0), precnv)
