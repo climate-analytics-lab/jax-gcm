@@ -2,15 +2,6 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
-from jcm.physics import get_physical_tendencies
-from jcm.convection import get_convection_tendencies
-from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-from jcm.surface_flux import get_surface_fluxes
-from jcm.vertical_diffusion import get_vertical_diffusion_tend
-from dinosaur.time_integration import ExplicitODE
-from jcm.humidity import spec_hum_to_rel_hum
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
@@ -74,6 +65,25 @@ class SpeedyModel:
             orography,
             self.coords,
             physics_specs)
+        
+        from jcm.geometry import initialize_geometry
+        initialize_geometry(self.coords.nodal_shape[0],
+                            self.coords.nodal_shape[2],
+                            (self.coords.nodal_shape[2]+1)//2)
+        from jcm.physics import initialize_physics
+        initialize_physics(self.coords.nodal_shape[0])
+        from jcm.longwave_radiation import radset
+        radset()
+
+        from jcm.physics import get_physical_tendencies
+        from jcm.convection import get_convection_tendencies
+        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+        from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.surface_flux import get_surface_fluxes
+        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+        from dinosaur.time_integration import ExplicitODE
+        from jcm.humidity import spec_hum_to_rel_hum
 
         physics_terms = [
             spec_hum_to_rel_hum, # this could get called in get_physics_tendencies before looping over the physics terms
