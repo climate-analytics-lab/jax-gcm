@@ -3,10 +3,12 @@ import jax.numpy as jnp
 import numpy as np
 from jcm.model import initialize_modules
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
-
+        
 ix, il, kx = 96, 48, 8
+
 class TestSolar(unittest.TestCase):
     def test_solar(self):
+        il, kx = 48, 8
         initialize_modules(kx=kx, il=il)
         from jcm.shortwave_radiation import solar
 
@@ -87,6 +89,7 @@ class TestSolar(unittest.TestCase):
         
 class TestShortWaveRadiation(unittest.TestCase):
     def test_shortwave_radiation(self):
+        ix, il, kx = 96, 48, 8
         initialize_modules(kx=kx, il=il)
         from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
         from jcm.physics import PhysicsState
@@ -177,6 +180,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.epssw = epssw
 
     def test_output_shapes(self):
+        ix, il, kx = 96, 48, 8
         initialize_modules(kx=kx, il=il)
         from jcm.shortwave_radiation import get_zonal_average_fields
         from jcm.physics_data import DateData, PhysicsData
