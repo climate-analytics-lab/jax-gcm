@@ -1,7 +1,8 @@
 import unittest
 import jax.numpy as jnp
-from jcm.params import ix, il, kx
 from jcm.model import initialize_modules
+
+ix, il, kx = 96, 48, 8
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -21,7 +22,6 @@ def initialize_arrays(ix, il, kx):
     ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((2, 1, 0))
     
     return ta, fsfcd, st4a, flux
-
 
 class TestDownwardLongwave(unittest.TestCase):
 

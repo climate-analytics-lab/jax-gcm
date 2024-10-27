@@ -1,10 +1,10 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.params import il, ix, kx
 from jcm.model import initialize_modules
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
+ix, il, kx = 96, 48, 8
 class TestSolar(unittest.TestCase):
     def test_solar(self):
         initialize_modules(kx=kx, il=il)

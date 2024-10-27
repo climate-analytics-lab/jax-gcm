@@ -1,8 +1,8 @@
 import unittest
 from jcm.model import initialize_modules
 import jax.numpy as jnp
-from jcm.params import kx 
 
+kx = 8
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):

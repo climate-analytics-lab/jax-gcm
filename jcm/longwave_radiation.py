@@ -135,11 +135,11 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
     ta_rounded = jnp.round(ta).astype(int)  # Rounded ta
 
-    flux = fband[ts_rounded-100,:] * fsfcu + refsfc * flux
+    flux = fband[ts_rounded-100,:] * fsfcu[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
-    dfabs[:,:,-1] = dfabs[:,:,-1] + epslw * fsfcu
+    dfabs = dfabs.at[:,:,-1].set(dfabs[:,:,-1] + epslw * fsfcu)
 
     for jb in range(nband):
         for k in range(kx-1, 0, -1):
@@ -159,13 +159,13 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     corlw1 = dhs[0] * stratc[:,:,1] * st4a[:,:,0,0] + stratc[:,:,0]
     corlw2 = dhs[1] * stratc[:,:,1] * st4a[:,:,1,0]
-    dfabs[:,:,0] = dfabs[:,:,0] - corlw1
-    dfabs[:,:,1] = dfabs[:,:,1] - corlw2
+    dfabs = dfabs.at[:,:,0].set(dfabs[:,:,0] - corlw1)
+    dfabs = dfabs.at[:,:,1].set(dfabs[:,:,1] - corlw2)
     ftop = corlw1 + corlw2
 
     ftop = jnp.sum(flux, axis = -1)
 
-    longwave_out = physics_data.longwave_rad.copy(fsfc=fsfc, ftop=ftop, dfabs=dfabs)
+    longwave_out = physics_data.longwave_rad.copy(rlds=fsfc, ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
     physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))

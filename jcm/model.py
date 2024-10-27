@@ -49,11 +49,11 @@ class SpeedyModel:
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
         # Not sure why we need this...
-        physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
+        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
 
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
-        self.dt = physics_specs.nondimensionalize(dt_si)
+        self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
@@ -61,7 +61,7 @@ class SpeedyModel:
 
         self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
-            physics_specs=physics_specs,
+            physics_specs=self.physics_specs,
             p0=p0,
             p1=p1)
         
@@ -74,7 +74,7 @@ class SpeedyModel:
             ref_temps,
             orography,
             self.coords,
-            physics_specs)
+            self.physics_specs)
         
         initialize_modules(kx = self.coords.nodal_shape[0],
                            il = self.coords.nodal_shape[2])
