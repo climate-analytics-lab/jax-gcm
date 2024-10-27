@@ -1,10 +1,8 @@
 import unittest
-from jcm import humidity
-from jcm.physics_data import ConvectionData
+from jcm.model import initialize_modules
 import jax.numpy as jnp
-from jcm.physics import PhysicsData, PhysicsState
-from jcm.geometry import fsg
 from jcm.params import kx 
+
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
@@ -15,6 +13,9 @@ class TestHumidityUnit(unittest.TestCase):
         self.qg_standard = jnp.ones((96,48,8))*2
 
     def test_get_qsat(self):
+        initialize_modules(kx=8, il=48)
+        from jcm import humidity
+
         temp = self.temp_standard
         pressure = self.pressure_standard
         sigma = self.sigma
@@ -36,6 +37,11 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at high temperature")
 
     def test_spec_hum_to_rel_hum(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import ConvectionData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm import humidity
+
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
@@ -70,6 +76,12 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
     def test_rel_hum_to_spec_hum(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.geometry import fsg
+        from jcm.physics_data import ConvectionData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm import humidity
+
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard

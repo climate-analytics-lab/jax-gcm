@@ -1,11 +1,14 @@
 import unittest
-from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
-from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-from jcm.physics import PhysicsData, PhysicsState
 import jax.numpy as jnp
+from jcm.model import initialize_modules
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
     def test_updated_surface_flux(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
+
         xy, xyz = (96, 48), (96, 48, 8)
         psa = jnp.ones(xy)
         ua = jnp.ones(xyz)
@@ -46,6 +49,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.isclose(sflux_data.t0[0, 0], 290.0, atol=1e-4))
 
     def test_surface_fluxes_test1(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
         ix, il, kx = 96, 48, 8
         xy = (ix,il)
         psa = jnp.ones((ix,il)) #surface pressure
@@ -96,6 +103,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test2(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
         ix, il, kx = 96, 48, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -145,6 +156,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test3(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
         ix, il, kx = 96, 48, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -193,6 +208,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test4(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
         ix, il, kx = 96, 48, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -241,6 +260,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test5(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+        from jcm.physics import PhysicsData, PhysicsState
+        from jcm.surface_flux import get_surface_fluxes
         ix, il, kx = 96, 48, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -288,6 +311,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_drag_test(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.surface_flux import set_orog_land_sfc_drag
         ix, il, kx = 96, 48, 8
 
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential

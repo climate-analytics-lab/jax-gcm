@@ -78,10 +78,6 @@ class SpeedyModel:
         
         initialize_modules(kx = self.coords.nodal_shape[0],
                            il = self.coords.nodal_shape[2])
-        from jcm.physical_constants import initialize_physics
-        initialize_physics()
-        from jcm.mod_radcon import radset
-        radset()
 
         from jcm.humidity import spec_hum_to_rel_hum
         from jcm.convection import get_convection_tendencies

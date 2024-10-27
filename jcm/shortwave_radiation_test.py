@@ -1,18 +1,15 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-
-from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
-from jcm.physical_constants import solc, epssw
 from jcm.params import il, ix, kx
-from jcm.geometry import sia
-from jcm.physics import PhysicsState
-from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
-
+from jcm.model import initialize_modules
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
     def test_solar(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.shortwave_radiation import solar
+
         self.assertTrue(np.allclose(solar(0.2), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
@@ -90,6 +87,11 @@ class TestSolar(unittest.TestCase):
         
 class TestShortWaveRadiation(unittest.TestCase):
     def test_shortwave_radiation(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
+        
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -164,8 +166,10 @@ class TestShortWaveRadiation(unittest.TestCase):
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
         ], atol=1e-4))
 
-
     def setUp(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.physical_constants import solc, epssw
+        
         # Set up test case with known inputs
         self.solc = solc
         self.il = il
@@ -173,6 +177,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.epssw = epssw
 
     def test_output_shapes(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.shortwave_radiation import get_zonal_average_fields
+        from jcm.physics_data import DateData, PhysicsData
+        from jcm.physics import PhysicsState
+
         # Ensure that the output shapes are correct
         tyear = 0.25
         xy = (ix, il)
@@ -189,6 +198,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertEqual(new_data.shortwave_rad.zenit.shape, (self.ix, self.il))
 
     def test_solar_radiation_values(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.physics_data import DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import solar, get_zonal_average_fields
+
         # Test that the solar radiation values are computed correctly
         tyear = 0.25
         xy = (ix, il)
@@ -202,6 +216,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.physics_data import DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import get_zonal_average_fields
+
         # Ensure polar night cooling behaves correctly
         tyear = 0.25
         xy = (ix, il)
@@ -216,6 +235,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.maximum(fs0 - physics_data.shortwave_rad.fsol, 0) == physics_data.shortwave_rad.stratz))
 
     def test_ozone_absorption(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.geometry import sia
+        from jcm.physical_constants import epssw
+        from jcm.physics_data import DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import get_zonal_average_fields
+
         # Check that ozone absorption is being calculated correctly
         tyear = 0.25
         xy = (ix, il)
@@ -230,7 +256,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
-    def test_random_input_consistency(self):     
+    def test_random_input_consistency(self):
+        initialize_modules(kx=kx, il=il)
+        from jcm.physics_data import DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import get_zonal_average_fields
+
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)

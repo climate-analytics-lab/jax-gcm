@@ -1,13 +1,16 @@
 import unittest
-from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
-from jcm.physics import PhysicsState
 import jax.numpy as jnp
 import numpy as np
+from jcm.model import initialize_modules
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def test_get_large_scale_condensation_tendencies(self):
+        initialize_modules(kx=8, il=1)
+        from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
+        from jcm.physics import PhysicsState
+        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+
         ix, il, kx = 1, 1, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il))
@@ -33,6 +36,11 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         self.assertIsNotNone(physics_tendencies.specific_humidity)
 
     def test_get_large_scale_condensation_tendencies_realistic(self):
+        initialize_modules(kx=8, il=1)
+        from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
+        from jcm.physics import PhysicsState
+        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+
         ix, il, kx = 1, 1, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) * 1.0110737
