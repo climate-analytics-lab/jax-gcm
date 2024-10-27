@@ -1,11 +1,13 @@
 import unittest
 import jax.numpy as jnp
-from jcm.model import initialize_modules
 
 class TestConvectionUnit(unittest.TestCase):
 
-    def test_diagnose_convection_moist_adiabat(self):
+    def setUp(self):        
+        from jcm.model import initialize_modules
         initialize_modules(kx=8, il=48)
+
+    def test_diagnose_convection_moist_adiabat(self):
         from jcm.convection import diagnose_convection
         
         ix, il, kx = 96, 48, 8
@@ -30,8 +32,6 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
      
     def test_get_convective_tendencies_moist_adiabat(self):
-        initialize_modules(kx=8, il=48)
-
         from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
         from jcm.physics import PhysicsState
         from jcm.physical_constants import grdsig, grdscp

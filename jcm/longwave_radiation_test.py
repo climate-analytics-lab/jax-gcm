@@ -24,14 +24,14 @@ def initialize_arrays(ix, il, kx):
     return ta, fsfcd, st4a, flux
 
 class TestDownwardLongwave(unittest.TestCase):
+    
+    def setUp(self):
+        initialize_modules(kx=kx, il=il)
 
     def test_downward_longwave_rad_fluxes(self):
-        initialize_modules(kx=kx, il=il)
         from jcm.physics_data import PhysicsData, ModRadConData
         from jcm.physics import PhysicsState
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes
-
-        import numpy as np
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
@@ -96,9 +96,9 @@ class TestDownwardLongwave(unittest.TestCase):
                      [78.02499,10.12045],
                      [78.51081,10.1671 ]]]
         
-        self.assertTrue(np.allclose(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds), atol=1e-4))
-        self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, atol=1e-4))
-        self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:5, :5, :, :], axis=2), np.asarray(f90_st4a), atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.longwave_rad.rlds[:5, :5], jnp.asarray(f90_rlds), atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, atol=1e-4))
+        self.assertTrue(jnp.allclose(jnp.mean(physics_data.mod_radcon.st4a[:5, :5, :, :], axis=2), jnp.asarray(f90_st4a), atol=1e-4))
 
     def test_upward_longwave_rad_fluxes(self):
         # TODO: Implement this test

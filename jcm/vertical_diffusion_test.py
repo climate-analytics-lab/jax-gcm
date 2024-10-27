@@ -1,16 +1,17 @@
 import unittest
-from jcm.model import initialize_modules
 import jax.numpy as jnp
-import numpy as np
 
+ix, il, kx = 96, 48, 8
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
+    def setUp(self):
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+
     def test_get_vertical_diffusion_tend(self):
-        initialize_modules(kx=8, il=48)
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
         from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
         from jcm.physics import PhysicsState
-        ix, il, kx = 96, 48, 8
+        from jcm.vertical_diffusion import get_vertical_diffusion_tend
         se = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(400,300,kx)[jnp.newaxis, jnp.newaxis, :]
         rh = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[jnp.newaxis, jnp.newaxis, :]
         qa = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[jnp.newaxis, jnp.newaxis, :]
@@ -33,8 +34,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         utenvd, vtenvd, ttenvd, qtenvd = physics_tendencies.u_wind, physics_tendencies.v_wind, physics_tendencies.temperature, physics_tendencies.specific_humidity
 
-        self.assertTrue(np.allclose(utenvd, np.zeros_like(utenvd), atol=1e-4))
-        self.assertTrue(np.allclose(vtenvd, np.zeros_like(vtenvd), atol=1e-4))
-        self.assertTrue(np.allclose(ttenvd[0,0,:], np.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
+        self.assertTrue(jnp.allclose(utenvd, jnp.zeros_like(utenvd), atol=1e-4))
+        self.assertTrue(jnp.allclose(vtenvd, jnp.zeros_like(vtenvd), atol=1e-4))
+        self.assertTrue(jnp.allclose(ttenvd[0,0,:], jnp.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
         3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-4))
-        self.assertTrue(np.allclose(qtenvd[0,0,:], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
+        self.assertTrue(jnp.allclose(qtenvd[0,0,:], jnp.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
