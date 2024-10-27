@@ -2,7 +2,7 @@ from numpy.testing import assert_array_almost_equal
 import unittest
 import jax.numpy as jnp
 from jcm.params import ix, il, kx
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
+from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState
 
@@ -37,7 +37,9 @@ class TestDownwardLongwave(unittest.TestCase):
         mod_radcon = ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
 
-        physics_data = radset(physics_data)
+        from jcm.mod_radcon import radset
+        radset()
+        
         state = PhysicsState(u_wind=jnp.zeros_like(ta),
                              v_wind=jnp.zeros_like(ta),
                              temperature=ta,

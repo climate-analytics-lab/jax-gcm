@@ -1,15 +1,23 @@
 import dinosaur
 from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
+from dinosaur import primitive_equations_states
 import jax
 import jax.numpy as jnp
-from jcm.physics import get_physical_tendencies
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
+    from jcm.physics import get_physical_tendencies
     def physical_tendencies(state):
         return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
+def initialize_modules(kx=8, il=64):
+    from jcm.geometry import initialize_geometry
+    initialize_geometry(kx=kx, il=il)
+    from jcm.physical_constants import initialize_physics
+    initialize_physics()
+    from jcm.mod_radcon import radset
+    radset()
 
 class SpeedyModel:
     """
@@ -68,13 +76,11 @@ class SpeedyModel:
             self.coords,
             physics_specs)
         
-        from jcm.geometry import initialize_geometry
-        initialize_geometry(self.coords.nodal_shape[0],
-                            self.coords.nodal_shape[2],
-                            (self.coords.nodal_shape[2]+1)//2)
+        initialize_modules(kx = self.coords.nodal_shape[0],
+                           il = self.coords.nodal_shape[2])
         from jcm.physical_constants import initialize_physics
         initialize_physics()
-        from jcm.longwave_radiation import radset
+        from jcm.mod_radcon import radset
         radset()
 
         from jcm.humidity import spec_hum_to_rel_hum

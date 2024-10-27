@@ -1,12 +1,13 @@
 import unittest
-from jcm.convection import diagnose_convection, get_convection_tendencies
 import jax.numpy as jnp
-from jcm.physics import PhysicsState
-from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
-from jcm.physical_constants import grdscp, grdsig
+from jcm.model import initialize_modules
 
 class TestConvectionUnit(unittest.TestCase):
+
     def test_diagnose_convection_moist_adiabat(self):
+        initialize_modules(kx=8, il=48)
+        from jcm.convection import diagnose_convection
+        
         ix, il, kx = 96, 48, 8
 
         psa = jnp.ones((ix, il)) #normalized surface pressure
@@ -29,6 +30,13 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
      
     def test_get_convective_tendencies_moist_adiabat(self):
+        initialize_modules(kx=8, il=48)
+
+        from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
+        from jcm.physics import PhysicsState
+        from jcm.physical_constants import grdsig, grdscp
+        from jcm.convection import get_convection_tendencies
+        
         ix, il, kx = 96, 48, 8
 
         psa = jnp.ones((ix, il)) #normalized surface pressure

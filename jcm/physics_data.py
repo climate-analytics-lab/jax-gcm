@@ -93,8 +93,7 @@ class SWRadiationData:
 @tree_math.struct
 class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
-    # fband = energy fraction emitted in each LW band = f(T)
-    fband: jnp.ndarray 
+    
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
@@ -108,8 +107,7 @@ class ModRadConData:
     flux: jnp.ndarray         # Radiative flux in different spectral bands
 
 
-    def __init__(self, nodal_shape, node_levels, fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
-        self.fband = fband if fband is not None else jnp.zeros((n_temperatures,n_bands))
+    def __init__(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
         self.alb_l = alb_l if alb_l is not None else jnp.zeros((nodal_shape))
         self.alb_s = alb_s if alb_s is not None else jnp.zeros((nodal_shape))
         self.albsfc = albsfc if albsfc is not None else jnp.zeros((nodal_shape))
@@ -119,11 +117,10 @@ class ModRadConData:
         self.stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,)))
         self.flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
 
-    def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             nodal_shape=None, 
             node_levels=None, 
-            fband=fband if fband is not None else self.fband,
             alb_l=alb_l if alb_l is not None else self.alb_l,
             alb_s=alb_s if alb_s is not None else self.alb_s,
             albsfc=albsfc if albsfc is not None else self.albsfc,

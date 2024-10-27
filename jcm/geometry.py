@@ -4,7 +4,6 @@ For storing all variables related to the model's grid space.
 '''
 
 import jax.numpy as jnp
-from jax import jit
 
 # Declare global variables
 hsg = None
@@ -23,8 +22,9 @@ cosgr = None
 cosgr2 = None
 
 # Initializes all of the model geometry variables.
-@jit
-def initialize_geometry(kx = 8, il = 64, iy = 32):
+def initialize_geometry(kx = 8, il = 64):
+    iy = (il + 1)//2
+    
     from jcm.physical_constants import akap, omega
     
     global hsg, dhs, fsg, dhsr, fsgr, radang, coriol, sia, coa, sia_half, coa_half, cosg, cosgr, cosgr2
