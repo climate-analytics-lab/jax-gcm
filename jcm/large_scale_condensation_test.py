@@ -4,9 +4,6 @@ from jcm.model import initialize_modules
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
-    def setUp(self):        
-        initialize_modules(kx=8, il=1)
-
     def test_get_large_scale_condensation_tendencies(self):
         initialize_modules(kx=8, il=1)
         from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
