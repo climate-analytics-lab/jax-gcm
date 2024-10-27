@@ -1,5 +1,6 @@
 import unittest
 import jax.numpy as jnp
+import numpy as np
 
 kx = 8
 class TestHumidityUnit(unittest.TestCase):
@@ -92,7 +93,7 @@ class TestHumidityUnit(unittest.TestCase):
         qa, qsat = humidity.rel_hum_to_spec_hum(temp[:,:,0], pressure, fsg[0], physics_data.humidity.rh[:,:,0])
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
-        self.assertTrue(jnp.allclose(qa, qg[:,:,0], atol=tolerance), "QA should be close to the original QG when converted from RH")
+        self.assertTrue(np.allclose(qa, qg[:,:,0], atol=tolerance), "QA should be close to the original QG when converted from RH")
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,6 @@
 import unittest
 import jax.numpy as jnp
+import numpy as np
 
 ix, il, kx = 96, 48, 8
 class TestSurfaceFluxesUnit(unittest.TestCase):
@@ -40,12 +41,12 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
 
-        self.assertTrue(jnp.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.slru[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.slru[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
+        self.assertTrue(np.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tsfc[0, 0], 290.0, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tskin[0, 0], 297.22821044921875, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.u0[0, 0], 0.949999988079071, atol=1e-4))
@@ -98,7 +99,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         # pulling the subset of return values to be testsed against the test data
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
-        self.assertTrue(jnp.allclose(
+        self.assertTrue(np.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
             rtol=2e-5
@@ -149,7 +150,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
-        self.assertTrue(jnp.allclose(
+        self.assertTrue(np.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
             rtol=2e-5
@@ -199,7 +200,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
     
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
-        self.assertTrue(jnp.allclose(
+        self.assertTrue(np.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
             rtol=2e-5
@@ -249,7 +250,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
-        self.assertTrue(jnp.allclose(
+        self.assertTrue(np.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
             rtol=2e-5
@@ -298,7 +299,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
-        self.assertTrue(jnp.allclose(
+        self.assertTrue(np.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
             rtol=2e-5
