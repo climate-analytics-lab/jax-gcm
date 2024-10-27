@@ -194,7 +194,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     acloud1, acloud2 = (cloudc[:, :, jnp.newaxis, jnp.newaxis]*a for a in (ablcl1, ablcl2))
 
-    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[jnp.newaxis, jnp.newaxis, :] > icltop[:, :, jnp.newaxis], acloud1.reshape(96, 48, 1), acloud2.reshape(96, 48, 1)))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[jnp.newaxis, jnp.newaxis, :] > icltop[:, :, jnp.newaxis], acloud1.reshape(ix, il, 1), acloud2.reshape(ix, il, 1)))
     absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, 5, 2))))
 
     # Compute transmissivity
