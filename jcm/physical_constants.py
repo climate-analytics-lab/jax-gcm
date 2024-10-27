@@ -4,7 +4,6 @@ For storing and initializing physical constants.
 '''
 
 import jax.numpy as jnp
-from jcm.params import kx
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)
@@ -34,3 +33,23 @@ wvi = jnp.array([[0.74906313, 0.519211  ],
                  [5.0501776 , 0.59072757],
                  [7.7501183 , 0.58097243],
                  [0.31963795, 0.        ]]) # Weights for vertical interpolation
+
+def initialize_physics():
+    from jcm.geometry import hsg, fsg, dhs
+    
+    global sigl, sigh, grdsig, grdscp, wvi
+
+    # 1.2 Functions of sigma and latitude
+    sigh = hsg
+    sigl = jnp.log(fsg)
+    grdsig = grav/(dhs*p0)
+    grdscp = grdsig/cp
+
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    wvi = jnp.zeros((fsg.shape[0], 2))
+    wvi = wvi.at[-1, 1].set((jnp.log(0.99)-sigl[-1])*wvi[-1,0])
+    wvi = wvi.at[:-1, 0].set(1./(sigl[1:]-sigl[:-1]))
+    wvi = wvi.at[:-1, 1].set((jnp.log(sigh[1:-1])-sigl[:-1])*wvi[:-1, 0])
