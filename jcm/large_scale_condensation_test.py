@@ -1,10 +1,10 @@
 import unittest
 import jax.numpy as jnp
+from jcm.model import initialize_modules
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def setUp(self):        
-        from jcm.model import initialize_modules
         initialize_modules(kx=8, il=1)
 
     def test_get_large_scale_condensation_tendencies(self):
