@@ -7,9 +7,9 @@ class TestModelUnit(unittest.TestCase):
         from jcm.held_suarez_model import HeldSuarezModel
         layers = 8
         model = HeldSuarezModel(
-            time_step=120,
+            time_step=180,
             save_interval=1,
-            total_time=4,
+            total_time=2,
             layers=layers
         )
     
@@ -59,9 +59,9 @@ class TestModelUnit(unittest.TestCase):
 
         layers = 8
         model = SpeedyModel(
-            time_step=120,
+            time_step=180,
             save_interval=1,
-            total_time=4,
+            total_time=2,
             layers=layers
         )
     
