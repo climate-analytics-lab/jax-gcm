@@ -6,7 +6,7 @@ from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 nband = 4
 
-def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
+def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, fband):
 
     """
     Calculate the downward longwave radiation fluxes
@@ -23,7 +23,6 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     """
     ix, il, kx = state.temperature.shape
     ta = state.temperature
-    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
@@ -100,7 +99,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
 
     return physics_tendencies, physics_data
 
-def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
+def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, fband):
     """
     Calculate the upward longwave radiation fluxes
     
@@ -124,7 +123,6 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     dfabs = physics_data.longwave_rad.dfabs
     rlds = physics_data.longwave_rad.rlds
 
-    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2

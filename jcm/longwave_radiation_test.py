@@ -5,6 +5,7 @@ from jcm.params import ix, il, kx
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState
+from jcm.mod_radcon import fbandradset
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -37,7 +38,6 @@ class TestDownwardLongwave(unittest.TestCase):
         mod_radcon = ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
 
-        physics_data = radset(physics_data)
         state = PhysicsState(u_wind=jnp.zeros_like(ta),
                              v_wind=jnp.zeros_like(ta),
                              temperature=ta,
@@ -45,7 +45,7 @@ class TestDownwardLongwave(unittest.TestCase):
                              geopotential=jnp.zeros_like(ta),
                              surface_pressure=jnp.zeros((ix, il)))
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data)
+        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, fbandradset)
 
         # fortran values
         # print(fsfcd[:5, :5])
