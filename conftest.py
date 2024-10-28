@@ -1,9 +1,9 @@
 import pytest
+import sys
 
 @pytest.fixture(autouse=True)
-def delete_imports():
+def clean_jcm_imports():
     yield
-    import sys
-    for key in list(sys.modules.keys()):
-        if key.startswith("jcm"):
-            del sys.modules[key]
+    keys_to_delete = {key for key in sys.modules if key == "jcm" or key.startswith("jcm.")}
+    for key in keys_to_delete:
+        del sys.modules[key]
