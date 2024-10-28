@@ -2,10 +2,10 @@ from numpy.testing import assert_array_almost_equal
 import unittest
 import jax.numpy as jnp
 from jcm.params import ix, il, kx
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
+from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState
-from jcm.mod_radcon import fbandradset
+from jcm.mod_radcon import fband
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -45,7 +45,7 @@ class TestDownwardLongwave(unittest.TestCase):
                              geopotential=jnp.zeros_like(ta),
                              surface_pressure=jnp.zeros((ix, il)))
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, fbandradset)
+        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, fband)
 
         # fortran values
         # print(fsfcd[:5, :5])

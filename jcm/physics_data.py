@@ -106,7 +106,7 @@ class ModRadConData:
     flux: jnp.ndarray         # Radiative flux in different spectral bands
 
 
-    def __init__(self, nodal_shape, node_levels, fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
+    def __init__(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
         self.alb_l = alb_l if alb_l is not None else jnp.zeros((nodal_shape))
         self.alb_s = alb_s if alb_s is not None else jnp.zeros((nodal_shape))
         self.albsfc = albsfc if albsfc is not None else jnp.zeros((nodal_shape))
