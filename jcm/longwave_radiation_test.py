@@ -4,7 +4,6 @@ import numpy as np
 from jcm.model import initialize_modules
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState        
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes
 
 ix, il, kx = 96, 48, 8
 
@@ -33,6 +32,7 @@ class TestDownwardLongwave(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
     def test_downward_longwave_rad_fluxes(self):
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
