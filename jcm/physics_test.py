@@ -2,11 +2,11 @@ import unittest
 from dinosaur.primitive_equations import PrimitiveEquations
 from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
+from jcm.model import initialize_modules
 
 class TestPhysicsUnit(unittest.TestCase):
 
     def setUp(self):
-        from jcm.model import initialize_modules
         initialize_modules(kx=8, il=48)
 
     def test_speedy_model_HS94(self):

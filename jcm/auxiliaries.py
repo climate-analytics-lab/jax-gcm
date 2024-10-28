@@ -6,7 +6,7 @@ For storing variables used by multiple physics schemes.
 import jax.numpy as jnp
 
 from jcm.params import ix, il
-from jcm.speedyf90_types import p
+from speedyf90_types import p
 
 # Physical variables shared among all physics schemes
 # TODO: Check these should be initialized to zeros (and need initialization at all)

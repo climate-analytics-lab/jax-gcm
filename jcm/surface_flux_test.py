@@ -1,17 +1,17 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
+from jcm.model import initialize_modules
+from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
+from jcm.physics import PhysicsData, PhysicsState
 
 ix, il, kx = 96, 48, 8
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def setUp(self):
-        from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
     def test_updated_surface_flux(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
 
         xy, xyz = (ix, il), (ix, il, kx)
@@ -54,8 +54,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.isclose(sflux_data.t0[0, 0], 290.0, atol=1e-4))
 
     def test_surface_fluxes_test1(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
         xy = (ix,il)
         psa = jnp.ones((ix,il)) #surface pressure
@@ -106,8 +104,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test2(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -157,8 +153,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test3(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -207,8 +201,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test4(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
@@ -257,8 +249,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ))
 
     def test_surface_fluxes_test5(self):
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsData, PhysicsState
         from jcm.surface_flux import get_surface_fluxes
         xy = (ix,il)
         psa = jnp.ones((ix, il)) #surface pressure

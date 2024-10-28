@@ -6,9 +6,9 @@
 import jax.numpy as jnp 
 
 # Import necessary modules
-from jcm.params import nsteps, delt, nsteps_out, nstrad
+from params import nsteps, delt, nsteps_out, nstrad
 from date import model_datetime, end_datetime, newdate, datetime_equal
-from jcm.shortwave_radiation import compute_shortwave
+from shortwave_radiation import compute_shortwave
 from input_output import output
 from coupler import couple_sea_land
 from initialization import initialize
