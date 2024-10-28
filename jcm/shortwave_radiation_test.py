@@ -16,7 +16,7 @@ class TestSolar(unittest.TestCase):
     def test_solar(self):
         from jcm.shortwave_radiation import solar
 
-        self.assertTrue(np.allclose(solar(0.2), jnp.array([
+        self.assertTrue(np.allclose(solar(0.2), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
             261.58627434, 283.95547202, 305.15011948, 325.07762082,
@@ -29,7 +29,7 @@ class TestSolar(unittest.TestCase):
             282.48360014, 260.01911561, 236.4767785 , 211.95903738,
             186.57407167, 160.43718712, 133.67240691, 106.41888862,
             78.84586166,  51.20481384,  24.06562443,   0.89269878]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.4), jnp.array([
+        self.assertTrue(np.allclose(solar(0.4), np.array([
             0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
             0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
             5.00775958e+01, 7.28770444e+01, 9.68131455e+01, 1.21415906e+02,
@@ -42,7 +42,7 @@ class TestSolar(unittest.TestCase):
             4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
             4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
             4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.6), jnp.array([
+        self.assertTrue(np.allclose(solar(0.6), np.array([
             0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
             83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
             206.84837586, 230.61437093, 253.6899679, 275.94351445, 297.25534724,
@@ -52,7 +52,7 @@ class TestSolar(unittest.TestCase):
             446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
             410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
             359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.8), jnp.array([
+        self.assertTrue(np.allclose(solar(0.8), np.array([
             2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
             2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
             3.42958056e+02, 3.60158149e+02, 3.76136095e+02, 3.90759256e+02,
@@ -65,7 +65,7 @@ class TestSolar(unittest.TestCase):
             2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
             1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
             1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(1.0), jnp.array([
+        self.assertTrue(np.allclose(solar(1.0), np.array([
             553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
             516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
             514.02258691, 515.87725366, 516.65036719, 516.12420873, 514.15095359,
@@ -77,7 +77,7 @@ class TestSolar(unittest.TestCase):
             20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.]), atol=1e-4))
 
         # other csol values
-        self.assertTrue(np.allclose(solar(0.6, 1300), jnp.array([
+        self.assertTrue(np.allclose(solar(0.6, 1300), np.array([
             0.,          0.,           0.,           0.,
             2.30256929,  16.58242672,  35.58566559,  56.89183219,
             79.47609897, 102.75932685, 126.36068201, 150.00199764,
@@ -114,11 +114,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         qa, qsat, rh = broadcast(qa), broadcast(qsat), broadcast(rh)
 
         psa = jnp.ones(xy)
-        precnv = -1 * jnp.ones(xy)
-        precls = 4 * jnp.ones(xy)
-        iptop = 8 * jnp.ones(xy)
-        gse = .01 * jnp.ones(xy)
-        fmask = .7 * jnp.ones(xy)
+        precnv = -1 * np.ones(xy)
+        precls = 4 * np.ones(xy)
+        iptop = 8 * np.ones(xy)
+        gse = .01 * np.ones(xy)
+        fmask = .7 * np.ones(xy)
         tyear = 0.6
 
         surface_flux = SurfaceFluxData(xy,fmask=fmask)
@@ -165,7 +165,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             284.20954594, 288.1834261, 291.08877534
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(jnp.mean(physics_data.shortwave_rad.dfabs, axis=2)[0, :], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[0, :], [
             0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
             4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
             8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
@@ -175,7 +175,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             13.45775005
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(jnp.mean(physics_data.shortwave_rad.dfabs, axis=1)[0, :], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=1)[0, :], [
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
         ], atol=1e-4))
 
@@ -211,7 +211,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
         topsr = solar(tyear)
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
+        self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
         from jcm.shortwave_radiation import get_zonal_average_fields
@@ -246,7 +246,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (tyear + 10.0 / 365.0)))  + 1.8 * flat2)
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
+        self.assertTrue(jnp.allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0]))
 
     def test_random_input_consistency(self):
         from jcm.shortwave_radiation import get_zonal_average_fields
