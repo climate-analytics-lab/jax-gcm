@@ -4,7 +4,6 @@ from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
-
 nband = 4
 
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
@@ -200,3 +199,4 @@ def radset(physics_data: PhysicsData):
     modradcon_out = physics_data.mod_radcon.copy(fband=fband)
     physics_data = physics_data.copy(mod_radcon=modradcon_out)
     return physics_data
+

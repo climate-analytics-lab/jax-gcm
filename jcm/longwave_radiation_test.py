@@ -41,7 +41,7 @@ class TestDownwardLongwave(unittest.TestCase):
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
-        
+
         physics_data = radset(physics_data)
         state = PhysicsState(u_wind=jnp.zeros_like(ta),
                              v_wind=jnp.zeros_like(ta),

@@ -292,6 +292,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     
 # @jit
 def clouds(state: PhysicsState, physics_data: PhysicsData):
+    #import params as p 
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 

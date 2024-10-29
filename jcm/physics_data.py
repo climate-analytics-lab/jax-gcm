@@ -93,8 +93,8 @@ class SWRadiationData:
 @tree_math.struct
 class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
-    # fband = energy fraction emitted in each LW band
-    fband: jnp.ndarray
+    # fband = energy fraction emitted in each LW band = f(T)
+    fband: jnp.ndarray 
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
