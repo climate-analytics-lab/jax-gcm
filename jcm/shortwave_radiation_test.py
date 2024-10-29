@@ -188,14 +188,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = phys.PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, new_data = sw.get_zonal_average_fields(state, physics_data)
         
-        self.assertEqual(new_data.shortwave_rad.fsol.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.ozupp.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.ozone.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.stratz.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.zenit.shape, (self.ix, self.il))
+        self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozone.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.stratz.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.zenit.shape, (ix, il))
 
     def test_solar_radiation_values(self):
-        # Test that the sw.solar radiation values are computed correctly
+        # Test that the solar radiation values are computed correctly
         tyear = 0.25
         xy = (ix, il)
         xyz = (ix, il, kx)

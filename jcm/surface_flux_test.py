@@ -10,7 +10,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         global pd, phys, sflux
         from jcm import physics_data as pd
         from jcm import physics as phys
-        from jcm import surface_fluxes as sflux
+        from jcm import surface_flux as sflux
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)

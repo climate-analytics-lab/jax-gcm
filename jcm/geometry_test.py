@@ -2,7 +2,7 @@ import unittest
 
 class TestGeometryUnit(unittest.TestCase):
 
-    def setUp():
+    def setUp(self):
         global geo
         from jcm import geometry as geo
 
