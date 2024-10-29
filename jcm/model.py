@@ -10,9 +10,9 @@ from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.surface_flux import get_surface_fluxes
 from jcm.vertical_diffusion import get_vertical_diffusion_tend
-from dinosaur.time_integration import ExplicitODE
 from jcm.humidity import spec_hum_to_rel_hum
-import dinosaur.primitive_equations
+from dinosaur.time_integration import ExplicitODE
+from dinosaur.primitive_equations import State
 from datetime import datetime
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
@@ -24,6 +24,11 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
         data = PhysicsData(dynamics.coords.horizontal.shape[0:2],
                     dynamics.coords.horizontal.shape[2],
                     date_data=DateData(model_time))
+        
+        # Remove the sim_time and convert to a plain State object
+        _state = state.asdict()
+        _state.pop('sim_time')
+        state = State(**_state)
 
         return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
