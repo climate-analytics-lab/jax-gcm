@@ -1,9 +1,6 @@
 import jax.numpy as jnp
 import tree_math
 
-n_temperatures = 301
-n_bands = 4
-
 @tree_math.struct
 class DateData:
     tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)

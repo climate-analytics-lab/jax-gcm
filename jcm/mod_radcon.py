@@ -12,11 +12,16 @@ emisfc = 0.98  # Longwave surface emissivity
 # Placeholder for CO2-related variable
 ablco2_ref = None  # To be initialized elsewhere
 
-# Initialize empty fband array
-fband_initial = jnp.zeros((301, 4))
+n_temperatures = 301
+n_bands = 4
 
-def calculate_radset_fband(initial_array):
-    """Calculate the transformed fband values for radiation calculations."""
+# Initialize empty fband array
+fband_initial = jnp.zeros((n_temperatures, n_bands))
+
+def radset(initial_array):
+    """
+    Set the energy fraction emitted in each LW band = f(T)
+    """
     eps1 = 1.0 - epslw
     t_min, t_max = 200, 320
     jtemp = jnp.arange(t_min, t_max + 1)
@@ -40,7 +45,7 @@ def calculate_radset_fband(initial_array):
     return result
 
 # Calculate final fband values
-fband = calculate_radset_fband(fband_initial)
+fband = radset(fband_initial)
 
 
 

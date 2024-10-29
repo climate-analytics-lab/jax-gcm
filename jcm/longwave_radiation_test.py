@@ -5,7 +5,6 @@ from jcm.params import ix, il, kx
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.physics_data import PhysicsData, ModRadConData
 from jcm.physics import PhysicsState
-from jcm.mod_radcon import fband
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
