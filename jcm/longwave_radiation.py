@@ -5,6 +5,9 @@ from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
+nband = 4
+fband = None
+
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
     """
@@ -172,5 +175,24 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     
     return physics_tendencies, physics_data
 
+def radset():
+    """
+    Set the energy fraction emitted in each LW band = f(T)
+    """
+    global fband
 
+    fband = jnp.zeros((301, nband))  # Example shape (100:400, 4)
 
+    eps1 = 1.0 - epslw
+
+    t_min, t_max = 200, 320
+    jtemp = jnp.arange(t_min, t_max + 1)
+    fband_2 = (0.148 - 3.0e-6 * (jtemp - 247) ** 2) * eps1
+    fband_3 = (0.356 - 5.2e-6 * (jtemp - 282) ** 2) * eps1
+    fband_4 = (0.314 + 1.0e-5 * (jtemp - 315) ** 2) * eps1
+    fband_1 = eps1 - (fband_2 + fband_3 + fband_4)
+    fband = fband.at[jtemp - 100, :4].set(jnp.stack((fband_1, fband_2, fband_3, fband_4), axis=-1))
+
+    jb = jnp.arange(4)
+    fband = fband.at[:(t_min - 100), jb].set(fband[t_min - 100, jb])
+    fband = fband.at[(t_max + 1 - 100):, jb].set(fband[t_max - 100, jb])
