@@ -1,6 +1,5 @@
 import unittest
 import jax.numpy as jnp
-import numpy as np
 from jcm.model import initialize_modules
 from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
 from jcm.physics import PhysicsData, PhysicsState
