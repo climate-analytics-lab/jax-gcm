@@ -28,7 +28,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
 
-        state = phys.phys.PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
+        state = phys.PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
         sflux_data = pd.SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
         hum_data = pd.HumidityData(xy,kx,rh=rh)
         conv_data = pd.ConvectionData(xy,kx,psa=psa)
