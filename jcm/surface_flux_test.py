@@ -29,13 +29,13 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland = True
 
         state = phys.phys.PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = pd.pd.SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = pd.pd.HumidityData(xy,kx,rh=rh)
-        conv_data = pd.pd.ConvectionData(xy,kx,psa=psa)
-        sw_rad = pd.pd.SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = pd.pd.LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = pd.pd.SeaModelData(xy,tsea=tsea)
-        physics_data = pd.pd.PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        sflux_data = pd.SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = pd.HumidityData(xy,kx,rh=rh)
+        conv_data = pd.ConvectionData(xy,kx,psa=psa)
+        sw_rad = pd.SWRadiationData(xy,kx,rsds=rsds)
+        lw_rad = pd.LWRadiationData(xy,kx,rlds=rlds)
+        sea_data = pd.SeaModelData(xy,tsea=tsea)
+        physics_data = pd.PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = sflux.get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
