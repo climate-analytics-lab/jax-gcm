@@ -5,10 +5,10 @@ class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
         global ix, il, kx
-        ix, il, kx = ix, il, 8
+        ix, il, kx = 96, 48, 8
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
-        
+
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg
         from jcm.physics_data import ConvectionData, PhysicsData
         from jcm.physics import PhysicsState
