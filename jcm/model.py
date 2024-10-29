@@ -14,7 +14,7 @@ def convert_tendencies_to_equation(dynamics, physics_terms):
 def initialize_modules(kx=8, il=64):
     from jcm.geometry import initialize_geometry
     initialize_geometry(kx=kx, il=il)
-    from jcm.physical_constants import initialize_physics
+    from jcm.physics import initialize_physics
     initialize_physics()
     from jcm.longwave_radiation import radset
     radset()

@@ -8,6 +8,8 @@ from collections import abc
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
+from jcm.geometry import hsg, fsg, dhs
+from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
@@ -30,6 +32,21 @@ class PhysicsTendency:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
 
+def initialize_physics():
+    # 1.2 Functions of sigma and latitude
+    pc.sigh = hsg
+    pc.sigl = jnp.log(fsg)
+    pc.grdsig = pc.grav/(dhs*pc.p0)
+    pc.grdscp = pc.grdsig/pc.cp
+
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    pc.wvi = jnp.zeros((fsg.shape[0], 2))
+    pc.wvi = pc.wvi.at[:-1, 0].set(1./(pc.sigl[1:]-pc.sigl[:-1]))
+    pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
+    pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
