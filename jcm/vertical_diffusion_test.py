@@ -1,18 +1,19 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.model import initialize_modules
-from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
-from jcm.physics import PhysicsState
-        
-ix, il, kx = 96, 48, 8
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
+        global pd, phys, vd
+        from jcm import physics_data as pd
+        from jcm import physics as phys
+        from jcm import vertical_diffusion as vd
 
     def test_get_vertical_diffusion_tend(self):
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
         se = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(400,300,kx)[jnp.newaxis, jnp.newaxis, :]
         rh = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[jnp.newaxis, jnp.newaxis, :]
         qa = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[jnp.newaxis, jnp.newaxis, :]
@@ -20,10 +21,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         phi = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(150000,0,kx)[jnp.newaxis, jnp.newaxis, :]
         iptop = jnp.ones((ix,il))*1
         
-        humidity_data = HumidityData((ix,il), kx, rh=rh, qsat=qsat)
-        convection_data = ConvectionData((ix,il), kx, iptop=iptop, se=se)
-        physics_data = PhysicsData((ix,il), kx, humidity=humidity_data, convection=convection_data)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
+        humidity_data = pd.HumidityData((ix,il), kx, rh=rh, qsat=qsat)
+        convection_data = pd.ConvectionData((ix,il), kx, iptop=iptop, se=se)
+        physics_data = pd.PhysicsData((ix,il), kx, humidity=humidity_data, convection=convection_data)
+        state = phys.PhysicsState(u_wind=jnp.zeros_like(qa),
                              v_wind=jnp.zeros_like(qa),
                              temperature=jnp.zeros_like(qa),
                              specific_humidity=qa,
@@ -31,7 +32,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
-        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data)
+        physics_tendencies, _ = vd.get_vertical_diffusion_tend(state, physics_data)
 
         utenvd, vtenvd, ttenvd, qtenvd = physics_tendencies.u_wind, physics_tendencies.v_wind, physics_tendencies.temperature, physics_tendencies.specific_humidity
 

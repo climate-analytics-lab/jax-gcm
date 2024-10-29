@@ -1,19 +1,20 @@
 import unittest
 import jax.numpy as jnp
-from jcm.model import initialize_modules
-from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
-from jcm.physics import PhysicsState
 
 class TestConvectionUnit(unittest.TestCase):
 
-    def setUp(self):        
-        initialize_modules(kx=8, il=48)
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        global pd, phys, conv, pc
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+        from jcm import physics_data as pd
+        from jcm import physics as phys
+        from jcm import convection as conv
+        from jcm import physical_constants as pc
 
     def test_diagnose_convection_moist_adiabat(self):
-        from jcm.convection import diagnose_convection
-        
-        ix, il, kx = 96, 48, 8
-
         psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
@@ -25,7 +26,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
         qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
 
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
+        itop, qdif = conv.diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
 
         test_itop = 4
         test_qdif = 1.1395
@@ -34,11 +35,6 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
      
     def test_get_convective_tendencies_moist_adiabat(self):
-        from jcm.physical_constants import grdsig, grdscp
-        from jcm.convection import get_convection_tendencies
-        
-        ix, il, kx = 96, 48, 8
-
         psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
@@ -50,17 +46,17 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
         qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
 
-        convection = ConvectionData((ix, il), kx, psa=psa, se=se_broadcast)
-        humidity = HumidityData((ix, il), kx, qsat=qsat_broadcast*1000.)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa_broadcast),
+        convection = pd.ConvectionData((ix, il), kx, psa=psa, se=se_broadcast)
+        humidity = pd.HumidityData((ix, il), kx, qsat=qsat_broadcast*1000.)
+        state = phys.PhysicsState(u_wind=jnp.zeros_like(qa_broadcast),
                              v_wind=jnp.zeros_like(qa_broadcast),
                              temperature=jnp.zeros_like(qa_broadcast),
                              specific_humidity=qa_broadcast*1000.,
                              geopotential=jnp.zeros_like(qa_broadcast),
                              surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
+        physics_data = pd.PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data)
+        physics_tendencies, physics_data = conv.get_convection_tendencies(state, physics_data)
 
         test_cbmf = jnp.array(0.019614903)
         test_precnv = jnp.array(0.21752352)
@@ -69,10 +65,10 @@ class TestConvectionUnit(unittest.TestCase):
 
         rhs = 1/physics_data.convection.psa
         test_ttend = test_dfse
-        test_ttend = test_ttend.at[1:].set(test_dfse[1:] * rhs[0,0] * grdscp[1:])
+        test_ttend = test_ttend.at[1:].set(test_dfse[1:] * rhs[0,0] * pc.grdscp[1:])
 
         test_qtend = test_dfqa
-        test_qtend = test_qtend.at[1:].set(test_dfqa[1:] * rhs[0,0] * grdsig[1:])
+        test_qtend = test_qtend.at[1:].set(test_dfqa[1:] * rhs[0,0] * pc.grdsig[1:])
 
         # Check that itop and qdif is not null.
         self.assertAlmostEqual(physics_data.convection.cbmf[0,0], test_cbmf, places=4)

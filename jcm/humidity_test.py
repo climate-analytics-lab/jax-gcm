@@ -1,14 +1,20 @@
 import unittest
 import jax.numpy as jnp
-from jcm.model import initialize_modules
-from jcm.physics_data import ConvectionData
-from jcm.physics import PhysicsData, PhysicsState        
 
 kx = 8
+
 class TestHumidityUnit(unittest.TestCase):
 
     def setUp(self):
+        global pd, phys, humidity, geo
+
+        from jcm.model import initialize_modules
         initialize_modules(kx=8, il=48)
+
+        from jcm import physics_data as pd
+        from jcm import physics as phys
+        from jcm import humidity
+        from jcm import geometry as geo
 
         self.temp_standard = jnp.ones((96,48,8))*273
         self.pressure_standard = jnp.ones((96,48))*0.5
@@ -16,8 +22,6 @@ class TestHumidityUnit(unittest.TestCase):
         self.qg_standard = jnp.ones((96,48,8))*2
 
     def test_get_qsat(self):
-        from jcm import humidity
-
         temp = self.temp_standard
         pressure = self.pressure_standard
         sigma = self.sigma
@@ -39,25 +43,23 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((qsat >= 0).all(), "Found negative qsat values at high temperature")
 
     def test_spec_hum_to_rel_hum(self):
-        from jcm import humidity
-
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        convection_data = ConvectionData((96,48), kx, psa=pressure)
-        physics_data = PhysicsData((96,48), kx, convection=convection_data)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
+        convection_data = pd.ConvectionData((96,48), kx, psa=pressure)
+        physics_data = pd.PhysicsData((96,48), kx, convection=convection_data)
+        state = phys.PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((96,48)))
 
         # Edge case: Zero Specific Humidity
         qg = jnp.ones((96,48,8))*0
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg,jnp.zeros_like(temp),jnp.zeros((96,48)))
+        state = phys.PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((96,48)))
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
         self.assertTrue((physics_data.humidity.rh == 0).all(), "Relative humidity should be 0 when specific humidity is 0")
 
-      # Edge case: Very High Temperature
+        # Edge case: Very High Temperature
         temp = jnp.ones((96,48,8))*400
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg,jnp.zeros_like(temp),jnp.zeros((96,48)))
+        state = phys.PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((96,48)))
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
         self.assertTrue(((physics_data.humidity.rh >= 0) & (physics_data.humidity.rh <= 1)).all(), "Relative humidity should be between 0 and 1 at very high temperatures")
 
@@ -70,24 +72,21 @@ class TestHumidityUnit(unittest.TestCase):
 
         # Edge case: High Specific Humidity (near saturation)
         qg = jnp.ones((96,48,8))*(physics_data.humidity.qsat[0, 0, :] - 1e-6)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg,jnp.zeros_like(temp),jnp.zeros((96,48)))
+        state = phys.PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((96,48)))
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
     def test_rel_hum_to_spec_hum(self):
-        from jcm.geometry import fsg
-        from jcm import humidity
-
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        convection_data = ConvectionData((96,48), kx, psa=pressure)
-        physics_data = PhysicsData((96,48), kx, convection=convection_data)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),jnp.zeros((96,48)))
+        convection_data = pd.ConvectionData((96,48), kx, psa=pressure)
+        physics_data = pd.PhysicsData((96,48), kx, convection=convection_data)
+        state = phys.PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((96,48)))
 
         _, physics_data = humidity.spec_hum_to_rel_hum(physics_data=physics_data, state=state)
-        qa, qsat = humidity.rel_hum_to_spec_hum(temp[:,:,0], pressure, fsg[0], physics_data.humidity.rh[:,:,0])
+        qa, qsat = humidity.rel_hum_to_spec_hum(temp[:,:,0], pressure, geo.fsg[0], physics_data.humidity.rh[:,:,0])
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
         self.assertTrue(jnp.allclose(qa, qg[:,:,0], atol=tolerance), "QA should be close to the original QG when converted from RH")

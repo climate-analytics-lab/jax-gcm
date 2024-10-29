@@ -1,36 +1,37 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.model import initialize_modules
-from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
-from jcm.physics import PhysicsState      
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def setUp(self):
-        initialize_modules(kx=8, il=1)
+        global ix, il, kx
+        ix, il, kx = 1, 1, 8
+        global pd, phys, cond
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+        from jcm import physics_data as pd
+        from jcm import physics as phys
+        from jcm import large_scale_condensation as cond
 
     def test_get_large_scale_condensation_tendencies(self):
-        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-
-        ix, il, kx = 1, 1, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il))
         qa = jnp.ones((ix, il, kx))
         qsat = jnp.ones((ix, il, kx))
         itop = jnp.full((ix, il), kx - 1)
 
-        convection = ConvectionData(xy, kx, psa=psa,iptop=itop)
-        humidity = HumidityData(xy, kx, qsat=qsat)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
+        convection = pd.ConvectionData(xy, kx, psa=psa,iptop=itop)
+        humidity = pd.HumidityData(xy, kx, qsat=qsat)
+        state = phys.PhysicsState(u_wind=jnp.zeros_like(qa),
                              v_wind=jnp.zeros_like(qa),
                              temperature=jnp.zeros_like(qa),
                              specific_humidity=qa,
                              geopotential=jnp.zeros_like(qa),
                              surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
+        physics_data = pd.PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
+        physics_tendencies, physics_data = cond.get_large_scale_condensation_tendencies(state, physics_data)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
@@ -38,9 +39,6 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         self.assertIsNotNone(physics_tendencies.specific_humidity)
 
     def test_get_large_scale_condensation_tendencies_realistic(self):
-        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-
-        ix, il, kx = 1, 1, 8
         xy = (ix,il)
         psa = jnp.ones((ix, il)) * 1.0110737
         qa = jnp.asarray([[[16.148024  , 10.943978  ,  5.851813  ,  2.4522789 ,  0.02198645,
@@ -49,17 +47,17 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01]]])
         itop = jnp.ones((ix, il)) * 4
 
-        convection = ConvectionData(xy, kx, psa=psa,iptop=itop)
-        humidity = HumidityData(xy, kx, qsat=qsat)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
+        convection = pd.ConvectionData(xy, kx, psa=psa,iptop=itop)
+        humidity = pd.HumidityData(xy, kx, qsat=qsat)
+        state = phys.PhysicsState(u_wind=jnp.zeros_like(qa),
                              v_wind=jnp.zeros_like(qa),
                              temperature=jnp.zeros_like(qa),
                              specific_humidity=qa,
                              geopotential=jnp.zeros_like(qa),
                              surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
+        physics_data = pd.PhysicsData(xy, kx, humidity=humidity, convection=convection)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
+        physics_tendencies, physics_data = cond.get_large_scale_condensation_tendencies(state, physics_data)
         
         np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]]]), atol=1e-4, rtol=0)

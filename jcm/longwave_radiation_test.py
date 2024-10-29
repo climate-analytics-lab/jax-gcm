@@ -1,11 +1,6 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.model import initialize_modules
-from jcm.physics_data import PhysicsData, ModRadConData
-from jcm.physics import PhysicsState        
-
-ix, il, kx = 96, 48, 8
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -29,25 +24,31 @@ def initialize_arrays(ix, il, kx):
 class TestDownwardLongwave(unittest.TestCase):
     
     def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        global pd, phys, lw
+        from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
+        from jcm import physics_data as pd
+        from jcm import physics as phys
+        from jcm import longwave_radiation as lw
 
-    def test_downward_longwave_rad_fluxes(self):
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes
+    def test_downward_longwave_rad_fluxes(self):        
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
-        mod_radcon = ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
-        physics_data = PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
+        mod_radcon = pd.ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
+        physics_data = pd.PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
         
-        state = PhysicsState(u_wind=jnp.zeros_like(ta),
+        state = phys.PhysicsState(u_wind=jnp.zeros_like(ta),
                              v_wind=jnp.zeros_like(ta),
                              temperature=ta,
                              specific_humidity=jnp.zeros_like(ta),
                              geopotential=jnp.zeros_like(ta),
                              surface_pressure=jnp.zeros((ix, il)))
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data)
+        _, physics_data = lw.get_downward_longwave_rad_fluxes(state, physics_data)
 
         # fortran values
         # print(fsfcd[:5, :5])

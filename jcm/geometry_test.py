@@ -1,10 +1,13 @@
 import unittest
-from jcm import geometry
 
 class TestGeometryUnit(unittest.TestCase):
 
+    def setUp():
+        global geo
+        from jcm import geometry as geo
+
     def test_initialize_geometry(self):
-        geometry.initialize_geometry()
+        geo.initialize_geometry()
 
         # Check that hsg is not null.
-        self.assertIsNotNone(geometry.hsg)
+        self.assertIsNotNone(geo.hsg)
