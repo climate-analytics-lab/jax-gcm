@@ -6,7 +6,6 @@ from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
 nband = 4
-fband = None
 
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
@@ -25,6 +24,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     """
     ix, il, kx = state.temperature.shape
     ta = state.temperature
+    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
@@ -125,6 +125,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     dfabs = physics_data.longwave_rad.dfabs
     rlds = physics_data.longwave_rad.rlds
 
+    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
@@ -175,11 +176,10 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     
     return physics_tendencies, physics_data
 
-def radset():
+def radset(physics_data: PhysicsData):
     """
     Set the energy fraction emitted in each LW band = f(T)
     """
-    global fband
 
     fband = jnp.zeros((301, nband))  # Example shape (100:400, 4)
 
@@ -196,3 +196,7 @@ def radset():
     jb = jnp.arange(4)
     fband = fband.at[:(t_min - 100), jb].set(fband[t_min - 100, jb])
     fband = fband.at[(t_max + 1 - 100):, jb].set(fband[t_max - 100, jb])
+
+    modradcon_out = physics_data.mod_radcon.copy(fband=fband)
+    physics_data = physics_data.copy(mod_radcon=modradcon_out)
+    return physics_data

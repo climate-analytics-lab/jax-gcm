@@ -16,8 +16,6 @@ def initialize_modules(kx=8, il=64):
     initialize_geometry(kx=kx, il=il)
     from jcm.physics import initialize_physics
     initialize_physics()
-    from jcm.longwave_radiation import radset
-    radset()
 
 class SpeedyModel:
     """
