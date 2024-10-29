@@ -45,7 +45,7 @@ class TestDownwardLongwave(unittest.TestCase):
                              geopotential=jnp.zeros_like(ta),
                              surface_pressure=jnp.zeros((ix, il)))
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, fband)
+        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data)
 
         # fortran values
         # print(fsfcd[:5, :5])

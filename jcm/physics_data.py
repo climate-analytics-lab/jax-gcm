@@ -116,7 +116,7 @@ class ModRadConData:
         self.stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,)))
         self.flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
 
-    def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             nodal_shape=None, 
             node_levels=None, 
