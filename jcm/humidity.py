@@ -4,11 +4,26 @@ For converting between specific and relative humidity, and computing the
 saturation specific humidity.
 '''
 
+import jax 
 import jax.numpy as jnp
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 from jcm.geometry import fsg
-import jax 
+from jcm.physical_constants import cp
+
+def compute_thermodynamic_variables(state: PhysicsState, physics_data: PhysicsData):
+    """
+    Sets psa and se in PhysicsData (physics.f90:110-114)
+    """
+    psa = state.surface_pressure
+    # rps = 1.0 / psa
+    # FIXME: physics.f90 here clamps state.specific_humidity to be nonnegative, which doesn't seem possible to do using tendencies.
+    se = cp * state.temperature + state.geopotential
+    
+    convection_out = physics_data.convection.copy(psa=psa, se=se)
+    physics_data = physics_data.copy(convection=convection_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    return physics_tendencies, physics_data
 
 def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     """

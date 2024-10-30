@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
-from jcm.physical_constants import epssw, solc
+from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
@@ -292,7 +292,6 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     
 # @jit
 def clouds(state: PhysicsState, physics_data: PhysicsData):
-    #import params as p 
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -311,6 +310,9 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         clstr: Stratiform cloud cover
         
     '''
+    se = physics_data.convection.se
+    phig = physics_data.convection.phig
+    gse = (se[:,:,-2] - se[:,:,-1])/(phig[:,:,-2] - phig[:,:,-1]) # physics.f90:147
 
     humidity = physics_data.humidity
     conv = physics_data.convection
@@ -374,14 +376,14 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     #Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (swrad.gse - gse_s0), 0.0, 1.0)
+    fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
 
-    swrad_out = physics_data.shortwave_rad.copy(icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
+    swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
@@ -435,3 +437,13 @@ def solar(tyear, csol=4.0*solc):
     topsr = csolp * fdis * (h0 * sia * sdecl + sh0 * coa * cdecl)
 
     return topsr
+
+def get_swrad_tend(state: PhysicsState, physics_data: PhysicsData):
+    """
+    Computes the temperature tendency due to the absorbed flux of shortwave radiation (already computed by the other shortwave_radiation routines).
+    """
+    ttend_swr = physics_data.shortwave_rad.dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:160-162
+    return PhysicsTendency(jnp.zeros_like(state.u_wind),
+                           jnp.zeros_like(state.v_wind),
+                           ttend_swr,
+                           jnp.zeros_like(state.specific_humidity)), physics_data

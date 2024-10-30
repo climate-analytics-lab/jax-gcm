@@ -5,12 +5,12 @@ import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from jcm.convection import get_convection_tendencies
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+from jcm.shortwave_radiation import clouds, get_shortwave_rad_fluxes, get_swrad_tend
+from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, get_lwrad_tend
 from jcm.surface_flux import get_surface_fluxes
-from jcm.vertical_diffusion import get_vertical_diffusion_tend
+from jcm.vertical_diffusion import get_vertical_diffusion_tend, get_pbl_surface_flux_tend
 from dinosaur.time_integration import ExplicitODE
-from jcm.humidity import spec_hum_to_rel_hum
+from jcm.humidity import compute_thermodynamic_variables, spec_hum_to_rel_hum
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
@@ -74,18 +74,23 @@ class SpeedyModel:
             orography,
             self.coords,
             physics_specs)
+        
+        # Thermodynamics
+        physics_terms = [compute_thermodynamic_variables, spec_hum_to_rel_hum]
+        
+        # Precipitation
+        physics_terms += [get_convection_tendencies, get_large_scale_condensation_tendencies]
+        
+        # Radiation and surface fluxes
+        compute_shortwave = True # FIXME
+        if compute_shortwave: physics_terms += [clouds, get_shortwave_rad_fluxes, get_swrad_tend]
+        physics_terms += [get_downward_longwave_rad_fluxes, get_surface_fluxes]
+        # FIXME: if sea_coupling_flag > 0: physics_terms += [get_surface_fluxes]?
+        physics_terms += [get_upward_longwave_rad_fluxes, get_lwrad_tend]
+        
+        # Planetary boundary layer interactions with lower troposphere
+        physics_terms += [get_vertical_diffusion_tend, get_pbl_surface_flux_tend]
 
-        physics_terms = [
-            spec_hum_to_rel_hum, # this could get called in get_physics_tendencies before looping over the physics terms
-            get_convection_tendencies,
-            get_large_scale_condensation_tendencies,
-            clouds,
-            get_shortwave_rad_fluxes,
-            get_downward_longwave_rad_fluxes,
-            get_surface_fluxes, # In speedy this gets called again if air-sea coupling is on
-            get_upward_longwave_rad_fluxes,
-            get_vertical_diffusion_tend
-        ]
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])

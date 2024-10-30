@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-from jcm.physical_constants import sbc, wvi
+from jcm.physical_constants import sbc, wvi, grdscp
 from jcm.mod_radcon import epslw, emisfc
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
@@ -200,4 +200,13 @@ def radset(physics_data: PhysicsData):
     physics_data = physics_data.copy(mod_radcon=modradcon_out)
     return physics_data
 
-
+def get_lwrad_tend(state: PhysicsState, physics_data: PhysicsData):
+    """
+    Computes the temperature tendency due to the absorbed flux of downward and upward longwave radiation (already computed by get_downward_longwave_rad_fluxes and get_upward_longwave_rad_fluxes).
+    """
+    ttend_lwr = physics_data.longwave_rad.dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:182-184
+    return PhysicsTendency(jnp.zeros_like(state.u_wind),
+                           jnp.zeros_like(state.v_wind),
+                           ttend_lwr,
+                           jnp.zeros_like(state.specific_humidity)), physics_data
+    

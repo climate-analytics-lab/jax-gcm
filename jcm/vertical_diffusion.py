@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
-from jcm.physical_constants import cp, alhc, sigh
+from jcm.physical_constants import cp, alhc, sigh, grdsig, grdscp
 from jcm.geometry import fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
@@ -130,3 +130,19 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
 
     # have not updated physics_data, can just return the instance we were passed 
     return physics_tendencies, physics_data
+
+@jit
+def get_pbl_surface_flux_tend(state: PhysicsState, physics_data: PhysicsData):
+        """
+        PBL effects on troposphere: tendencies due to surface fluxes (physics.f90:197-205)
+        """
+        rps = 1.0 / physics_data.convection.psa
+        utend = jnp.zeros_like(state.u_wind)
+        vtend = jnp.zeros_like(state.v_wind)
+        ttend = jnp.zeros_like(state.temperature)
+        qtend = jnp.zeros_like(state.specific_humidity)
+        utend = utend.at[:,:,-1].set(physics_data.surface_flux.ustr[:,:,2]*rps*grdsig[-1])
+        vtend = vtend.at[:,:,-1].set(physics_data.surface_flux.vstr[:,:,2]*rps*grdsig[-1])
+        ttend = ttend.at[:,:,-1].set(physics_data.surface_flux.shf[:,:,2]*rps*grdscp[-1]) #FIXME: check this
+        qtend = qtend.at[:,:,-1].set(physics_data.surface_flux.evap[:,:,2]*rps*grdsig[-1])
+        return PhysicsTendency(utend, vtend, ttend, qtend), physics_data
