@@ -2,6 +2,7 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
+from jax import device_get
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
@@ -12,8 +13,9 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     def physical_tendencies(state):            
+        from datetime import timedelta
         from jcm.date import DateData
-        model_time = reference_date + state.sim_time * units.second
+        model_time = reference_date + timedelta(seconds=device_get(state.sim_time))
 
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
