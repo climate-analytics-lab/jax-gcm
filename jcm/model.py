@@ -3,20 +3,39 @@ from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
-from jcm.convection import get_convection_tendencies
+from jcm.convection import compute_thermodynamic_variables, get_convection_tendencies
+from jcm.humidity import spec_hum_to_rel_hum
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 from jcm.shortwave_radiation import clouds, get_shortwave_rad_fluxes, get_swrad_tend
 from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, get_lwrad_tend
 from jcm.surface_flux import get_surface_fluxes
 from jcm.vertical_diffusion import get_vertical_diffusion_tend, get_pbl_surface_flux_tend
 from dinosaur.time_integration import ExplicitODE
-from jcm.humidity import compute_thermodynamic_variables, spec_hum_to_rel_hum
+
+def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
+    """
+    Returns a list of functions that compute physical tendencies for the model.
+    """
+    # Thermodynamics and precipitation
+    physics_terms = [compute_thermodynamic_variables, spec_hum_to_rel_hum, get_convection_tendencies, get_large_scale_condensation_tendencies]
+    
+    # Radiation and surface fluxes
+    if compute_shortwave:
+        physics_terms += [clouds, get_shortwave_rad_fluxes, get_swrad_tend]
+    physics_terms += [get_downward_longwave_rad_fluxes, get_surface_fluxes]
+    if sea_coupling_flag > 0:
+        physics_terms += [get_surface_fluxes]
+    physics_terms += [get_upward_longwave_rad_fluxes, get_lwrad_tend]
+    
+    # Planetary boundary layer interactions with lower troposphere
+    physics_terms += [get_vertical_diffusion_tend, get_pbl_surface_flux_tend]
+
+    return physics_terms
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
         return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
-
 
 class SpeedyModel:
     """
@@ -75,30 +94,16 @@ class SpeedyModel:
             self.coords,
             physics_specs)
         
-        # Thermodynamics
-        physics_terms = [compute_thermodynamic_variables, spec_hum_to_rel_hum]
-        
-        # Precipitation
-        physics_terms += [get_convection_tendencies, get_large_scale_condensation_tendencies]
-        
-        # Radiation and surface fluxes
-        compute_shortwave = True # FIXME
-        if compute_shortwave: physics_terms += [clouds, get_shortwave_rad_fluxes, get_swrad_tend]
-        physics_terms += [get_downward_longwave_rad_fluxes, get_surface_fluxes]
-        # FIXME: if sea_coupling_flag > 0: physics_terms += [get_surface_fluxes]?
-        physics_terms += [get_upward_longwave_rad_fluxes, get_lwrad_tend]
-        
-        # Planetary boundary layer interactions with lower troposphere
-        physics_terms += [get_vertical_diffusion_tend, get_pbl_surface_flux_tend]
+        physics_terms = get_speedy_physics_terms()
 
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 
-        self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
-        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
+        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             dinosaur.time_integration.exponential_step_filter(
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),

@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
+from jcm.physical_constants import cp, p0, alhc, wvi, grav, grdscp, grdsig
 from jcm.geometry import dhs, fsg
 
 psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
@@ -16,6 +16,20 @@ rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for s
 rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
+
+def compute_thermodynamic_variables(state: PhysicsState, physics_data: PhysicsData):
+    """
+    Sets psa and se in PhysicsData (physics.f90:110-114)
+    """
+    psa = state.surface_pressure
+    # rps = 1.0 / psa
+    # FIXME: physics.f90 here clamps state.specific_humidity to be nonnegative, which doesn't seem possible to do using tendencies.
+    se = cp * state.temperature + state.geopotential
+    
+    convection_out = physics_data.convection.copy(psa=psa, se=se)
+    physics_data = physics_data.copy(convection=convection_out)
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.specific_humidity))
+    return physics_tendencies, physics_data
 
 def diagnose_convection(psa, se, qa, qsat):
     """
