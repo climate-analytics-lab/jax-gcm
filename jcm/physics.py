@@ -102,6 +102,7 @@ def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
+    data: PhysicsData = None
 ):
     """
     Computes the physical tendencies given the current state and a list of physics functions.
@@ -124,14 +125,9 @@ def get_physical_tendencies(
         jnp.zeros_like(physics_state.u_wind),
         jnp.zeros_like(physics_state.u_wind))
     
-    data = PhysicsData(physics_state.temperature.shape[0:2],physics_state.temperature.shape[2])
-    # optionally initialize the physics data here if it needs to be 
-
     for term in physics_terms:
         tend, data = term(physics_state, data)
         physics_tendency += tend
-
-    #physics_tendency = sum(term(physics_state) for term in physics_terms)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
