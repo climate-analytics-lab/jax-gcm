@@ -11,9 +11,8 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     def physical_tendencies(state):            
-        from datetime import timedelta
         from jcm.date import DateData
-        model_time = reference_date + timedelta(seconds=state.sim_time)
+        model_time = reference_date + state.sim_time * units.second
 
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
