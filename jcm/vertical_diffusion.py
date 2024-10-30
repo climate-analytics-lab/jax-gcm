@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
-from jcm.physical_constants import cp, alhc, sigh, grdsig, grdscp
+from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData

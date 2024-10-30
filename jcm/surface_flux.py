@@ -293,7 +293,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData):
     rps = 1.0 / physics_data.convection.psa
     utend = jnp.zeros_like(state.u_wind).at[:,:,-1].add(ustr[:,:,2]*rps*grdsig[-1])
     vtend = jnp.zeros_like(state.v_wind).at[:,:,-1].add(vstr[:,:,2]*rps*grdsig[-1])
-    ttend = jnp.zeros_like(state.temperature).at[:,:,-1].add(shf[:,:,2]*rps*grdscp[-1]) #FIXME: check this
+    ttend = jnp.zeros_like(state.temperature).at[:,:,-1].add(shf[:,:,2]*rps*grdscp[-1])
     qtend = jnp.zeros_like(state.specific_humidity).at[:,:,-1].add(evap[:,:,2]*rps*grdsig[-1])
     physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
 
