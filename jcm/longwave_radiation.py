@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi
-from jcm.mod_radcon import epslw, emisfc
+from jcm.mod_radcon import epslw, emisfc, fband
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
@@ -23,7 +23,6 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     """
     ix, il, kx = state.temperature.shape
     ta = state.temperature
-    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
@@ -124,7 +123,6 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     dfabs = physics_data.longwave_rad.dfabs
     rlds = physics_data.longwave_rad.rlds
 
-    fband = physics_data.mod_radcon.fband
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
@@ -174,29 +172,3 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data
-
-def radset(physics_data: PhysicsData):
-    """
-    Set the energy fraction emitted in each LW band = f(T)
-    """
-
-    fband = jnp.zeros((301, nband))  # Example shape (100:400, 4)
-
-    eps1 = 1.0 - epslw
-
-    t_min, t_max = 200, 320
-    jtemp = jnp.arange(t_min, t_max + 1)
-    fband_2 = (0.148 - 3.0e-6 * (jtemp - 247) ** 2) * eps1
-    fband_3 = (0.356 - 5.2e-6 * (jtemp - 282) ** 2) * eps1
-    fband_4 = (0.314 + 1.0e-5 * (jtemp - 315) ** 2) * eps1
-    fband_1 = eps1 - (fband_2 + fband_3 + fband_4)
-    fband = fband.at[jtemp - 100, :4].set(jnp.stack((fband_1, fband_2, fband_3, fband_4), axis=-1))
-
-    jb = jnp.arange(4)
-    fband = fband.at[:(t_min - 100), jb].set(fband[t_min - 100, jb])
-    fband = fband.at[(t_max + 1 - 100):, jb].set(fband[t_max - 100, jb])
-
-    modradcon_out = physics_data.mod_radcon.copy(fband=fband)
-    physics_data = physics_data.copy(mod_radcon=modradcon_out)
-    return physics_data
-
