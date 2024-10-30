@@ -5,11 +5,27 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
+from dinosaur.primitive_equations import State
 from jcm.held_suarez import HeldSuarezForcing
 
-def convert_tendencies_to_equation(dynamics, physics_terms):
-    def physical_tendencies(state):
-        return get_physical_tendencies(state, dynamics, physics_terms)
+def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
+    from jcm.physics_data import PhysicsData
+    from jcm.physics import get_physical_tendencies
+    def physical_tendencies(state):            
+        from datetime import timedelta
+        from jcm.date import DateData
+        model_time = reference_date + timedelta(seconds=state.sim_time)
+
+        data = PhysicsData(dynamics.coords.nodal_shape[1:],
+                    dynamics.coords.nodal_shape[0],
+                    date_data=DateData(model_time))
+        
+        # Remove the sim_time and convert to a plain State object
+        _state = state.asdict()
+        _state.pop('sim_time')
+        state = State(**_state)
+
+        return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class HeldSuarezModel:
