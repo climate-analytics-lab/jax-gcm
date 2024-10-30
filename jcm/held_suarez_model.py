@@ -7,6 +7,7 @@ from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
 from jcm.held_suarez import HeldSuarezForcing
+from datetime import datetime
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData
@@ -35,7 +36,7 @@ class HeldSuarezModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8) -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -48,6 +49,7 @@ class HeldSuarezModel:
         """
 
         # Integration settings
+        start_date = start_date or datetime(2000, 1, 1)
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -89,7 +91,7 @@ class HeldSuarezModel:
 
         physics_terms = [ hsf.held_suarez_forcings ] 
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
