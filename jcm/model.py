@@ -2,6 +2,7 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
+from jcm.physics_data import PhysicsData
 from jcm.physics import get_physical_tendencies
 from jcm.convection import compute_thermodynamic_variables, get_convection_tendencies
 from jcm.humidity import spec_hum_to_rel_hum
@@ -11,6 +12,8 @@ from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_
 from jcm.surface_flux import get_surface_fluxes
 from jcm.vertical_diffusion import get_vertical_diffusion_tend, get_pbl_surface_flux_tend
 from dinosaur.time_integration import ExplicitODE
+from dinosaur.primitive_equations import State
+from datetime import datetime
 
 def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
     """
@@ -32,9 +35,22 @@ def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
 
     return physics_terms
 
-def convert_tendencies_to_equation(dynamics, physics_terms):
-    def physical_tendencies(state):
-        return get_physical_tendencies(state, dynamics, physics_terms)
+def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
+    def physical_tendencies(state):            
+        from datetime import timedelta
+        from jcm.date import DateData
+        model_time = reference_date + timedelta(seconds=state.sim_time)
+
+        data = PhysicsData(dynamics.coords.nodal_shape[1:],
+                    dynamics.coords.nodal_shape[0],
+                    date_data=DateData(model_time))
+        
+        # Remove the sim_time and convert to a plain State object
+        _state = state.asdict()
+        _state.pop('sim_time')
+        state = State(**_state)
+
+        return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -44,7 +60,7 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8) -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -53,10 +69,12 @@ class SpeedyModel:
             save_interval: Save interval in days
             total_time: Total integration time in days
             layers: Number of vertical layers
+            start_date: Start date of the simulation
 
         """
 
         # Integration settings
+        start_date = start_date or datetime(2000, 1, 1)
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -88,7 +106,7 @@ class SpeedyModel:
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
         # Governing equations
-        primitive = dinosaur.primitive_equations.PrimitiveEquations(
+        primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
             ref_temps,
             orography,
             self.coords,
@@ -96,7 +114,7 @@ class SpeedyModel:
         
         physics_terms = get_speedy_physics_terms()
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
@@ -111,13 +129,14 @@ class SpeedyModel:
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
         
-    def get_initial_state(self, random_seed=0) -> dinosaur.primitive_equations.State:
-        return self.initial_state_fn(jax.random.PRNGKey(random_seed))
+    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
+        state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
+        return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
+    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.State:
         return self.step_fn(state)
                                  
-    def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
+    def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,

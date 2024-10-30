@@ -1,20 +1,7 @@
 import jax.numpy as jnp
 import tree_math
+from jcm.date import DateData
 
-n_temperatures = 301
-n_bands = 4
-
-@tree_math.struct
-class DateData:
-    tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
-
-    def __init__(self, tyear=None) -> None:
-        self.tyear = tyear if tyear is not None else jnp.zeros((1))
-
-    def copy(self, tyear=None):
-        return DateData(
-            tyear if tyear is not None else self.tyear
-        )
     
 @tree_math.struct
 class LWRadiationData:
@@ -93,8 +80,6 @@ class SWRadiationData:
 @tree_math.struct
 class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
-    # fband = energy fraction emitted in each LW band = f(T)
-    fband: jnp.ndarray 
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
@@ -108,8 +93,7 @@ class ModRadConData:
     flux: jnp.ndarray         # Radiative flux in different spectral bands
 
 
-    def __init__(self, nodal_shape, node_levels, fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
-        self.fband = fband if fband is not None else jnp.zeros((n_temperatures,n_bands))
+    def __init__(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None) -> None:
         self.alb_l = alb_l if alb_l is not None else jnp.zeros((nodal_shape))
         self.alb_s = alb_s if alb_s is not None else jnp.zeros((nodal_shape))
         self.albsfc = albsfc if albsfc is not None else jnp.zeros((nodal_shape))
@@ -119,11 +103,10 @@ class ModRadConData:
         self.stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,)))
         self.flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
 
-    def copy(self,fband=None,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self,alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             nodal_shape=None, 
             node_levels=None, 
-            fband=fband if fband is not None else self.fband,
             alb_l=alb_l if alb_l is not None else self.alb_l,
             alb_s=alb_s if alb_s is not None else self.alb_s,
             albsfc=albsfc if albsfc is not None else self.albsfc,
@@ -268,6 +251,7 @@ class SurfaceFluxData:
             phi0=phi0 if phi0 is not None else self.phi0
         )
 
+#TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
 class PhysicsData:
     shortwave_rad: SWRadiationData
