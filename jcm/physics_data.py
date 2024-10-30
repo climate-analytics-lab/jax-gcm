@@ -1,20 +1,9 @@
 import jax.numpy as jnp
 import tree_math
+from jcm.date import DateData
 
 n_temperatures = 301
 n_bands = 4
-
-@tree_math.struct
-class DateData:
-    tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
-
-    def __init__(self, tyear=None) -> None:
-        self.tyear = tyear if tyear is not None else jnp.zeros((1))
-
-    def copy(self, tyear=None):
-        return DateData(
-            tyear if tyear is not None else self.tyear
-        )
     
 @tree_math.struct
 class LWRadiationData:
@@ -268,6 +257,7 @@ class SurfaceFluxData:
             phi0=phi0 if phi0 is not None else self.phi0
         )
 
+#TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
 class PhysicsData:
     shortwave_rad: SWRadiationData
