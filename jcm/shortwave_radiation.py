@@ -214,7 +214,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
     ttend_swr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind), jnp.zeros_like(state.v_wind), ttend_swr, jnp.zeros_like(state.specific_humidity))
-    
+
     return physics_tendencies, physics_data
 
 
@@ -320,7 +320,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     humidity = physics_data.humidity
     conv = physics_data.convection
     condensation = physics_data.condensation
-    swrad = physics_data.shortwave_rad
     kx = state.temperature.shape[2]
 
     # Constants

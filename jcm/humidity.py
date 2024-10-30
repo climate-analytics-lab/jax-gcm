@@ -34,7 +34,7 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(2, jnp.newaxis, 0), out_axes=2) # map over each input's z-axis and output to z-axis
-    qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg)
+    qsat = map_qsat(state.temperature, psa, fsg)
     rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
