@@ -104,7 +104,7 @@ class SpeedyModel:
             get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend
         ]
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
