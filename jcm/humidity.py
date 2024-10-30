@@ -22,7 +22,7 @@ def compute_thermodynamic_variables(state: PhysicsState, physics_data: PhysicsDa
     
     convection_out = physics_data.convection.copy(psa=psa, se=se)
     physics_data = physics_data.copy(convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.specific_humidity))
     return physics_tendencies, physics_data
 
 def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):

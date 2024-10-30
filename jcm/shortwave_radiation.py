@@ -311,7 +311,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         
     '''
     se = physics_data.convection.se
-    phig = physics_data.convection.phig
+    phig = physics_data.convection.geopotential
     gse = (se[:,:,-2] - se[:,:,-1])/(phig[:,:,-2] - phig[:,:,-1]) # physics.f90:147
 
     humidity = physics_data.humidity
