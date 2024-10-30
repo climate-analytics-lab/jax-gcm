@@ -29,10 +29,10 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ModRadConData, PhysicsData, PhysicsState, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
+        global ModRadConData, PhysicsData, PhysicsState, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, PhysicsData
         from jcm.physics import PhysicsState
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):        
 
