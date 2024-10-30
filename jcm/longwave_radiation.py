@@ -169,19 +169,13 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     longwave_out = physics_data.longwave_rad.copy(fsfc=fsfc, ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
     physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
-    return physics_tendencies, physics_data
-
-
-
-def get_lwrad_tend(state: PhysicsState, physics_data: PhysicsData):
-    """
-    Computes the temperature tendency due to the absorbed flux of downward and upward longwave radiation (already computed by get_downward_longwave_rad_fluxes and get_upward_longwave_rad_fluxes).
-    """
-    ttend_lwr = physics_data.longwave_rad.dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:182-184
-    return PhysicsTendency(jnp.zeros_like(state.u_wind),
+    # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
+    ttend_lwr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis]
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),
                            jnp.zeros_like(state.v_wind),
                            ttend_lwr,
-                           jnp.zeros_like(state.specific_humidity)), physics_data
+                           jnp.zeros_like(state.specific_humidity))
+    
+    return physics_tendencies, physics_data
     

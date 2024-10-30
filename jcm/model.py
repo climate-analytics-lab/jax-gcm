@@ -4,13 +4,13 @@ import jax
 import jax.numpy as jnp
 from jcm.physics_data import PhysicsData
 from jcm.physics import get_physical_tendencies
-from jcm.convection import compute_thermodynamic_variables, get_convection_tendencies
+from jcm.convection import get_convection_tendencies
 from jcm.humidity import spec_hum_to_rel_hum
 from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.shortwave_radiation import compute_gse, clouds, get_shortwave_rad_fluxes, get_swrad_tend
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, get_lwrad_tend
+from jcm.shortwave_radiation import clouds, get_shortwave_rad_fluxes
+from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 from jcm.surface_flux import get_surface_fluxes
-from jcm.vertical_diffusion import get_vertical_diffusion_tend, get_pbl_surface_flux_tend
+from jcm.vertical_diffusion import get_vertical_diffusion_tend
 from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
 from datetime import datetime
@@ -20,18 +20,18 @@ def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
     Returns a list of functions that compute physical tendencies for the model.
     """
     # Thermodynamics and precipitation
-    physics_terms = [compute_thermodynamic_variables, spec_hum_to_rel_hum, get_convection_tendencies, get_large_scale_condensation_tendencies]
+    physics_terms = [spec_hum_to_rel_hum, get_convection_tendencies, get_large_scale_condensation_tendencies]
     
     # Radiation and surface fluxes
     if compute_shortwave:
-        physics_terms += [compute_gse, clouds, get_shortwave_rad_fluxes, get_swrad_tend]
+        physics_terms += [clouds, get_shortwave_rad_fluxes]
     physics_terms += [get_downward_longwave_rad_fluxes, get_surface_fluxes]
     if sea_coupling_flag > 0:
         physics_terms += [get_surface_fluxes]
-    physics_terms += [get_upward_longwave_rad_fluxes, get_lwrad_tend]
+    physics_terms += [get_upward_longwave_rad_fluxes]
     
     # Planetary boundary layer interactions with lower troposphere
-    physics_terms += [get_vertical_diffusion_tend, get_pbl_surface_flux_tend]
+    physics_terms += [get_vertical_diffusion_tend]
 
     return physics_terms
 

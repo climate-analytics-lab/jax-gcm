@@ -6,8 +6,9 @@ saturation specific humidity.
 
 import jax 
 import jax.numpy as jnp
-from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physical_constants import cp
 from jcm.geometry import fsg
 
 def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
@@ -26,13 +27,18 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
         qsat: Saturation specific humidity
     """
 
+    # compute thermodynamic variables: logic from physics.f90:110-114
+    psa = state.surface_pressure
+    se = cp * state.temperature + state.geopotential
+    convection_out = physics_data.convection.copy(psa=psa, se=se)
+    
+    # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(2, jnp.newaxis, 0), out_axes=2) # map over each input's z-axis and output to z-axis
     qsat = map_qsat(state.temperature, physics_data.convection.psa, fsg)
-
     rh = state.specific_humidity / qsat
-    
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
-    physics_data = physics_data.copy(humidity=humidity_out)
+
+    physics_data = physics_data.copy(convection=convection_out, humidity=humidity_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
     return physics_tendencies, physics_data

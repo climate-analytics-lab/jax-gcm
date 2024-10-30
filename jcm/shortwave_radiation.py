@@ -211,8 +211,10 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     shortwave_rad_out = physics_data.shortwave_rad.copy(ssr=ssr, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
-
+    # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
+    ttend_swr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:160-162
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind), jnp.zeros_like(state.v_wind), ttend_swr, jnp.zeros_like(state.specific_humidity))
+    
     return physics_tendencies, physics_data
 
 
@@ -290,17 +292,6 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     
     return physics_tendencies, physics_data
 
-def compute_gse(state: PhysicsState, physics_data: PhysicsData):
-    se = physics_data.convection.se
-    phig = state.geopotential
-    gse = (se[:,:,-2] - se[:,:,-1])/(phig[:,:,-2] - phig[:,:,-1]) # physics.f90:147
-
-    swrad_out = physics_data.shortwave_rad.copy(gse=gse) 
-    physics_data = physics_data.copy(shortwave_rad=swrad_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
-    
-    return physics_tendencies, physics_data
-
 # @jit
 def clouds(state: PhysicsState, physics_data: PhysicsData):
     '''
@@ -321,6 +312,11 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         clstr: Stratiform cloud cover
         
     '''
+    # Compute gradient of static energy: logic from physics.f90:147
+    se = physics_data.convection.se
+    phig = state.geopotential
+    gse = (se[:,:,-2] - se[:,:,-1])/(phig[:,:,-2] - phig[:,:,-1])
+
     humidity = physics_data.humidity
     conv = physics_data.convection
     condensation = physics_data.condensation
@@ -383,14 +379,14 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     #Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (swrad.gse - gse_s0), 0.0, 1.0)
+    fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
 
-    swrad_out = physics_data.shortwave_rad.copy(icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
+    swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
@@ -444,13 +440,3 @@ def solar(tyear, csol=4.0*solc):
     topsr = csolp * fdis * (h0 * sia * sdecl + sh0 * coa * cdecl)
 
     return topsr
-
-def get_swrad_tend(state: PhysicsState, physics_data: PhysicsData):
-    """
-    Computes the temperature tendency due to the absorbed flux of shortwave radiation (already computed by the other shortwave_radiation routines).
-    """
-    ttend_swr = physics_data.shortwave_rad.dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:160-162
-    return PhysicsTendency(jnp.zeros_like(state.u_wind),
-                           jnp.zeros_like(state.v_wind),
-                           ttend_swr,
-                           jnp.zeros_like(state.specific_humidity)), physics_data
