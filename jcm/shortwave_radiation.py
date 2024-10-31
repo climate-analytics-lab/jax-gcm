@@ -6,6 +6,7 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
 from jcm.mod_radcon import epslw
+from jcm.params import nstrad
 from jax import lax
 
 # @jit
@@ -21,6 +22,9 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
+
+    if physics_data.DateData.model_steps % nstrad != 1:
+        return PhysicsTendency(jnp.zeros_like(state.u_wind), jnp.zeros_like(state.v_wind), jnp.zeros_like(state.temperature), jnp.zeros_like(state.specific_humidity)), physics_data
 
     ix, il, kx = state.temperature.shape
     psa = physics_data.convection.psa
@@ -312,6 +316,12 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         clstr: Stratiform cloud cover
         
     '''
+    # This function doesn't directly produce tendencies
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    if physics_data.DateData.model_steps % nstrad != 1:
+        return physics_tendencies, physics_data
+
     # Compute gradient of static energy: logic from physics.f90:147
     se = physics_data.convection.se
     phig = state.geopotential
@@ -387,8 +397,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
-    
     return physics_tendencies, physics_data
 
 # @jit

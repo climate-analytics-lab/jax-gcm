@@ -15,7 +15,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
 from datetime import datetime
 
-def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
+def get_speedy_physics_terms(sea_coupling_flag=0):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
@@ -23,26 +23,27 @@ def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
+        clouds,
+        get_shortwave_rad_fluxes,
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
         get_upward_longwave_rad_fluxes,
         get_vertical_diffusion_tend
     ]
-    if compute_shortwave:
-        physics_terms[3:3] = [clouds, get_shortwave_rad_fluxes]
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
-def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
+def convert_tendencies_to_equation(dynamics, physics_terms, reference_date, dt):
     def physical_tendencies(state):            
         from datetime import timedelta
         from jcm.date import DateData
         model_time = reference_date + timedelta(seconds=state.sim_time)
+        model_steps = jnp.round(state.sim_time * units.second / dt)
 
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
-                    date_data=DateData(model_time))
+                    date_data=DateData(model_time, model_steps))
         
         # Remove the sim_time and convert to a plain State object
         _state = state.asdict()
@@ -113,7 +114,7 @@ class SpeedyModel:
         
         physics_terms = get_speedy_physics_terms()
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, start_date, dt_si)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
