@@ -201,14 +201,14 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfqa = dfqa.at[:, :, :-1].set(jnp.where(loop_mask[:, :, :-1], _fuq_array[:, :, 1:] - _fdq_array[:, :, 1:], dfqa[:, :, :-1]))
 
     #Net flux of dry static energy and moisture
-    dfse = dfse.add(jnp.where(loop_mask, _fds_array - _fus_array, 0))
-    dfqa = dfqa.add(jnp.where(loop_mask, _fdq_array - _fuq_array, 0))
+    dfse += jnp.where(loop_mask, _fds_array - _fus_array, 0)
+    dfqa += jnp.where(loop_mask, _fdq_array - _fuq_array, 0)
 
     # Secondary moisture flux
     delq = rhil * qsat - qa
     fsq = smf * cbmf[:, :, jnp.newaxis] * delq
     secondary_moisture_flux_mask = loop_mask & (delq > 0.)
-    dfqa = dfqa.add(jnp.where(secondary_moisture_flux_mask, fsq, 0))
+    dfqa += jnp.where(secondary_moisture_flux_mask, fsq, 0)
     dfqa = dfqa.at[:, :, -1].add(-1 * jnp.sum(secondary_moisture_flux_mask * fsq, axis=-1))
 
     if iptop < kx - 1: # Only update these fields if they would have been updated in the fortran
