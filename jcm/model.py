@@ -13,7 +13,7 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date, dt):
     def physical_tendencies(state):            
         from jcm.date import DateData
         model_time = reference_date #+ state.sim_time * units.second
-        model_steps = jnp.round(state.sim_time * units.second / dt)
+        model_steps = jnp.round(state.sim_time / dt)
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
                     date_data=DateData(model_time, model_steps))
@@ -113,7 +113,7 @@ class SpeedyModel:
             get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend
         ]
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, start_date, dt_si)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, start_date, time_step * 60)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
