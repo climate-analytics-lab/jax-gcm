@@ -19,20 +19,19 @@ def get_speedy_physics_terms(compute_shortwave=True, sea_coupling_flag=0):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
-    # Thermodynamics and precipitation
-    physics_terms = [spec_hum_to_rel_hum, get_convection_tendencies, get_large_scale_condensation_tendencies]
-    
-    # Radiation and surface fluxes
+    physics_terms = [
+        spec_hum_to_rel_hum,
+        get_convection_tendencies,
+        get_large_scale_condensation_tendencies,
+        get_downward_longwave_rad_fluxes,
+        get_surface_fluxes,
+        get_upward_longwave_rad_fluxes,
+        get_vertical_diffusion_tend
+    ]
     if compute_shortwave:
-        physics_terms += [clouds, get_shortwave_rad_fluxes]
-    physics_terms += [get_downward_longwave_rad_fluxes, get_surface_fluxes]
+        physics_terms[3:3] = [clouds, get_shortwave_rad_fluxes]
     if sea_coupling_flag > 0:
-        physics_terms += [get_surface_fluxes]
-    physics_terms += [get_upward_longwave_rad_fluxes]
-    
-    # Planetary boundary layer interactions with lower troposphere
-    physics_terms += [get_vertical_diffusion_tend]
-
+        physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
