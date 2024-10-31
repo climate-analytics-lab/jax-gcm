@@ -312,11 +312,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         clstr: Stratiform cloud cover
         
     '''
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
-    
-    if physics_data.date.model_steps % nstrad > 0:
-        return physics_tendencies, physics_data
-
     humidity = physics_data.humidity
     conv = physics_data.convection
     condensation = physics_data.condensation
@@ -386,7 +381,11 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
 
-    swrad_out = physics_data.shortwave_rad.copy(icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
+    compute_shortwave = physics_data.date.model_steps % nstrad > 0
+    swrad_out = physics_data.shortwave_rad.copy(icltop=jnp.where(compute_shortwave, icltop, physics_data.shortwave_rad.icltop),
+                                                cloudc=jnp.where(compute_shortwave, cloudc, physics_data.shortwave_rad.cloudc),
+                                                cloudstr=jnp.where(compute_shortwave, clstr, physics_data.shortwave_rad.cloudstr),
+                                                qcloud=jnp.where(compute_shortwave, qcloud, physics_data.shortwave_rad.qcloud))
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
