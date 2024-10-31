@@ -6,6 +6,7 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
 from jcm.mod_radcon import epslw
+from jcm.params import nstrad
 from jax import lax
 
 # @jit
@@ -311,6 +312,10 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
         clstr: Stratiform cloud cover
         
     '''
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    if physics_data.date.model_steps % nstrad > 0:
+        return physics_tendencies, physics_data
 
     humidity = physics_data.humidity
     conv = physics_data.convection

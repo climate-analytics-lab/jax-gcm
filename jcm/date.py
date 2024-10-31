@@ -5,13 +5,16 @@ from datetime import datetime
 @tree_math.struct
 class DateData:
     tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    model_steps: jnp.ndarray
 
-    def __init__(self, model_time=None) -> None:        
+    def __init__(self, model_time=None, model_steps=None) -> None:        
         self.tyear = fraction_of_year_elapsed(model_time) if model_time is not None else jnp.zeros((1))
+        self.model_steps = model_steps if model_steps is not None else jnp.zeros((1))
 
-    def copy(self, tyear=None):
+    def copy(self, tyear=None, model_steps=None):
         copy = DateData()
         copy.tyear = tyear if tyear is not None else self.tyear
+        copy.model_steps = model_steps if model_steps is not None else self.model_steps
         return copy
 
 def fraction_of_year_elapsed(dt):
