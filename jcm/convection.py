@@ -183,16 +183,14 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     # Mass entrainment (fmass) and upward flux at upper boundary (fus, fuq) can be done first
     _enmass_array = loop_mask * entr[jnp.newaxis, jnp.newaxis, :] * psa[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
-    
-    _fmass_array = jnp.cumsum(_enmass_array.at[:, :, -1].add(fmass)[::-1], axis=-1)[::-1]
-    _fus_array = jnp.cumsum((_enmass_array*se).at[:, :, -1].add(fus)[::-1], axis=-1)[::-1]
-    _fuq_array = jnp.cumsum((_enmass_array*qa).at[:, :, -1].add(fuq)[::-1], axis=-1)[::-1]
+    _fmass_array, _fus_array, _fuq_array = (jnp.cumsum((_enmass_array*tracer_density).at[:, :, -1].add(cloud_base_flux)[::-1], axis=-1)[::-1] 
+                                            for (tracer_density, cloud_base_flux) in ((1, fmass), (se, fus), (qa, fuq)))
 
     # Downward fluxes at upper boundary can now be calculated using fmass
-    sb = jnp.zeros_like(se).at[:, :, 1:].set(se[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (se[:, :, 1:] - se[:, :, :-1]))
-    qb = jnp.zeros_like(qa).at[:, :, 1:].set(qa[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qa[:, :, 1:] - qa[:, :, :-1]))
-    _fds_array = jnp.where(loop_mask, _fmass_array * sb, fds[:, :, jnp.newaxis])
-    _fdq_array = jnp.where(loop_mask, _fmass_array * qb, fdq[:, :, jnp.newaxis])
+    sb, qb = (jnp.zeros_like(tracer_density).at[:, :, 1:].set(tracer_density[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (tracer_density[:, :, 1:] - tracer_density[:, :, :-1]))
+              for tracer_density in (se, qa))
+    _fds_array, _fdq_array = (jnp.where(loop_mask, _fmass_array * tracer_gradient, cloud_base_flux[:, :, jnp.newaxis])
+                              for (tracer_gradient, cloud_base_flux) in ((sb, fds), (qb, fdq)))
 
     # With fus, fds, fuq, fdq we can calculate dfse and dfqa.
 
@@ -213,7 +211,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
     # iptop >= kx - 1 corresponds to skipping the loop; [:, :, -1] elements of these arrays should be the prior-to-loop values of these fields
     last_loop_iteration = jnp.minimum(iptop, kx - 1)
-    fmass, fus, fuq, fds, fdq = (index_array(_array, last_loop_iteration) for _array in (_fmass_array, _fus_array, _fuq_array, _fds_array, _fdq_array))
+    fmass, fus, fuq, fds, fdq = (index_array(_array, last_loop_iteration)
+                                 for _array in (_fmass_array, _fus_array, _fuq_array, _fds_array, _fdq_array))
 
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
