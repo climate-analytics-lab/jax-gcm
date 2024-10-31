@@ -82,14 +82,14 @@ def diagnose_convection(psa, se, qa, qsat):
     # Check 3: RH > RH_c at both k=kx and k=kx-1
     qthr0 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-1]
     qthr1 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-2]
-    lqthr = jnp.where(mask_ktop1_less_kx, (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1), lqthr)
+    lqthr = (qa[:, :, kx-1] > qthr0) and (qa[:, :, kx-2] > qthr1)
 
     mask_ktop2_less_kx = ktop2 < kx
-    combined_mask1 = mask_ktop1_less_kx & mask_ktop2_less_kx
+    combined_mask1 = mask_ktop1_less_kx and mask_ktop2_less_kx
     iptop = jnp.where(combined_mask1, ktop1, iptop)
     qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
 
-    combined_mask2 = mask_ktop1_less_kx & lqthr & ~combined_mask1
+    combined_mask2 = mask_ktop1_less_kx and (~mask_ktop2_less_kx) and lqthr
     iptop = jnp.where(combined_mask2, ktop1, iptop)
     qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
 
