@@ -80,8 +80,8 @@ def diagnose_convection(psa, se, qa, qsat):
 
     mask_ktop1_less_kx = ktop1 < kx    
     # Check 3: RH > RH_c at both k=kx and k=kx-1
-    qthr0 = jnp.where(mask_ktop1_less_kx, rhbl * qsat[:, :, kx-1], qthr0)
-    qthr1 = jnp.where(mask_ktop1_less_kx, rhbl * qsat[:, :, kx-2], qthr1)
+    qthr0 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-1]
+    qthr1 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-2]
     lqthr = jnp.where(mask_ktop1_less_kx, (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1), lqthr)
 
     mask_ktop2_less_kx = ktop2 < kx
@@ -179,7 +179,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Loop runs on reversed(range(iptop, kx-1)) but we slice only as necessary to keep indices within bounds, and use loop_mask to restrict the logic
     loop_mask = (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis]) and (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] < kx-1)
 
-    # Loop body: the only thing reorded from the f90 is that fluxes at lower boundary are now computed later
+    # Loop body: the only thing reordered from the f90 is that fluxes at lower boundary are now computed later
 
     # Mass entrainment (fmass) and upward flux at upper boundary (fus, fuq) can be done first
     _enmass_array = loop_mask * entr[jnp.newaxis, jnp.newaxis, :] * psa[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
