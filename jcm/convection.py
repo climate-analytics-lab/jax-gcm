@@ -152,8 +152,9 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Maximum specific humidity in the PBL
     qmax = jnp.maximum(1.01 * qa[:, :, k], qsat[:, :, k])
 
-    # Pulled the intermediate layers calculation up here because it's independent of layer - V.M.
-    _sb_3d, _qb_3d = (jnp.zeros_like(tracer_density).at[:, :, 1:].set(tracer_density[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (tracer_density[:, :, 1:] - tracer_density[:, :, :-1]))
+    # Pulled the interpolation up here because it's independent of layer - V.M.
+    interpolate_tracer = lambda tracer_density: tracer_density[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (tracer_density[:, :, 1:] - tracer_density[:, :, :-1])
+    _sb_3d, _qb_3d = (jnp.zeros_like(tracer_density).at[:, :, 1:].set(interpolate_tracer(tracer_density))
                       for tracer_density in (se, qa))
     
     # Dry static energy and moisture at upper boundary
@@ -186,8 +187,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
                                    for (tracer_density, cloud_base_flux) in ((1, fmass), (se, fus), (qa, fuq)))
 
     # Downward fluxes at upper boundary can now be calculated using fmass
-    _fds_3d, _fdq_3d = (jnp.where(loop_mask, _fmass_3d * tracer_gradient, cloud_base_flux[:, :, jnp.newaxis])
-                        for (tracer_gradient, cloud_base_flux) in ((_sb_3d, fds), (_qb_3d, fdq)))
+    _fds_3d, _fdq_3d = (jnp.where(loop_mask, _fmass_3d * interpolated_tracer, cloud_base_flux[:, :, jnp.newaxis])
+                        for (interpolated_tracer, cloud_base_flux) in ((_sb_3d, fds), (_qb_3d, fdq)))
 
     # With fus, fds, fuq, fdq we can calculate dfse and dfqa.
 
@@ -214,7 +215,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     k = iptop - 1
 
     # Flux of convective precipitation
-    qsatb = index_array(qsat, k) + index_array(wvi[jnp.newaxis, jnp.newaxis, :, 1], k) * (index_array(qsat, k + 1) - index_array(qsat, k))
+    qsatb = index_array(interpolate_tracer(qsat), k)
     precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture
