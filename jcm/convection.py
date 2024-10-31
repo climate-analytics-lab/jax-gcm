@@ -134,7 +134,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     nlp = kx + 1
 
     # Entrainment profile (up to sigma = 0.5)
-    entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
+    entr = jnp.zeros((kx)).at[1:kx-1].set(jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0)
     sentr = jnp.sum(entr)
     entr *= entmax / sentr
 
