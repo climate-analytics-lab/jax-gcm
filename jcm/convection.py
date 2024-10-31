@@ -191,8 +191,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Downward fluxes at upper boundary can now be calculated using fmass
     sb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(se[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (se[:, :, 1:] - se[:, :, :-1]))
     qb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(qa[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qa[:, :, 1:] - qa[:, :, :-1]))
-    _fds_array = (fmass * sb).at[:, :, -1].set(fds)
-    _fdq_array = (fmass * qb).at[:, :, -1].set(fdq)
+    _fds_array = (fmass[:, :, jnp.newaxis] * sb).at[:, :, -1].set(fds)
+    _fdq_array = (fmass[:, :, jnp.newaxis] * qb).at[:, :, -1].set(fdq)
 
     # With fus, fds, fuq, fdq we can calculate dfse and dfqa.
 
