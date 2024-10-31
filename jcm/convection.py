@@ -176,7 +176,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfqa = dfqa.at[:, :, k].set(fdq - fuq)
 
     # 3.2 intermediate layers (entrainment)
-    # Loop runs on reversed(range(iptop, kx-1)) but we slice only as necessary to keep indices within bounds, and use loop_mask to restrict the logic
+    # Loop runs on reversed(range(iptop, kx-1)) but we slice only as necessary to keep indices within bounds, and use loop_mask to restrict the logic where needed
     loop_mask = (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis]) & (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] < kx-1)
 
     # Loop body: the only thing reordered from the f90 is that fluxes at lower boundary are now computed later
@@ -189,10 +189,10 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     _fuq_array = jnp.cumsum((_enmass_array*qa).at[:, :, -1].add(fuq)[::-1], axis=-1)[::-1]
 
     # Downward fluxes at upper boundary can now be calculated using fmass
-    sb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(se[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (se[:, :, 1:] - se[:, :, :-1]))
-    qb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(qa[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qa[:, :, 1:] - qa[:, :, :-1]))
-    _fds_array = jnp.where(loop_mask, fmass[:, :, jnp.newaxis] * sb, fds[:, :, jnp.newaxis])
-    _fdq_array = jnp.where(loop_mask, fmass[:, :, jnp.newaxis] * qb, fdq[:, :, jnp.newaxis])
+    sb = jnp.zeros_like(se).at[:, :, 1:].set(se[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (se[:, :, 1:] - se[:, :, :-1]))
+    qb = jnp.zeros_like(qa).at[:, :, 1:].set(qa[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qa[:, :, 1:] - qa[:, :, :-1]))
+    _fds_array = jnp.where(loop_mask, _fmass_array * sb, fds[:, :, jnp.newaxis])
+    _fdq_array = jnp.where(loop_mask, _fmass_array * qb, fdq[:, :, jnp.newaxis])
 
     # With fus, fds, fuq, fdq we can calculate dfse and dfqa.
 
@@ -201,26 +201,19 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfqa = dfqa.at[:, :, :-1].set(jnp.where(loop_mask[:, :, :-1], _fuq_array[:, :, 1:] - _fdq_array[:, :, 1:], dfqa[:, :, :-1]))
 
     #Net flux of dry static energy and moisture
-    dfse += jnp.where(loop_mask, _fds_array - _fus_array, 0)
-    dfqa += jnp.where(loop_mask, _fdq_array - _fuq_array, 0)
+    dfse += loop_mask * (_fds_array - _fus_array)
+    dfqa += loop_mask * (_fdq_array - _fuq_array)
 
     # Secondary moisture flux
     delq = rhil * qsat - qa
-    fsq = smf * cbmf[:, :, jnp.newaxis] * delq
-    secondary_moisture_flux_mask = loop_mask & (delq > 0.)
-    dfqa += jnp.where(secondary_moisture_flux_mask, fsq, 0)
-    dfqa = dfqa.at[:, :, -1].add(-1 * jnp.sum(secondary_moisture_flux_mask * fsq, axis=-1))
+    masked_fsq = (loop_mask & (delq > 0.)) * smf * cbmf[:, :, jnp.newaxis] * delq
+    dfqa = (dfqa + masked_fsq).at[:, :, -1].add(-jnp.sum(masked_fsq, axis=-1))
 
     # assuming that take_along_axis is well-optimized
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
     # iptop >= kx - 1 corresponds to skipping the loop; [:, :, -1] elements of these arrays should be the prior-to-loop values of these fields
     last_loop_iteration = jnp.minimum(iptop, kx - 1)
-    fmass = index_array(_fmass_array, last_loop_iteration)
-    fus = index_array(_fus_array, last_loop_iteration)
-    fuq = index_array(_fuq_array, last_loop_iteration)
-    fds = index_array(_fds_array, last_loop_iteration)
-    fdq = index_array(_fdq_array, last_loop_iteration)
-
+    fmass, fus, fuq, fds, fdq = (index_array(_array, last_loop_iteration) for _array in (_fmass_array, _fus_array, _fuq_array, _fds_array, _fdq_array))
 
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
