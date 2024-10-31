@@ -82,14 +82,14 @@ def diagnose_convection(psa, se, qa, qsat):
     # Check 3: RH > RH_c at both k=kx and k=kx-1
     qthr0 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-1]
     qthr1 = mask_ktop1_less_kx * rhbl * qsat[:, :, kx-2]
-    lqthr = (qa[:, :, kx-1] > qthr0) and (qa[:, :, kx-2] > qthr1)
+    lqthr = (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1)
 
     mask_ktop2_less_kx = ktop2 < kx
-    combined_mask1 = mask_ktop1_less_kx and mask_ktop2_less_kx
+    combined_mask1 = mask_ktop1_less_kx & mask_ktop2_less_kx
     iptop = jnp.where(combined_mask1, ktop1, iptop)
     qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
 
-    combined_mask2 = mask_ktop1_less_kx and (~mask_ktop2_less_kx) and lqthr
+    combined_mask2 = mask_ktop1_less_kx & (~mask_ktop2_less_kx) & lqthr
     iptop = jnp.where(combined_mask2, ktop1, iptop)
     qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
 
@@ -177,7 +177,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     # 3.2 intermediate layers (entrainment)
     # Loop runs on reversed(range(iptop, kx-1)) but we slice only as necessary to keep indices within bounds, and use loop_mask to restrict the logic
-    loop_mask = (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis]) and (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] < kx-1)
+    loop_mask = (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis]) & (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] < kx-1)
 
     # Loop body: the only thing reordered from the f90 is that fluxes at lower boundary are now computed later
 
@@ -207,7 +207,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Secondary moisture flux
     delq = rhil * qsat - qa
     fsq = smf * cbmf[:, :, jnp.newaxis] * delq
-    secondary_moisture_flux_mask = loop_mask and (delq > 0.)
+    secondary_moisture_flux_mask = loop_mask & (delq > 0.)
     dfqa = dfqa.add(jnp.where(secondary_moisture_flux_mask, fsq, 0))
     dfqa = dfqa.at[:, :, -1].add(-1 * jnp.sum(secondary_moisture_flux_mask * fsq, axis=-1))
 
