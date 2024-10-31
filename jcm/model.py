@@ -132,7 +132,7 @@ class SpeedyModel:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.State:
+    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
         return self.step_fn(state)
                                  
     def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
