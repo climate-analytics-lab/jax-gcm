@@ -23,7 +23,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
 
-    if physics_data.DateData.model_steps % nstrad > 0:
+    if physics_data.date.model_steps % nstrad > 0:
         return PhysicsTendency(jnp.zeros_like(state.u_wind), jnp.zeros_like(state.v_wind), jnp.zeros_like(state.temperature), jnp.zeros_like(state.specific_humidity)), physics_data
 
     ix, il, kx = state.temperature.shape
@@ -319,7 +319,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     # This function doesn't directly produce tendencies
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
     
-    if physics_data.DateData.model_steps % nstrad > 0:
+    if physics_data.date.model_steps % nstrad > 0:
         return physics_tendencies, physics_data
 
     # Compute gradient of static energy: logic from physics.f90:147
