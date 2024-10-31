@@ -66,17 +66,17 @@ def diagnose_convection(psa, se, qa, qsat):
     mss2 = mss[:, :, k_indices] + wvi[k_indices, 1] * (mss[:, :, k_indices + 1] - mss[:, :, k_indices])
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    mask_conditional_instability = mss0[:, :, None] > mss2
+    mask_conditional_instability = mss0[:, :, jnp.newaxis] > mss2
     ktop1 = jnp.full((ix, il), kx, dtype=int)
     ktop1 = k_indices[jnp.argmax(mask_conditional_instability, axis=2)]
 
     # Check 2: gradient of actual moist static energy between lower and upper 
     # troposphere
-    mask_mse1_greater_mss2 = mse1[:, :, None] > mss2
+    mask_mse1_greater_mss2 = mse1[:, :, jnp.newaxis] > mss2
     ktop2 = jnp.full((ix, il), kx, dtype=int)
     ktop2 = k_indices[jnp.argmax(mask_mse1_greater_mss2, axis=2)]
     msthr = jnp.zeros((ix, il), dtype=float)
-    msthr = mss2[jnp.arange(ix)[:, None], jnp.arange(il), jnp.argmax(mask_mse1_greater_mss2, axis=2)]
+    msthr = mss2[jnp.arange(ix)[:, jnp.newaxis], jnp.arange(il), jnp.argmax(mask_mse1_greater_mss2, axis=2)]
 
     mask_ktop1_less_kx = ktop1 < kx    
     # Check 3: RH > RH_c at both k=kx and k=kx-1
@@ -191,8 +191,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Downward fluxes at upper boundary can now be calculated using fmass
     sb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(se[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (se[:, :, 1:] - se[:, :, :-1]))
     qb = jnp.zeros_like(loop_mask).at[:, :, 1:].set(qa[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qa[:, :, 1:] - qa[:, :, :-1]))
-    _fds_array = (fmass[:, :, jnp.newaxis] * sb).at[:, :, -1].set(fds)
-    _fdq_array = (fmass[:, :, jnp.newaxis] * qb).at[:, :, -1].set(fdq)
+    _fds_array = jnp.where(loop_mask, fmass[:, :, jnp.newaxis] * sb, fds[:, :, jnp.newaxis])
+    _fdq_array = jnp.where(loop_mask, fmass[:, :, jnp.newaxis] * qb, fdq[:, :, jnp.newaxis])
 
     # With fus, fds, fuq, fdq we can calculate dfse and dfqa.
 
@@ -211,19 +211,22 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfqa += jnp.where(secondary_moisture_flux_mask, fsq, 0)
     dfqa = dfqa.at[:, :, -1].add(-1 * jnp.sum(secondary_moisture_flux_mask * fsq, axis=-1))
 
-    # Update the fields that would have been updated in the fortran. Simplest way to deal with edge cases
-    updated_by_loop = iptop < kx - 1
-    fmass = jnp.where(updated_by_loop, _fmass_array[:, :, iptop], fmass)
-    fus = jnp.where(updated_by_loop, _fus_array[:, :, iptop], fus)
-    fuq = jnp.where(updated_by_loop, _fuq_array[:, :, iptop], fuq)
-    fds = jnp.where(updated_by_loop, _fds_array[:, :, iptop], fds)
-    fdq = jnp.where(updated_by_loop, _fdq_array[:, :, iptop], fdq)
+    # assuming that take_along_axis is well-optimized
+    index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
+    # iptop >= kx - 1 corresponds to skipping the loop; [:, :, -1] elements of these arrays should be the prior-to-loop values of these fields
+    last_loop_iteration = jnp.minimum(iptop, kx - 1)
+    fmass = index_array(_fmass_array, last_loop_iteration)
+    fus = index_array(_fus_array, last_loop_iteration)
+    fuq = index_array(_fuq_array, last_loop_iteration)
+    fds = index_array(_fds_array, last_loop_iteration)
+    fdq = index_array(_fdq_array, last_loop_iteration)
+
 
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
 
     # Flux of convective precipitation
-    qsatb = qsat[:, :, k] + wvi[jnp.newaxis, jnp.newaxis, k, 1] * (qsat[:, :, k + 1] - qsat[:, :, k])
+    qsatb = index_array(qsat, k) + index_array(wvi[jnp.newaxis, jnp.newaxis, :, 1], k) * (index_array(qsat, k + 1) - index_array(qsat, k))
     precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture
