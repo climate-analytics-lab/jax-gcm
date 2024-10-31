@@ -211,9 +211,13 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfqa += jnp.where(secondary_moisture_flux_mask, fsq, 0)
     dfqa = dfqa.at[:, :, -1].add(-1 * jnp.sum(secondary_moisture_flux_mask * fsq, axis=-1))
 
-    if iptop < kx - 1: # Only update these fields if they would have been updated in the fortran
-        fmass = _fmass_array[:, :, iptop]
-        fus, fuq, fds, fdq = _fus_array[:, :, iptop], _fuq_array[:, :, iptop], _fds_array[:, :, iptop], _fdq_array[:, :, iptop]
+    # Update the fields that would have been updated in the fortran. Simplest way to deal with edge cases
+    updated_by_loop = iptop < kx - 1
+    fmass = jnp.where(updated_by_loop, _fmass_array[:, :, iptop], fmass)
+    fus = jnp.where(updated_by_loop, _fus_array[:, :, iptop], fus)
+    fuq = jnp.where(updated_by_loop, _fuq_array[:, :, iptop], fuq)
+    fds = jnp.where(updated_by_loop, _fds_array[:, :, iptop], fds)
+    fdq = jnp.where(updated_by_loop, _fdq_array[:, :, iptop], fdq)
 
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
@@ -223,8 +227,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture
-    dfse = dfse.at[:, :, k].set(fus - fds + alhc * precnv)
-    dfqa = dfqa.at[:, :, k].set(fuq - fdq - precnv)
+    dfse, dfqa = dfse.at[:, :, k].set(fus - fds + alhc * precnv), dfqa.at[:, :, k].set(fuq - fdq - precnv)
 
     # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
     # pass on the rest of physics_data that was not updated or needed in this function
