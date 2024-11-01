@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-from jcm.physical_constants import sbc, wvi
+from jcm.physical_constants import sbc, wvi, grdscp
 from jcm.mod_radcon import epslw, emisfc, fband
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
@@ -169,6 +169,13 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     longwave_out = physics_data.longwave_rad.copy(rlds=fsfc, ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
     physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    
+    # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
+    ttend_lwr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis]
+    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),
+                           jnp.zeros_like(state.v_wind),
+                           ttend_lwr,
+                           jnp.zeros_like(state.specific_humidity))
     
     return physics_tendencies, physics_data
+    

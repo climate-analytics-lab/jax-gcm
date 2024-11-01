@@ -7,6 +7,41 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
 from datetime import datetime
 
+def initialize_modules(kx=8, il=64):
+    from jcm.geometry import initialize_geometry
+    initialize_geometry(kx=kx, il=il)
+    from jcm.physics import initialize_physics
+    initialize_physics()
+
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
+    """
+    Returns a list of functions that compute physical tendencies for the model.
+    """
+    initialize_modules(kx = grid_shape[0],
+                    il = grid_shape[2])
+    
+    from jcm.humidity import spec_hum_to_rel_hum
+    from jcm.convection import get_convection_tendencies
+    from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+    from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+    from jcm.surface_flux import get_surface_fluxes
+    from jcm.vertical_diffusion import get_vertical_diffusion_tend
+    physics_terms = [
+        spec_hum_to_rel_hum,
+        get_convection_tendencies,
+        get_large_scale_condensation_tendencies,
+        clouds,
+        get_shortwave_rad_fluxes,
+        get_downward_longwave_rad_fluxes,
+        get_surface_fluxes,
+        get_upward_longwave_rad_fluxes,
+        get_vertical_diffusion_tend
+    ]
+    if sea_coupling_flag > 0:
+        physics_terms.insert(-3, get_surface_fluxes)
+    return physics_terms
+
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
@@ -25,12 +60,6 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
 
         return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
-
-def initialize_modules(kx=8, il=64):
-    from jcm.geometry import initialize_geometry
-    initialize_geometry(kx=kx, il=il)
-    from jcm.physics import initialize_physics
-    initialize_physics()
 
 class SpeedyModel:
     """
@@ -91,36 +120,16 @@ class SpeedyModel:
             self.coords,
             self.physics_specs)
         
-        initialize_modules(kx = self.coords.nodal_shape[0],
-                           il = self.coords.nodal_shape[2])
+        physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        from jcm.humidity import spec_hum_to_rel_hum
-        from jcm.convection import get_convection_tendencies
-        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-        from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-        from jcm.surface_flux import get_surface_fluxes
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
-
-        physics_terms = [
-            spec_hum_to_rel_hum, # this could get called in get_physics_tendencies before looping over the physics terms
-            get_convection_tendencies,
-            get_large_scale_condensation_tendencies,
-            clouds,
-            get_shortwave_rad_fluxes,
-            get_downward_longwave_rad_fluxes,
-            get_surface_fluxes, # In speedy this gets called again if air-sea coupling is on
-            get_upward_longwave_rad_fluxes,
-            get_vertical_diffusion_tend
-        ]
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
-        self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
-        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
+        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             dinosaur.time_integration.exponential_step_filter(
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),

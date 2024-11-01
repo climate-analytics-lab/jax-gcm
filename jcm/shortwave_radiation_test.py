@@ -110,29 +110,30 @@ class TestShortWaveRadiation(unittest.TestCase):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1)
+        se = .1*geopotential
 
         xy = (ix, il)
-        broadcast = lambda a: jnp.tile(a[None, None, :], xy + (1,))
-        qa, qsat, rh = broadcast(qa), broadcast(qsat), broadcast(rh)
+        broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
         psa = jnp.ones(xy)
         precnv = -1 * np.ones(xy)
         precls = 4 * np.ones(xy)
         iptop = 8 * np.ones(xy)
-        gse = .01 * np.ones(xy)
         fmask = .7 * np.ones(xy)
 
         surface_flux = SurfaceFluxData(xy,fmask=fmask)
         humidity = HumidityData(xy, kx, rh=rh, qsat=qsat)
-        convection = ConvectionData(xy, kx, psa=psa, iptop=iptop, precnv=precnv)
+        convection = ConvectionData(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData(xy, kx, precls=precls)
-        sw_data = SWRadiationData(xy, kx, gse=gse)
+        sw_data = SWRadiationData(xy, kx)
 
         date_data = DateData()
         date_data.tyear = 0.6
 
         physics_data = PhysicsData(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=jnp.zeros_like(qa), surface_pressure=jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         _, physics_data = clouds(state, physics_data)
         _, physics_data = get_zonal_average_fields(state, physics_data)

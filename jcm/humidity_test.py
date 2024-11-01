@@ -82,7 +82,7 @@ class TestHumidityUnit(unittest.TestCase):
 
         convection_data = ConvectionData((ix,il), kx, psa=pressure)
         physics_data = PhysicsData((ix,il), kx, convection=convection_data)
-        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((ix,il)))
+        state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),pressure)
 
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state)
         qa, qsat = rel_hum_to_spec_hum(temp[:,:,0], pressure, fsg[0], physics_data.humidity.rh[:,:,0])
