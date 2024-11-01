@@ -2,31 +2,14 @@ import dinosaur
 from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
-from jax import device_get
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
-from dinosaur.primitive_equations import State
 from jcm.held_suarez import HeldSuarezForcing
 from datetime import datetime
 
-def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
-    from jcm.physics_data import PhysicsData
-    from jcm.physics import get_physical_tendencies
-    def physical_tendencies(state):            
-        from datetime import timedelta
-        from jcm.date import DateData
-        model_time = reference_date + timedelta(seconds=device_get(state.sim_time))
-
-        data = PhysicsData(dynamics.coords.nodal_shape[1:],
-                    dynamics.coords.nodal_shape[0],
-                    date=DateData(model_time))
-        
-        # Remove the sim_time and convert to a plain State object
-        _state = state.asdict()
-        _state.pop('sim_time')
-        state = State(**_state)
-
-        return get_physical_tendencies(state, dynamics, physics_terms, data)
+def convert_tendencies_to_equation(dynamics, physics_terms):
+    def physical_tendencies(state):
+        return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class HeldSuarezModel:
@@ -36,7 +19,7 @@ class HeldSuarezModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None) -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -49,7 +32,6 @@ class HeldSuarezModel:
         """
 
         # Integration settings
-        start_date = start_date or datetime(2000, 1, 1)
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -91,7 +73,7 @@ class HeldSuarezModel:
 
         physics_terms = [ hsf.held_suarez_forcings ] 
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 
