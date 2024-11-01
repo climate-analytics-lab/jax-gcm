@@ -196,7 +196,7 @@ class SurfaceFluxData:
     # TODO: check if any of these (fmask, phi0) need to be initialized and/or should be moved somewhere else
     stl_am: jnp.ndarray # Land surface temperature, should come from land_model.py
     soilw_am: jnp.ndarray # Soil water availability, should come from land_model.py
-    lfluxland: jnp.bool # Land surface fluxes true or false, hard coded in physics.f90
+    lfluxland: bool # Land surface fluxes true or false, hard coded in physics.f90
     ustr: jnp.ndarray # u-stress
     vstr: jnp.ndarray # v-stress
     shf: jnp.ndarray # Sensible heat flux
