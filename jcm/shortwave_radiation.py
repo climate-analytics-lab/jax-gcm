@@ -196,7 +196,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     acloud1, acloud2 = (cloudc[:, :, jnp.newaxis, jnp.newaxis]*a for a in (ablcl1, ablcl2))
 
     absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[jnp.newaxis, jnp.newaxis, :] > icltop[:, :, jnp.newaxis], acloud1.reshape(ix, il, 1), acloud2.reshape(ix, il, 1)))
-    absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, 5, 2))))
+    absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, kx-3, 2))))
 
     # Compute transmissivity
     tau2 = jnp.exp(-absorptivity*psa[:, :, jnp.newaxis, jnp.newaxis]*dhs[jnp.newaxis, jnp.newaxis, :, jnp.newaxis])
