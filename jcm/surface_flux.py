@@ -4,7 +4,7 @@ from jax import jit
 # importing custom functions from library
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav
+from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav, grdsig, grdscp
 from jcm.geometry import coa
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
@@ -288,7 +288,14 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData):
     
     surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, slru=slru, hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+
+    # Compute tendencies due to surface fluxes (physics.f90:197-205)
+    rps = 1.0 / physics_data.convection.psa
+    utend = jnp.zeros_like(state.u_wind).at[:,:,-1].add(ustr[:,:,2]*rps*grdsig[-1])
+    vtend = jnp.zeros_like(state.v_wind).at[:,:,-1].add(vstr[:,:,2]*rps*grdsig[-1])
+    ttend = jnp.zeros_like(state.temperature).at[:,:,-1].add(shf[:,:,2]*rps*grdscp[-1])
+    qtend = jnp.zeros_like(state.specific_humidity).at[:,:,-1].add(evap[:,:,2]*rps*grdsig[-1])
+    physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
 
     return physics_tendencies, physics_data
 
