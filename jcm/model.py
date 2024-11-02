@@ -5,15 +5,16 @@ from dinosaur.scales import units
 from dinosaur import primitive_equations_states
 from dinosaur.time_integration import ExplicitODE
 from dinosaur.primitive_equations import State
-from datetime import datetime
+from jcm.date import Timestamp, Timedelta
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
-    def physical_tendencies(state):            
-        from datetime import timedelta
-        from jcm.date import DateData
-        model_time = reference_date + timedelta(seconds=state.sim_time)
+    from jcm.date import DateData
+
+    def physical_tendencies(state):                
+        
+        model_time = reference_date + Timedelta(seconds=state.sim_time)
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
                     date=DateData(model_time))
@@ -51,9 +52,11 @@ class SpeedyModel:
             start_date: Start date of the simulation
 
         """
+        from datetime import datetime
+        import numpy as np
 
         # Integration settings
-        start_date = start_date or datetime(2000, 1, 1)
+        start_date = start_date or Timestamp.from_datetime64(np.datetime64(datetime(2000, 1, 1)))
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day

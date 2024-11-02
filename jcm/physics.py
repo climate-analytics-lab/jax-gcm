@@ -13,7 +13,7 @@ from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, StateWithTime, PrimitiveEquations
 
 @tree_math.struct
 class PhysicsState:
@@ -48,7 +48,7 @@ def initialize_physics():
     pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
     pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
-def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
+def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -90,7 +90,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     return physics_state
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -111,12 +111,13 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = State(vor_tendency, div_tendency, t_tendency, log_sp_tendency, {'specific_humidity': q_tendency})
+    dynamics_tendency = StateWithTime(vor_tendency, div_tendency, t_tendency, log_sp_tendency, sim_time=0., 
+                                      tracers={'specific_humidity': q_tendency})
     return dynamics_tendency
 
 
 def get_physical_tendencies(
-    state: State,
+    state: StateWithTime,
     dynamics: PrimitiveEquations,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None
