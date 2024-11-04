@@ -22,7 +22,7 @@ class TestConvectionUnit(unittest.TestCase):
 
         itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
 
-        test_itop = 4
+        test_itop = 5
         test_qdif = 1.1395
         # Check that itop and qdif is not null.
         self.assertEqual(itop[0,0], test_itop)

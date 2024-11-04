@@ -104,8 +104,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     Args:
     psa: Normalised surface pressure [p/p0] 
     se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg] - qa
-    qsat: Saturation specific humidity [g/kg] - qsat
+    qa: Specific humidity [g/kg] - state.specific_humidity
+    qsat: Saturation specific humidity [g/kg] - humidity.qsat
 
     Returns:
     iptop: Top of convection (layer index)
@@ -174,7 +174,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # Net flux of dry static energy and moisture
     dfse = dfse.at[:, :, k].set(fds - fus)
     dfqa = dfqa.at[:, :, k].set(fdq - fuq)
-    
+
     # 3.2 intermediate layers (entrainment)
     # replace loop with masking
     loop_mask = (jnp.arange(1, kx+1)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis] + 1) & (jnp.arange(1, kx+1)[jnp.newaxis, jnp.newaxis, :] <= kx - 1)
@@ -230,10 +230,6 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     dfse = dfse.at[:,:,k].set(fus - fds + alhc * precnv)
     dfqa = dfqa.at[:,:,k].set(fuq - fdq - precnv)
 
-    print(iptop[0, 0], qdif[0, 0], cbmf[0, 0], precnv[0, 0], dfse[0, 0], dfqa[0, 0])
-
-    # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
-    # pass on the rest of physics_data that was not updated or needed in this function
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
     # Another important note is that this goes from 2:kx in the fortran
 
