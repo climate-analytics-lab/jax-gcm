@@ -127,7 +127,6 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     # 1. Initialization of output and workspace arrays
 
     dfse, dfqa = _zeros_3d, _zeros_3d
-    cbmf, precnv = _zeros_2d, _zeros_2d
 
     #keep indexing consistent with original Speedy
     nl1 = kx - 1 
@@ -149,64 +148,51 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     mask = iptop < kx
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
-    k1 = k - 1
 
     # Maximum specific humidity in the PBL
     qmax = jnp.maximum(1.01 * qa[:, :, -1], qsat[:, :, -1])
+
+    interpolate = lambda tracer: tracer[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * jnp.diff(tracer, axis=-1)
+    _sb_3d, _qb_3d = (_zeros_3d.at[:, :, 1:].set(interpolate(tracer)) for tracer in (se, qa))
     
-    # # Dry static energy and moisture at upper boundary
-    sb = se[:, :, k1] + wvi[k1, 1] * (se[:, :, k] - se[:, :, k1])
-    qb = jnp.minimum(qa[:, :, k1] + wvi[k1, 1] * (qa[:, :, k] - qa[:, :, k1]), qa[:, :, k])
+    # Dry static energy and moisture at upper boundary
+    sb, qb = _sb_3d[:, :, k], jnp.minimum(_qb_3d, qa)[:, :, k]
     
     # Cloud-base mass flux
     fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
-    cbmf = jnp.where(mask, fmass, cbmf)
+    cbmf = mask * fmass
 
     # Upward fluxes at upper boundary
-    fus = fmass * se[:, :, k]
-    fuq = fmass * qmax
+    fus, fuq = fmass * se[:, :, k], fmass * qmax
 
     # Downward fluxes at upper boundary
-    fds = fmass*sb
-    fdq = fmass*qb
+    fds, fdq = fmass * sb, fmass * qb
 
     # Net flux of dry static energy and moisture
-    dfse = dfse.at[:, :, k].set(fds - fus)
-    dfqa = dfqa.at[:, :, k].set(fdq - fuq)
+    dfse, dfqa = dfse.at[:, :, k].set(fds - fus), dfqa.at[:, :, k].set(fdq - fuq)
 
-    # 3.2 intermediate layers (entrainment)
+    # 3.2 Intermediate layers (entrainment)
+
     # replace loop with masking
-    loop_mask = (jnp.arange(1, kx+1)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis] + 1) & (jnp.arange(1, kx+1)[jnp.newaxis, jnp.newaxis, :] <= kx - 1)
+    loop_mask = (kx - 2 >= jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :]) & \
+                (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis])
+    
     #start by making entrainment profile:
-    _enmass_3d = loop_mask*_zeros_3d.at[:,:,1:-1].set(entr[jnp.newaxis, jnp.newaxis, :] * (psa * cbmf)[:, :, jnp.newaxis])
+    _enmass_3d = loop_mask * _zeros_3d.at[:, :, 1:-1].set(entr[jnp.newaxis, jnp.newaxis, :] * (psa * cbmf)[:, :, jnp.newaxis])
 
-    #now get mass entrainment
-    #mass flux
-    _fmass_3d = fmass[:, :, jnp.newaxis] + loop_mask*(jnp.cumsum(_enmass_3d[:, :, ::-1], axis=-1)[:, :, ::-1])
-
-    #upwards static energy flux
-    _fus_3d = fus[:, :, jnp.newaxis] + loop_mask*(jnp.cumsum((_enmass_3d*se)[:, :, ::-1], axis=-1)[:, :, ::-1])
-    
-    #upwards moisture flux
-    _fuq_3d = fuq[:, :, jnp.newaxis] + loop_mask*(jnp.cumsum((_enmass_3d*qa)[:, :, ::-1], axis=-1)[:, :, ::-1])
-    
-    #Downward fluxes
-    interpolate_tracer = lambda tracer_density: tracer_density[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (tracer_density[:, :, 1:] - tracer_density[:, :, :-1])
-    _sb_3d, _qb_3d = (
-        _zeros_3d.at[:, :, 1:].set(interpolate_tracer(tracer_density))
-        for tracer_density in (se, qa)
+    # Upward fluxes at upper boundary of mass, energy, moisture
+    _fmass_3d, _fus_3d, _fuq_3d = (
+        base_flux[:, :, jnp.newaxis] + jnp.cumsum((_enmass_3d * tracer)[:, :, ::-1], axis=-1)[:, :, ::-1]
+        for base_flux, tracer in ((fmass, 1), (fus, se), (fuq, qa))
     )
-    _fds_3d = (_fmass_3d * _sb_3d).at[:, :, -1].set(fds)
-    _fdq_3d = (_fmass_3d * _qb_3d).at[:, :, -1].set(fdq)
 
-    # Fluxes at lower boundary
-    dfse = dfse.at[:, :, :-1].set(jnp.where(loop_mask[:, :, :-1], _fus_3d[:, :, 1:] - _fds_3d[:, :, 1:], dfse[:, :, :-1]))
-    dfqa = dfqa.at[:, :, :-1].set(jnp.where(loop_mask[:, :, :-1], _fuq_3d[:, :, 1:] - _fdq_3d[:, :, 1:], dfqa[:, :, :-1]))
+    #Downward fluxes
+    _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[:, :, -1].set(fds), (_fmass_3d * _qb_3d).at[:, :, -1].set(fdq)
 
-    # Net flux of dry static energy and moisture
-    dfse += loop_mask*(_fds_3d - _fus_3d)
-    dfqa += loop_mask*(_fdq_3d - _fuq_3d)
+    # Calculate flux convergence
+    dfse = dfse.at[:, :, :-1].add(loop_mask[:, :, :-1] * (jnp.diff(_fus_3d - _fds_3d, axis=-1)))
+    dfqa = dfqa.at[:, :, :-1].add(loop_mask[:, :, :-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=-1)))
 
     # Secondary moisture flux
     delq = loop_mask * (rhil * qsat - qa)
@@ -217,18 +203,18 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
-    fus, fuq, fds, fdq = index_array(_fus_3d, iptop), index_array(_fuq_3d, iptop), index_array(_fds_3d, iptop), index_array(_fdq_3d, iptop)
-
+    fmass, fus, fuq, fds, fdq = (index_array(_flux_3d, iptop) for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
+    
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
 
     # Flux of convective precipitation
-    qsatb = index_array(qsat[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * (qsat[:, :, 1:]-qsat[:, :, :-1]), k)
-    precnv = jnp.maximum(fuq - index_array(_fmass_3d, iptop) * qsatb, 0.0)
+    qsatb = index_array(interpolate(qsat), k)
+    precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture
-    dfse = dfse.at[:,:,k].set(fus - fds + alhc * precnv)
-    dfqa = dfqa.at[:,:,k].set(fuq - fdq - precnv)
+    dfse = dfse.at[:, :, k].set(fus - fds + alhc * precnv)
+    dfqa = dfqa.at[:, :, k].set(fuq - fdq - precnv)
 
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
     # Another important note is that this goes from 2:kx in the fortran
