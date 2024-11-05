@@ -4,14 +4,29 @@ For storing all variables related to the model's grid space.
 '''
 
 import jax.numpy as jnp
-from jax import jit
-
-from jcm.params import kx, il, iy
 from jcm.physical_constants import akap, omega
 
+# Declare global variables
+hsg = None
+dhs = None
+fsg = None
+dhsr = None
+fsgr = None
+radang = None
+coriol = None
+sia = None
+coa = None
+sia_half = None
+coa_half = None
+cosg = None
+cosgr = None
+cosgr2 = None
+
 # Initializes all of the model geometry variables.
-@jit
-def initialize_geometry():
+def initialize_geometry(kx = 8, il = 64):
+    iy = (il + 1)//2
+
+    global hsg, dhs, fsg, dhsr, fsgr, radang, coriol, sia, coa, sia_half, coa_half, cosg, cosgr, cosgr2
     # Definition of model levels
     if kx == 5:
         hsg = jnp.array([0.000, 0.150, 0.350, 0.650, 0.900, 1.000])
@@ -47,7 +62,3 @@ def initialize_geometry():
     cosgr2 = 1. / (cosg * cosg)
 
     coriol = 2.0 * omega * sia
-
-    return hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol
-
-hsg, dhs, fsg, dhsr, fsgr, sia_half, coa_half, sia, coa, radang, cosg, cosgr, cosgr2, coriol = initialize_geometry()

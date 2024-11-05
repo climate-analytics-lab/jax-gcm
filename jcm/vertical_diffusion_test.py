@@ -1,14 +1,20 @@
 import unittest
-from jcm.vertical_diffusion import get_vertical_diffusion_tend
 import jax.numpy as jnp
 import numpy as np
-from jcm.physics_data import PhysicsData, HumidityData, ConvectionData
-from jcm.physics import PhysicsState
-
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
-    def test_get_vertical_diffusion_tend(self):
+    def setUp(self):
+        global ix, il, kx
         ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+
+        global HumidityData, ConvectionData, PhysicsData, PhysicsState, get_vertical_diffusion_tend
+        from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+
+    def test_get_vertical_diffusion_tend(self):
         se = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(400,300,kx)[jnp.newaxis, jnp.newaxis, :]
         rh = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[jnp.newaxis, jnp.newaxis, :]
         qa = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[jnp.newaxis, jnp.newaxis, :]

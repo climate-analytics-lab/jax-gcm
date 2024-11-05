@@ -1,10 +1,6 @@
-from numpy.testing import assert_array_almost_equal
 import unittest
 import jax.numpy as jnp
-from jcm.params import ix, il, kx
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-from jcm.physics_data import PhysicsData, ModRadConData
-from jcm.physics import PhysicsState
+import numpy as np
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -25,11 +21,20 @@ def initialize_arrays(ix, il, kx):
     
     return ta, fsfcd, st4a, flux
 
-
 class TestDownwardLongwave(unittest.TestCase):
+    
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
 
-    def test_downward_longwave_rad_fluxes(self):
-        import numpy as np
+        global ModRadConData, PhysicsData, PhysicsState, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.physics_data import ModRadConData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+
+    def test_downward_longwave_rad_fluxes(self):        
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements

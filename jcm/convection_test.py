@@ -1,14 +1,21 @@
 import unittest
-from jcm.convection import diagnose_convection, get_convection_tendencies
 import jax.numpy as jnp
-from jcm.physics import PhysicsState
-from jcm.physics_data import PhysicsData, ConvectionData, HumidityData
-from jcm.physical_constants import grdscp, grdsig
 
 class TestConvectionUnit(unittest.TestCase):
-    def test_diagnose_convection_moist_adiabat(self):
-        ix, il, kx = 96, 48, 8
 
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+        
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig
+        from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.convection import diagnose_convection, get_convection_tendencies
+        from jcm.physical_constants import grdscp, grdsig
+
+    def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
@@ -29,8 +36,6 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
      
     def test_get_convective_tendencies_moist_adiabat(self):
-        ix, il, kx = 96, 48, 8
-
         psa = jnp.ones((ix, il)) #normalized surface pressure
 
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
