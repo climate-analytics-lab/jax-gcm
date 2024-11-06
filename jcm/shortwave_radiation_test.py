@@ -1,17 +1,19 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
-
-from jcm.shortwave_radiation import solar, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
-from jcm.physical_constants import solc, epssw
-from jcm.params import il, ix, kx
-from jcm.geometry import sia
-from jcm.physics import PhysicsState
-from jcm.physics_data import SWRadiationData, CondensationData, ConvectionData, HumidityData, SurfaceFluxData, DateData, PhysicsData
-
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
+
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+
+        global solar
+        from jcm.shortwave_radiation import solar
+
     def test_solar(self):
         self.assertTrue(np.allclose(solar(0.2), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
@@ -89,7 +91,22 @@ class TestSolar(unittest.TestCase):
             345.64242972, 350.46165015, 353.81093342, 355.67622859]), atol=1e-4))
         
 class TestShortWaveRadiation(unittest.TestCase):
-    def test_shortwave_radiation(self):
+
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+        from jcm.model import initialize_modules
+        initialize_modules(kx=kx, il=il)
+
+        global SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
+               PhysicsState, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw
+        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
+        from jcm.physics import PhysicsState
+        from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
+        from jcm.physical_constants import epssw
+        from jcm.geometry import sia
+
+    def test_shortwave_radiation(self):        
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -166,38 +183,32 @@ class TestShortWaveRadiation(unittest.TestCase):
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
         ], atol=1e-4))
 
-
-    def setUp(self):
-        # Set up test case with known inputs
-        self.solc = solc
-        self.il = il
-        self.ix = ix
-        self.epssw = epssw
-
     def test_output_shapes(self):
         from datetime import datetime
+        from jcm.date import Timestamp
         # Ensure that the output shapes are correct
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=datetime(2000, 3, 21))
+        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, new_data = get_zonal_average_fields(state, physics_data)
         
-        self.assertEqual(new_data.shortwave_rad.fsol.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.ozupp.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.ozone.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.stratz.shape, (self.ix, self.il))
-        self.assertEqual(new_data.shortwave_rad.zenit.shape, (self.ix, self.il))
+        self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozone.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.stratz.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.zenit.shape, (ix, il))
 
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
         from datetime import datetime
+        from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=datetime(2000, 3, 21))
+        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -208,10 +219,11 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
         from datetime import datetime
+        from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=datetime(2000, 3, 21))
+        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -238,10 +250,11 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_random_input_consistency(self):     
         from datetime import datetime
+        from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=datetime(2000, 3, 21))
+        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)

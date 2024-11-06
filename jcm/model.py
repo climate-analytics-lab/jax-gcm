@@ -1,24 +1,30 @@
-import dinosaur
-from dinosaur.scales import units
 import jax
 import jax.numpy as jnp
-from jcm.physics_data import PhysicsData
-from jcm.physics import get_physical_tendencies
-from jcm.convection import get_convection_tendencies
-from jcm.humidity import spec_hum_to_rel_hum
-from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-from jcm.shortwave_radiation import clouds, get_shortwave_rad_fluxes
-from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-from jcm.surface_flux import get_surface_fluxes
-from jcm.vertical_diffusion import get_vertical_diffusion_tend
+import dinosaur
+from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
-from dinosaur.primitive_equations import State
-from datetime import datetime
+from jcm.date import Timestamp, Timedelta
 
-def get_speedy_physics_terms(sea_coupling_flag=0):
+def initialize_modules(kx=8, il=64):
+    from jcm.geometry import initialize_geometry
+    initialize_geometry(kx=kx, il=il)
+    from jcm.physics import initialize_physics
+    initialize_physics()
+
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
+    initialize_modules(kx = grid_shape[0],
+                    il = grid_shape[2])
+    
+    from jcm.humidity import spec_hum_to_rel_hum
+    from jcm.convection import get_convection_tendencies
+    from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+    from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+    from jcm.surface_flux import get_surface_fluxes
+    from jcm.vertical_diffusion import get_vertical_diffusion_tend
     physics_terms = [
         spec_hum_to_rel_hum,
         get_convection_tendencies,
@@ -35,19 +41,16 @@ def get_speedy_physics_terms(sea_coupling_flag=0):
     return physics_terms
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
-    def physical_tendencies(state):            
-        from datetime import timedelta
-        from jcm.date import DateData
-        model_time = reference_date + timedelta(seconds=state.sim_time)
+    from jcm.physics_data import PhysicsData
+    from jcm.physics import get_physical_tendencies
+    from jcm.date import DateData
 
+    def physical_tendencies(state):                
+        
+        model_time = reference_date + Timedelta(seconds=state.sim_time)
         data = PhysicsData(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
-                    date_data=DateData(model_time))
-        
-        # Remove the sim_time and convert to a plain State object
-        _state = state.asdict()
-        _state.pop('sim_time')
-        state = State(**_state)
+                    date=DateData(model_time))
 
         return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
@@ -71,9 +74,10 @@ class SpeedyModel:
             start_date: Start date of the simulation
 
         """
+        from datetime import datetime
 
         # Integration settings
-        start_date = start_date or datetime(2000, 1, 1)
+        start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -84,11 +88,11 @@ class SpeedyModel:
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
         # Not sure why we need this...
-        physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
+        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
 
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
-        self.dt = physics_specs.nondimensionalize(dt_si)
+        self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
@@ -96,7 +100,7 @@ class SpeedyModel:
 
         self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
-            physics_specs=physics_specs,
+            physics_specs=self.physics_specs,
             p0=p0,
             p1=p1)
         
@@ -109,9 +113,9 @@ class SpeedyModel:
             ref_temps,
             orography,
             self.coords,
-            physics_specs)
+            self.physics_specs)
         
-        physics_terms = get_speedy_physics_terms()
+        physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
         speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
@@ -132,7 +136,7 @@ class SpeedyModel:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.State:
+    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
         return self.step_fn(state)
                                  
     def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
