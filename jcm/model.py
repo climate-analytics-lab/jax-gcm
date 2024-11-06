@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import dinosaur
 from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
+from dinosaur import primitive_equations
 from jcm.date import Timestamp, Timedelta
 
 def initialize_modules(kx=8, il=64):

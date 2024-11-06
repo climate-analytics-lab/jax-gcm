@@ -119,14 +119,13 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     se = conv.se
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
-    _zeros_3d = jnp.zeros_like(se)
-    _zeros_2d = _zeros_3d[:, :, 0]
-    _, _, kx = _zeros_3d.shape
+    ix, il, kx = se.shape
+    _zeros_3d = lambda: jnp.zeros((ix,il,kx))
     psa = conv.psa
     
     # 1. Initialization of output and workspace arrays
 
-    dfse, dfqa = _zeros_3d, _zeros_3d
+    dfse, dfqa = _zeros_3d(), _zeros_3d()
 
     #keep indexing consistent with original Speedy
     nl1 = kx - 1 
@@ -153,7 +152,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     qmax = jnp.maximum(1.01 * qa[:, :, -1], qsat[:, :, -1])
 
     interpolate = lambda tracer: tracer[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * jnp.diff(tracer, axis=-1)
-    _sb_3d, _qb_3d = (_zeros_3d.at[:, :, 1:].set(interpolate(tracer)) for tracer in (se, qa))
+    _sb_3d, _qb_3d = (_zeros_3d().at[:, :, 1:].set(interpolate(tracer)) for tracer in (se, qa))
     
     # Dry static energy and moisture at upper boundary
     sb, qb = _sb_3d[:, :, k], jnp.minimum(_qb_3d, qa)[:, :, k]
@@ -179,7 +178,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
                 (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis])
     
     #start by making entrainment profile:
-    _enmass_3d = loop_mask * _zeros_3d.at[:, :, 1:-1].set(entr[jnp.newaxis, jnp.newaxis, :] * (psa * cbmf)[:, :, jnp.newaxis])
+    _enmass_3d = loop_mask * _zeros_3d().at[:, :, 1:-1].set(entr[jnp.newaxis, jnp.newaxis, :] * (psa * cbmf)[:, :, jnp.newaxis])
 
     # Upward fluxes at upper boundary of mass, energy, moisture
     _fmass_3d, _fus_3d, _fuq_3d = (
