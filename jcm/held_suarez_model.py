@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
+from dinosaur import primitive_equations
 from jcm.held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
