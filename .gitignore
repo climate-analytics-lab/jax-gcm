@@ -161,3 +161,6 @@ cython_debug/
 #MacOS files
 .DS_Store
 notebooks/model_state.nc
+
+#Hydra Output
+/jcm/outputs/
