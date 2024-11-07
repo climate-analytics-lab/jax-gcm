@@ -136,7 +136,6 @@ class SpeedyModel:
         
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        state.tracers = {'specific_humidity': dinosaur.primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)}
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
     def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
