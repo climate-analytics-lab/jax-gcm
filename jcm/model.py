@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import dinosaur
 from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
+from dinosaur import primitive_equations
 from dinosaur import primitive_equations_states
 from jcm.date import Timestamp, Timedelta
 
@@ -135,6 +136,7 @@ class SpeedyModel:
         
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
+        state.tracers = {'specific_humidity': dinosaur.primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)}
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
     def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
@@ -146,4 +148,3 @@ class SpeedyModel:
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps))
         return integrate_fn(state)
-
