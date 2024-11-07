@@ -1,0 +1,15 @@
+defaults:
+  - physics/radiation
+  - physics/convection
+  - physics/diffusion
+  - _self_
+
+model:
+  time_step: 10
+  save_interval: 10
+  total_time: 10
+  layers: 8
+
+output:
+  directory: "data"
+  filename: "model_state.nc"

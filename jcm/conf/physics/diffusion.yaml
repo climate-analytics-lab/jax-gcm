@@ -1,0 +1,7 @@
+diffusion:
+  vertical:
+    enabled: true
+    coefficient: 1.0
+  horizontal:
+    enabled: true
+    coefficient: 1.0

@@ -1,0 +1,16 @@
+defaults:
+  - ../config
+  - physics/radiation_test
+  - physics/convection_test
+  - physics/diffusion_test
+  - _self_
+
+model:
+  time_step: 5
+  save_interval: 5
+  total_time: 5
+  layers: 4
+
+output:
+  directory: "test_data"
+  filename: "test_model_state.nc"

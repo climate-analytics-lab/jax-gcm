@@ -1,0 +1,7 @@
+radiation:
+  shortwave:
+    enabled: true
+    scheme: "simplified"
+  longwave:
+    enabled: true
+    scheme: "simplified"
