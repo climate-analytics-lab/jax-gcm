@@ -47,16 +47,17 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
         qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
 
-        convection = ConvectionData((ix, il), kx, psa=psa, se=se_broadcast)
-        humidity = HumidityData((ix, il), kx, qsat=qsat_broadcast*1000.)
+        convection = ConvectionData.zeros((ix, il), kx, psa=psa, se=se_broadcast)
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast*1000.)
         state = PhysicsState(u_wind=jnp.zeros_like(qa_broadcast),
                              v_wind=jnp.zeros_like(qa_broadcast),
                              temperature=jnp.zeros_like(qa_broadcast),
                              specific_humidity=qa_broadcast*1000.,
                              geopotential=jnp.zeros_like(qa_broadcast),
                              surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
+        print(physics_data)
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data)
 
         test_cbmf = jnp.array(0.019614903)
