@@ -57,7 +57,6 @@ class TestConvectionUnit(unittest.TestCase):
                              surface_pressure=jnp.zeros((ix, il)))
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
-        print(physics_data)
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data)
 
         test_cbmf = jnp.array(0.019614903)

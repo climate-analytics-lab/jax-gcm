@@ -18,13 +18,12 @@ class LWRadiationData:
             slr = slr if slr is not None else jnp.zeros((nodal_shape)),
         )
 
-    @classmethod
-    def copy(self, lwrad, rlds=None, dfabs=None, ftop=None, slr=None):
+    def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
-            rlds=rlds if rlds is not None else lwrad.rlds,
-            dfabs=dfabs if dfabs is not None else lwrad.dfabs,
-            ftop=ftop if ftop is not None else lwrad.ftop,
-            slr=slr if slr is not None else lwrad.slr
+            rlds=rlds if rlds is not None else self.rlds,
+            dfabs=dfabs if dfabs is not None else self.dfabs,
+            ftop=ftop if ftop is not None else self.ftop,
+            slr=slr if slr is not None else self.slr
         )
 
 @tree_math.struct
@@ -63,23 +62,22 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,)))
         )
 
-    @classmethod
-    def copy(self, swrad, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
-            qcloud=qcloud if qcloud is not None else swrad.qcloud,
-            fsol=fsol if fsol is not None else swrad.fsol,
-            rsds=rsds if rsds is not None else swrad.rsds,
-            ssr=ssr if ssr is not None else swrad.ssr,
-            ozone=ozone if ozone is not None else swrad.ozone,
-            ozupp=ozupp if ozupp is not None else swrad.ozupp,
-            zenit=zenit if zenit is not None else swrad.zenit,
-            stratz=stratz if stratz is not None else swrad.stratz,
-            gse=gse if gse is not None else swrad.gse,
-            icltop=icltop if icltop is not None else swrad.icltop,
-            cloudc=cloudc if cloudc is not None else swrad.cloudc,
-            cloudstr=cloudstr if cloudstr is not None else swrad.cloudstr,
-            ftop=ftop if ftop is not None else swrad.ftop,
-            dfabs=dfabs if dfabs is not None else swrad.dfabs
+            qcloud=qcloud if qcloud is not None else self.qcloud,
+            fsol=fsol if fsol is not None else self.fsol,
+            rsds=rsds if rsds is not None else self.rsds,
+            ssr=ssr if ssr is not None else self.ssr,
+            ozone=ozone if ozone is not None else self.ozone,
+            ozupp=ozupp if ozupp is not None else self.ozupp,
+            zenit=zenit if zenit is not None else self.zenit,
+            stratz=stratz if stratz is not None else self.stratz,
+            gse=gse if gse is not None else self.gse,
+            icltop=icltop if icltop is not None else self.icltop,
+            cloudc=cloudc if cloudc is not None else self.cloudc,
+            cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
+            ftop=ftop if ftop is not None else self.ftop,
+            dfabs=dfabs if dfabs is not None else self.dfabs
         )
     
 @tree_math.struct
@@ -110,17 +108,16 @@ class ModRadConData:
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
 
-    @classmethod
-    def copy(self, modradcon, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
-            alb_l=alb_l if alb_l is not None else modradcon.alb_l,
-            alb_s=alb_s if alb_s is not None else modradcon.alb_s,
-            albsfc=albsfc if albsfc is not None else modradcon.albsfc,
-            snowc=snowc if snowc is not None else modradcon.snowc,
-            tau2=tau2 if tau2 is not None else modradcon.tau2,
-            st4a=st4a if st4a is not None else modradcon.st4a,
-            stratc=stratc if stratc is not None else modradcon.stratc,
-            flux=flux if flux is not None else modradcon.flux
+            alb_l=alb_l if alb_l is not None else self.alb_l,
+            alb_s=alb_s if alb_s is not None else self.alb_s,
+            albsfc=albsfc if albsfc is not None else self.albsfc,
+            snowc=snowc if snowc is not None else self.snowc,
+            tau2=tau2 if tau2 is not None else self.tau2,
+            st4a=st4a if st4a is not None else self.st4a,
+            stratc=stratc if stratc is not None else self.stratc,
+            flux=flux if flux is not None else self.flux
         )
 @tree_math.struct
 class SeaModelData:
@@ -133,9 +130,9 @@ class SeaModelData:
         )
 
     @classmethod
-    def copy(self, seamodel, tsea=None):
+    def copy(self, tsea=None):
         return CondensationData(
-            tsea=tsea if tsea is not None else seamodel.tsea, 
+            tsea=tsea if tsea is not None else self.tsea, 
         )
 
 @tree_math.struct
@@ -152,12 +149,11 @@ class CondensationData:
             dqlsc = dqlsc if dqlsc is not None else jnp.zeros((nodal_shape+(node_levels,))),
         )
 
-    @classmethod
-    def copy(self, condensation, precls=None, dtlsc=None, dqlsc=None):
+    def copy(self, precls=None, dtlsc=None, dqlsc=None):
         return CondensationData(
-            precls=precls if precls is not None else condensation.precls, 
-            dtlsc=dtlsc if dtlsc is not None else condensation.dtlsc, 
-            dqlsc=dqlsc if dqlsc is not None else condensation.dqlsc
+            precls=precls if precls is not None else self.precls, 
+            dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
+            dqlsc=dqlsc if dqlsc is not None else self.dqlsc
         )
 
 @tree_math.struct
@@ -178,14 +174,13 @@ class ConvectionData:
             precnv = precnv if precnv is not None else jnp.zeros((nodal_shape)),
         )
     
-    @classmethod
-    def copy(self, convection, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
-            psa=psa if psa is not None else convection.psa,
-            se=se if se is not None else convection.se,
-            iptop=iptop if iptop is not None else convection.iptop,
-            cbmf=cbmf if cbmf is not None else convection.cbmf,
-            precnv=precnv if precnv is not None else convection.precnv
+            psa=psa if psa is not None else self.psa,
+            se=se if se is not None else self.se,
+            iptop=iptop if iptop is not None else self.iptop,
+            cbmf=cbmf if cbmf is not None else self.cbmf,
+            precnv=precnv if precnv is not None else self.precnv
         )
 
 @tree_math.struct
@@ -200,11 +195,10 @@ class HumidityData:
             qsat = qsat if qsat is not None else jnp.zeros((nodal_shape+(node_levels,)))
         )
 
-    @classmethod
-    def copy(self, humidity, rh=None, qsat=None):
+    def copy(self, rh=None, qsat=None):
         return HumidityData(
-            rh=rh if rh is not None else humidity.rh, 
-            qsat=qsat if qsat is not None else humidity.qsat
+            rh=rh if rh is not None else self.rh, 
+            qsat=qsat if qsat is not None else self.qsat
         )
 
 @tree_math.struct
@@ -248,25 +242,24 @@ class SurfaceFluxData:
             phi0 = phi0 if phi0 is not None else jnp.zeros((nodal_shape))
         )
 
-    @classmethod
-    def copy(self, surf_flux, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
         return SurfaceFluxData(
-            stl_am=stl_am if stl_am is not None else surf_flux.stl_am,
-            soilw_am=soilw_am if soilw_am is not None else surf_flux.soilw_am,
-            lfluxland=lfluxland if lfluxland is not None else surf_flux.lfluxland,
-            ustr=ustr if ustr is not None else surf_flux.ustr,
-            vstr=vstr if vstr is not None else surf_flux.vstr,
-            shf=shf if shf is not None else surf_flux.shf,
-            evap=evap if evap is not None else surf_flux.evap,
-            slru=slru if slru is not None else surf_flux.slru,
-            hfluxn=hfluxn if hfluxn is not None else surf_flux.hfluxn,
-            tsfc=tsfc if tsfc is not None else surf_flux.tsfc,
-            tskin=tskin if tskin is not None else surf_flux.tskin,
-            u0=u0 if u0 is not None else surf_flux.u0,
-            v0=v0 if v0 is not None else surf_flux.v0,
-            t0=t0 if t0 is not None else surf_flux.t0,
-            fmask=fmask if fmask is not None else surf_flux.fmask,
-            phi0=phi0 if phi0 is not None else surf_flux.phi0
+            stl_am=stl_am if stl_am is not None else self.stl_am,
+            soilw_am=soilw_am if soilw_am is not None else self.soilw_am,
+            lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
+            ustr=ustr if ustr is not None else self.ustr,
+            vstr=vstr if vstr is not None else self.vstr,
+            shf=shf if shf is not None else self.shf,
+            evap=evap if evap is not None else self.evap,
+            slru=slru if slru is not None else self.slru,
+            hfluxn=hfluxn if hfluxn is not None else self.hfluxn,
+            tsfc=tsfc if tsfc is not None else self.tsfc,
+            tskin=tskin if tskin is not None else self.tskin,
+            u0=u0 if u0 is not None else self.u0,
+            v0=v0 if v0 is not None else self.v0,
+            t0=t0 if t0 is not None else self.t0,
+            fmask=fmask if fmask is not None else self.fmask,
+            phi0=phi0 if phi0 is not None else self.phi0
         )
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
@@ -296,16 +289,15 @@ class PhysicsData:
             sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape)
         )
 
-    @classmethod
-    def copy(self, phys_data, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
         return PhysicsData(
-            shortwave_rad=shortwave_rad if shortwave_rad is not None else phys_data.shortwave_rad,
-            longwave_rad=longwave_rad if longwave_rad is not None else phys_data.longwave_rad,
-            convection=convection if convection is not None else phys_data.convection,
-            mod_radcon=mod_radcon if mod_radcon is not None else phys_data.mod_radcon,
-            humidity=humidity if humidity is not None else phys_data.humidity,
-            condensation=condensation if condensation is not None else phys_data.condensation,
-            surface_flux=surface_flux if surface_flux is not None else phys_data.surface_flux,
-            date=date if date is not None else phys_data.date,
-            sea_model=sea_model if sea_model is not None else phys_data.sea_model
+            shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
+            longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
+            convection=convection if convection is not None else self.convection,
+            mod_radcon=mod_radcon if mod_radcon is not None else self.mod_radcon,
+            humidity=humidity if humidity is not None else self.humidity,
+            condensation=condensation if condensation is not None else self.condensation,
+            surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
+            date=date if date is not None else self.date,
+            sea_model=sea_model if sea_model is not None else self.sea_model
         )
