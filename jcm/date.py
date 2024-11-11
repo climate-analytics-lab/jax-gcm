@@ -165,9 +165,7 @@ class DateData:
         return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else jnp.zeros((1)))
  
     def copy(self, tyear=None):
-        copy = DateData()
-        copy.tyear = tyear if tyear is not None else self.tyear
-        return copy
+        return DateData(tyear if tyear is not None else self.tyear)
 
 def fraction_of_year_elapsed(dt):
     """

@@ -24,11 +24,11 @@ class TestDateUnit(unittest.TestCase):
         # Test the DateData class
 
         # Test with no input
-        d = DateData()
+        d = DateData.set_date()
         self.assertEqual(d.tyear, 0.0)
 
         # Test with input
-        d = DateData(Timestamp.from_datetime(datetime(2000, 7, 2)))
+        d = DateData.set_date(Timestamp.from_datetime(datetime(2000, 7, 2)))
         self.assertAlmostEqual(d.tyear, 0.5, places=2)
 
         # Test copy
