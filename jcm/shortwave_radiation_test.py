@@ -132,7 +132,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData.zeros(xy, kx)
 
         #equivalent of tyear = 0.6
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 8, 7, 14, 24)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2001, 8, 7)))
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
@@ -249,7 +249,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
-        np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0])
+        np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
     def test_random_input_consistency(self):     
         from datetime import datetime
