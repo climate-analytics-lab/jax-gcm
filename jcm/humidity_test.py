@@ -46,8 +46,8 @@ class TestHumidityUnit(unittest.TestCase):
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        convection_data = ConvectionData((ix,il), kx, psa=pressure)
-        physics_data = PhysicsData((ix,il), kx, convection=convection_data)
+        convection_data = ConvectionData.zeros((ix,il), kx, psa=pressure)
+        physics_data = PhysicsData.zeros((ix,il), kx, convection=convection_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp), jnp.zeros((ix,il)))
 
         # Edge case: Zero Specific Humidity
@@ -80,8 +80,8 @@ class TestHumidityUnit(unittest.TestCase):
         pressure = self.pressure_standard
         qg = self.qg_standard
 
-        convection_data = ConvectionData((ix,il), kx, psa=pressure)
-        physics_data = PhysicsData((ix,il), kx, convection=convection_data)
+        convection_data = ConvectionData.zeros((ix,il), kx, psa=pressure)
+        physics_data = PhysicsData.zeros((ix,il), kx, convection=convection_data)
         state = PhysicsState(jnp.zeros_like(temp), jnp.zeros_like(temp), temp, qg, jnp.zeros_like(temp),pressure)
 
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state)
