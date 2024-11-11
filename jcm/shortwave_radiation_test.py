@@ -132,7 +132,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData.zeros(xy, kx)
 
         #equivalent of tyear = 0.6
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2001, 8, 7)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2001, 8, 8)))
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
