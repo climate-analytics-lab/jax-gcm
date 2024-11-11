@@ -22,9 +22,9 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         phi = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(150000,0,kx)[jnp.newaxis, jnp.newaxis, :]
         iptop = jnp.ones((ix,il))*1
         
-        humidity_data = HumidityData((ix,il), kx, rh=rh, qsat=qsat)
-        convection_data = ConvectionData((ix,il), kx, iptop=iptop, se=se)
-        physics_data = PhysicsData((ix,il), kx, humidity=humidity_data, convection=convection_data)
+        humidity_data = HumidityData.zeros((ix,il), kx, rh=rh, qsat=qsat)
+        convection_data = ConvectionData.zeros((ix,il), kx, iptop=iptop, se=se)
+        physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
         state = PhysicsState(u_wind=jnp.zeros_like(qa),
                              v_wind=jnp.zeros_like(qa),
                              temperature=jnp.zeros_like(qa),

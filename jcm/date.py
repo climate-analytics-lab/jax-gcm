@@ -161,10 +161,9 @@ class DateData:
     tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
 
     @classmethod
-    def get_time(self, model_time=None):        
+    def set_date(self, model_time=None):        
         return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else jnp.zeros((1)))
-
-    @classmethod   
+ 
     def copy(self, tyear=None):
         copy = DateData()
         copy.tyear = tyear if tyear is not None else self.tyear

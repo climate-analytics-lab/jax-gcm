@@ -106,7 +106,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
 
-    def test_shortwave_radiation(self):        
+    def test_shortwave_radiation(self):   
+        from datetime import datetime
+        from jcm.date import Timestamp     
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -129,8 +131,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
-        date_data = DateData()
-        date_data.tyear = 0.6
+        #equivalent of tyear = 0.6
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 8, 7)))
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
@@ -190,7 +192,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, new_data = get_zonal_average_fields(state, physics_data)
@@ -208,7 +210,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -223,7 +225,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -234,10 +236,11 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
+        from datetime import datetime
+        from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
-        date_data = DateData()
-        date_data.tyear = 0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
@@ -254,7 +257,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
