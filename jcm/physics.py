@@ -8,10 +8,12 @@ from collections import abc
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
+from jcm.geometry import hsg, fsg, dhs
+from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, State, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, StateWithTime, PrimitiveEquations
 
 @tree_math.struct
 class PhysicsState:
@@ -21,7 +23,27 @@ class PhysicsState:
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
     surface_pressure: jnp.ndarray
-    # relative_humidity: jnp.ndarray
+
+    @classmethod
+    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else jnp.zeros(shape),
+            v_wind if v_wind is not None else jnp.zeros(shape),
+            temperature if temperature is not None else jnp.zeros(shape),
+            specific_humidity if specific_humidity is not None else jnp.zeros(shape),
+            geopotential if geopotential is not None else jnp.zeros(shape),
+            surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
+        )
+    
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else self.u_wind,
+            v_wind if v_wind is not None else self.v_wind,
+            temperature if temperature is not None else self.temperature,
+            specific_humidity if specific_humidity is not None else self.specific_humidity,
+            geopotential if geopotential is not None else self.geopotential,
+            surface_pressure if surface_pressure is not None else self.surface_pressure
+        )
 
 @tree_math.struct
 class PhysicsTendency:
@@ -30,8 +52,40 @@ class PhysicsTendency:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
 
+    @classmethod
+    def zeros(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else jnp.zeros(shape),
+            v_wind if v_wind is not None else jnp.zeros(shape),
+            temperature if temperature is not None else jnp.zeros(shape),
+            specific_humidity if specific_humidity is not None else jnp.zeros(shape)
+        )
+    
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else self.u_wind,
+            v_wind if v_wind is not None else self.v_wind,
+            temperature if temperature is not None else self.temperature,
+            specific_humidity if specific_humidity is not None else self.specific_humidity
+        )
 
-def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
+def initialize_physics():
+    # 1.2 Functions of sigma and latitude
+    pc.sigh = hsg
+    pc.sigl = jnp.log(fsg)
+    pc.grdsig = pc.grav/(dhs*pc.p0)
+    pc.grdscp = pc.grdsig/pc.cp
+
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    pc.wvi = jnp.zeros((fsg.shape[0], 2))
+    pc.wvi = pc.wvi.at[:-1, 0].set(1./(pc.sigl[1:]-pc.sigl[:-1]))
+    pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
+    pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
+
+def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -73,7 +127,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     return physics_state
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -94,14 +148,16 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = State(vor_tendency, div_tendency, t_tendency, log_sp_tendency, {'specific_humidity': q_tendency})
+    dynamics_tendency = StateWithTime(vor_tendency, div_tendency, t_tendency, log_sp_tendency, sim_time=0., 
+                                      tracers={'specific_humidity': q_tendency})
     return dynamics_tendency
 
 
 def get_physical_tendencies(
-    state: State,
+    state: StateWithTime,
     dynamics: PrimitiveEquations,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
+    data: PhysicsData = None
 ):
     """
     Computes the physical tendencies given the current state and a list of physics functions.
@@ -118,20 +174,11 @@ def get_physical_tendencies(
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
-    physics_tendency = PhysicsTendency(
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind))
+    physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
-    data = PhysicsData(physics_state.temperature.shape[0:2],physics_state.temperature.shape[2])
-    # optionally initialize the physics data here if it needs to be 
-
     for term in physics_terms:
         tend, data = term(physics_state, data)
         physics_tendency += tend
-
-    #physics_tendency = sum(term(physics_state) for term in physics_terms)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency

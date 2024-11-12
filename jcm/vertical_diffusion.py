@@ -43,7 +43,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
 
     nl1 = kx - 1
     cshc = dhs[kx - 1] / 3600.0
-    cvdi = (sigh[nl1-1] - sigh[0]) / ((nl1 - 1) * 3600.0)
+    cvdi = (sigh[nl1-1] - sigh[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / trshc
     fshcse = cshc / (trshc * cp)
@@ -52,7 +52,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     fvdise = cvdi / (trvds * cp)
 
     rsig = 1.0 / dhs
-    rsig1 = 1.0 / (1.0 - sigh[1:])
+    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - sigh[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
@@ -126,7 +126,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
     
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
+    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape,temperature=ttenvd, specific_humidity=qtenvd)
 
     # have not updated physics_data, can just return the instance we were passed 
     return physics_tendencies, physics_data

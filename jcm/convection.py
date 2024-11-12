@@ -17,16 +17,6 @@ rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
-if wvi[0, 1] == 0.:
-    """
-    wvi is the weights for vertical interpolation. It's calculated in physics f90, but doesn't seem to be calculated in new code. Below is the code I used to 
-    calculate it offline, but sigl and sigh seem to be a bit different than in the original Speedy code. Hard coded the wvi values, but would be good to resolve this
-    """
-    #wvi = wvi.at[:-1, 0].set(1.0 / (sigl[1:] - sigl[:-1]))
-    #wvi = wvi.at[:-1, 1].set((jnp.log(sigh[:-1]) - sigl[:-1]) * wvi[:-1, 0])
-    #wvi = wvi.at[-1, 1].set((jnp.log(0.99) - sigl[-1]) * wvi[-2, 0])
-    wvi=jnp.array([[0.74906313, 0.519211  ],[1.3432906,  0.52088195], [1.8845587,  0.49444085],[2.4663029,  0.5211523 ],[3.3897371,  0.5508966 ],[5.0501776,  0.59072757],[7.7501183,  0.58097243],[0.,         0.31963795]])
-
 def diagnose_convection(psa, se, qa, qsat):
     """
     Diagnose convectively unstable gridboxes  
@@ -72,21 +62,21 @@ def diagnose_convection(psa, se, qa, qsat):
     mss0 = jnp.maximum(mse0, mss[:, :, kx-1])
 
     # Compute mss2 array for all k layers (3 to kx-3)
-    k_indices = jnp.arange(3, kx-3, dtype=int)
+    k_indices = jnp.arange(2, kx-3, dtype=int)
     mss2 = mss[:, :, k_indices] + wvi[k_indices, 1] * (mss[:, :, k_indices + 1] - mss[:, :, k_indices])
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    mask_conditional_instability = mss0[:, :, None] > mss2
+    mask_conditional_instability = mss0[:, :, jnp.newaxis] > mss2
     ktop1 = jnp.full((ix, il), kx, dtype=int)
-    ktop1 = k_indices[jnp.argmax(mask_conditional_instability, axis=2)]
+    ktop1 = (k_indices+1)[jnp.argmax(mask_conditional_instability, axis=2)]
 
     # Check 2: gradient of actual moist static energy between lower and upper 
     # troposphere
-    mask_mse1_greater_mss2 = mse1[:, :, None] > mss2
+    mask_mse1_greater_mss2 = mse1[:, :, jnp.newaxis] > mss2
     ktop2 = jnp.full((ix, il), kx, dtype=int)
-    ktop2 = k_indices[jnp.argmax(mask_mse1_greater_mss2, axis=2)]
+    ktop2 = (k_indices+1)[jnp.argmax(mask_mse1_greater_mss2, axis=2)]
     msthr = jnp.zeros((ix, il), dtype=float)
-    msthr = mss2[jnp.arange(ix)[:, None], jnp.arange(il), jnp.argmax(mask_mse1_greater_mss2, axis=2)]
+    msthr = mss2[jnp.arange(ix)[:, jnp.newaxis], jnp.arange(il), jnp.argmax(mask_mse1_greater_mss2, axis=2)]
 
     # Check 3: RH > RH_c at both k=kx and k=kx-1
     qthr0 = rhbl * qsat[:, :, kx-1]
@@ -101,7 +91,7 @@ def diagnose_convection(psa, se, qa, qsat):
     iptop = jnp.where(combined_mask1, ktop1, iptop)
     qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
 
-    combined_mask2 = mask_ktop1_less_kx & lqthr & ~combined_mask1
+    combined_mask2 = mask_ktop1_less_kx & (~mask_ktop2_less_kx) & lqthr
     iptop = jnp.where(combined_mask2, ktop1, iptop)
     qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
 
@@ -126,20 +116,16 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     """
     conv = physics_data.convection
-    humidity = physics_data.humidity
     se = conv.se
     qa = state.specific_humidity
-    qsat = humidity.qsat
+    qsat = physics_data.humidity.qsat
     ix, il, kx = se.shape
+    _zeros_3d = lambda: jnp.zeros((ix,il,kx))
     psa = conv.psa
     
     # 1. Initialization of output and workspace arrays
 
-    dfse = jnp.zeros_like(se)
-    dfqa = jnp.zeros_like(state.specific_humidity)
-
-    cbmf = jnp.zeros_like(psa)
-    precnv = jnp.zeros_like(psa)
+    dfse, dfqa = _zeros_3d(), _zeros_3d()
 
     #keep indexing consistent with original Speedy
     nl1 = kx - 1 
@@ -155,134 +141,90 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     rdps=2.0/(1.0 - psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, state.specific_humidity, humidity.qsat)
+    iptop, qdif = diagnose_convection(psa, se, qa, qsat)
 
     # 3. Convection over selected grid-points
     mask = iptop < kx
-    #3.1 Boundary layer (cloud base)
+    # 3.1 Boundary layer (cloud base)
     k = kx - 1
-    k1 = k - 1
 
     # Maximum specific humidity in the PBL
-    qmax = jnp.maximum(1.01 * state.specific_humidity[:, :, -1], humidity.qsat[:, :, -1])
+    qmax = jnp.maximum(1.01 * qa[:, :, -1], qsat[:, :, -1])
 
-    # Dry static energy and moisture at upper boundary
-    sb = se[:, :, k1] + wvi[k1, 1] * (se[:, :, k] - se[:, :, k1])
-    qb = jnp.minimum(state.specific_humidity[:, :, k1] + wvi[k1, 1] * (state.specific_humidity[:, :, k] - state.specific_humidity[:, :, k1]), state.specific_humidity[:, :, k])
+    interpolate = lambda tracer: tracer[:, :, :-1] + wvi[jnp.newaxis, jnp.newaxis, :-1, 1] * jnp.diff(tracer, axis=-1)
+    _sb_3d, _qb_3d = (_zeros_3d().at[:, :, 1:].set(interpolate(tracer)) for tracer in (se, qa))
     
+    # Dry static energy and moisture at upper boundary
+    sb, qb = _sb_3d[:, :, k], jnp.minimum(_qb_3d, qa)[:, :, k]
+    
+    # Cloud-base mass flux
     fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
-    cbmf = jnp.where(mask, fmass, cbmf)
+    cbmf = mask * fmass
 
     # Upward fluxes at upper boundary
-    fus = fmass * se[:, :, -1]
-    fuq = fmass * qmax
+    fus, fuq = fmass * se[:, :, k], fmass * qmax
 
     # Downward fluxes at upper boundary
-    fds = fmass*sb
-    fdq = fmass*qb
-
-    #Net flux of dry static energy and moisture
-    dfse = dfse.at[:, :, k].set(fds - fus)
-    dfqa = dfqa.at[:, :, k].set(fdq - fuq)
-
-    # 3.2 intermediate layers (entrainment)
-    #start by making entrainment profile:
-    enmass = entr[jnp.newaxis, jnp.newaxis, :] * psa[:, :, jnp.newaxis] * cbmf[:, :, jnp.newaxis]
-
-    #now get mass entrainment 
-    """
-    N.B in this and following loops, fluxes at one level depend on fluxes at level below, so have to iterate 
-    (is there a better way of doing this?)
-    """
-    #mass flux
-    def entrain_loop_fmass(i, var):
-        a = kx - i - 1
-        var = var.at[:, :, a].set(var[:, :, a + 1] + enmass[:, :, a - 1])
-        return var   
-    fmass_broadcast = jnp.tile(fmass[:, :, jnp.newaxis], (1, 1, kx))
-    fmass_new = jax.lax.fori_loop(1, kx - 2, entrain_loop_fmass, fmass_broadcast)
-
-    #upwards static energy flux
-    def entrain_loop_fus(i, var):
-        a = kx - i - 1
-        var = var.at[:, :, a].set(var[:, :, a + 1] + entrain_se[:, :, a - 1])
-        return var
-    entrain_se = enmass*se[:, :, 1:kx-1]
-    fus_broadcast = jnp.tile(fus[:, :, jnp.newaxis], (1, 1, kx))
-    fus_new = jax.lax.fori_loop(1, kx - 2, entrain_loop_fus, fus_broadcast)
-
-    #upwards moisture flux
-    def entrain_loop_fuq(i, var):
-        a = kx - i - 1
-        var = var.at[:, :, a].set(var[:, :, a + 1] + entrain_qa[:, :, a - 1])
-        return var
-    entrain_qa = enmass*qa[:, :, 1:kx-1]
-    fuq_broadcast = jnp.tile(fuq[:, :, jnp.newaxis], (1, 1, kx))
-    fuq_new = jax.lax.fori_loop(1, kx - 2, entrain_loop_fuq, fuq_broadcast)
-
-    #Downward fluxes
-    sb = se[:, :, :kx - 2] + wvi[jnp.newaxis, jnp.newaxis, :kx-2, 1] * (se[:,:, 1:kx - 1] - se[:,:, :kx - 2])
-    qb = qa[:, :, :kx - 2] + wvi[jnp.newaxis, jnp.newaxis, :kx-2, 1] * (qa[:,:, 1:kx - 1] - qa[:,:, :kx - 2])
-
-    fds_new = jnp.tile(fds[:, :, jnp.newaxis], (1, 1, kx))
-    fdq_new = jnp.tile(fdq[:, :, jnp.newaxis], (1, 1, kx))
-
-    fds_new = fds_new.at[:, :, 1:kx-1].set(fmass_new[:, :, 1:kx-1]*sb)
-    fdq_new = fdq_new.at[:, :, 1:kx-1].set(fmass_new[:, :, 1:kx-1]*qb)
-
-    #Now mask out all values above iptop:
-    # Expand the iptop array to match the shape of fus_new
-    expanded_iptop = jnp.expand_dims(iptop, axis=-1)
-    
-    # Generate indices for the third dimension
-    indices = jnp.arange(kx)
-    
-    # Create a boolean mask where we want to set values to 0
-    new_mask = indices > expanded_iptop
-    
-    # Apply the mask to the fluxes
-    fus_new_masked = fus_new * new_mask
-    fuq_new_masked = fuq_new * new_mask
-    fds_new_masked = fds_new * new_mask
-    fdq_new_masked = fdq_new * new_mask
-    
-    dfse = dfse.at[:, :, :kx-1].set(fus_new_masked[:, :, 1:] - fus_new_masked[:, :, :-1] + fds_new_masked[:, :, :-1] - fds_new_masked[:, :, 1:])
-    dfqa = dfqa.at[:, :, :kx-1].set(fuq_new_masked[:, :, 1:] - fuq_new_masked[:, :, :-1] + fdq_new_masked[:, :, :-1] - fdq_new_masked[:, :, 1:])
-
-    # Secondary moisture flux -- copied this directly from old code. Hard to test
-    delq_vals = rhil * qsat[:, :, 1:kx-1] - qa[:, :, 1:kx-1]
-    fsq_vals = jnp.where(delq_vals > 0, smf * cbmf[:, :, jnp.newaxis] * delq_vals, 0.0)
-    dfqa = dfqa.at[:, :, 1:kx-1].add(fsq_vals)
-    dfqa = dfqa.at[:, :, kx].add(-jnp.sum(fsq_vals, axis=-1))
-
-    # 3.3 Top layer (condensation and detrainment)
-    k = iptop
-
-    # Flux of convective precipitation
-    i = jnp.arange(ix)[:, jnp.newaxis]  # Shape (ix, 1)
-    j = jnp.arange(il)[jnp.newaxis, :]  # Shape (1, il)
-
-    qsatb = qsat[j, j, k] + wvi[k, 1] *(qsat[i, j, k+1]-qsat[i,j, k])
-    precnv = jnp.where(mask, jnp.maximum(fuq_new[i, j, k] - fmass_new[i, j, k] * qsatb, 0.0), precnv)
+    fds, fdq = fmass * sb, fmass * qb
 
     # Net flux of dry static energy and moisture
-    dfse = dfse.at[i,j,k].set(fus_new[i,j, k +1] - fds_new[i,j, k+1] + alhc * precnv)
-    dfqa = dfqa.at[i,j,k].set(fuq_new[i,j,k+1] - fdq_new[i,j,k+1] - precnv)
+    dfse, dfqa = dfse.at[:, :, k].set(fds - fus), dfqa.at[:, :, k].set(fdq - fuq)
 
-    # make a new physics_data struct. overwrite the appropriate convection bits that were calculated in this function
-    # pass on the rest of physics_data that was not updated or needed in this function
+    # 3.2 Intermediate layers (entrainment)
+
+    # replace loop with masking
+    loop_mask = (kx - 2 >= jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :]) & \
+                (jnp.arange(kx)[jnp.newaxis, jnp.newaxis, :] >= iptop[:, :, jnp.newaxis])
+    
+    #start by making entrainment profile:
+    _enmass_3d = loop_mask * _zeros_3d().at[:, :, 1:-1].set(entr[jnp.newaxis, jnp.newaxis, :] * (psa * cbmf)[:, :, jnp.newaxis])
+
+    # Upward fluxes at upper boundary of mass, energy, moisture
+    _fmass_3d, _fus_3d, _fuq_3d = (
+        base_flux[:, :, jnp.newaxis] + jnp.cumsum((_enmass_3d * tracer)[:, :, ::-1], axis=-1)[:, :, ::-1]
+        for base_flux, tracer in ((fmass, 1), (fus, se), (fuq, qa))
+    )
+
+    #Downward fluxes
+    _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[:, :, -1].set(fds), (_fmass_3d * _qb_3d).at[:, :, -1].set(fdq)
+
+    # Calculate flux convergence
+    dfse = dfse.at[:, :, :-1].add(loop_mask[:, :, :-1] * (jnp.diff(_fus_3d - _fds_3d, axis=-1)))
+    dfqa = dfqa.at[:, :, :-1].add(loop_mask[:, :, :-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=-1)))
+
+    # Secondary moisture flux
+    delq = loop_mask * (rhil * qsat - qa)
+    moisture_flux_mask = delq > 0.
+    fsq_masked = moisture_flux_mask * smf * cbmf[:, :, jnp.newaxis] * delq
+    dfqa += fsq_masked
+    dfqa = dfqa.at[:, :, -1].add(-jnp.sum(fsq_masked, axis=-1))
+
+    # assuming that take_along_axis is at least as well-optimized as any workaround via masking
+    index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
+    fmass, fus, fuq, fds, fdq = (index_array(_flux_3d, iptop) for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
+    
+    # 3.3 Top layer (condensation and detrainment)
+    k = iptop - 1
+
+    # Flux of convective precipitation
+    qsatb = index_array(interpolate(qsat), k)
+    precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
+
+    # Net flux of dry static energy and moisture
+    dfse = dfse.at[:, :, k].set(fus - fds + alhc * precnv)
+    dfqa = dfqa.at[:, :, k].set(fuq - fdq - precnv)
+
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
-    # Another important note is that this goes from 2:kx in the fortran, and grdscp and grdsig are length kx+1 (not kx)
+    # Another important note is that this goes from 2:kx in the fortran
 
-    rps = 1/psa 
-    ttend = dfse 
-    qtend = dfqa
-    ttend = ttend.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:-1])
-    qtend = qtend.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:-1])
+    # Compute tendencies due to convection. Logic from physics.f90:127-130
+    rps = 1/psa
+    ttend = dfse.at[:,:,1:].set(dfse[:,:,1:] * rps[:,:,jnp.newaxis] * grdscp[jnp.newaxis, jnp.newaxis, 1:])
+    qtend = dfqa.at[:,:,1:].set(dfqa[:,:,1:] * rps[:,:,jnp.newaxis] * grdsig[jnp.newaxis, jnp.newaxis, 1:])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),ttend,qtend)
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend,specific_humidity=qtend)
     
     return physics_tendencies, physics_data

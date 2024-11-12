@@ -4,7 +4,6 @@ For storing and initializing physical constants.
 '''
 
 import jax.numpy as jnp
-from jcm.params import kx
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)
@@ -22,8 +21,8 @@ sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
 epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
 # Functions of sigma and latitude (initial. in INPHYS)
-sigl = jnp.log(jnp.linspace(1.0, 0.0, kx)) # Logarithm of full-level sigma
-sigh = jnp.linspace(1.0, 0.0, kx + 1) # Half-level sigma
-grdsig = grav / (jnp.gradient(sigh) * p0) # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
-grdscp = grav / (jnp.gradient(sigh) * p0 * cp) # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
-wvi = jnp.zeros((kx, 2)) # Weights for vertical interpolation
+sigl = None # Logarithm of full-level sigma
+sigh = None # Half-level sigma
+grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
+gridscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
+wvi = None # Weights for vertical interpolation

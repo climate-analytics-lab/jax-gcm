@@ -1,14 +1,15 @@
 import unittest
-from jcm.physics import get_physical_tendencies
-from jcm.held_suarez_model import HeldSuarezModel
 from dinosaur.primitive_equations import PrimitiveEquations
 from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
-from jcm.held_suarez import HeldSuarezForcing
+from datetime import datetime
 
 class TestPhysicsUnit(unittest.TestCase):
-
     def test_speedy_model_HS94(self):
+        from jcm.held_suarez_model import HeldSuarezModel
+        from jcm.held_suarez import HeldSuarezForcing
+        from jcm.physics import get_physical_tendencies
+
         hs_model = HeldSuarezModel()
     
         state = hs_model.get_initial_state()
@@ -38,6 +39,6 @@ class TestPhysicsUnit(unittest.TestCase):
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
-        dynamics_tendency = get_physical_tendencies(state,dynamics,physics_terms)
+        dynamics_tendency = get_physical_tendencies(state, dynamics, physics_terms, datetime(2000, 1, 1))
 
         self.assertIsNotNone(dynamics_tendency)

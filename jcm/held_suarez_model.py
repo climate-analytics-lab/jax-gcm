@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
+from dinosaur import primitive_equations
 from jcm.held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, physics_terms):
@@ -63,7 +64,7 @@ class HeldSuarezModel:
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
         # Governing equations
-        primitive = dinosaur.primitive_equations.PrimitiveEquations(
+        primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
             self.ref_temps,
             self.orography,
             self.coords,
@@ -88,13 +89,14 @@ class HeldSuarezModel:
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
         
-    def get_initial_state(self, random_seed=0) -> dinosaur.primitive_equations.State:
-        return self.initial_state_fn(jax.random.PRNGKey(random_seed))
+    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
+        state =  self.initial_state_fn(jax.random.PRNGKey(random_seed))
+        return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
+    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
         return self.step_fn(state)
                                  
-    def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
+    def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
