@@ -38,16 +38,12 @@ class TestDownwardLongwave(unittest.TestCase):
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
+        xyz = (ix, il, kx)
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
-        mod_radcon = ModRadConData((ix, il), kx, flux=flux, st4a=st4a)
-        physics_data = PhysicsData((ix, il), kx, mod_radcon=mod_radcon)
+        mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
+        physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
 
-        state = PhysicsState(u_wind=jnp.zeros_like(ta),
-                             v_wind=jnp.zeros_like(ta),
-                             temperature=ta,
-                             specific_humidity=jnp.zeros_like(ta),
-                             geopotential=jnp.zeros_like(ta),
-                             surface_pressure=jnp.zeros((ix, il)))
+        state = PhysicsState.zeros(xyz,temperature=ta)
         
         _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data)
 

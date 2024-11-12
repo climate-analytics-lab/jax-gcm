@@ -50,9 +50,9 @@ def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     def physical_tendencies(state):                
         
         model_time = reference_date + Timedelta(seconds=state.sim_time)
-        data = PhysicsData(dynamics.coords.nodal_shape[1:],
+        data = PhysicsData.zeros(dynamics.coords.nodal_shape[1:],
                     dynamics.coords.nodal_shape[0],
-                    date=DateData(model_time))
+                    date=DateData.set_date(model_time))
 
         return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)

@@ -30,14 +30,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
 
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
@@ -56,6 +56,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test1(self):
         xy = (ix,il)
+        xyz = (ix,il,kx)
         psa = jnp.ones((ix,il)) #surface pressure
         ua = jnp.ones(((ix, il, kx))) #zonal wind
         va = jnp.ones(((ix, il, kx))) #meridional wind
@@ -71,14 +72,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
             
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
@@ -105,6 +106,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test2(self):
         xy = (ix,il)
+        xyz = (ix, il, kx)
         psa = jnp.ones((ix, il)) #surface pressure
         ua = jnp.ones(((ix, il, kx))) #zonal wind
         va = jnp.ones(((ix, il, kx))) #meridional wind
@@ -120,14 +122,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
@@ -153,6 +155,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test3(self):
         xy = (ix,il)
+        xyz = (ix, il, kx)
         psa = jnp.ones((ix, il)) #surface pressure
         ua = jnp.ones(((ix, il, kx))) #zonal wind
         va = jnp.ones(((ix, il, kx))) #meridional wind
@@ -168,14 +171,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
@@ -200,6 +203,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test4(self):
         xy = (ix,il)
+        xyz = (ix, il, kx)
         psa = jnp.ones((ix, il)) #surface pressure
         ua = jnp.ones(((ix, il, kx))) #zonal wind
         va = jnp.ones(((ix, il, kx))) #meridional wind
@@ -215,14 +219,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux
@@ -247,6 +251,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test5(self):
         xy = (ix,il)
+        xyz = (ix,il,kx)
         psa = jnp.ones((ix, il)) #surface pressure
         ua = jnp.ones(((ix, il, kx))) #zonal wind
         va = jnp.ones(((ix, il, kx))) #meridional wind
@@ -261,14 +266,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
-        state = PhysicsState(ua, va, ta, qa, phi, jnp.zeros_like(psa))
-        sflux_data = SurfaceFluxData(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
-        hum_data = HumidityData(xy,kx,rh=rh)
-        conv_data = ConvectionData(xy,kx,psa=psa)
-        sw_rad = SWRadiationData(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData(xy,kx,rlds=rlds)
-        sea_data = SeaModelData(xy,tsea=tsea)
-        physics_data = PhysicsData(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
         _, physics_data = get_surface_fluxes(state, physics_data)
         sflux_data = physics_data.surface_flux

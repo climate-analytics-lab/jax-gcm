@@ -17,20 +17,16 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def test_get_large_scale_condensation_tendencies(self):
         xy = (ix,il)
+        xyz = (ix,il,kx)
         psa = jnp.ones((ix, il))
         qa = jnp.ones((ix, il, kx))
         qsat = jnp.ones((ix, il, kx))
         itop = jnp.full((ix, il), kx - 1)
 
-        convection = ConvectionData(xy, kx, psa=psa,iptop=itop)
-        humidity = HumidityData(xy, kx, qsat=qsat)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
-                             v_wind=jnp.zeros_like(qa),
-                             temperature=jnp.zeros_like(qa),
-                             specific_humidity=qa,
-                             geopotential=jnp.zeros_like(qa),
-                             surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
+        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        humidity = HumidityData.zeros(xy, kx, qsat=qsat)
+        state = state = PhysicsState.zeros(xyz, specific_humidity=qa)
+        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
@@ -41,6 +37,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def test_get_large_scale_condensation_tendencies_realistic(self):
         xy = (ix,il)
+        xyz = (ix,il,kx)
         psa = jnp.ones((ix, il)) * 1.0110737
         qa = jnp.asarray([[[16.148024  , 10.943978  ,  5.851813  ,  2.4522789 ,  0.02198645,
         0.16069981,  0.        ,  0.        ]]])
@@ -48,15 +45,10 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01]]])
         itop = jnp.ones((ix, il)) * 4
 
-        convection = ConvectionData(xy, kx, psa=psa,iptop=itop)
-        humidity = HumidityData(xy, kx, qsat=qsat)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
-                             v_wind=jnp.zeros_like(qa),
-                             temperature=jnp.zeros_like(qa),
-                             specific_humidity=qa,
-                             geopotential=jnp.zeros_like(qa),
-                             surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData(xy, kx, humidity=humidity, convection=convection)
+        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        humidity = HumidityData.zeros(xy, kx, qsat=qsat)
+        state = PhysicsState.zeros(xyz, specific_humidity=qa)
+        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
         

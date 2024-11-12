@@ -126,7 +126,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     
     ttenvd = ttenvd.at[:, :, 1:nl1+1].add(-cumulative_fluxse)
     
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(ttenvd), jnp.zeros_like(ttenvd), ttenvd, qtenvd)
+    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape,temperature=ttenvd, specific_humidity=qtenvd)
 
     # have not updated physics_data, can just return the instance we were passed 
     return physics_tendencies, physics_data

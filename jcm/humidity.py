@@ -39,7 +39,7 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
     physics_data = physics_data.copy(convection=convection_out, humidity=humidity_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     
     return physics_tendencies, physics_data
 

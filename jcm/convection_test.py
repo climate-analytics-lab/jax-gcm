@@ -37,7 +37,7 @@ class TestConvectionUnit(unittest.TestCase):
      
     def test_get_convective_tendencies_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
-
+        xyz = (ix, il, kx)
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.])
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
@@ -47,15 +47,10 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
         qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
 
-        convection = ConvectionData((ix, il), kx, psa=psa, se=se_broadcast)
-        humidity = HumidityData((ix, il), kx, qsat=qsat_broadcast*1000.)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa_broadcast),
-                             v_wind=jnp.zeros_like(qa_broadcast),
-                             temperature=jnp.zeros_like(qa_broadcast),
-                             specific_humidity=qa_broadcast*1000.,
-                             geopotential=jnp.zeros_like(qa_broadcast),
-                             surface_pressure=jnp.zeros((ix, il)))
-        physics_data = PhysicsData((ix, il), kx, humidity=humidity, convection=convection)
+        convection = ConvectionData.zeros((ix, il), kx, psa=psa, se=se_broadcast)
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast*1000.)
+        state = PhysicsState.zeros(xyz,specific_humidity=qa_broadcast*1000.)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data)
 

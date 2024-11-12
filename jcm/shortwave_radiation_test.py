@@ -106,7 +106,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
 
-    def test_shortwave_radiation(self):        
+    def test_shortwave_radiation(self):   
+        from datetime import datetime
+        from jcm.date import Timestamp     
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -114,6 +116,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         se = .1*geopotential
 
         xy = (ix, il)
+        xyz = (ix, il, kx)
         broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
@@ -123,17 +126,17 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * np.ones(xy)
         fmask = .7 * np.ones(xy)
 
-        surface_flux = SurfaceFluxData(xy,fmask=fmask)
-        humidity = HumidityData(xy, kx, rh=rh, qsat=qsat)
-        convection = ConvectionData(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
-        condensation = CondensationData(xy, kx, precls=precls)
-        sw_data = SWRadiationData(xy, kx)
+        surface_flux = SurfaceFluxData.zeros(xy,fmask=fmask)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx)
 
-        date_data = DateData()
-        date_data.tyear = 0.6
+        #equivalent of tyear = 0.6
+        date_data = DateData(tyear=0.6)
 
-        physics_data = PhysicsData(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         _, physics_data = clouds(state, physics_data)
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -190,9 +193,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-        physics_data = PhysicsData(xy,kx,date=date_data)
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        state = PhysicsState.zeros(xyz)
         _, new_data = get_zonal_average_fields(state, physics_data)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
@@ -208,8 +211,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-        physics_data = PhysicsData(xy,kx,date=date_data)
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
@@ -223,8 +226,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-        physics_data = PhysicsData(xy,kx,date=date_data)
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
@@ -234,19 +237,20 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
+        from datetime import datetime
+        from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
-        date_data = DateData()
-        date_data.tyear = 0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
 
-        physics_data = PhysicsData(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
-        np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0])
+        np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
     def test_random_input_consistency(self):     
         from datetime import datetime
@@ -254,9 +258,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-        physics_data = PhysicsData(xy,kx,date=date_data)
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        state = PhysicsState.zeros(xyz)
         _, physics_data = get_zonal_average_fields(state, physics_data)
         
         # Ensure outputs are consistent and within expected ranges

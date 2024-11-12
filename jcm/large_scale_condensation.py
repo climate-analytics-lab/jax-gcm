@@ -81,6 +81,6 @@ def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: P
     condensation_out = physics_data.condensation.copy(precls=precls)
     convection_out = physics_data.convection.copy(iptop=iptop)
     physics_data = physics_data.copy(condensation=condensation_out, convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),dtlsc, dqlsc)
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=dtlsc, specific_humidity=dqlsc)
     
     return physics_tendencies, physics_data

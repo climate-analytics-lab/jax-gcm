@@ -225,6 +225,6 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),ttend,qtend)
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend,specific_humidity=qtend)
     
     return physics_tendencies, physics_data
