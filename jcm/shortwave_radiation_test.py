@@ -240,7 +240,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.date import Timestamp
         xy = (ix, il)
         xyz = (ix, il, kx)
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
