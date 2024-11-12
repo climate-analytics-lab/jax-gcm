@@ -172,7 +172,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     
     # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
     ttend_lwr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis]
-    physics_tendencies = PhysicsTendency(shape=state.temperature.shape,temperature=ttend_lwr)
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend_lwr)
     
     return physics_tendencies, physics_data
     
