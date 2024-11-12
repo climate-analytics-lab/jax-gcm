@@ -116,6 +116,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         se = .1*geopotential
 
         xy = (ix, il)
+        xyz = (ix, il, kx)
         broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
@@ -135,7 +136,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData(tyear=0.6)
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState(jnp.zeros_like(qa), jnp.zeros_like(qa), jnp.zeros_like(qa), specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         _, physics_data = clouds(state, physics_data)
         _, physics_data = get_zonal_average_fields(state, physics_data)
@@ -194,7 +195,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        state = PhysicsState.zeros(xyz)
         _, new_data = get_zonal_average_fields(state, physics_data)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
@@ -259,7 +260,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        state = PhysicsState.zeros(xyz)
         _, physics_data = get_zonal_average_fields(state, physics_data)
         
         # Ensure outputs are consistent and within expected ranges

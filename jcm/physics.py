@@ -23,7 +23,27 @@ class PhysicsState:
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
     surface_pressure: jnp.ndarray
-    # relative_humidity: jnp.ndarray
+
+    @classmethod
+    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else jnp.zeros(shape),
+            v_wind if v_wind is not None else jnp.zeros(shape),
+            temperature if temperature is not None else jnp.zeros(shape),
+            specific_humidity if specific_humidity is not None else jnp.zeros(shape),
+            geopotential if geopotential is not None else jnp.zeros(shape),
+            surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
+        )
+    
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else self.u_wind,
+            v_wind if v_wind is not None else self.v_wind,
+            temperature if temperature is not None else self.temperature,
+            specific_humidity if specific_humidity is not None else self.specific_humidity,
+            geopotential if geopotential is not None else self.geopotential,
+            surface_pressure if surface_pressure is not None else self.surface_pressure
+        )
 
 @tree_math.struct
 class PhysicsTendency:
@@ -31,6 +51,23 @@ class PhysicsTendency:
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
+
+    @classmethod
+    def zeros(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else jnp.zeros(shape),
+            v_wind if v_wind is not None else jnp.zeros(shape),
+            temperature if temperature is not None else jnp.zeros(shape),
+            specific_humidity if specific_humidity is not None else jnp.zeros(shape)
+        )
+    
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else self.u_wind,
+            v_wind if v_wind is not None else self.v_wind,
+            temperature if temperature is not None else self.temperature,
+            specific_humidity if specific_humidity is not None else self.specific_humidity
+        )
 
 def initialize_physics():
     # 1.2 Functions of sigma and latitude
@@ -137,11 +174,7 @@ def get_physical_tendencies(
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
-    physics_tendency = PhysicsTendency(
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind),
-        jnp.zeros_like(physics_state.u_wind))
+    physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:
         tend, data = term(physics_state, data)

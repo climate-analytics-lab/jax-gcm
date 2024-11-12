@@ -214,7 +214,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
     ttend_swr = dfabs*grdscp[jnp.newaxis, jnp.newaxis, :]/physics_data.convection.psa[:, :, jnp.newaxis] # physics.f90:160-162
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind), jnp.zeros_like(state.v_wind), ttend_swr, jnp.zeros_like(state.specific_humidity))
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
     return physics_tendencies, physics_data
 
@@ -289,7 +289,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
 
     swrad_out = physics_data.shortwave_rad.copy(fsol=fsol, ozupp=ozupp, ozone=ozone, zenit=zenit, stratz=stratz)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
     
     return physics_tendencies, physics_data
 
@@ -390,7 +390,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
 
     # This function doesn't directly produce tendencies
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
 
     return physics_tendencies, physics_data
 

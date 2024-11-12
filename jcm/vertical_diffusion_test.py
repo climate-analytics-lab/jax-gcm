@@ -22,15 +22,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         phi = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(150000,0,kx)[jnp.newaxis, jnp.newaxis, :]
         iptop = jnp.ones((ix,il))*1
         
+        xyz = (ix, il, kx)
         humidity_data = HumidityData.zeros((ix,il), kx, rh=rh, qsat=qsat)
         convection_data = ConvectionData.zeros((ix,il), kx, iptop=iptop, se=se)
         physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
-        state = PhysicsState(u_wind=jnp.zeros_like(qa),
-                             v_wind=jnp.zeros_like(qa),
-                             temperature=jnp.zeros_like(qa),
-                             specific_humidity=qa,
-                             geopotential=phi,
-                             surface_pressure=jnp.zeros((ix, il)))
+        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=phi)
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
         physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data)
