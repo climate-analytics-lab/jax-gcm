@@ -42,17 +42,32 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
+def fixed_ssts(il):
+    from jcm.geometry import radang
+    sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
+    return jnp.tile(sst_profile[jnp.newaxis, :], (il, 1))
+
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
-    from jcm.physics_data import PhysicsData
+    from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
 
     def physical_tendencies(state):                
         
         model_time = reference_date + Timedelta(seconds=state.sim_time)
-        data = PhysicsData.zeros(dynamics.coords.nodal_shape[1:],
-                    dynamics.coords.nodal_shape[0],
-                    date=DateData.set_date(model_time))
+        date = DateData.set_date(model_time)
+
+        sea_model = SeaModelData.zeros(
+            dynamics.coords.nodal_shape[1:],
+            tsea=fixed_ssts(dynamics.coords.nodal_shape[1])
+        )
+
+        data = PhysicsData.zeros(
+            dynamics.coords.nodal_shape[1:],
+            dynamics.coords.nodal_shape[0],
+            date=date,
+            sea_model=sea_model
+        )
 
         return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
