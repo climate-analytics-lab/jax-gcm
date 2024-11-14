@@ -6,6 +6,9 @@ import argparse
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
     
+"""
+Run model with specific parameters
+"""
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def run_model(cfg: DictConfig) -> None:
     os.makedirs(cfg.output.directory, exist_ok=True)
