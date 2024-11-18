@@ -4,6 +4,7 @@ Parametrization of convection. Convection is modelled using a simplified
 version of the Tiedke (1993) mass-flux convection scheme.
 '''
 import jax
+from jax import jit
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
@@ -17,6 +18,7 @@ rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
 entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
 smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
+@jit
 def diagnose_convection(psa, se, qa, qsat):
     """
     Diagnose convectively unstable gridboxes  
@@ -97,6 +99,7 @@ def diagnose_convection(psa, se, qa, qsat):
 
     return iptop, qdif
 
+@jit
 def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.

@@ -1,3 +1,5 @@
+import jax
+from jax import jit
 import jax.numpy as jnp
 from jcm.physical_constants import sbc, wvi, grdscp
 from jcm.mod_radcon import epslw, emisfc, fband
@@ -6,6 +8,7 @@ from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 nband = 4
 
+@jit
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
 
     """
@@ -99,6 +102,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
 
     return physics_tendencies, physics_data
 
+@jit
 def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     """
     Calculate the upward longwave radiation fluxes

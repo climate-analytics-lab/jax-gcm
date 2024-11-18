@@ -17,13 +17,12 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
-    initialize_modules(kx = grid_shape[0],
-                    il = grid_shape[2])
+    initialize_modules(kx = grid_shape[0], il = grid_shape[2])
     
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
@@ -32,6 +31,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
         clouds,
+        get_zonal_average_fields,
         get_shortwave_rad_fluxes,
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
@@ -42,24 +42,25 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
-def fixed_ssts(il):
+def fixed_ssts(ix):
     from jcm.geometry import radang
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis, :], (il, 1))
+    return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
 
 def convert_tendencies_to_equation(dynamics, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
 
-    def physical_tendencies(state):                
+    def physical_tendencies(state):
         
-        model_time = reference_date + Timedelta(seconds=state.sim_time)
-        date = DateData.set_date(model_time)
+        date = DateData.set_date(
+            model_time = reference_date + Timedelta(seconds=state.sim_time)
+        )
 
         sea_model = SeaModelData.zeros(
             dynamics.coords.nodal_shape[1:],
-            tsea=fixed_ssts(dynamics.coords.nodal_shape[1])
+            tsea = fixed_ssts(dynamics.coords.nodal_shape[1])
         )
 
         data = PhysicsData.zeros(
@@ -151,6 +152,7 @@ class SpeedyModel:
         
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
+        state.log_surface_pressure = state.log_surface_pressure * 1e-3
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
     def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:

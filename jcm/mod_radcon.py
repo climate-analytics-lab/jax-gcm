@@ -1,3 +1,4 @@
+from jax import jit
 import jax.numpy as jnp
 # Radiation and cloud constants
 # Albedo values
@@ -18,6 +19,7 @@ n_bands = 4
 # Initialize empty fband array
 fband_initial = jnp.zeros((n_temperatures, n_bands))
 
+@jit
 def radset(initial_array):
     """
     Set the energy fraction emitted in each LW band = f(T)

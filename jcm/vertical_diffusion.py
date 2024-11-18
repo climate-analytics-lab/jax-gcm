@@ -12,7 +12,7 @@ redshc = jnp.array(0.5)  # Reduction factor of shallow convection in areas of de
 rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
 segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
-# @jit
+@jit
 def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     
     '''
