@@ -168,7 +168,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     dfabs = dfabs.at[:,:,1].set(dfabs[:,:,1] - corlw2)
     ftop = corlw1 + corlw2
 
-    ftop = jnp.sum(flux, axis = -1)
+    ftop += jnp.sum(flux, axis = -1)
 
     longwave_out = physics_data.longwave_rad.copy(rlds=fsfc, ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
