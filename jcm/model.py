@@ -70,7 +70,7 @@ def convert_tendencies_to_equation(dynamics, specs, physics_terms, reference_dat
             sea_model=sea_model
         )
 
-        return get_physical_tendencies(state, dynamics, specs, physics_terms, data)
+        return get_physical_tendencies(state, dynamics, physics_terms, data)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -135,7 +135,7 @@ class SpeedyModel:
         
         physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, self.physics_specs, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms, reference_date=start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 

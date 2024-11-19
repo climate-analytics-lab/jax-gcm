@@ -8,9 +8,9 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
 from jcm.held_suarez import HeldSuarezForcing
 
-def convert_tendencies_to_equation(dynamics, specs, physics_terms):
+def convert_tendencies_to_equation(dynamics, physics_terms):
     def physical_tendencies(state):
-        return get_physical_tendencies(state, dynamics, specs, physics_terms)
+        return get_physical_tendencies(state, dynamics, physics_terms)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class HeldSuarezModel:
@@ -74,7 +74,7 @@ class HeldSuarezModel:
 
         physics_terms = [ hsf.held_suarez_forcings ] 
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, self.physics_specs, physics_terms)
+        speedy_forcing = convert_tendencies_to_equation(primitive, physics_terms)
 
         self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
 

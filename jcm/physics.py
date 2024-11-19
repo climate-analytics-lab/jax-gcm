@@ -85,7 +85,7 @@ def initialize_physics():
     pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
     pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
-def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations, specs: PrimitiveEquationsSpecs) -> PhysicsState:
+def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -114,17 +114,17 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
-    u = specs.dimensionalize(u, units.meter / units.second).m
-    v = specs.dimensionalize(v, units.meter / units.second).m
-    t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + specs.dimensionalize(t, units.kelvin).m
-    q = specs.dimensionalize(q, units.gram / units.kilogram).m
+    u = dynamics.physics_specs.dimensionalize(u, units.meter / units.second).m
+    v = dynamics.physics_specs.dimensionalize(v, units.meter / units.second).m
+    t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
+    q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
     # for some reason this works but clipping doesn't (0 causes numerical issues)
     q = jnp.sqrt(q**2)
 
     # FIXME: figure out what the speedy normalization is for these
-    # phi = specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
-    # sp = specs.dimensionalize(sp, units.pascal).m
+    # phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
+    # sp = dynamics.physics_specs.dimensionalize(sp, units.pascal).m
 
     # FIXME
     # print("u: ", jnp.min(u), jnp.max(u))
@@ -143,7 +143,7 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     return physics_state
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations, specs: PrimitiveEquationsSpecs) -> StateWithTime:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -154,7 +154,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    u_tend, v_tend, t_tend, q_tend = (specs.nondimensionalize(v.transpose(2, 0, 1) * unit / units.second)
+    u_tend, v_tend, t_tend, q_tend = (dynamics.physics_specs.nondimensionalize(v.transpose(2, 0, 1) * unit / units.second)
                                       for (v, unit) in ((physics_tendency.u_wind, units.meter / units.second),
                                                         (physics_tendency.v_wind, units.meter / units.second),
                                                         (physics_tendency.temperature, units.kelvin),
@@ -183,7 +183,6 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 def get_physical_tendencies(
     state: StateWithTime,
     dynamics: PrimitiveEquations,
-    specs: PrimitiveEquationsSpecs,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None
 ):
@@ -198,7 +197,7 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-    physics_state = dynamics_state_to_physics_state(state, dynamics, specs)
+    physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
@@ -208,5 +207,5 @@ def get_physical_tendencies(
         tend, data = term(physics_state, data)
         physics_tendency += tend
 
-    dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics, specs)
+    dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
