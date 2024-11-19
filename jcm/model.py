@@ -1,3 +1,4 @@
+import dinosaur.primitive_equations_states
 import jax
 import jax.numpy as jnp
 import dinosaur
@@ -116,13 +117,14 @@ class SpeedyModel:
         p0 = 100e3 * units.pascal
         p1 = 5e3 * units.pascal
 
-        self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
+        atmospheric_state_fn = dinosaur.primitive_equations_states.isothermal_rest_atmosphere
+
+        self.initial_state_fn, aux_features = atmospheric_state_fn(
             coords=self.coords,
-            physics_specs=self.physics_specs,
-            p0=p0,
-            p1=p1)
+            physics_specs=self.physics_specs)
         
         ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
+        ref_temps = jnp.linspace(260, ref_temps[-1], self.coords.nodal_shape[0])
         orography = dinosaur.primitive_equations.truncated_modal_orography(
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 

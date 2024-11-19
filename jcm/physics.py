@@ -119,9 +119,6 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    # for some reason this works but clipping doesn't (0 causes numerical issues)
-    q = jnp.sqrt(q**2)
-
     # FIXME: figure out what the speedy normalization is for these
     # phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
     # sp = dynamics.physics_specs.dimensionalize(sp, units.pascal).m
@@ -129,8 +126,10 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # FIXME
     # print("u: ", jnp.min(u), jnp.max(u))
     # print("v: ", jnp.min(v), jnp.max(v))
-    # print("t: ", jnp.min(t), jnp.max(t))
-    # print("q: ", jnp.min(q), jnp.max(q))
+    # print("ta at surface: ", jnp.mean(t, axis=1)[-1])
+    # print("ta at toa: ", jnp.mean(t, axis=1)[0])
+    print("tmin, tmax: ", jnp.min(t), jnp.max(t))
+    print("q: ", jnp.min(q), jnp.max(q))
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
@@ -154,19 +153,16 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    u_tend, v_tend, t_tend, q_tend = (dynamics.physics_specs.nondimensionalize(v.transpose(2, 0, 1) * unit / units.second)
-                                      for (v, unit) in ((physics_tendency.u_wind, units.meter / units.second),
-                                                        (physics_tendency.v_wind, units.meter / units.second),
-                                                        (physics_tendency.temperature, units.kelvin),
-                                                        (physics_tendency.specific_humidity, units.gram / units.kilogram)))
-    
-    vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(
-        dynamics.coords.horizontal,
-        u_tend,
-        v_tend
+    u_tend, v_tend, t_tend, q_tend = (
+        dynamics.physics_specs.nondimensionalize(v.transpose(2, 0, 1) * unit / units.second)
+        for (v, unit) in ((physics_tendency.u_wind, units.meter / units.second),
+                          (physics_tendency.v_wind, units.meter / units.second),
+                          (physics_tendency.temperature, units.kelvin),
+                          (physics_tendency.specific_humidity, units.gram / units.kilogram))
     )
-    t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
-    q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
+    
+    vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
+    t_tend_modal, q_tend_modal = dynamics.coords.horizontal.to_modal((t_tend, q_tend))
     
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
@@ -199,6 +195,12 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
+    q = physics_state.specific_humidity
+
+    # for some reason clipping causes blowup, even if the lower bound is nonzero
+    # this is unphysical but the tendency fix below makes the negative q values converge to zero
+    physics_state = physics_state.copy(specific_humidity = jnp.sqrt(q**2))
+
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
@@ -206,6 +208,14 @@ def get_physical_tendencies(
     for term in physics_terms:
         tend, data = term(physics_state, data)
         physics_tendency += tend
+
+    # ideally, the tendency for negative q should be -q / timestep size
+    # note that timestep size is actually 1/3 of the model's time_step
+    # if we overshoot it might cause issues so I'm conservatively dividing by 3600,
+    # which corresponds to time_step = 240 min (larger than what we use)
+    physics_tendency = physics_tendency.copy(
+        specific_humidity=jnp.where(q < 0, -q / 3600, physics_tendency.specific_humidity)
+    )
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
