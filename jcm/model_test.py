@@ -14,11 +14,11 @@ class TestModelUnit(unittest.TestCase):
         )
     
         state = model.get_initial_state()
-        state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                model.coords, model.physics_specs
-            )
-        }
+        q_perturbation = primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)
+        q_perturbation = model.coords.horizontal.to_modal(
+            1e-3 * model.coords.horizontal.to_nodal(q_perturbation)
+        )
+        state.tracers = {'specific_humidity': q_perturbation}
 
         modal_x = 85
         modal_y = 44
@@ -66,11 +66,11 @@ class TestModelUnit(unittest.TestCase):
         )
     
         state = model.get_initial_state()
-        state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                model.coords, model.physics_specs
-            )
-        }
+        q_perturbation = primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)
+        q_perturbation = model.coords.horizontal.to_modal(
+            1e-3 * model.coords.horizontal.to_nodal(q_perturbation)
+        )
+        state.tracers = {'specific_humidity': q_perturbation}
 
         modal_x = 85
         modal_y = 44
