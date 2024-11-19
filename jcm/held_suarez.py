@@ -1,6 +1,5 @@
 import dinosaur
 from dinosaur.scales import units
-import jax 
 import jax.numpy as jnp
 from jcm.physics_data import PhysicsData
 from dinosaur.time_integration import ExplicitODE

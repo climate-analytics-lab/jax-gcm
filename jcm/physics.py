@@ -11,9 +11,9 @@ from typing import Callable
 from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
-
+from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, StateWithTime, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
 
 @tree_math.struct
 class PhysicsState:
@@ -85,7 +85,7 @@ def initialize_physics():
     pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
     pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
-def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
+def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations, specs: PrimitiveEquationsSpecs) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -99,35 +99,44 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
-    # Calculate geopotential
+    # Z, X, Y
+    nodal_state = compute_diagnostic_state(state, dynamics.coords)
+    t = nodal_state.temperature_variation
+    q = nodal_state.tracers['specific_humidity']
+    
     phi_spectral = get_geopotential(
         state.temperature_variation,
         dynamics.reference_temperature,
         dynamics.orography,
         dynamics.coords.vertical,
     )
-    # Z, X, Y
-    t_spectral = state.temperature_variation + dynamics.coords.horizontal.to_modal(dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis])
-    q_spectral = state.tracers['specific_humidity']
-
-    t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
-        (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
-    )
-    
-    
+    phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
+
+    u = specs.dimensionalize(u, units.meter / units.second).m
+    v = specs.dimensionalize(v, units.meter / units.second).m
+    t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + t #specs.dimensionalize(t, units.kelvin).m
+    # q = specs.dimensionalize(q, units.kilogram / units.kilogram).m
+    # phi = specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
+    # sp = specs.dimensionalize(sp, units.pascal).m
+    print("u: ", jnp.min(u), jnp.max(u))
+    print("v: ", jnp.min(v), jnp.max(v))
+    print("t: ", jnp.min(t), jnp.max(t))
+    print("q: ", jnp.min(q), jnp.max(q))
+
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
         v.transpose(1, 2, 0),
         t.transpose(1, 2, 0),
         q.transpose(1, 2, 0),
-        phi.transpose(1, 2, 0), 
+        phi.transpose(1, 2, 0),
         jnp.squeeze(sp.transpose(1, 2, 0))
     )
     return physics_state
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations, specs: PrimitiveEquationsSpecs) -> StateWithTime:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -138,12 +147,23 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
+    u_tendency_nodal, v_tendency_nodal, t_tendency_nodal, q_tendency_nodal = (v.transpose(2, 0, 1)
+                                                                                  for v in (physics_tendency.u_wind,
+                                                                                            physics_tendency.v_wind,
+                                                                                            physics_tendency.temperature,
+                                                                                            physics_tendency.specific_humidity))
+    u_tendency_nodal = specs.nondimensionalize(u_tendency_nodal * units.meter / units.second**2)
+    v_tendency_nodal = specs.nondimensionalize(v_tendency_nodal * units.meter / units.second**2)
+    # t_tendency_nodal = specs.nondimensionalize(t_tendency_nodal * units.kelvin / units.second)
+    # q_tendency_nodal = specs.nondimensionalize(q_tendency_nodal * units.kilogram / units.kilogram / units.second)
 
     vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(
-        dynamics.coords.horizontal, physics_tendency.u_wind.transpose(2, 0, 1), physics_tendency.v_wind.transpose(2, 0, 1)
+        dynamics.coords.horizontal,
+        u_tendency_nodal,# * 21600/jnp.pi,
+        v_tendency_nodal# * 21600/jnp.pi
     )
-    t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature.transpose(2, 0, 1))
-    q_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.specific_humidity.transpose(2, 0, 1))
+    t_tendency = dynamics.coords.horizontal.to_modal(t_tendency_nodal * 21600/jnp.pi)
+    q_tendency = dynamics.coords.horizontal.to_modal(q_tendency_nodal * 21600/jnp.pi)
     
     log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
@@ -156,6 +176,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 def get_physical_tendencies(
     state: StateWithTime,
     dynamics: PrimitiveEquations,
+    specs: PrimitiveEquationsSpecs,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None
 ):
@@ -170,15 +191,19 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-    physics_state = dynamics_state_to_physics_state(state, dynamics)
+    physics_state = dynamics_state_to_physics_state(state, dynamics, specs)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
+    print("testing 1")
+
     for term in physics_terms:
         tend, data = term(physics_state, data)
         physics_tendency += tend
 
-    dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
+    print("testing 2")
+
+    dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics, specs)
     return dynamics_tendency
