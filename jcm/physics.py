@@ -128,8 +128,8 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # print("v: ", jnp.min(v), jnp.max(v))
     # print("ta at surface: ", jnp.mean(t, axis=1)[-1])
     # print("ta at toa: ", jnp.mean(t, axis=1)[0])
-    # print("tmin, tmax: ", jnp.min(t), jnp.max(t))
-    # print("q: ", jnp.min(q), jnp.max(q))
+    print("tmin, tmax: ", jnp.min(t), jnp.max(t))
+    print("q: ", jnp.min(q), jnp.max(q))
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
@@ -162,7 +162,8 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     )
     
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
-    t_tend_modal, q_tend_modal = dynamics.coords.horizontal.to_modal((t_tend, q_tend))
+    t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
+    q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
     
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
 
@@ -199,7 +200,7 @@ def get_physical_tendencies(
 
     # for some reason clipping causes blowup, even if the lower bound is nonzero
     # this is unphysical but the tendency fix below makes the negative q values converge to zero
-    physics_state = physics_state.copy(specific_humidity = jnp.sqrt(q**2))
+    physics_state = physics_state.copy(specific_humidity = jnp.abs(q))
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
