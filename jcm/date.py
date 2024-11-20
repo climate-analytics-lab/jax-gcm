@@ -13,11 +13,11 @@ import numpy as np
 
 # Generic types.
 #
-Dtype = jax.typing.DTypeLike | Any
+# Dtype = jax.typing.DTypeLike | Any
 Array = np.ndarray | jax.Array
 Numeric = float | int | Array
-Timestep = np.timedelta64 | float
-PRNGKeyArray = jax.Array
+# Timestep = np.timedelta64 | float
+# PRNGKeyArray = jax.Array
 
 
 @jax.tree_util.register_pytree_node_class

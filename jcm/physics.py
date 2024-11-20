@@ -124,12 +124,8 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # sp = dynamics.physics_specs.dimensionalize(sp, units.pascal).m
 
     # FIXME
-    # print("u: ", jnp.min(u), jnp.max(u))
-    # print("v: ", jnp.min(v), jnp.max(v))
-    # print("ta at surface: ", jnp.mean(t, axis=1)[-1])
-    # print("ta at toa: ", jnp.mean(t, axis=1)[0])
-    print("tmin, tmax: ", jnp.min(t), jnp.max(t))
-    print("q: ", jnp.min(q), jnp.max(q))
+    # print("tmin, tmax: ", jnp.min(t), jnp.max(t))
+    # print("q: ", jnp.min(q), jnp.max(q))
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
@@ -180,6 +176,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 def get_physical_tendencies(
     state: StateWithTime,
     dynamics: PrimitiveEquations,
+    time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None
 ):
@@ -198,9 +195,7 @@ def get_physical_tendencies(
 
     q = physics_state.specific_humidity
 
-    # for some reason clipping causes blowup, even if the lower bound is nonzero
-    # this is unphysical but the tendency fix below makes the negative q values converge to zero
-    physics_state = physics_state.copy(specific_humidity = jnp.abs(q))
+    physics_state = physics_state.copy(specific_humidity = jnp.clip(q, 1e-4, None))
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
@@ -210,12 +205,16 @@ def get_physical_tendencies(
         tend, data = term(physics_state, data)
         physics_tendency += tend
 
-    # ideally, the tendency for negative q should be -q / timestep size
-    # note that timestep size is actually 1/3 of the model's time_step
-    # if we overshoot it might cause issues so I'm conservatively dividing by 3600,
-    # which corresponds to time_step = 240 min (larger than what we use)
+    # the actual timestep size seems to be 1/3 of time_step
+    # so I'm setting the tendency to clamp q > 0 to -q/(60s/min * 1/3 * time_step)
+    # maybe should reduce this if it's overshooting somehow
+    dt_seconds = 20 * time_step
     physics_tendency = physics_tendency.copy(
-        specific_humidity=jnp.where(q < 0, -q / 3600, physics_tendency.specific_humidity)
+        specific_humidity=jnp.where(
+            q + dt_seconds * physics_tendency.specific_humidity >= 0,
+            physics_tendency.specific_humidity,
+            -q / dt_seconds
+        )
     )
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
