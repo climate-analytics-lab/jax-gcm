@@ -128,8 +128,8 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # print("v: ", jnp.min(v), jnp.max(v))
     # print("ta at surface: ", jnp.mean(t, axis=1)[-1])
     # print("ta at toa: ", jnp.mean(t, axis=1)[0])
-    print("tmin, tmax: ", jnp.min(t), jnp.max(t))
-    print("q: ", jnp.min(q), jnp.max(q))
+    # print("tmin, tmax: ", jnp.min(t), jnp.max(t))
+    # print("q: ", jnp.min(q), jnp.max(q))
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
