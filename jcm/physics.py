@@ -118,14 +118,9 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     v = dynamics.physics_specs.dimensionalize(v, units.meter / units.second).m
     t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
-
-    # FIXME: figure out what the speedy normalization is for these
+    # FIXME: having issues with these
     # phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
-    # sp = dynamics.physics_specs.dimensionalize(sp, units.pascal).m
-
-    # FIXME
-    # print("tmin, tmax: ", jnp.min(t), jnp.max(t))
-    # print("q: ", jnp.min(q), jnp.max(q))
+    # sp = dynamics.physics_specs.dimensionalize(sp, 1e5 * units.pascal).m
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
