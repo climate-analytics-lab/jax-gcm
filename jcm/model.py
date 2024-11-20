@@ -117,7 +117,7 @@ class SpeedyModel:
         p0 = 100e3 * units.pascal
         p1 = 5e3 * units.pascal
 
-        aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
+        self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
             p0=p0,
