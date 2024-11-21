@@ -114,13 +114,12 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
+    # note: surface pressure is nondimensionalized by assuming mean(log_sp) = 0, which means it uses a pressure scale of 1e5, different from the scales used by other quantities, so we don't dimensionalize it here
     u = dynamics.physics_specs.dimensionalize(u, units.meter / units.second).m
     v = dynamics.physics_specs.dimensionalize(v, units.meter / units.second).m
     t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
-    # FIXME: having issues with these
-    # phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
-    # sp = dynamics.physics_specs.dimensionalize(sp, 1e5 * units.pascal).m
+    phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),

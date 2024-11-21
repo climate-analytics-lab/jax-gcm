@@ -29,7 +29,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
     physics_terms = [
         spec_hum_to_rel_hum,
-        get_convection_tendencies,
+        # get_convection_tendencies,
         get_large_scale_condensation_tendencies,
         clouds,
         get_zonal_average_fields,
@@ -125,7 +125,6 @@ class SpeedyModel:
         )
         
         ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
-        # ref_temps = jnp.linspace(270, ref_temps[-1], ref_temps.shape[0])
         orography = dinosaur.primitive_equations.truncated_modal_orography(
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
