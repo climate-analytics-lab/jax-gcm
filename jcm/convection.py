@@ -70,7 +70,7 @@ def diagnose_convection(psa, se, qa, qsat):
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
     mask_conditional_instability = mss0[:, :, jnp.newaxis] > mss2
     ktop1 = jnp.where(
-        jnp.sum(mask_conditional_instability, axis=2) > 0,
+        jnp.any(mask_conditional_instability, axis=2),
         (k_indices+1)[jnp.argmax(mask_conditional_instability, axis=2)],
         jnp.array(kx, dtype=int)
     )
@@ -79,7 +79,7 @@ def diagnose_convection(psa, se, qa, qsat):
     # troposphere
     mask_mse1_greater_mss2 = mse1[:, :, jnp.newaxis] > mss2
     ktop2 = jnp.where(
-        jnp.sum(mask_mse1_greater_mss2, axis=2) > 0,
+        jnp.any(mask_mse1_greater_mss2, axis=2),
         (k_indices+1)[jnp.argmax(mask_mse1_greater_mss2, axis=2)],
         jnp.array(kx, dtype=int)
     )

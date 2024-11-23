@@ -187,9 +187,8 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
-    q = physics_state.specific_humidity
-
-    physics_state = physics_state.copy(specific_humidity = jnp.clip(q, 1e-4, None))
+    # q = physics_state.specific_humidity
+    # physics_state = physics_state.copy(specific_humidity = jnp.clip(q, 0, None))
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 
@@ -200,14 +199,13 @@ def get_physical_tendencies(
         physics_tendency += tend
 
     # the actual timestep size seems to be 1/3 of time_step
-    # so I'm setting the tendency to clamp q > 0 to -q/(60s/min * 1/3 * time_step)
-    # maybe should reduce this if it's overshooting somehow
+    # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
     dt_seconds = 20 * time_step
     physics_tendency = physics_tendency.copy(
         specific_humidity=jnp.where(
-            q + dt_seconds * physics_tendency.specific_humidity >= 0,
+            physics_state.specific_humidity + dt_seconds * physics_tendency.specific_humidity >= 0,
             physics_tendency.specific_humidity,
-            -q / dt_seconds
+            - physics_state.specific_humidity / dt_seconds
         )
     )
 
