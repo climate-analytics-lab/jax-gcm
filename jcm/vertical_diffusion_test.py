@@ -1,3 +1,4 @@
+import jax
 import unittest
 import jax.numpy as jnp
 import numpy as np
@@ -38,3 +39,17 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         self.assertTrue(np.allclose(ttenvd[0,0,:], np.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
         3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-4))
         self.assertTrue(np.allclose(qtenvd[0,0,:], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
+
+    def test_grad_get_vertical_diffusion(self): 
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        physics_data = PhysicsData.zeros(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.zeros(xyz)
+
+        # Calculate gradient
+        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data) 
+        tends = primals[0].copy(jnp.ones_like(primals[0].u_wind),jnp.ones_like(primals[0].v_wind),
+                                jnp.ones_like(primals[0].temperature),jnp.ones_like(primals[0].specific_humidity))
+        datas = primals[1].copy()  #Note: would like to include a ones function to get accurate gradients
+        input = (tends, datas)
+        df_dtends, df_ddatas = f_vjp(input)
