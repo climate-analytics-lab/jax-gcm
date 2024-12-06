@@ -1,4 +1,5 @@
 import unittest
+import jax
 import jax.numpy as jnp
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
@@ -13,6 +14,83 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
         from jcm.physics import PhysicsState
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
+
+    def test_surface_fluxes_gradients(self):
+        """Test that we can calculate gradients of surface fluxes without getting NaN values"""
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        
+        # Use the same test inputs as test_updated_surface_flux
+        psa = jnp.ones(xy)
+        ua = jnp.ones(xyz)
+        va = jnp.ones(xyz)
+        ta = jnp.ones(xyz) * 290.0
+        qa = jnp.ones(xyz)
+        rh = jnp.ones(xyz) * 0.5
+        phi = jnp.ones(xyz) * (jnp.arange(kx))[None, None, ::-1]
+        phi0 = jnp.zeros(xy)
+        fmask = 0.5 * jnp.ones(xy)
+        tsea = jnp.ones(xy) * 292.0
+        rsds = 400.0 * jnp.ones(xy)
+        rlds = 400.0 * jnp.ones(xy)
+        lfluxland = True
+
+        state = PhysicsState.zeros(xyz, ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy, phi0=phi0, fmask=fmask, lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy, kx, rh=rh)
+        conv_data = ConvectionData.zeros(xy, kx, psa=psa)
+        sw_rad = SWRadiationData.zeros(xy, kx, rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy, kx, rlds=rlds)
+        sea_data = SeaModelData.zeros(xy, tsea=tsea)
+        physics_data = PhysicsData.zeros(xy, kx, convection=conv_data, humidity=hum_data, 
+                                       surface_flux=sflux_data, shortwave_rad=sw_rad, 
+                                       longwave_rad=lw_rad, sea_model=sea_data)
+
+        # Function to get surface flux outputs for gradient testing
+        def get_flux_outputs(state, physics_data):
+            _, updated_physics = get_surface_fluxes(state, physics_data)
+            sflux = updated_physics.surface_flux
+            # Return a single tensor combining multiple outputs to test gradients
+            return jnp.concatenate([
+                sflux.ustr.ravel(),
+                sflux.vstr.ravel(),
+                sflux.shf.ravel(),
+                sflux.evap.ravel(),
+                sflux.slru.ravel()
+            ])
+
+        # Calculate gradients with respect to different inputs
+        primals, grad_fn = jax.vjp(get_flux_outputs, state, physics_data)
+        
+        # Input for gradient calculation (ones matching output shape)
+        grad_input = jnp.ones_like(primals)
+        
+        # Get gradients
+        (state_grads, physics_grads) = grad_fn(grad_input)
+
+        # Verify gradients exist and are not NaN
+        self.assertFalse(jnp.any(jnp.isnan(state_grads.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state_grads.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state_grads.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(state_grads.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(state_grads.geopotential)))
+
+    def test_surface_drag_gradients(self):
+        """Test that we can calculate gradients of surface drag without getting NaN values"""
+        # Use same test input as test_surface_fluxes_drag_test
+        phi0 = 500.0 * jnp.ones((ix, il))
+
+        # Calculate gradients
+        primals, grad_fn = jax.vjp(set_orog_land_sfc_drag, phi0)
+        
+        # Input for gradient calculation (ones matching output shape)
+        grad_input = jnp.ones_like(primals)
+        
+        # Get gradients
+        (phi0_grads,) = grad_fn(grad_input)
+
+        # Verify gradients exist and are not NaN
+        self.assertFalse(jnp.any(jnp.isnan(phi0_grads)))
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)
