@@ -5,12 +5,14 @@ saturation specific humidity.
 '''
 
 import jax 
+from jax import jit
 import jax.numpy as jnp
 from jcm.physics_data import PhysicsData
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physical_constants import cp
 from jcm.geometry import fsg
 
+@jit
 def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     """
     Converts specific humidity to relative humidity, and also returns saturation 
@@ -43,7 +45,7 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
     
     return physics_tendencies, physics_data
 
-
+@jit
 def rel_hum_to_spec_hum(ta, ps, sig, rh):
     """
     Converts relative humidity to specific humidity, and also returns saturation 
@@ -63,7 +65,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
     qa = rh * qsat
     return qa, qsat
 
-
+@jit
 def get_qsat(ta, ps, sig):
     """
     Computes saturation specific humidity.

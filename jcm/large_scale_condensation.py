@@ -2,7 +2,7 @@
 Date: 2/11/2024
 Parametrization of large-scale condensation.
 '''
-
+from jax import jit
 import jax.numpy as jnp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
@@ -17,6 +17,7 @@ rhblsc = 0.95 # Relative humidity threshold for boundary layer
 
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
+@jit
 def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: PhysicsData):
     """
     Compute large-scale condensation and associated tendencies of temperature and moisture

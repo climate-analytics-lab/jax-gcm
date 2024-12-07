@@ -49,7 +49,7 @@ def initialize_geometry(kx = 8, il = 64):
     # NB: J=1 is Southernmost point!
     j = jnp.arange(1, iy + 1)
 
-    sia_half = jnp.cos(3.141592654 * (j - 0.25) / (il + 0.5))
+    sia_half = jnp.cos(jnp.pi * (j - 0.25) / (il + 0.5))
     coa_half = jnp.sqrt(1.0 - sia_half ** 2.0)
 
     sia = jnp.concatenate((-sia_half, sia_half[::-1]), axis=0).ravel()

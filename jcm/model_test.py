@@ -14,11 +14,7 @@ class TestModelUnit(unittest.TestCase):
         )
     
         state = model.get_initial_state()
-        state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                model.coords, model.physics_specs
-            )
-        }
+        state.tracers = {'specific_humidity': 1e-4 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
         modal_x = 85
         modal_y = 44
@@ -66,11 +62,9 @@ class TestModelUnit(unittest.TestCase):
         )
     
         state = model.get_initial_state()
-        state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                model.coords, model.physics_specs
-            )
-        }
+
+        # Specify humidity perturbation in kg/kg
+        state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
         modal_x = 85
         modal_y = 44
