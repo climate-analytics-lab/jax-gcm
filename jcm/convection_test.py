@@ -9,11 +9,30 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig, get_qsat, fsg
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState
         from jcm.convection import diagnose_convection, get_convection_tendencies
         from jcm.physical_constants import grdscp, grdsig
+        from jcm.humidity import get_qsat
+        from jcm.geometry import fsg
+
+    def test_diagnose_convection_isothermal(self):
+        psa = jnp.ones((ix, il))
+        
+        se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
+       304056.8 , 293391.7 ])
+        qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
+        qsat = qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
+        
+        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qsat_broadcast = jnp.tile(qsat, (ix, il, 1))
+        
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
+        
+        self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
+        self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
 
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
@@ -23,9 +42,9 @@ class TestConvectionUnit(unittest.TestCase):
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
 
-        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
-        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
-        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, kx))
+        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qsat_broadcast = jnp.tile(qsat[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
 
         itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000.)
 
@@ -34,6 +53,32 @@ class TestConvectionUnit(unittest.TestCase):
         # Check that itop and qdif is not null.
         self.assertEqual(itop[0,0], test_itop)
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
+
+    def test_get_convective_tendencies_isothermal(self):
+        psa = jnp.ones((ix, il))
+        
+        se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
+       304056.8 , 293391.7 ])
+        qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
+        qsat = qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
+        
+        se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
+        qsat_broadcast = jnp.tile(qsat, (ix, il, 1))
+        
+        convection = ConvectionData.zeros((ix, il), kx, psa=psa, se=se_broadcast)
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast)
+        state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa_broadcast)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
+
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data)
+
+        self.assertTrue(jnp.allclose(physics_data.convection.iptop, jnp.ones((ix, il))*9))
+        self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
+        self.assertTrue(jnp.allclose(physics_data.convection.precnv, jnp.zeros((ix, il))))
+        self.assertTrue(jnp.allclose(physics_tendencies.temperature, jnp.zeros((ix, il, kx))))
+        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, jnp.zeros((ix, il, kx))))    
+
      
     def test_get_convective_tendencies_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure

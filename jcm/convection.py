@@ -54,55 +54,45 @@ def diagnose_convection(psa, se, qa, qsat):
 
     # Minimum of moist static energy in the lowest two levels
     # Mask for psa > psmin
-    mask_psa = psa > psmin # FIXME: this might need to be used in more places
+    mask_psa = psa > psmin
 
-    mse0 = jnp.where(mask_psa, se[:, :, kx-1] + alhc * qa[:, :, kx-1], 0)
-    mse1 = jnp.where(mask_psa, se[:, :, kx-2] + alhc * qa[:, :, kx-2], 0)
+    mse0 = se[:, :, kx-1] + alhc * qa[:, :, kx-1]
+    mse1 = se[:, :, kx-2] + alhc * qa[:, :, kx-2]
     mse1 = jnp.minimum(mse0, mse1)
 
     # Saturation (or super-saturated) moist static energy in PBL
     mss0 = jnp.maximum(mse0, mss[:, :, kx-1])
 
-    # Compute mss2 array for all k layers (3 to kx-3)
-    k_indices = jnp.arange(2, kx-3, dtype=int)
-    mss2 = mss[:, :, k_indices] + wvi[k_indices, 1] * (mss[:, :, k_indices + 1] - mss[:, :, k_indices])
+    
+    mss2 = jnp.pad(mss[:, :, :-1] + wvi[:-1, 1] * (mss[:, :, 1:] - mss[:, :, :-1]), ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=0) # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
+
+    # If there is any instability, cloud top is the first unstable level (from top down)
+    # Otherwise kx (surface)
+    # Note ktop1 and ktop2 are 1-indexed to match icltop convention
+    possible_cltop_levels = jnp.arange(2, kx-3, dtype=int)
+    get_cloud_top = lambda instability_mask: jnp.where(jnp.any(instability_mask, axis=2),
+                                                       (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=2)],
+                                                       jnp.array(kx, dtype=int)) 
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    mask_conditional_instability = mss0[:, :, jnp.newaxis] > mss2
-    ktop1 = jnp.where(
-        jnp.any(mask_conditional_instability, axis=2),
-        (k_indices+1)[jnp.argmax(mask_conditional_instability, axis=2)],
-        jnp.array(kx, dtype=int)
-    )
-
+    ktop1 = get_cloud_top(mss0[:, :, jnp.newaxis] > mss2[:,:,2:kx-3])
+    
     # Check 2: gradient of actual moist static energy between lower and upper 
     # troposphere
-    mask_mse1_greater_mss2 = mse1[:, :, jnp.newaxis] > mss2
-    ktop2 = jnp.where(
-        jnp.any(mask_mse1_greater_mss2, axis=2),
-        (k_indices+1)[jnp.argmax(mask_mse1_greater_mss2, axis=2)],
-        jnp.array(kx, dtype=int)
-    )
-    msthr = jnp.zeros((ix, il), dtype=float)
-    msthr = mss2[jnp.arange(ix)[:, jnp.newaxis], jnp.arange(il), jnp.argmax(mask_mse1_greater_mss2, axis=2)]
+    ktop2 = get_cloud_top(mse1[:, :, jnp.newaxis] > mss2[:,:,2:kx-3])
+    msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[:, :, jnp.newaxis] - 1, axis=-1), axis=-1)
 
     # Check 3: RH > RH_c at both k=kx and k=kx-1
     qthr0 = rhbl * qsat[:, :, kx-1]
     qthr1 = rhbl * qsat[:, :, kx-2]
     lqthr = (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1)
 
-    # Applying masks to iptop and qdif
-    mask_ktop1_less_kx = ktop1 < kx
-    mask_ktop2_less_kx = ktop2 < kx
+    case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
+    case_2 = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr
 
-    combined_mask1 = mask_ktop1_less_kx & mask_ktop2_less_kx
-    iptop = jnp.where(combined_mask1, ktop1, iptop)
-    qdif = jnp.where(combined_mask1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
-
-    combined_mask2 = mask_ktop1_less_kx & (~mask_ktop2_less_kx) & lqthr
-    iptop = jnp.where(combined_mask2, ktop1, iptop)
-    qdif = jnp.where(combined_mask2, qa[:, :, kx-1] - qthr0, qdif)
-
+    iptop = jnp.where(case_1 | case_2, ktop1, iptop)
+    qdif = jnp.where(case_1, jnp.maximum(qa[:, :, kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
+    qdif = jnp.where(case_2, qa[:, :, kx-1] - qthr0, qdif)
     return iptop, qdif
 
 @jit
@@ -211,13 +201,16 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
 
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[:, :, jnp.newaxis], axis=-1), axis=-1)
-    fmass, fus, fuq, fds, fdq = (index_array(jnp.pad(_flux_3d, ((0, 0), (0, 0), (0, 2)), mode='constant', constant_values=0), iptop) for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
+    # FIXME: do we need to pad by 1 or 2
+    pad_array = lambda array: jnp.pad(array, ((0, 0), (0, 0), (0, 2)), mode='constant', constant_values=0)
+    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop)
+                                 for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
     
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
 
     # Flux of convective precipitation
-    qsatb = index_array(jnp.pad(interpolate(qsat), ((0, 0), (0, 0), (0, 2)), mode='constant', constant_values=0), k)
+    qsatb = index_array(pad_array(interpolate(qsat)), k)
     precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture

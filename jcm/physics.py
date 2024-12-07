@@ -143,19 +143,17 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    u_tend, v_tend, t_tend, q_tend = (
-        dynamics.physics_specs.nondimensionalize(v.transpose(2, 0, 1) * unit / units.second)
-        for (v, unit) in ((physics_tendency.u_wind, units.meter / units.second),
-                          (physics_tendency.v_wind, units.meter / units.second),
-                          (physics_tendency.temperature, units.kelvin),
-                          (physics_tendency.specific_humidity, units.gram / units.kilogram))
-    )
+    nondimensionalize = lambda tend, unit: dynamics.physics_specs.nondimensionalize(tend.transpose(2, 0, 1) * unit / units.second)
+    u_tend = nondimensionalize(physics_tendency.u_wind, units.meter / units.second)
+    v_tend = nondimensionalize(physics_tendency.v_wind, units.meter / units.second)
+    t_tend = nondimensionalize(physics_tendency.temperature, units.kelvin)
+    q_tend = nondimensionalize(physics_tendency.specific_humidity, units.gram / units.kilogram)
     
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
     q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
     
-    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
+    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
     dynamics_tendency = StateWithTime(vor_tend_modal,
@@ -186,9 +184,6 @@ def get_physical_tendencies(
         Physical tendencies
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
-
-    # q = physics_state.specific_humidity
-    # physics_state = physics_state.copy(specific_humidity = jnp.clip(q, 0, None))
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
     # and implicitly passed to the next physics_term. tendencies are summed 

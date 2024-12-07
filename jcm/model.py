@@ -44,6 +44,10 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     return physics_terms
 
 def fixed_ssts(ix):
+    """
+    Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
+    Obtained from Neale, R.B. and Hoskins, B.J. (2000), "A standard test for AGCMs including their physical parametrizations: I: the proposal." Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
+    """
     from jcm.geometry import radang
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
@@ -166,3 +170,8 @@ class SpeedyModel:
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps))
         return integrate_fn(state)
+
+    def data_to_xarray(self, data):
+        from dinosaur.xarray_utils import data_to_xarray
+        
+        return data_to_xarray(data, coords=self.coords, times=self.times)
