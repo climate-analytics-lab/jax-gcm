@@ -1,7 +1,10 @@
 jax
 tree-math
 dinosaur-dycore
+
+# I/O requirements
 xarray
+xarray_tensorstore
 dask
 
 # Testing requirements
