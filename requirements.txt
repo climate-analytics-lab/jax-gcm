@@ -1,7 +1,8 @@
 jax
-dinosaur
 tree-math
-dinosaur-dycore  # fix me! google hasn't put v1 on pip yet
+dinosaur-dycore
+xarray
+dask
 
 # Testing requirements
 pytest-cov
