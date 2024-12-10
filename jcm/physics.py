@@ -11,9 +11,9 @@ from typing import Callable
 from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
-
+from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, StateWithTime, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
 
 @tree_math.struct
 class PhysicsState:
@@ -99,29 +99,34 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
-    # Calculate geopotential
+    # Z, X, Y
+    nodal_state = compute_diagnostic_state(state, dynamics.coords)
+    t = nodal_state.temperature_variation
+    q = nodal_state.tracers['specific_humidity']
+    
     phi_spectral = get_geopotential(
         state.temperature_variation,
         dynamics.reference_temperature,
         dynamics.orography,
         dynamics.coords.vertical,
     )
-    # Z, X, Y
-    t_spectral = state.temperature_variation + dynamics.coords.horizontal.to_modal(dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis])
-    q_spectral = state.tracers['specific_humidity']
-
-    t, q, phi, log_sp = dynamics.coords.horizontal.to_nodal(
-        (t_spectral, q_spectral, phi_spectral, state.log_surface_pressure)
-    )
-    
-    
+    phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
+
+    # note: surface pressure is nondimensionalized by assuming mean(log_sp) = 0, which means it uses a pressure scale of 1e5, different from the scales used by other quantities, so we don't dimensionalize it here
+    u = dynamics.physics_specs.dimensionalize(u, units.meter / units.second).m
+    v = dynamics.physics_specs.dimensionalize(v, units.meter / units.second).m
+    t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
+    q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
+    phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
+
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
         v.transpose(1, 2, 0),
         t.transpose(1, 2, 0),
         q.transpose(1, 2, 0),
-        phi.transpose(1, 2, 0), 
+        phi.transpose(1, 2, 0),
         jnp.squeeze(sp.transpose(1, 2, 0))
     )
     return physics_state
@@ -138,24 +143,32 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-
-    vor_tendency, div_tendency = uv_nodal_to_vor_div_modal(
-        dynamics.coords.horizontal, physics_tendency.u_wind.transpose(2, 0, 1), physics_tendency.v_wind.transpose(2, 0, 1)
-    )
-    t_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.temperature.transpose(2, 0, 1))
-    q_tendency = dynamics.coords.horizontal.to_modal(physics_tendency.specific_humidity.transpose(2, 0, 1))
+    nondimensionalize = lambda tend, unit: dynamics.physics_specs.nondimensionalize(tend.transpose(2, 0, 1) * unit / units.second)
+    u_tend = nondimensionalize(physics_tendency.u_wind, units.meter / units.second)
+    v_tend = nondimensionalize(physics_tendency.v_wind, units.meter / units.second)
+    t_tend = nondimensionalize(physics_tendency.temperature, units.kelvin)
+    q_tend = nondimensionalize(physics_tendency.specific_humidity, units.gram / units.kilogram)
     
-    log_sp_tendency = jnp.zeros_like(t_tendency[0, ...]) # This assumes the physics tendency is zero for log_surface_pressure
+    vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
+    t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
+    q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
+    
+    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = StateWithTime(vor_tendency, div_tendency, t_tendency, log_sp_tendency, sim_time=0., 
-                                      tracers={'specific_humidity': q_tendency})
+    dynamics_tendency = StateWithTime(vor_tend_modal,
+                                      div_tend_modal,
+                                      t_tend_modal,
+                                      log_sp_tend_modal,
+                                      sim_time=0., 
+                                      tracers={'specific_humidity': q_tend_modal})
     return dynamics_tendency
 
 
 def get_physical_tendencies(
     state: StateWithTime,
     dynamics: PrimitiveEquations,
+    time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None
 ):
@@ -179,6 +192,17 @@ def get_physical_tendencies(
     for term in physics_terms:
         tend, data = term(physics_state, data)
         physics_tendency += tend
+
+    # the actual timestep size seems to be 1/3 of time_step
+    # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
+    dt_seconds = 20 * time_step
+    physics_tendency = physics_tendency.copy(
+        specific_humidity=jnp.where(
+            physics_state.specific_humidity + dt_seconds * physics_tendency.specific_humidity >= 0,
+            physics_tendency.specific_humidity,
+            - physics_state.specific_humidity / dt_seconds
+        )
+    )
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency

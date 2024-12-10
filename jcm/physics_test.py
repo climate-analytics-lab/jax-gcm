@@ -10,7 +10,8 @@ class TestPhysicsUnit(unittest.TestCase):
         from jcm.held_suarez import HeldSuarezForcing
         from jcm.physics import get_physical_tendencies
 
-        hs_model = HeldSuarezModel()
+        time_step = 10
+        hs_model = HeldSuarezModel(time_step=time_step)
     
         state = hs_model.get_initial_state()
         state.tracers = {
@@ -39,6 +40,6 @@ class TestPhysicsUnit(unittest.TestCase):
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
-        dynamics_tendency = get_physical_tendencies(state, dynamics, physics_terms, datetime(2000, 1, 1))
+        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, datetime(2000, 1, 1))
 
         self.assertIsNotNone(dynamics_tendency)

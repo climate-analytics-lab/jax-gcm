@@ -9,7 +9,7 @@ from jcm.mod_radcon import epslw
 from jcm.params import nstrad
 from jax import lax
 
-# @jit
+@jit
 def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
@@ -219,7 +219,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     return physics_tendencies, physics_data
 
 
-# @jit
+@jit
 def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
@@ -293,7 +293,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     
     return physics_tendencies, physics_data
 
-# @jit
+@jit
 def clouds(state: PhysicsState, physics_data: PhysicsData):
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
@@ -394,7 +394,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     return physics_tendencies, physics_data
 
-# @jit
+@jit
 def solar(tyear, csol=4.0*solc):
 
     """

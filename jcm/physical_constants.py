@@ -24,5 +24,5 @@ epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
 sigl = None # Logarithm of full-level sigma
 sigh = None # Half-level sigma
 grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
-gridscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
+grdscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
 wvi = None # Weights for vertical interpolation
