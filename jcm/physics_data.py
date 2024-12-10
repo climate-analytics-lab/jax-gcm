@@ -17,6 +17,15 @@ class LWRadiationData:
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
             slr = slr if slr is not None else jnp.zeros((nodal_shape)),
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, rlds=None, dfabs=None, ftop=None, slr=None):
+        return LWRadiationData(
+            rlds = rlds if rlds is not None else jnp.ones((nodal_shape)),
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,))),
+            ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
+            slr = slr if slr is not None else jnp.ones((nodal_shape)),
+        )
 
     def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
@@ -60,6 +69,25 @@ class SWRadiationData:
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros((nodal_shape)),
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
             dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,)))
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+        return SWRadiationData(
+            qcloud = qcloud if qcloud is not None else jnp.ones((nodal_shape)),
+            fsol = fsol if fsol is not None else jnp.ones((nodal_shape)),
+            rsds = rsds if rsds is not None else jnp.ones((nodal_shape)),
+            ssr = ssr if ssr is not None else jnp.ones((nodal_shape)),
+            ozone = ozone if ozone is not None else jnp.ones((nodal_shape)),
+            ozupp = ozupp if ozupp is not None else jnp.ones((nodal_shape)),
+            zenit = zenit if zenit is not None else jnp.ones((nodal_shape)),
+            stratz = stratz if stratz is not None else jnp.ones((nodal_shape)),
+            gse = gse if gse is not None else jnp.ones((nodal_shape)),
+            icltop = icltop if icltop is not None else jnp.ones((nodal_shape)),
+            cloudc = cloudc if cloudc is not None else jnp.ones((nodal_shape)),
+            cloudstr = cloudstr if cloudstr is not None else jnp.ones((nodal_shape)),
+            ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,)))
         )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
@@ -107,6 +135,19 @@ class ModRadConData:
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+        return ModRadConData(
+            alb_l = alb_l if alb_l is not None else jnp.ones((nodal_shape)),
+            alb_s = alb_s if alb_s is not None else jnp.ones((nodal_shape)),
+            albsfc = albsfc if albsfc is not None else jnp.ones((nodal_shape)),
+            snowc = snowc if snowc is not None else jnp.ones((nodal_shape)),
+            tau2 = tau2 if tau2 is not None else jnp.ones((nodal_shape+(node_levels,)+(4,))),
+            st4a = st4a if st4a is not None else jnp.ones((nodal_shape+(node_levels,)+(2,))),
+            stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
+            flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
+        )
 
     def copy(self, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
@@ -128,6 +169,12 @@ class SeaModelData:
         return SeaModelData(
             tsea = tsea if tsea is not None else jnp.zeros((nodal_shape))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, tsea=None):
+        return SeaModelData(
+            tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
+        )
 
     @classmethod
     def copy(self, tsea=None):
@@ -147,6 +194,14 @@ class CondensationData:
             precls = precls if precls is not None else jnp.zeros((nodal_shape)),
             dtlsc = dtlsc if dtlsc is not None else jnp.zeros((nodal_shape+(node_levels,))),
             dqlsc = dqlsc if dqlsc is not None else jnp.zeros((nodal_shape+(node_levels,))),
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None):
+        return CondensationData(
+            precls = precls if precls is not None else jnp.ones((nodal_shape)),
+            dtlsc = dtlsc if dtlsc is not None else jnp.ones((nodal_shape+(node_levels,))),
+            dqlsc = dqlsc if dqlsc is not None else jnp.ones((nodal_shape+(node_levels,))),
         )
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
@@ -174,6 +229,16 @@ class ConvectionData:
             precnv = precnv if precnv is not None else jnp.zeros((nodal_shape)),
         )
     
+    @classmethod
+    def ones(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+        return ConvectionData(
+            psa = psa if psa is not None else jnp.ones((nodal_shape)),
+            se = se if se is not None else jnp.ones((nodal_shape + (node_levels,))),
+            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
+            cbmf = cbmf if cbmf is not None else jnp.ones((nodal_shape)),
+            precnv = precnv if precnv is not None else jnp.ones((nodal_shape)),
+        )
+    
     def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             psa=psa if psa is not None else self.psa,
@@ -193,6 +258,13 @@ class HumidityData:
         return HumidityData(
             rh = rh if rh is not None else jnp.zeros((nodal_shape+(node_levels,))),
             qsat = qsat if qsat is not None else jnp.zeros((nodal_shape+(node_levels,)))
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, rh=None, qsat=None):
+        return HumidityData(
+            rh = rh if rh is not None else jnp.ones((nodal_shape+(node_levels,))),
+            qsat = qsat if qsat is not None else jnp.ones((nodal_shape+(node_levels,)))
         )
 
     def copy(self, rh=None, qsat=None):
@@ -241,6 +313,27 @@ class SurfaceFluxData:
             fmask = fmask if fmask is not None else jnp.zeros((nodal_shape)),
             phi0 = phi0 if phi0 is not None else jnp.zeros((nodal_shape))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+        return SurfaceFluxData(
+            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 1.0),
+            soilw_am = soilw_am if soilw_am is not None else jnp.full((nodal_shape), 1.0),
+            lfluxland = lfluxland if lfluxland is not None else True,
+            ustr = ustr if ustr is not None else jnp.ones((nodal_shape)+(3,)),
+            vstr = vstr if vstr is not None else jnp.ones((nodal_shape)+(3,)),
+            shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
+            evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
+            slru = slru if slru is not None else jnp.ones((nodal_shape)+(3,)),
+            hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
+            tsfc = tsfc if tsfc is not None else jnp.ones((nodal_shape)),
+            tskin = tskin if tskin is not None else jnp.ones((nodal_shape)),
+            u0 = u0 if u0 is not None else jnp.ones((nodal_shape)),
+            v0 = v0 if v0 is not None else jnp.ones((nodal_shape)),
+            t0 = t0 if t0 is not None else jnp.ones((nodal_shape)),
+            fmask = fmask if fmask is not None else jnp.ones((nodal_shape)),
+            phi0 = phi0 if phi0 is not None else jnp.ones((nodal_shape))
+        )
 
     def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
         return SurfaceFluxData(
@@ -287,6 +380,20 @@ class PhysicsData:
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.set_date(),
             sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape)
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+        return PhysicsData(        
+            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
+            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
+            convection = convection if convection is not None else ConvectionData.ones(nodal_shape, node_levels),
+            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.ones(nodal_shape, node_levels),
+            humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, node_levels),
+            condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
+            surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
+            date = date if date is not None else DateData.set_date(),
+            sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape)
         )
 
     def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):

@@ -35,6 +35,17 @@ class PhysicsState:
             surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
         )
     
+    @classmethod
+    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else jnp.ones(shape),
+            v_wind if v_wind is not None else jnp.ones(shape),
+            temperature if temperature is not None else jnp.ones(shape),
+            specific_humidity if specific_humidity is not None else jnp.ones(shape),
+            geopotential if geopotential is not None else jnp.ones(shape),
+            surface_pressure if surface_pressure is not None else jnp.ones(shape[0:2])
+        )
+    
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
@@ -59,6 +70,15 @@ class PhysicsTendency:
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape)
+        )
+    
+    @classmethod
+    def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else jnp.ones(shape),
+            v_wind if v_wind is not None else jnp.ones(shape),
+            temperature if temperature is not None else jnp.ones(shape),
+            specific_humidity if specific_humidity is not None else jnp.ones(shape)
         )
     
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
