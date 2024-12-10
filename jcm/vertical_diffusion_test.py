@@ -1,7 +1,6 @@
 import jax
 import unittest
 import jax.numpy as jnp
-import jax
 import numpy as np
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
@@ -97,3 +96,9 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         datas = primals[1].copy()  #Note: would like to include a ones function to get accurate gradients
         input = (tends, datas)
         df_dtends, df_ddatas = f_vjp(input)
+
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.geopotential)))
