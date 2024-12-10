@@ -1,11 +1,11 @@
 defaults:
   - _self_
   - model: default
-  - override hydra/job_logging: disabled
+  - override hydra/help: custom_help
 
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
-    subdir: ${hydra.job.num}
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: multirun/${hydra.job.num}

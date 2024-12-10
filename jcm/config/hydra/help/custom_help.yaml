@@ -1,0 +1,32 @@
+app_name: JCM
+
+
+template: |
+
+  ${hydra.help.app_name}:
+  ----
+  Runs atmospheric simulations using configurable parameters.
+
+  Usage Examples:
+  ---------------
+  Basic run:
+    python main.py
+    python main.py model.time_step=20
+
+  Parameter sweep:
+    python main.py -m model.time_step=10,20,30
+    python main.py -m model.time_step=10,20 model.layers=4,8
+
+  Available Parameters:
+  ---------------------
+  time_step: Model time step in minutes (default: 10)
+  save_interval: Save interval in days (default: 10)
+  total_time: Total simulation time in days (default: 10)
+  layers: Number of vertical layers (default: 8)
+
+  Output:
+  -------
+  Creates in ./outputs:
+    - model_state.nc: Model predictions
+    - .hydra/: Run configuration
+    - run.log: Execution log

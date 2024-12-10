@@ -3,22 +3,14 @@ from omegaconf import DictConfig
 from jcm.model import SpeedyModel
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
+from hydra.core.hydra_config import HydraConfig
+from pathlib import Path
 
-"""
-Now when running main, you can pass in arguments through the command line:
-
-python main.py
-python main.py model.time_step=20
-
-By default, values are saved as:
-time_step: 10
-save_interval: 10
-total_time: 10
-layers: 8
-
-"""
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig):
+    """
+    Allows you to run Speedy Model with adjustable parameters
+    """
     model = SpeedyModel(
         time_step=cfg.model.time_step,
         save_interval=cfg.model.save_interval,
@@ -33,7 +25,21 @@ def main(cfg: DictConfig):
             
     final_state, predictions = model.unroll(state)
     ds = model.data_to_xarray(asdict(predictions))
-    ds.to_netcdf("model_state.nc")
+    hydra_cfg = HydraConfig.get()
+    print(hydra_cfg.mode)
+    base_dir = Path('outputs') / hydra_cfg.run.dir.split('outputs/')[-1]
+    
+    if str(hydra_cfg.mode) == "RunMode.MULTIRUN":
+        output_dir = base_dir / 'multirun' / str(hydra_cfg.job.num)
+    else:
+        output_dir = base_dir
+    
+        
+    filename = f"model_state.nc"
+    output_path = output_dir / filename
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(str(output_path))
 
 if __name__ == "__main__":
     main()
