@@ -1,6 +1,7 @@
 jax
 tree-math
-dinosaur-dycore
+dinosaur-dycore  
+hydra-core
 
 # I/O requirements
 xarray
@@ -9,3 +10,4 @@ dask
 
 # Testing requirements
 pytest-cov
+

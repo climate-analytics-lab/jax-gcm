@@ -1,0 +1,11 @@
+defaults:
+  - _self_
+  - model: default
+  - override hydra/help: custom_help
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: multirun/${hydra.job.num}
