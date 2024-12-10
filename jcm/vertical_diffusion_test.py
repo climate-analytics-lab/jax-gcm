@@ -95,10 +95,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                                 jnp.ones_like(primals[0].temperature),jnp.ones_like(primals[0].specific_humidity))
         datas = primals[1].copy()  #Note: would like to include a ones function to get accurate gradients
         input = (tends, datas)
-        df_dtends, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas = f_vjp(input)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.specific_humidity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.surface_pressure)))
