@@ -163,7 +163,7 @@ class TestDownwardLongwave(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.condensation.dqlsc)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.stl_am)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.soilw_am)))
-        # Note testing df_ddatas.surface_flux.lfluxland because it is a bool type
+        # Not testing df_ddatas.surface_flux.lfluxland because it is a bool type
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.ustr)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.vstr)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.shf)))
@@ -241,7 +241,7 @@ class TestDownwardLongwave(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.condensation.dqlsc)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.stl_am)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.soilw_am)))
-        # Note testing df_ddatas.surface_flux.lfluxland because it is a bool type
+        # Not testing df_ddatas.surface_flux.lfluxland because it is a bool type
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.ustr)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.vstr)))
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.shf)))
