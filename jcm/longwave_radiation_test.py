@@ -102,12 +102,12 @@ class TestDownwardLongwave(unittest.TestCase):
 
         pass
 
-    def test_get_downward_longwave_rad_fluxes_gradients(self):    
+    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         xyz = (ix, il, kx)
-        physics_data = PhysicsData.zeros(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.zeros(xyz)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(xyz)
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data) 
@@ -180,7 +180,7 @@ class TestDownwardLongwave(unittest.TestCase):
         # No testing df_ddatas.date
         self.assertFalse(jnp.any(jnp.isnan(df_ddatas.sea_model.tsea)))
 
-    def test_get_upward_longwave_rad_fluxes_gradients(self):    
+    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         xyz = (ix, il, kx)

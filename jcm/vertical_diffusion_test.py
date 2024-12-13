@@ -21,7 +21,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         qa = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[jnp.newaxis, jnp.newaxis, :]
         qsat = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[jnp.newaxis, jnp.newaxis, :]
         phi = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(150000,0,kx)[jnp.newaxis, jnp.newaxis, :]
-        iptop = jnp.ones((ix,il))*1
+        iptop = jnp.ones((ix,il), dtype=int)*1
         
         xyz = (ix, il, kx)
         humidity_data = HumidityData.zeros((ix,il), kx, rh=rh, qsat=qsat)
@@ -40,12 +40,12 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-4))
         self.assertTrue(np.allclose(qtenvd[0,0,:], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
 
-    def test_get_vertical_diffusion_gradients(self): 
+    def test_get_vertical_diffusion_gradients_isnan_ones(self): 
         """Test that we can calculate gradients of vertical diffusion without getting NaN values"""
         xy = (ix, il)
         xyz = (ix, il, kx)
-        physics_data = PhysicsData.zeros(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.zeros(xyz)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(xyz)
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data) 
