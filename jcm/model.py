@@ -1,4 +1,5 @@
 import dinosaur.primitive_equations_states
+from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
 import dinosaur
@@ -13,35 +14,6 @@ def initialize_modules(kx=8, il=64):
     initialize_geometry(kx=kx, il=il)
     from jcm.physics import initialize_physics
     initialize_physics()
-
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
-    """
-    Returns a list of functions that compute physical tendencies for the model.
-    """
-    initialize_modules(kx = grid_shape[0], il = grid_shape[2])
-    
-    from jcm.humidity import spec_hum_to_rel_hum
-    from jcm.convection import get_convection_tendencies
-    from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
-    from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-    from jcm.surface_flux import get_surface_fluxes
-    from jcm.vertical_diffusion import get_vertical_diffusion_tend
-    physics_terms = [
-        spec_hum_to_rel_hum,
-        get_convection_tendencies,
-        get_large_scale_condensation_tendencies,
-        clouds,
-        get_zonal_average_fields,
-        get_shortwave_rad_fluxes,
-        get_downward_longwave_rad_fluxes,
-        get_surface_fluxes,
-        get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend
-    ]
-    if sea_coupling_flag > 0:
-        physics_terms.insert(-3, get_surface_fluxes)
-    return physics_terms
 
 def fixed_ssts(ix):
     """
@@ -128,22 +100,22 @@ class SpeedyModel:
             p1=p1
         )
         
-        ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
+        self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         orography = dinosaur.primitive_equations.truncated_modal_orography(
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
         # Governing equations
-        primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
-            ref_temps,
+        self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
+            self.ref_temps,
             orography,
             self.coords,
             self.physics_specs)
         
-        physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        physics_terms = self.get_speedy_physics_terms(self.coords.nodal_shape)
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, time_step, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, physics_terms, reference_date=start_date)
 
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
@@ -156,6 +128,36 @@ class SpeedyModel:
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
         
+    
+    def get_speedy_physics_terms(self, grid_shape, sea_coupling_flag=0):
+        """
+        Returns a list of functions that compute physical tendencies for the model.
+        """
+        initialize_modules(kx = grid_shape[0], il = grid_shape[2])
+        
+        from jcm.humidity import spec_hum_to_rel_hum
+        from jcm.convection import get_convection_tendencies
+        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+        from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.surface_flux import get_surface_fluxes
+        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+        self.physics_terms = [
+            spec_hum_to_rel_hum,
+            get_convection_tendencies,
+            get_large_scale_condensation_tendencies,
+            clouds,
+            get_zonal_average_fields,
+            get_shortwave_rad_fluxes,
+            get_downward_longwave_rad_fluxes,
+            get_surface_fluxes,
+            get_upward_longwave_rad_fluxes,
+            get_vertical_diffusion_tend
+        ]
+        if sea_coupling_flag > 0:
+            self.physics_terms.insert(-3, get_surface_fluxes)
+        return self.physics_terms
+
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
@@ -166,12 +168,55 @@ class SpeedyModel:
 
     def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
         return self.step_fn(state)
-                                 
+    
+    def post_process(self, state):
+        u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal, state.vorticity, state.divergence)
+        vor_nodal = self.coords.horizontal.to_nodal(state.vorticity)
+        div_nodal = self.coords.horizontal.to_nodal(state.divergence)
+        tracers_nodal = {f'{k}_nodal': self.coords.horizontal.to_nodal(v) for k, v in state.tracers.items()}
+        t_nodal = (
+            self.coords.horizontal.to_nodal(state.temperature_variation)
+            + self.ref_temps[:, jnp.newaxis, jnp.newaxis]
+        )
+        dynamics_nodal = {
+            'u_nodal': u_nodal,
+            'v_nodal': v_nodal,
+            't_nodal': t_nodal,
+            'vor_nodal': vor_nodal,
+            'div_nodal': div_nodal,
+            **tracers_nodal,
+        }
+
+        from jcm.physics import PhysicsData, dynamics_state_to_physics_state
+        physics_state = dynamics_state_to_physics_state(state, self.primitive)
+        data = PhysicsData.zeros(u_nodal.shape[1:], u_nodal.shape[0])
+        for term in self.physics_terms:
+            _, data = term(physics_state, data)
+        physics_nodal = {
+            'lwftop': data.longwave_rad.ftop,
+            'slr': data.longwave_rad.slr,
+            'ssr': data.shortwave_rad.ssr,
+            'gse': data.shortwave_rad.gse,
+            'icltop': data.shortwave_rad.icltop,
+            'swftop': data.shortwave_rad.ftop,
+            'iptop': data.convection.iptop,
+            'precls': data.condensation.precls,
+            'evap': data.surface_flux.evap,
+        }
+        
+        return {
+            **dynamics_nodal,
+            **physics_nodal,
+        }
+    
     def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
-            inner_steps=self.inner_steps))
+            inner_steps=self.inner_steps,
+            start_with_input=True,
+            post_process_fn=self.post_process,
+        ))
         return integrate_fn(state)
     
     def data_to_xarray(self, data):
