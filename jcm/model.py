@@ -72,7 +72,7 @@ class SpeedyModel:
         from datetime import datetime
 
         # Integration settings
-        start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
+        self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -113,7 +113,7 @@ class SpeedyModel:
         
         physics_terms = self.get_speedy_physics_terms(self.coords.nodal_shape)
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, physics_terms, reference_date=self.start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
@@ -127,7 +127,7 @@ class SpeedyModel:
         ]
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
-        
+
     
     def get_speedy_physics_terms(self, grid_shape, sea_coupling_flag=0):
         """
@@ -170,43 +170,32 @@ class SpeedyModel:
         return self.step_fn(state)
     
     def post_process(self, state):
-        u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal, state.vorticity, state.divergence)
-        # vor_nodal = self.coords.horizontal.to_nodal(state.vorticity)
-        # div_nodal = self.coords.horizontal.to_nodal(state.divergence)
-        # tracers_nodal = {f'{k}_nodal': self.coords.horizontal.to_nodal(v) for k, v in state.tracers.items()}
-        # t_nodal = (
-        #     self.coords.horizontal.to_nodal(state.temperature_variation)
-        #     + self.ref_temps[:, jnp.newaxis, jnp.newaxis]
-        # )
-        # dynamics_nodal = {
-        #     'u_nodal': u_nodal,
-        #     'v_nodal': v_nodal,
-        #     't_nodal': t_nodal,
-        #     'vor_nodal': vor_nodal,
-        #     'div_nodal': div_nodal,
-        #     **tracers_nodal,
-        # }
+        from jcm.date import DateData
+        from jcm.physics_data import PhysicsData, SeaModelData
+        from jcm.physics import dynamics_state_to_physics_state
 
-        from jcm.physics import PhysicsData, dynamics_state_to_physics_state
+        date = DateData.set_date(
+            model_time = self.start_date + Timedelta(seconds=state.sim_time)
+        )
+
+        sea_model = SeaModelData.zeros(
+            self.coords.nodal_shape[1:],
+            tsea = fixed_ssts(self.coords.nodal_shape[1])
+        )
+
+        data = PhysicsData.zeros(
+            self.coords.nodal_shape[1:],
+            self.coords.nodal_shape[0],
+            date=date,
+            sea_model=sea_model
+        )
+
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        data = PhysicsData.zeros(u_nodal.shape[1:], u_nodal.shape[0])
         for term in self.physics_terms:
             _, data = term(physics_state, data)
-        # physics_nodal = {
-        #     'lwftop': data.longwave_rad.ftop,
-        #     'slr': data.longwave_rad.slr,
-        #     'ssr': data.shortwave_rad.ssr,
-        #     'gse': data.shortwave_rad.gse,
-        #     'icltop': data.shortwave_rad.icltop,
-        #     'swftop': data.shortwave_rad.ftop,
-        #     'iptop': data.convection.iptop,
-        #     'precls': data.condensation.precls,
-        #     'evap': data.surface_flux.evap,
-        # }
         
         return {
             'dynamics': state,
-            # 'dynamics_nodal': dynamics_nodal,
             'physics': data,
         }
     
