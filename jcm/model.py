@@ -171,42 +171,43 @@ class SpeedyModel:
     
     def post_process(self, state):
         u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal, state.vorticity, state.divergence)
-        vor_nodal = self.coords.horizontal.to_nodal(state.vorticity)
-        div_nodal = self.coords.horizontal.to_nodal(state.divergence)
-        tracers_nodal = {f'{k}_nodal': self.coords.horizontal.to_nodal(v) for k, v in state.tracers.items()}
-        t_nodal = (
-            self.coords.horizontal.to_nodal(state.temperature_variation)
-            + self.ref_temps[:, jnp.newaxis, jnp.newaxis]
-        )
-        dynamics_nodal = {
-            'u_nodal': u_nodal,
-            'v_nodal': v_nodal,
-            't_nodal': t_nodal,
-            'vor_nodal': vor_nodal,
-            'div_nodal': div_nodal,
-            **tracers_nodal,
-        }
+        # vor_nodal = self.coords.horizontal.to_nodal(state.vorticity)
+        # div_nodal = self.coords.horizontal.to_nodal(state.divergence)
+        # tracers_nodal = {f'{k}_nodal': self.coords.horizontal.to_nodal(v) for k, v in state.tracers.items()}
+        # t_nodal = (
+        #     self.coords.horizontal.to_nodal(state.temperature_variation)
+        #     + self.ref_temps[:, jnp.newaxis, jnp.newaxis]
+        # )
+        # dynamics_nodal = {
+        #     'u_nodal': u_nodal,
+        #     'v_nodal': v_nodal,
+        #     't_nodal': t_nodal,
+        #     'vor_nodal': vor_nodal,
+        #     'div_nodal': div_nodal,
+        #     **tracers_nodal,
+        # }
 
         from jcm.physics import PhysicsData, dynamics_state_to_physics_state
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         data = PhysicsData.zeros(u_nodal.shape[1:], u_nodal.shape[0])
         for term in self.physics_terms:
             _, data = term(physics_state, data)
-        physics_nodal = {
-            'lwftop': data.longwave_rad.ftop,
-            'slr': data.longwave_rad.slr,
-            'ssr': data.shortwave_rad.ssr,
-            'gse': data.shortwave_rad.gse,
-            'icltop': data.shortwave_rad.icltop,
-            'swftop': data.shortwave_rad.ftop,
-            'iptop': data.convection.iptop,
-            'precls': data.condensation.precls,
-            'evap': data.surface_flux.evap,
-        }
+        # physics_nodal = {
+        #     'lwftop': data.longwave_rad.ftop,
+        #     'slr': data.longwave_rad.slr,
+        #     'ssr': data.shortwave_rad.ssr,
+        #     'gse': data.shortwave_rad.gse,
+        #     'icltop': data.shortwave_rad.icltop,
+        #     'swftop': data.shortwave_rad.ftop,
+        #     'iptop': data.convection.iptop,
+        #     'precls': data.condensation.precls,
+        #     'evap': data.surface_flux.evap,
+        # }
         
         return {
-            **dynamics_nodal,
-            **physics_nodal,
+            'dynamics': state,
+            # 'dynamics_nodal': dynamics_nodal,
+            'physics': data,
         }
     
     def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
