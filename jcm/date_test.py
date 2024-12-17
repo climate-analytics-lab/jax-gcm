@@ -24,7 +24,7 @@ class TestDateUnit(unittest.TestCase):
         # Test the DateData class
 
         # Test with no input
-        d = DateData.set_date()
+        d = DateData.zeros()
         self.assertEqual(d.tyear, 0.0)
 
         # Test with input

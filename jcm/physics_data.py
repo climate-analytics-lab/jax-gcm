@@ -378,7 +378,7 @@ class PhysicsData:
             humidity = humidity if humidity is not None else HumidityData.zeros(nodal_shape, node_levels),
             condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
-            date = date if date is not None else DateData.set_date(),
+            date = date if date is not None else DateData.zeros(),
             sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape)
         )
     
@@ -392,7 +392,7 @@ class PhysicsData:
             humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, node_levels),
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
-            date = date if date is not None else DateData.set_date(),
+            date = date if date is not None else DateData.ones(),
             sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape)
         )
 
