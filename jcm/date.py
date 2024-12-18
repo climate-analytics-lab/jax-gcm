@@ -158,11 +158,11 @@ class Timestamp:
 
 @tree_math.struct
 class DateData:
-    tyear: jnp.ndarray # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    tyear: jnp.float32 # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
 
     @classmethod
     def zeros(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else jnp.zeros((1)))
+        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0)
     
     @classmethod
     def set_date(self, model_time):        
@@ -170,7 +170,7 @@ class DateData:
     
     @classmethod
     def ones(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else jnp.ones((1)))
+        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0)
  
     def copy(self, tyear=None):
         return DateData(tyear if tyear is not None else self.tyear)
@@ -197,4 +197,4 @@ def fraction_of_year_elapsed(dt):
     days_elapsed += dt.delta.seconds / (24 * 60 * 60)
 
     # Calculate the fraction of the year elapsed
-    return jnp.array(days_elapsed / 365.25)
+    return jnp.float32(days_elapsed / 365.25)
