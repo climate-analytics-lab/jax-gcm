@@ -15,6 +15,35 @@ def initialize_modules(kx=8, il=64):
     from jcm.physics import initialize_physics
     initialize_physics()
 
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
+        """
+        Returns a list of functions that compute physical tendencies for the model.
+        """
+        initialize_modules(kx = grid_shape[0], il = grid_shape[2])
+        
+        from jcm.humidity import spec_hum_to_rel_hum
+        from jcm.convection import get_convection_tendencies
+        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+        from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
+        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.surface_flux import get_surface_fluxes
+        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+        physics_terms = [
+            spec_hum_to_rel_hum,
+            get_convection_tendencies,
+            get_large_scale_condensation_tendencies,
+            clouds,
+            get_zonal_average_fields,
+            get_shortwave_rad_fluxes,
+            get_downward_longwave_rad_fluxes,
+            get_surface_fluxes,
+            get_upward_longwave_rad_fluxes,
+            get_vertical_diffusion_tend
+        ]
+        if sea_coupling_flag > 0:
+            physics_terms.insert(-3, get_surface_fluxes)
+        return physics_terms
+
 def fixed_ssts(ix):
     """
     Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
@@ -111,9 +140,9 @@ class SpeedyModel:
             self.coords,
             self.physics_specs)
         
-        physics_terms = self.get_speedy_physics_terms(self.coords.nodal_shape)
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, physics_terms, reference_date=self.start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
@@ -127,36 +156,6 @@ class SpeedyModel:
         ]
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
-
-    
-    def get_speedy_physics_terms(self, grid_shape, sea_coupling_flag=0):
-        """
-        Returns a list of functions that compute physical tendencies for the model.
-        """
-        initialize_modules(kx = grid_shape[0], il = grid_shape[2])
-        
-        from jcm.humidity import spec_hum_to_rel_hum
-        from jcm.convection import get_convection_tendencies
-        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-        from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-        from jcm.surface_flux import get_surface_fluxes
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
-        self.physics_terms = [
-            spec_hum_to_rel_hum,
-            get_convection_tendencies,
-            get_large_scale_condensation_tendencies,
-            clouds,
-            get_zonal_average_fields,
-            get_shortwave_rad_fluxes,
-            get_downward_longwave_rad_fluxes,
-            get_surface_fluxes,
-            get_upward_longwave_rad_fluxes,
-            get_vertical_diffusion_tend
-        ]
-        if sea_coupling_flag > 0:
-            self.physics_terms.insert(-3, get_surface_fluxes)
-        return self.physics_terms
 
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
