@@ -134,7 +134,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData.zeros(xy, kx)
 
         #equivalent of tyear = 0.6
-        date_data = DateData(tyear=0.6)
+        date_data = DateData.zeros()
+        date_data.tyear = jnp.array([0.6])
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
@@ -545,15 +546,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData.zeros(xy, kx)
 
         #equivalent of tyear = 0.6
-        date_data = DateData.set_date()
-        # date_data = DateData.set_date(model_time = Timestamp(delta=Timedelta(days=200, seconds=0)))
+        date_data = DateData.zeros()
+        date_data.tyear = jnp.array([0.6])
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
-
-        #_, physics_data = clouds(state, physics_data)
-        #_, physics_data = get_zonal_average_fields(state, physics_data)
-        #_, physics_data = get_shortwave_rad_fluxes(state, physics_data)
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(clouds, state, physics_data) 
@@ -561,3 +558,68 @@ class TestShortWaveRadiation(unittest.TestCase):
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas = f_vjp(input)
+
+        # Checking if the function with respect to the input states is nan
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.specific_humidity)))  #Currently failing here
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.surface_pressure)))
+
+        # Checking if the function with respect to the input physics data is nan
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.longwave_rad.rlds)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.longwave_rad.dfabs)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.longwave_rad.ftop)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.longwave_rad.slr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.qcloud)))  #Currently failing here
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.fsol)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.rsds)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.ssr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.ozone)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.ozupp)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.zenit)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.stratz)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.gse)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.icltop)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.cloudc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.cloudstr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.ftop)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.shortwave_rad.dfabs)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.psa)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.se)))
+        # self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.iptop))) doesn't work bc current type is int
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.cbmf)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.precnv)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.alb_l)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.alb_s)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.albsfc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.snowc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.tau2)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.st4a)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.stratc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.mod_radcon.flux)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.rh)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.qsat)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.condensation.precls)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.condensation.dtlsc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.condensation.dqlsc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.stl_am)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.soilw_am)))
+        # Not testing df_ddatas.surface_flux.lfluxland because it is a bool type
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.ustr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.vstr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.shf)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.evap)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.slru)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.hfluxn)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.tsfc)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.tskin)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.u0)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.v0)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.t0)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.fmask)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.phi0)))
+        # No testing df_ddatas.date
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.sea_model.tsea)))
+
