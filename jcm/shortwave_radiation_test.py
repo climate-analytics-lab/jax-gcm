@@ -135,7 +135,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
-        date_data.tyear = jnp.array([0.6])
+        date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
@@ -514,7 +514,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear[0])))
 
-    def test_shortwave_radiation_gradients_with_realistic_values(self):   
+    def test_clouds_gradients_with_realistic_values(self):   
         from datetime import datetime
         from jcm.date import Timestamp, Timedelta     
         # qa = 0.5 * 1000. * jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])[jnp.newaxis, jnp.newaxis, :]
@@ -547,7 +547,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
-        date_data.tyear = jnp.array([0.6])
+        date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
