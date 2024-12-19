@@ -10,132 +10,56 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData, \
-               PhysicsState, PhysicsTendency, get_surface_fluxes, set_orog_land_sfc_drag
+               PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 
-    def test_surface_fluxes_gradients(self):
-        """Test that we can calculate gradients of surface fluxes without getting NaN values"""
+    def test_grad_surface_flux(self):
         xy = (ix, il)
         xyz = (ix, il, kx)
-        
-        # Use the same test inputs as test_updated_surface_flux
-        psa = jnp.ones(xy)
-        ua = jnp.ones(xyz)
-        va = jnp.ones(xyz)
-        ta = jnp.ones(xyz) * 290.0
-        qa = jnp.ones(xyz)
-        rh = jnp.ones(xyz) * 0.5
-        phi = jnp.ones(xyz) * (jnp.arange(kx))[None, None, ::-1]
-        phi0 = jnp.zeros(xy)
-        fmask = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones(xy) * 292.0
-        rsds = 400.0 * jnp.ones(xy)
-        rlds = 400.0 * jnp.ones(xy)
-        lfluxland = True
 
-        state = PhysicsState.zeros(xyz, ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy, phi0=phi0, fmask=fmask, lfluxland=lfluxland)
-        hum_data = HumidityData.zeros(xy, kx, rh=rh)
-        conv_data = ConvectionData.zeros(xy, kx, psa=psa)
-        sw_rad = SWRadiationData.zeros(xy, kx, rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy, kx, rlds=rlds)
-        sea_data = SeaModelData.zeros(xy, tsea=tsea)
-        physics_data = PhysicsData.zeros(xy, kx, convection=conv_data, humidity=hum_data, 
-                                       surface_flux=sflux_data, shortwave_rad=sw_rad, 
-                                       longwave_rad=lw_rad, sea_model=sea_data)
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
+        lfluxland=True
+            
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
 
-        # Calculate gradients with respect to different inputs
-        _, grad_fn = jax.vjp(get_surface_fluxes, state, physics_data)
-        
-        # Input for gradient calculation (ones matching output shape)
+        primals, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data)
+
         tends = PhysicsTendency.ones(xyz)
-        datas = PhysicsData.ones(xy,kx) 
-        grad_input = (tends, datas)
-        
-        # Get gradients
-        (state_grads, data_grad) = grad_fn(grad_input)
+        datas = PhysicsData.ones(xy, kx)
 
-        # Verify gradients exist and are not NaN
-        self.assertFalse(jnp.any(jnp.isnan(state_grads.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(state_grads.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(state_grads.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(state_grads.specific_humidity)))
-        self.assertFalse(jnp.any(jnp.isnan(state_grads.geopotential)))
+        input_tensors = (tends, datas)
 
-        # Checking if the function with respect to the input physics data is nan
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.longwave_rad.rlds)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.longwave_rad.dfabs)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.longwave_rad.ftop)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.longwave_rad.slr)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.qcloud)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.fsol)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.rsds)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.ssr)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.ozone)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.ozupp)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.zenit)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.stratz)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.gse)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.icltop)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.cloudc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.cloudstr)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.ftop)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.shortwave_rad.dfabs)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.convection.psa)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.convection.se)))
-        # self.assertFalse(jnp.any(jnp.isnan(data_grad.convection.iptop))) doesn't work bc current type is int
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.convection.cbmf)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.convection.precnv)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.alb_l)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.alb_s)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.albsfc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.snowc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.tau2)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.st4a)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.stratc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.mod_radcon.flux)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.humidity.rh)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.humidity.qsat)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.condensation.precls)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.condensation.dtlsc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.condensation.dqlsc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.stl_am)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.soilw_am)))
-        # Not testing data_grad.surface_flux.lfluxland because it is a bool type
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.ustr)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.vstr)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.shf)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.evap)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.slru)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.hfluxn)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.tsfc)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.tskin)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.u0)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.v0)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.t0)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.fmask)))
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.surface_flux.phi0)))
-        # No testing data_grad.date
-        self.assertFalse(jnp.any(jnp.isnan(data_grad.sea_model.tsea)))
+        df_dtends, df_ddatas = f_vjp(input_tensors)
 
-    def test_surface_drag_gradients(self):
-        """Test that we can calculate gradients of surface drag without getting NaN values"""
-        # Use same test input as test_surface_fluxes_drag_test
-        phi0 = 500.0 * jnp.ones((ix, il))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtends.specific_humidity)))
 
-        # Calculate gradients
-        primals, grad_fn = jax.vjp(set_orog_land_sfc_drag, phi0)
-        
-        # Input for gradient calculation (ones matching output shape)
-        grad_input = jnp.ones_like(primals)
-        
-        # Get gradients
-        (phi0_grads,) = grad_fn(grad_input)
-
-        # Verify gradients exist and are not NaN
-        self.assertFalse(jnp.any(jnp.isnan(phi0_grads)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.ustr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.vstr)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.shf)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.evap)))
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)

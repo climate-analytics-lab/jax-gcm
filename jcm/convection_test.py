@@ -1,5 +1,6 @@
 import unittest
 import jax.numpy as jnp
+import jax
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -9,11 +10,39 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState
+        from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
         from jcm.physical_constants import grdscp, grdsig
+
+    def test_get_convection_tendencies_isnan_ones(self): 
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        
+        physics_data = PhysicsData.ones(xy, kx)  
+        
+        state = PhysicsState.ones(xyz)
+
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data) 
+        
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy, kx)
+        input = (tends, datas)
+        
+        df_dstates, df_ddatas = f_vjp(input)
+
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstates.surface_pressure)))
+
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.psa)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.se)))
+        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.qsat)))
+
 
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
