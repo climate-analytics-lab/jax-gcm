@@ -1,36 +1,45 @@
+import hydra
+from omegaconf import DictConfig
 from jcm.model import SpeedyModel
-import argparse
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
+from hydra.core.hydra_config import HydraConfig
+from pathlib import Path
 
-def parse_args():
-    # optional arguments
-    parser = argparse.ArgumentParser(description="Instantiate and run SpeedyModel.")
-    parser.add_argument('--time_step', type=int, default=10, help="Time step")
-    parser.add_argument('--save_interval', type=int, default=10, help="Save checkpoint after given interval")
-    parser.add_argument('--total_time', type=int, default=10, help="Total time")
-    parser.add_argument('--layers', type=int, default=8, help="Number of layers")
-   
-    return parser.parse_args()
-
-if __name__ == "__main__":
-    args = parse_args()
-
+@hydra.main(version_base=None, config_path="config", config_name="config")
+def main(cfg: DictConfig):
+    """
+    Allows you to run Speedy Model with adjustable parameters
+    """
     model = SpeedyModel(
-        time_step=args.time_step,
-        save_interval=args.save_interval,
-        total_time=args.total_time,
-        layers=args.layers
+        time_step=cfg.model.time_step,
+        save_interval=cfg.model.save_interval,
+        total_time=cfg.model.total_time,
+        layers=cfg.model.layers
     )
     
-    # Get the initial state
     state = model.get_initial_state()
     state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                model.coords, model.physics_specs)}
-    # Use the initial state to call unroll
+        'specific_humidity': primitive_equations_states.gaussian_scalar(
+            model.coords, model.physics_specs)}
+            
     final_state, predictions = model.unroll(state)
-    
     ds = model.data_to_xarray(asdict(predictions))
-    ds.to_netcdf("model_state.nc")
+    hydra_cfg = HydraConfig.get()
+    print(hydra_cfg.mode)
+    base_dir = Path('outputs') / hydra_cfg.run.dir.split('outputs/')[-1]
     
+    if str(hydra_cfg.mode) == "RunMode.MULTIRUN":
+        output_dir = base_dir / 'multirun' / str(hydra_cfg.job.num)
+    else:
+        output_dir = base_dir
+    
+        
+    filename = f"model_state.nc"
+    output_path = output_dir / filename
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(str(output_path))
+
+if __name__ == "__main__":
+    main()

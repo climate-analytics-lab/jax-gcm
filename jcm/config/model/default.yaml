@@ -1,0 +1,4 @@
+time_step: 10
+save_interval: 10
+total_time: 10
+layers: 8
