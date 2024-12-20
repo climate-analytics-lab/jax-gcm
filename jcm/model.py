@@ -61,7 +61,9 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
     def physical_tendencies(state):
         
         date = DateData.set_date(
-            model_time = reference_date + Timedelta(seconds=state.sim_time)
+            model_time = reference_date + Timedelta(
+                seconds=dynamics.physics_specs.dimensionalize(state.sim_time, units.second).m
+            )
         )
 
         sea_model = SeaModelData.zeros(
@@ -174,7 +176,9 @@ class SpeedyModel:
         from jcm.physics import dynamics_state_to_physics_state
 
         date = DateData.set_date(
-            model_time = self.start_date + Timedelta(seconds=state.sim_time)
+            model_time = self.start_date + Timedelta(
+                seconds=self.physics_specs.dimensionalize(state.sim_time, units.second).m
+                )
         )
 
         sea_model = SeaModelData.zeros(
