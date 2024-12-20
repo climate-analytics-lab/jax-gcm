@@ -131,7 +131,7 @@ class SeaModelData:
 
     @classmethod
     def copy(self, tsea=None):
-        return CondensationData(
+        return SeaModelData(
             tsea=tsea if tsea is not None else self.tsea, 
         )
 
