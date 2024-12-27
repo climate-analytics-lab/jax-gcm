@@ -257,7 +257,7 @@ class ConvectionData:
         return ConvectionData(
             psa = psa if psa is not None else jnp.zeros((nodal_shape)),
             se = se if se is not None else jnp.zeros((nodal_shape + (node_levels,))),
-            iptop = int(iptop) if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
+            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros((nodal_shape)),
             precnv = precnv if precnv is not None else jnp.zeros((nodal_shape)),
         )
@@ -267,7 +267,7 @@ class ConvectionData:
         return ConvectionData(
             psa = psa if psa is not None else jnp.ones((nodal_shape)),
             se = se if se is not None else jnp.ones((nodal_shape + (node_levels,))),
-            iptop = int(iptop) if iptop is not None else jnp.ones((nodal_shape),dtype=int),
+            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones((nodal_shape)),
             precnv = precnv if precnv is not None else jnp.ones((nodal_shape)),
         )
@@ -276,7 +276,7 @@ class ConvectionData:
         return ConvectionData(
             psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
-            iptop=int(iptop) if iptop is not None else self.iptop,
+            iptop= iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
             precnv=precnv if precnv is not None else self.precnv
         )
