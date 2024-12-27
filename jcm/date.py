@@ -174,6 +174,14 @@ class DateData:
  
     def copy(self, tyear=None):
         return DateData(tyear if tyear is not None else self.tyear)
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
+
 
 def fraction_of_year_elapsed(dt):
     """

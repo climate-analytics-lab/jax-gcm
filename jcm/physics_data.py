@@ -34,6 +34,13 @@ class LWRadiationData:
             ftop=ftop if ftop is not None else self.ftop,
             slr=slr if slr is not None else self.slr
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 
 @tree_math.struct
 class SWRadiationData:
@@ -108,6 +115,13 @@ class SWRadiationData:
             dfabs=dfabs if dfabs is not None else self.dfabs
         )
     
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
+    
 @tree_math.struct
 class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
@@ -160,6 +174,13 @@ class ModRadConData:
             stratc=stratc if stratc is not None else self.stratc,
             flux=flux if flux is not None else self.flux
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 @tree_math.struct
 class SeaModelData:
     tsea: jnp.ndarray # SST, should come from sea_model.py
@@ -176,12 +197,17 @@ class SeaModelData:
             tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
         )
 
-    @classmethod
     def copy(self, tsea=None):
         return CondensationData(
             tsea=tsea if tsea is not None else self.tsea, 
         )
 
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 @tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
@@ -210,6 +236,13 @@ class CondensationData:
             dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
             dqlsc=dqlsc if dqlsc is not None else self.dqlsc
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 
 @tree_math.struct
 class ConvectionData:
@@ -224,7 +257,7 @@ class ConvectionData:
         return ConvectionData(
             psa = psa if psa is not None else jnp.zeros((nodal_shape)),
             se = se if se is not None else jnp.zeros((nodal_shape + (node_levels,))),
-            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
+            iptop = int(iptop) if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros((nodal_shape)),
             precnv = precnv if precnv is not None else jnp.zeros((nodal_shape)),
         )
@@ -234,7 +267,7 @@ class ConvectionData:
         return ConvectionData(
             psa = psa if psa is not None else jnp.ones((nodal_shape)),
             se = se if se is not None else jnp.ones((nodal_shape + (node_levels,))),
-            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
+            iptop = int(iptop) if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones((nodal_shape)),
             precnv = precnv if precnv is not None else jnp.ones((nodal_shape)),
         )
@@ -243,10 +276,17 @@ class ConvectionData:
         return ConvectionData(
             psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
-            iptop=iptop if iptop is not None else self.iptop,
+            iptop=int(iptop) if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
             precnv=precnv if precnv is not None else self.precnv
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 
 @tree_math.struct
 class HumidityData:
@@ -272,6 +312,13 @@ class HumidityData:
             rh=rh if rh is not None else self.rh, 
             qsat=qsat if qsat is not None else self.qsat
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 
 @tree_math.struct
 class SurfaceFluxData:
@@ -354,6 +401,13 @@ class SurfaceFluxData:
             fmask=fmask if fmask is not None else self.fmask,
             phi0=phi0 if phi0 is not None else self.phi0
         )
+    
+    def isnan(self):
+        nans = list(self.astuple())
+        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
+            nans[i] = jnp.isnan(item)
+
+        return nans
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
@@ -408,3 +462,10 @@ class PhysicsData:
             date=date if date is not None else self.date,
             sea_model=sea_model if sea_model is not None else self.sea_model
         )
+
+    def isnan(physics_data):
+        nans = list(physics_data.astuple())
+        for (item,i) in zip(physics_data.astuple(),range(len(physics_data.astuple()))):
+            nans[i] = item.isnan()
+
+        return nans
