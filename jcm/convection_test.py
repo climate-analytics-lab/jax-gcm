@@ -1,6 +1,7 @@
 import unittest
 import jax.numpy as jnp
 import jax
+from jax import tree_util
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -24,7 +25,7 @@ class TestConvectionUnit(unittest.TestCase):
         se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
        304056.8 , 293391.7 ])
         qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
-        qsat = qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
+        qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
         
         se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
@@ -51,16 +52,8 @@ class TestConvectionUnit(unittest.TestCase):
         
         df_dstates, df_ddatas = f_vjp(input)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.specific_humidity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.geopotential)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.surface_pressure)))
-
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.psa)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.se)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.qsat)))
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
 
 
     def test_diagnose_convection_moist_adiabat(self):

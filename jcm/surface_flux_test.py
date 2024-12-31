@@ -49,17 +49,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         input_tensors = (tends, datas)
 
-        df_dtends, df_ddatas = f_vjp(input_tensors)
+        df_dstate, df_ddatas = f_vjp(input_tensors)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dtends.specific_humidity)))
-
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.ustr)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.vstr)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.shf)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.surface_flux.evap)))
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstate.isnan().any_true())
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)

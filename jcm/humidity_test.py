@@ -57,17 +57,8 @@ class TestHumidityUnit(unittest.TestCase):
         
         df_dstates, df_ddatas = f_vjp(input)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.specific_humidity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.geopotential)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstates.surface_pressure)))
-
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.psa)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.convection.se)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.rh)))
-        self.assertFalse(jnp.any(jnp.isnan(df_ddatas.humidity.qsat)))
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
 
     def test_get_qsat(self):
         temp = self.temp_standard
