@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
+from jax import tree_util
  
 @tree_math.struct
 class LWRadiationData:
@@ -36,12 +37,7 @@ class LWRadiationData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
-
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
@@ -116,11 +112,7 @@ class SWRadiationData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
 class ModRadConData:
@@ -176,11 +168,7 @@ class ModRadConData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class SeaModelData:
     tsea: jnp.ndarray # SST, should come from sea_model.py
@@ -203,11 +191,7 @@ class SeaModelData:
         )
 
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
@@ -238,11 +222,7 @@ class CondensationData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ConvectionData:
@@ -282,11 +262,8 @@ class ConvectionData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class HumidityData:
@@ -314,11 +291,7 @@ class HumidityData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class SurfaceFluxData:
@@ -403,11 +376,8 @@ class SurfaceFluxData:
         )
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        self.lfluxland = 0
+        return tree_util.tree_map(jnp.isnan, self)
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
@@ -463,9 +433,18 @@ class PhysicsData:
             sea_model=sea_model if sea_model is not None else self.sea_model
         )
 
-    def isnan(physics_data):
-        nans = list(physics_data.astuple())
-        for (item,i) in zip(physics_data.astuple(),range(len(physics_data.astuple()))):
-            nans[i] = item.isnan()
-
-        return nans
+    def isnan(self):
+        return PhysicsData(
+            shortwave_rad=self.shortwave_rad.isnan(),
+            longwave_rad=self.longwave_rad.isnan(),
+            convection=self.convection.isnan(),
+            mod_radcon=self.mod_radcon.isnan(),
+            humidity=self.humidity.isnan(),
+            condensation=self.condensation.isnan(),
+            surface_flux=self.surface_flux.isnan(),
+            date=self.date.isnan(),
+            sea_model=self.sea_model.isnan()
+        )
+    
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))

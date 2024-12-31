@@ -3,6 +3,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 from datetime import datetime
+from jax import tree_util
 
 ### NOTE, the below code is taken verbatim from the NeuralGCM experimental branch and should be 
 ### imported from there (or wherever it ends up) once it is stable
@@ -176,11 +177,7 @@ class DateData:
         return DateData(tyear if tyear is not None else self.tyear)
     
     def isnan(self):
-        nans = list(self.astuple())
-        for (item,i) in zip(self.astuple(),range(len(self.astuple()))):
-            nans[i] = jnp.isnan(item)
-
-        return nans
+        return tree_util.tree_map(jnp.isnan, self)
 
 
 def fraction_of_year_elapsed(dt):
