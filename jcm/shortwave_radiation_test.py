@@ -272,12 +272,40 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
         self.assertTrue(jnp.all(physics_data.shortwave_rad.zenit >= 0))
         
-    def test_get_zonal_average_fields_gradients_isnan_ones(self):    
+    def test_get_zonal_average_fields_gradients_isnan(self):    
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
+        from datetime import datetime
+        from jcm.date import Timestamp, Timedelta     
+
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+
         xy = (ix, il)
         xyz = (ix, il, kx)
-        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
+
+        surface_flux = SurfaceFluxData.zeros(xy,fmask=fmask)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx)
+
+        #equivalent of tyear = 0.6
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
+
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data) 
@@ -317,11 +345,6 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_clouds_gradients_isnan_with_realistic_values(self):   
         from datetime import datetime
         from jcm.date import Timestamp, Timedelta     
-        # qa = 0.5 * 1000. * jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])[jnp.newaxis, jnp.newaxis, :]
-        # qsat = 1000. * jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])[jnp.newaxis, jnp.newaxis, :]
-        # rh = qa/qsat
-        # geopotential = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.arange(7, -1, -1)[jnp.newaxis, jnp.newaxis, :]
-        # se = .1*geopotential
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
