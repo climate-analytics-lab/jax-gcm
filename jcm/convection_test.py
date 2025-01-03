@@ -1,5 +1,7 @@
 import unittest
 import jax.numpy as jnp
+import jax
+from jax import tree_util
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -9,9 +11,9 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig, get_qsat, fsg
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState
+        from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
         from jcm.physical_constants import grdscp, grdsig
         from jcm.humidity import get_qsat
@@ -23,7 +25,7 @@ class TestConvectionUnit(unittest.TestCase):
         se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
        304056.8 , 293391.7 ])
         qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
-        qsat = qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
+        qsat = get_qsat(jnp.ones((1,1,1)) * 288., jnp.ones((1,1,1)), fsg[None, None, :])
         
         se_broadcast = jnp.tile(se[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
         qa_broadcast = jnp.tile(qa[jnp.newaxis, jnp.newaxis, :], (ix, il, 1))
@@ -33,6 +35,26 @@ class TestConvectionUnit(unittest.TestCase):
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
+
+    def test_get_convection_tendencies_isnan_ones(self): 
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        
+        physics_data = PhysicsData.ones(xy, kx)  
+        
+        state = PhysicsState.ones(xyz)
+
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data) 
+        
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy, kx)
+        input = (tends, datas)
+        
+        df_dstates, df_ddatas = f_vjp(input)
+
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
+
 
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure

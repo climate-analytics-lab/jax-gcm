@@ -1,6 +1,7 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import jax
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -29,9 +30,9 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ModRadConData, PhysicsData, PhysicsState, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, PhysicsData
-        from jcm.physics import PhysicsState
+        from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):        
@@ -100,5 +101,40 @@ class TestDownwardLongwave(unittest.TestCase):
         # TODO: Implement this test
 
         pass
+
+    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+        """Test that we can calculate gradients of longwave radiation without getting NaN values"""
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(xyz)
+
+        # Calculate gradient
+        primals, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data) 
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy,kx) 
+        input = (tends, datas)
+        df_dstates, df_ddatas = f_vjp(input)
+
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
+       
+
+    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+        """Test that we can calculate gradients of longwave radiation without getting NaN values"""
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(xyz)
+
+        # Calculate gradient
+        primals, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data) 
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy,kx) 
+        input = (tends, datas)
+        df_dstates, df_ddatas = f_vjp(input)
+
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
 
 

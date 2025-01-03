@@ -1,4 +1,5 @@
 import unittest
+import jax
 import jax.numpy as jnp
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
@@ -9,10 +10,49 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData, \
-               PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag
+               PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
-        from jcm.physics import PhysicsState
+        from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
+
+    def test_grad_surface_flux(self):
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(((ix, il, kx))) #zonal wind
+        va = jnp.ones(((ix, il, kx))) #meridional wind
+        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
+        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
+        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
+        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
+        lfluxland=True
+            
+        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx,psa=psa)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        sea_data = SeaModelData.zeros(xy,tsea=tsea)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+
+        primals, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data)
+
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy, kx)
+
+        input_tensors = (tends, datas)
+
+        df_dstate, df_ddatas = f_vjp(input_tensors)
+
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstate.isnan().any_true())
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)

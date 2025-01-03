@@ -1,6 +1,7 @@
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import jax
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
@@ -10,9 +11,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, get_large_scale_condensation_tendencies
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, get_large_scale_condensation_tendencies
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState
+        from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 
     def test_get_large_scale_condensation_tendencies(self):
@@ -43,7 +44,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         0.16069981,  0.        ,  0.        ]]])
         qsat = jnp.asarray([[[1.64229703e-01, 1.69719307e-02, 1.45193088e-01, 1.98833509e+00,
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01]]])
-        itop = jnp.ones((ix, il)) * 4
+        itop = jnp.ones((ix, il), dtype=int) * 4
 
         convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
@@ -58,4 +59,22 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00]]]), atol=1e-4, rtol=0)
         self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
         self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
+
+    def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):    
+        """Test that we can calculate gradients of large-scale condensation without getting NaN values"""
+        xy = (ix, il)
+        xyz = (ix, il, kx)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(xyz)
+
+        # Calculate gradient
+        primals, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data) 
+        tends = PhysicsTendency.ones(xyz)
+        datas = PhysicsData.ones(xy,kx) 
+        input = (tends, datas)
+        df_dstates, df_ddatas = f_vjp(input)
+
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
+
 

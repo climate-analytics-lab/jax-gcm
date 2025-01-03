@@ -14,6 +14,7 @@ from jcm.physics_data import PhysicsData
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
+from jax import tree_util
 
 @tree_math.struct
 class PhysicsState:
@@ -35,6 +36,17 @@ class PhysicsState:
             surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
         )
     
+    @classmethod
+    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return PhysicsState(
+            u_wind if u_wind is not None else jnp.ones(shape),
+            v_wind if v_wind is not None else jnp.ones(shape),
+            temperature if temperature is not None else jnp.ones(shape),
+            specific_humidity if specific_humidity is not None else jnp.ones(shape),
+            geopotential if geopotential is not None else jnp.ones(shape),
+            surface_pressure if surface_pressure is not None else jnp.ones(shape[0:2])
+        )
+    
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
@@ -44,6 +56,12 @@ class PhysicsState:
             geopotential if geopotential is not None else self.geopotential,
             surface_pressure if surface_pressure is not None else self.surface_pressure
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+    
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
 @tree_math.struct
 class PhysicsTendency:
@@ -59,6 +77,15 @@ class PhysicsTendency:
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape)
+        )
+    
+    @classmethod
+    def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return PhysicsTendency(
+            u_wind if u_wind is not None else jnp.ones(shape),
+            v_wind if v_wind is not None else jnp.ones(shape),
+            temperature if temperature is not None else jnp.ones(shape),
+            specific_humidity if specific_humidity is not None else jnp.ones(shape)
         )
     
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):

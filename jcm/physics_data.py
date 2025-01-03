@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
+from jax import tree_util
  
 @tree_math.struct
 class LWRadiationData:
@@ -17,6 +18,15 @@ class LWRadiationData:
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
             slr = slr if slr is not None else jnp.zeros((nodal_shape)),
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, rlds=None, dfabs=None, ftop=None, slr=None):
+        return LWRadiationData(
+            rlds = rlds if rlds is not None else jnp.ones((nodal_shape)),
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,))),
+            ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
+            slr = slr if slr is not None else jnp.ones((nodal_shape)),
+        )
 
     def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
@@ -25,7 +35,9 @@ class LWRadiationData:
             ftop=ftop if ftop is not None else self.ftop,
             slr=slr if slr is not None else self.slr
         )
-
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
@@ -61,6 +73,25 @@ class SWRadiationData:
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
             dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,)))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+        return SWRadiationData(
+            qcloud = qcloud if qcloud is not None else jnp.ones((nodal_shape)),
+            fsol = fsol if fsol is not None else jnp.ones((nodal_shape)),
+            rsds = rsds if rsds is not None else jnp.ones((nodal_shape)),
+            ssr = ssr if ssr is not None else jnp.ones((nodal_shape)),
+            ozone = ozone if ozone is not None else jnp.ones((nodal_shape)),
+            ozupp = ozupp if ozupp is not None else jnp.ones((nodal_shape)),
+            zenit = zenit if zenit is not None else jnp.ones((nodal_shape)),
+            stratz = stratz if stratz is not None else jnp.ones((nodal_shape)),
+            gse = gse if gse is not None else jnp.ones((nodal_shape)),
+            icltop = icltop if icltop is not None else jnp.ones((nodal_shape)),
+            cloudc = cloudc if cloudc is not None else jnp.ones((nodal_shape)),
+            cloudstr = cloudstr if cloudstr is not None else jnp.ones((nodal_shape)),
+            ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,)))
+        )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
@@ -79,6 +110,9 @@ class SWRadiationData:
             ftop=ftop if ftop is not None else self.ftop,
             dfabs=dfabs if dfabs is not None else self.dfabs
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
 class ModRadConData:
@@ -107,6 +141,19 @@ class ModRadConData:
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+        return ModRadConData(
+            alb_l = alb_l if alb_l is not None else jnp.ones((nodal_shape)),
+            alb_s = alb_s if alb_s is not None else jnp.ones((nodal_shape)),
+            albsfc = albsfc if albsfc is not None else jnp.ones((nodal_shape)),
+            snowc = snowc if snowc is not None else jnp.ones((nodal_shape)),
+            tau2 = tau2 if tau2 is not None else jnp.ones((nodal_shape+(node_levels,)+(4,))),
+            st4a = st4a if st4a is not None else jnp.ones((nodal_shape+(node_levels,)+(2,))),
+            stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
+            flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
+        )
 
     def copy(self, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
@@ -119,6 +166,9 @@ class ModRadConData:
             stratc=stratc if stratc is not None else self.stratc,
             flux=flux if flux is not None else self.flux
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class SeaModelData:
     tsea: jnp.ndarray # SST, should come from sea_model.py
@@ -128,13 +178,20 @@ class SeaModelData:
         return SeaModelData(
             tsea = tsea if tsea is not None else jnp.zeros((nodal_shape))
         )
-
+    
     @classmethod
+    def ones(self, nodal_shape, tsea=None):
+        return SeaModelData(
+            tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
+        )
+
     def copy(self, tsea=None):
         return CondensationData(
             tsea=tsea if tsea is not None else self.tsea, 
         )
 
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
@@ -148,6 +205,14 @@ class CondensationData:
             dtlsc = dtlsc if dtlsc is not None else jnp.zeros((nodal_shape+(node_levels,))),
             dqlsc = dqlsc if dqlsc is not None else jnp.zeros((nodal_shape+(node_levels,))),
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None):
+        return CondensationData(
+            precls = precls if precls is not None else jnp.ones((nodal_shape)),
+            dtlsc = dtlsc if dtlsc is not None else jnp.ones((nodal_shape+(node_levels,))),
+            dqlsc = dqlsc if dqlsc is not None else jnp.ones((nodal_shape+(node_levels,))),
+        )
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
         return CondensationData(
@@ -155,6 +220,9 @@ class CondensationData:
             dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
             dqlsc=dqlsc if dqlsc is not None else self.dqlsc
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ConvectionData:
@@ -174,14 +242,31 @@ class ConvectionData:
             precnv = precnv if precnv is not None else jnp.zeros((nodal_shape)),
         )
     
+    @classmethod
+    def ones(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+        return ConvectionData(
+            psa = psa if psa is not None else jnp.ones((nodal_shape)),
+            se = se if se is not None else jnp.ones((nodal_shape + (node_levels,))),
+            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
+            cbmf = cbmf if cbmf is not None else jnp.ones((nodal_shape)),
+            precnv = precnv if precnv is not None else jnp.ones((nodal_shape)),
+        )
+    
     def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
-            iptop=iptop if iptop is not None else self.iptop,
+            iptop= iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
             precnv=precnv if precnv is not None else self.precnv
         )
+    
+    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to 
+    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaninful 
+    # or intended to be used.
+    def isnan(self):
+        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class HumidityData:
@@ -194,12 +279,22 @@ class HumidityData:
             rh = rh if rh is not None else jnp.zeros((nodal_shape+(node_levels,))),
             qsat = qsat if qsat is not None else jnp.zeros((nodal_shape+(node_levels,)))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, rh=None, qsat=None):
+        return HumidityData(
+            rh = rh if rh is not None else jnp.ones((nodal_shape+(node_levels,))),
+            qsat = qsat if qsat is not None else jnp.ones((nodal_shape+(node_levels,)))
+        )
 
     def copy(self, rh=None, qsat=None):
         return HumidityData(
             rh=rh if rh is not None else self.rh, 
             qsat=qsat if qsat is not None else self.qsat
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class SurfaceFluxData:
@@ -241,6 +336,27 @@ class SurfaceFluxData:
             fmask = fmask if fmask is not None else jnp.zeros((nodal_shape)),
             phi0 = phi0 if phi0 is not None else jnp.zeros((nodal_shape))
         )
+    
+    @classmethod
+    def ones(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+        return SurfaceFluxData(
+            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 1.0),
+            soilw_am = soilw_am if soilw_am is not None else jnp.full((nodal_shape), 1.0),
+            lfluxland = lfluxland if lfluxland is not None else True,
+            ustr = ustr if ustr is not None else jnp.ones((nodal_shape)+(3,)),
+            vstr = vstr if vstr is not None else jnp.ones((nodal_shape)+(3,)),
+            shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
+            evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
+            slru = slru if slru is not None else jnp.ones((nodal_shape)+(3,)),
+            hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
+            tsfc = tsfc if tsfc is not None else jnp.ones((nodal_shape)),
+            tskin = tskin if tskin is not None else jnp.ones((nodal_shape)),
+            u0 = u0 if u0 is not None else jnp.ones((nodal_shape)),
+            v0 = v0 if v0 is not None else jnp.ones((nodal_shape)),
+            t0 = t0 if t0 is not None else jnp.ones((nodal_shape)),
+            fmask = fmask if fmask is not None else jnp.ones((nodal_shape)),
+            phi0 = phi0 if phi0 is not None else jnp.ones((nodal_shape))
+        )
 
     def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
         return SurfaceFluxData(
@@ -261,6 +377,12 @@ class SurfaceFluxData:
             fmask=fmask if fmask is not None else self.fmask,
             phi0=phi0 if phi0 is not None else self.phi0
         )
+    
+    # Ignoring lfluxland in the isnan check because it is a boolean. We use this check on gradients with respect to SurfaceFluxData, 
+    # which will be NaN for lfluxland. 
+    def isnan(self):
+        self.lfluxland = 0
+        return tree_util.tree_map(jnp.isnan, self)
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
@@ -285,8 +407,22 @@ class PhysicsData:
             humidity = humidity if humidity is not None else HumidityData.zeros(nodal_shape, node_levels),
             condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
-            date = date if date is not None else DateData.set_date(),
+            date = date if date is not None else DateData.zeros(),
             sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape)
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+        return PhysicsData(        
+            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
+            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
+            convection = convection if convection is not None else ConvectionData.ones(nodal_shape, node_levels),
+            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.ones(nodal_shape, node_levels),
+            humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, node_levels),
+            condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
+            surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
+            date = date if date is not None else DateData.ones(),
+            sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape)
         )
 
     def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
@@ -301,3 +437,22 @@ class PhysicsData:
             date=date if date is not None else self.date,
             sea_model=sea_model if sea_model is not None else self.sea_model
         )
+
+    # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
+    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in 
+    # valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
+    def isnan(self):
+        return PhysicsData(
+            shortwave_rad=self.shortwave_rad.isnan(),
+            longwave_rad=self.longwave_rad.isnan(),
+            convection=self.convection.isnan(),
+            mod_radcon=self.mod_radcon.isnan(),
+            humidity=self.humidity.isnan(),
+            condensation=self.condensation.isnan(),
+            surface_flux=self.surface_flux.isnan(),
+            date=0, 
+            sea_model=self.sea_model.isnan()
+        )
+    
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
