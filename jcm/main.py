@@ -19,9 +19,6 @@ def main(cfg: DictConfig):
     )
     
     state = model.get_initial_state()
-    state.tracers = {
-        'specific_humidity': primitive_equations_states.gaussian_scalar(
-            model.coords, model.physics_specs)}
             
     final_state, predictions = model.unroll(state)
     ds = model.data_to_xarray(asdict(predictions))

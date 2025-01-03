@@ -72,9 +72,10 @@ class TestModelUnit(unittest.TestCase):
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
     
         final_state, predictions = model.unroll(state)
+        dynamics_predictions = predictions['dynamics']
 
         self.assertIsNotNone(final_state)
-        self.assertIsNotNone(predictions)
+        self.assertIsNotNone(dynamics_predictions)
 
         self.assertIsNotNone(final_state.divergence)
         self.assertIsNotNone(final_state.vorticity)
@@ -82,11 +83,11 @@ class TestModelUnit(unittest.TestCase):
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
 
-        self.assertIsNotNone(predictions.divergence)
-        self.assertIsNotNone(predictions.vorticity)
-        self.assertIsNotNone(predictions.temperature_variation)
-        self.assertIsNotNone(predictions.log_surface_pressure)
-        self.assertIsNotNone(predictions.tracers['specific_humidity'])
+        self.assertIsNotNone(dynamics_predictions.divergence)
+        self.assertIsNotNone(dynamics_predictions.vorticity)
+        self.assertIsNotNone(dynamics_predictions.temperature_variation)
+        self.assertIsNotNone(dynamics_predictions.log_surface_pressure)
+        self.assertIsNotNone(dynamics_predictions.tracers['specific_humidity'])
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
@@ -94,8 +95,8 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1, modal_x, modal_y))
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
 
-        self.assertTupleEqual(predictions.divergence.shape, output_tzxy)
-        self.assertTupleEqual(predictions.vorticity.shape, output_tzxy)
-        self.assertTupleEqual(predictions.temperature_variation.shape, output_tzxy)
-        self.assertTupleEqual(predictions.log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
-        self.assertTupleEqual(predictions.tracers['specific_humidity'].shape, output_tzxy)
+        self.assertTupleEqual(dynamics_predictions.divergence.shape, output_tzxy)
+        self.assertTupleEqual(dynamics_predictions.vorticity.shape, output_tzxy)
+        self.assertTupleEqual(dynamics_predictions.temperature_variation.shape, output_tzxy)
+        self.assertTupleEqual(dynamics_predictions.log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
+        self.assertTupleEqual(dynamics_predictions.tracers['specific_humidity'].shape, output_tzxy)
