@@ -261,6 +261,9 @@ class ConvectionData:
             precnv=precnv if precnv is not None else self.precnv
         )
     
+    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to 
+    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaninful 
+    # or intended to be used.
     def isnan(self):
         self.iptop = jnp.zeros_like(self.iptop, dtype=float)
         return tree_util.tree_map(jnp.isnan, self)
@@ -433,6 +436,9 @@ class PhysicsData:
             sea_model=sea_model if sea_model is not None else self.sea_model
         )
 
+    # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
+    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in 
+    # valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
     def isnan(self):
         return PhysicsData(
             shortwave_rad=self.shortwave_rad.isnan(),
@@ -442,7 +448,7 @@ class PhysicsData:
             humidity=self.humidity.isnan(),
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
-            date=self.date.isnan(),
+            date=0, 
             sea_model=self.sea_model.isnan()
         )
     
