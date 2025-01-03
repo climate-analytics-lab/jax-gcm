@@ -378,6 +378,8 @@ class SurfaceFluxData:
             phi0=phi0 if phi0 is not None else self.phi0
         )
     
+    # Ignoring lfluxland in the isnan check because it is a boolean. We use this check on gradients with respect to SurfaceFluxData, 
+    # which will be NaN for lfluxland. 
     def isnan(self):
         self.lfluxland = 0
         return tree_util.tree_map(jnp.isnan, self)
