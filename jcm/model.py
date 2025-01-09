@@ -1,4 +1,5 @@
 import dinosaur.primitive_equations_states
+from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
 import dinosaur
@@ -60,7 +61,9 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
     def physical_tendencies(state):
         
         date = DateData.set_date(
-            model_time = reference_date + Timedelta(seconds=state.sim_time)
+            model_time = reference_date + Timedelta(
+                seconds=dynamics.physics_specs.dimensionalize(state.sim_time, units.second).m
+            )
         )
 
         sea_model = SeaModelData.zeros(
@@ -100,7 +103,7 @@ class SpeedyModel:
         from datetime import datetime
 
         # Integration settings
-        start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
+        self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
@@ -128,22 +131,22 @@ class SpeedyModel:
             p1=p1
         )
         
-        ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
+        self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         orography = dinosaur.primitive_equations.truncated_modal_orography(
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
         # Governing equations
-        primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
-            ref_temps,
+        self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
+            self.ref_temps,
             orography,
             self.coords,
             self.physics_specs)
         
-        physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, time_step, physics_terms, reference_date=start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
 
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
@@ -155,24 +158,129 @@ class SpeedyModel:
         ]
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
-        
+
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
+        state.tracers = {
+            'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+        }
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
     def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
         return self.step_fn(state)
-                                 
+    
+    def post_process(self, state):
+        from jcm.date import DateData
+        from jcm.physics_data import PhysicsData, SeaModelData
+        from jcm.physics import dynamics_state_to_physics_state
+
+        date = DateData.set_date(
+            model_time = self.start_date + Timedelta(
+                seconds=self.physics_specs.dimensionalize(state.sim_time, units.second).m
+                )
+        )
+
+        # TODO: factor this out into boundary conditions object
+        sea_model = SeaModelData.zeros(
+            self.coords.nodal_shape[1:],
+            tsea = fixed_ssts(self.coords.nodal_shape[1])
+        )
+
+        data = PhysicsData.zeros(
+            self.coords.nodal_shape[1:],
+            self.coords.nodal_shape[0],
+            date=date,
+            sea_model=sea_model
+        )
+
+        physics_state = dynamics_state_to_physics_state(state, self.primitive)
+        for term in self.physics_terms:
+            _, data = term(physics_state, data)
+        
+        return {
+            'dynamics': state,
+            'physics': data,
+        }
+    
     def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
-            inner_steps=self.inner_steps))
+            inner_steps=self.inner_steps,
+            start_with_input=True,
+            post_process_fn=self.post_process,
+        ))
         return integrate_fn(state)
     
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
         
         return data_to_xarray(data, coords=self.coords, times=self.times)
+    
+    def predictions_to_xarray(self, predictions):
+        from dinosaur.xarray_utils import data_to_xarray
 
+        # extract dynamics predictions (State format)
+        # and physics predictions (PhysicsData format) from postprocessed output
+        dynamics_predictions = predictions['dynamics']
+        physics_predictions = predictions['physics']
+
+        # prepare dynamics predictions for xarray conversion:
+        # convert from modal to nodal, and dimensionalize
+        u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal,
+                                                dynamics_predictions.vorticity,
+                                                dynamics_predictions.divergence)
+        # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
+        # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
+        log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure))
+        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal) * 1e5
+        diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
+
+        # dimensionalize
+        u_nodal = self.physics_specs.dimensionalize(jnp.asarray(u_nodal), units.meter / units.second).m
+        v_nodal = self.physics_specs.dimensionalize(jnp.asarray(v_nodal), units.meter / units.second).m
+        diagnostic_state_preds.temperature_variation = (288 * units.kelvin + self.physics_specs.dimensionalize(diagnostic_state_preds.temperature_variation, units.kelvin)).m
+        diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
+
+        # prepare physics predictions for xarray conversion:
+        # unpack into single dictionary, and unpack/transpose individual fields
+        # unpack PhysicsData struct
+        physics_state_preds = {
+            f"{module}.{field}": value # avoids name conflicts between fields of different modules
+            for module, module_dict in physics_predictions.asdict().items()
+            for field, value in module_dict.asdict().items()
+        }
+        # replace multi-channel fields with a field for each channel
+        _original_keys = list(physics_state_preds.keys())
+        for k in _original_keys:
+            v = physics_state_preds[k]
+            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[-1] != self.coords.nodal_shape[0]):
+                physics_state_preds.update(
+                    {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
+                )
+                del physics_state_preds[k]
+        # convert x, y, z to z, x, y to match dinosaur dimension ordering
+        for k, v in physics_state_preds.items():
+            if v.shape[1:4] == self.coords.nodal_shape[1:] + (self.coords.nodal_shape[0],):
+                physics_state_preds[k] = jnp.moveaxis(v, (0, 1, 2, 3), (0, 2, 3, 1))
+
+        # create xarray dataset
+        nodal_predictions = {
+            **diagnostic_state_preds.asdict(),
+            **physics_state_preds
+        }
+        broken_keys = ['cos_lat_u', 'cos_lat_grad_log_sp', 'cos_lat_grad_log_sp', ] # These are tuples which are not supported by xarray
+        broken_keys += ['sigma_dot_explicit', 'sigma_dot_full'] # These have one less time step for some reason...
+        pred_ds = self.data_to_xarray({k: v for k, v in nodal_predictions.items() if k not in broken_keys})
+        pred_ds = pred_ds.rename_vars({'temperature_variation': 'temperature'})
+        pred_ds['u'] = self.data_to_xarray({'u': u_nodal})['u']
+        pred_ds['v'] = self.data_to_xarray({'v': v_nodal})['v']
+        pred_ds['surface_pressure'] = self.data_to_xarray({'surface_pressure': surface_pressure_nodal})['surface_pressure']
+        
+        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
+        pred_ds = pred_ds.isel(level=slice(None, None, -1))
+        # convert integer time (in days) to datetime
+        pred_ds['time'] = (self.start_date.delta.days + pred_ds.time).astype('datetime64[D]')
+        
+        return pred_ds
