@@ -95,7 +95,8 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData):
     alb_l = physics_data.mod_radcon.alb_l
     alb_s = physics_data.mod_radcon.alb_s
 
-    forog = set_orog_land_sfc_drag(phi0)
+    # this takes spectrally truncated phi0, not phi0 itself
+    forog = set_orog_land_sfc_drag(phis0)
 
     # Initialize variables
     esbc  = emisfc*sbc
@@ -301,7 +302,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData):
     return physics_tendencies, physics_data
 
 @jit
-def set_orog_land_sfc_drag(phi0):
+def set_orog_land_sfc_drag(phis0):
     '''
     Parameters
     ----------
@@ -311,7 +312,7 @@ def set_orog_land_sfc_drag(phi0):
 
     rhdrag = 1/(grav*hdrag)
 
-    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phi0, 0.0)*rhdrag))
+    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))
 
     return forog
 

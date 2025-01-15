@@ -53,6 +53,7 @@ def fixed_ssts(ix):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
 
+#  add boundaries argument
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date):
     from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
@@ -78,7 +79,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             sea_model=sea_model
         )
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data)
+        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, ())
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -110,7 +111,7 @@ class SpeedyModel:
 
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=dinosaur.spherical_harmonic.Grid.T42(),
+            horizontal=dinosaur.spherical_harmonic.Grid.T42(), # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
         # Not sure why we need this...
@@ -144,6 +145,7 @@ class SpeedyModel:
         
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
+        # pass in boundaries (define them above)
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])

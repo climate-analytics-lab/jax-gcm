@@ -19,3 +19,7 @@ issty0 = 1979   # Starting year for SST anomaly file
 # User-specified parameters
 nstdia = 36 * 5 # Period (number of steps) for diagnostic print-out
 nsteps_out = 1  # Number of time steps between outputs
+
+trunc = 30   # Spectral truncation total wavenumber
+nx = trunc+2 # Number of total wavenumbers for spectral storage arrays
+mx = trunc+1 # Number of zonal wavenumbers for spectral storage arrays
