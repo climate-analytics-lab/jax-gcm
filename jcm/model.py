@@ -89,7 +89,7 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None) -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None, boundary_file='boundaries.nc') -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -99,10 +99,11 @@ class SpeedyModel:
             total_time: Total integration time in days
             layers: Number of vertical layers
             start_date: Start date of the simulation
+            boundary_file: Path to the boundary conditions file including land-sea mask and albedo
 
         """
         from datetime import datetime
-        from jcm.physics import spectral_truncation
+        from jcm.boundaries import initialize_boundaries
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -146,11 +147,10 @@ class SpeedyModel:
         
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        # boundaries (define them and pass to convert_tendencies_to_equation)
-        # need to spectrally truncate phi0 which then becomes phis0
-        phis0 = spectral_truncation(self.primitive, phi0, truncation_number)
+        # TODO: make the truncation number a parameter consistent with the grid shape        
+        boundaries = initialize_boundaries(boundary_file, self.primitive, 42)
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, self.start_date, boundaries)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
