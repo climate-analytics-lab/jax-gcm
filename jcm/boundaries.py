@@ -1,15 +1,21 @@
 import jax.numpy as jnp
 import tree_math
 
+# we might want to separate this into sub-dataclasses (sea-model and land-model) for clarity
+# need to pull sea-model out of PhysicsData
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
-    fmask_l: jnp.ndarray # land mask - set by land_model_init()
-    fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
     phi0: jnp.ndarray  # surface geopotential (ix, il)
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
+    fmask_l: jnp.ndarray # land mask - set by land_model_init()
+    stl_am: jnp.ndarray # land surface temperature (ix,il)
+    snowd_am: jnp.ndarray # snow depth (water equivalent) (ix,il)
+    soilw_am: jnp.ndarray # soil water availability (ix,il)
+
+    fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
 def initialize_boundaries(surface_filename, primitive, truncation_number):
     """
