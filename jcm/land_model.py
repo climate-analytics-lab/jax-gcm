@@ -7,6 +7,8 @@ sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 # need to pass this function the boundaries data object -- this should get called from either boundaries.py
 # or model.py
 def land_model_init(land_filename, snow_filename, soil_filename, surface_filename, boundaries):
+    import xarray as xr
+
     # Soil moisture parameters
     swcap = 0.30 # Soil wetness at field capacity (volume fraction)
     swwil = 0.17 # Soil wetness at wilting point  (volume fraction)
@@ -18,36 +20,27 @@ def land_model_init(land_filename, snow_filename, soil_filename, surface_filenam
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
-    do j = 1, il
-        do i = 1, ix
-            if (fmask_l(i,j) >= thrsh) then
-                bmask_l(i,j) = 1.0
-                if (fmask(i,j) > (1.0 - thrsh)) fmask_l(i,j) = 1.0
-            else
-                bmask_l(i,j) = 0.0
-                fmask_l(i,j) = 0.0
+    bmask_l = jnp.where(fmask_l >= thrsh, 1.0, 0.0)
+
+    # Update fmask_l based on the conditions
+    fmask_l = jnp.where(fmask_l >= thrsh, 
+                        jnp.where(boundaries.fmask > (1.0 - thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
-    do month = 1, 12
-        stl12(:,:,month) = load_boundary_file(land_filename, "stl", month)
-
-        # simple sanity check
-        fillsf(stl12(:,:,month), 0.0_p)
-
+    stl12 = jnp.asarray(xr.open_dataset(surface_filename)["stl"])
     # simple sanity check
-    forchk(bmask_l, 12, 0.0_p, 400.0_p, 273.0_p, stl12)
+    fillsf(stl12(:,:,month), 0.0)
+    forchk(bmask_l, 12, 0.0, 400.0, 273.0, stl12)
 
     # Snow depth
-    do month = 1, 12
-        snowd12(:,:,month) = load_boundary_file(snow_filename, "snowd", month)
-
+    snowd12 = jnp.asarray(xr.open_dataset(snow_filename)["snowd"])
     # simple sanity check
-    forchk(bmask_l, 12, 0.0_p, 20000.0_p, 0.0_p, snowd12)
+    forchk(bmask_l, 12, 0.0, 20000.0, 0.0, snowd12)
 
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
-    veg_high = load_boundary_file(surface_filename, "vegh")
-    veg_low  = load_boundary_file(surface_filename, "vegl")
+    veg_high = jnp.asarray(xr.open_dataset(surface_filename)["vegh"])
+    veg_low  = jnp.asarray(xr.open_dataset(surface_filename)["vegl"])
 
     # Combine high and low vegetation fractions
     veg = max(0.0, veg_high + 0.8*veg_low)
@@ -60,40 +53,33 @@ def land_model_init(land_filename, snow_filename, soil_filename, surface_filenam
     swwil2 = idep2*swwil
     rsw    = 1.0/(swcap + idep2*(swcap - swwil))
 
-    do month = 1, 12
-        # Combine soil water content from two top layers
-        swl1 = load_boundary_file(soil_filename, "swl1", month)
-        swl2 = load_boundary_file(soil_filename, "swl2", month)
+    # Combine soil water content from two top layers
+    swl1 = jnp.asarray(xr.open_dataset(soil_filename)["swl1"])
+    swl2 = jnp.asarray(xr.open_dataset(soil_filename)["swl2"])
+    
+    swroot = idep2 * swl2
+    # Compute the intermediate max term
+    max_term = jnp.maximum(0.0, swroot - swwil2)
+    # Compute the soil water content
+    soilw12 = jnp.minimum(1.0, rsw * (swl1 + veg * max_term))
 
-        do j = 1, il
-            do i = 1, ix
-                swroot = idep2*swl2(i,j)
-                soilw12(i,j,month) = min(1.0, rsw*(swl1(i,j) + veg(i,j) &
-                    & *max(0.0, swroot - swwil2)))
+    # Repeat the computed 2D array along a new axis for 12 months - dont need to do this we 
+    # will have all 12 months at once
+    # soilw12 = jnp.tile(soilw12[:, :, None], (1, 1, 12))
 
-    # replace this with whatever check function duncan comes up with
-    forchk(bmask_l, 12, 0.0_p, 10.0_p, 0.0_p, soilw12)
+    # sanity check
+    forchk(bmask_l, 12, 0.0, 10.0, 0.0, soilw12)
 
     # =========================================================================
     # Set heat capacities and dissipation times for soil and ice-sheet layers
     # =========================================================================
 
     # Model parameters (default values)
-
-    # Soil layer depth (m)
-    depth_soil = 1.0
-
-    # Land-ice depth (m)
-    depth_lice = 5.0
-
-    # Dissipation time (days) for land-surface temp. anomalies
-    tdland  = 40.
-
-    # Minimum fraction of land for the definition of anomalies
-    flandmin = 1./3.
-
-    # Heat capacities per m^2 (depth*heat_cap/m^3)
-    hcapl  = depth_soil*2.50e+6
+    depth_soil = 1.0 # Soil layer depth (m)
+    depth_lice = 5.0 # Land-ice depth (m)
+    tdland  = 40.0 # Dissipation time (days) for land-surface temp. anomalies
+    flandmin = 1.0/3.0 # Minimum fraction of land for the definition of anomalies
+    hcapl  = depth_soil*2.50e+6 # Heat capacities per m^2 (depth*heat_cap/m^3)
     hcapli = depth_lice*1.93e+6
 
     # 2. Compute constant fields

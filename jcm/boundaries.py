@@ -17,6 +17,7 @@ class BoundaryData:
 
     fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
+# this function should probably call the land_model_init and sea_model_init functions
 def initialize_boundaries(surface_filename, primitive, truncation_number):
     """
     Initialize the boundary conditions
