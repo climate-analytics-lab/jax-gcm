@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
 from jcm.physical_constants import grav
-from jcm.params import trunc, mx, nx
+from jcm.params import mx, nx
 
 #global variables 
 fmask = None #fractional land-sea mask (ix,il)
@@ -25,21 +25,16 @@ def initialize_boundaries(input_filename):
     alb0 = load_boundary_file(input_filename, "alb")
 
 
-def spectral_truncation(fg1):
-    # what shouldl we be using for grid_to_spec/spec_to_grid? should that be from dinosaur?
-    fsp # (mx,nx)
+def spectral_truncation(fsp, trunc):
+    # given fsp, a spectral representation of a field, return a truncated version
+    nx = trunc+2 # Number of total wavenumbers for spectral storage arrays
+    mx = trunc+1 # Number of zonal wavenumbers for spectral storage arrays
 
-    fsp = grid_to_spec(fg1)
+    n_indices, m_indices = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx), indexing='ij')
+    total_wavenumber = m_indices + n_indices
+    fsp = jnp.where(total_wavenumber > trunc, 0.0, fsp)
 
-    for n in range(nx):
-        for m in range(mx):
-            total_wavenumber = m + n - 2
-            if (total_wavenumber > trunc):
-                fsp[m,n] = (0.0, 0.0) #--> change to jax.at
-
-    fg2 = spec_to_grid(fsp, 1)
-
-    return fg2
+    return fsp
 
 def load_boundary_file(file_name, field_name):
     # implement whatever python method we want for loading a variable into ix, il array from ncfile
