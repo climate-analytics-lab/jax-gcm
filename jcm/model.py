@@ -54,7 +54,7 @@ def fixed_ssts(ix):
     return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
 
 #  add boundaries argument
-def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date):
+def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries):
     from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
@@ -79,7 +79,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             sea_model=sea_model
         )
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, ())
+        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, boundaries)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -102,6 +102,7 @@ class SpeedyModel:
 
         """
         from datetime import datetime
+        from jcm.physics import spectral_truncation
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -145,7 +146,10 @@ class SpeedyModel:
         
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
-        # pass in boundaries (define them above)
+        # boundaries (define them and pass to convert_tendencies_to_equation)
+        # need to spectrally truncate phi0 which then becomes phis0
+        phis0 = spectral_truncation(self.primitive, phi0, truncation_number)
+
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])

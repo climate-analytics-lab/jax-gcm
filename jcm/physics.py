@@ -234,3 +234,18 @@ def get_physical_tendencies(
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
+
+def spectral_truncation(dynamics: PrimitiveEquations, fg1, trunc):
+    # given fsp, a spectral representation of a field, return a truncated version
+    nx = trunc+2 # Number of total wavenumbers for spectral storage arrays
+    mx = trunc+1 # Number of zonal wavenumbers for spectral storage arrays
+
+    fsp = dynamics.coords.horizontal.to_modal(fg1)
+
+    n_indices, m_indices = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx), indexing='ij')
+    total_wavenumber = m_indices + n_indices
+    fsp = jnp.where(total_wavenumber > trunc, 0.0, fsp)
+
+    fg2 = dynamics.coords.horizontal.to_nodal(fg1)
+
+    return fg2

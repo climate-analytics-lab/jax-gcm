@@ -25,16 +25,6 @@ def initialize_boundaries(input_filename):
     alb0 = load_boundary_file(input_filename, "alb")
 
 
-def spectral_truncation(fsp, trunc):
-    # given fsp, a spectral representation of a field, return a truncated version
-    nx = trunc+2 # Number of total wavenumbers for spectral storage arrays
-    mx = trunc+1 # Number of zonal wavenumbers for spectral storage arrays
-
-    n_indices, m_indices = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx), indexing='ij')
-    total_wavenumber = m_indices + n_indices
-    fsp = jnp.where(total_wavenumber > trunc, 0.0, fsp)
-
-    return fsp
 
 def load_boundary_file(file_name, field_name):
     # implement whatever python method we want for loading a variable into ix, il array from ncfile
