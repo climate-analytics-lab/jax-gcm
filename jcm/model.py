@@ -8,6 +8,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
 from dinosaur import primitive_equations_states
 from jcm.date import Timestamp, Timedelta
+from jcm.params import Parameters
 
 def initialize_modules(kx=8, il=64):
     from jcm.geometry import initialize_geometry
@@ -54,7 +55,7 @@ def fixed_ssts(ix):
     return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
 
 #  add boundaries argument
-def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries):
+def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
     from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
@@ -79,7 +80,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             sea_model=sea_model
         )
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, boundaries)
+        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, boundaries, parameters)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -89,7 +90,8 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None, boundary_file='boundaries.nc') -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
+                 start_date=None, boundary_file='boundaries.nc', parameters=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -150,7 +152,9 @@ class SpeedyModel:
         # TODO: make the truncation number a parameter consistent with the grid shape        
         boundaries = initialize_boundaries(boundary_file, self.primitive, 42)
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, self.start_date, boundaries)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
+                                                        self.physics_terms, self.start_date, 
+                                                        boundaries, parameters)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 

@@ -12,6 +12,7 @@ from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
@@ -199,7 +200,8 @@ def get_physical_tendencies(
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None,
-    boundaries: BoundaryData = None
+    boundaries: BoundaryData = None,
+    parameters: Parameters = None
 ):
     """
     Computes the physical tendencies given the current state and a list of physics functions.

@@ -10,16 +10,21 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
 from jcm.geometry import dhs, fsg
+import tree_math
 
-psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
-trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
-rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for secondary mass flux
-rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
-entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
-smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
+
+@tree_math.struct
+class ConvectionParameters:
+    psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
+    trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
+    rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for secondary mass flux
+    rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
+    entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
+    smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
+
 
 @jit
-def diagnose_convection(psa, se, qa, qsat):
+def diagnose_convection(psa, se, qa, qsat, psmin, rhbl, alhc):
     """
     Diagnose convectively unstable gridboxes  
 
@@ -96,7 +101,7 @@ def diagnose_convection(psa, se, qa, qsat):
     return iptop, qdif
 
 @jit
-def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData):
+def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, boundary_data: BoundaryData, parameters: Parameters):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 

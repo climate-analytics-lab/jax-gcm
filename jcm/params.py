@@ -2,6 +2,8 @@
 Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 '''
+import tree_math
+from jcm.convection import ConvectionParameters
 
 # Time stepping parameters
 nsteps = 36     # Number of time steps in one day
@@ -19,3 +21,7 @@ issty0 = 1979   # Starting year for SST anomaly file
 # User-specified parameters
 nstdia = 36 * 5 # Period (number of steps) for diagnostic print-out
 nsteps_out = 1  # Number of time steps between outputs
+
+@tree_math.struct
+class Parameters:
+    convection: ConvectionParameters
