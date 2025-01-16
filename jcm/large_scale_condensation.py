@@ -4,6 +4,7 @@ Parametrization of large-scale condensation.
 '''
 from jax import jit
 import jax.numpy as jnp
+from jcm.boundaries import BoundaryData
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, cp, alhc, grav
@@ -18,7 +19,7 @@ rhblsc = 0.95 # Relative humidity threshold for boundary layer
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
 @jit
-def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: PhysicsData):
+def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
     """
     Compute large-scale condensation and associated tendencies of temperature and moisture
 

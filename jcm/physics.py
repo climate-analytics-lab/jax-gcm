@@ -11,7 +11,6 @@ from typing import Callable
 from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
-from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal

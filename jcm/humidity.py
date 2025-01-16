@@ -7,13 +7,14 @@ saturation specific humidity.
 import jax 
 from jax import jit
 import jax.numpy as jnp
+from jcm.boundaries import BoundaryData
 from jcm.physics_data import PhysicsData
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physical_constants import cp
 from jcm.geometry import fsg
 
 @jit
-def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData):
+def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
     """
     Converts specific humidity to relative humidity, and also returns saturation 
      specific humidity.

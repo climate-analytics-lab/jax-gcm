@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
+from jcm.boundaries import BoundaryData
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
@@ -13,7 +14,7 @@ rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
 segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
 @jit
-def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
+def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
     
     '''
     Inputs:
