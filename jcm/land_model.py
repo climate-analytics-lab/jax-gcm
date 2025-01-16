@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 
 # should these be moved to params.py?
-land_coupling_flag = 1 # Flag for land-coupling (0: off, 1: on)
 sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 # Soil moisture parameters
 swcap = 0.30 # Soil wetness at field capacity (volume fraction)
@@ -93,7 +92,7 @@ def land_model_init(surface_filename, boundaries):
 # day = index for day of the year -- get this from tyear
 def couple_land_atm(day, boundaries):
     # Run the land model if the land model flags is switched on
-    if (land_coupling_flag == 1):
+    if (boundaries.land_coupling_flag):
         stl_lm = run_land_model(boundaries.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
         stl_am = stl_lm
     # Otherwise get the land surface from climatology

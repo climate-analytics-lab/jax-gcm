@@ -18,28 +18,30 @@ class BoundaryData:
     stlcl_ob: jnp.ndarray
     snowcl_ob: jnp.ndarray # -- for all days - don't need _am, just grab from _ob
     soilwcl_ob: jnp.ndarray
+    land_coupling_flag: jnp.int32 # 0 or 1
 
     fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
     @classmethod
-    def new(cls,fmask,phi0,phis0,alb0,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None):
+    def new(self,nodal_shape,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None, land_coupling_flag=None):
         return BoundaryData(
-            fmask=fmask,
-            phi0=phi0,
-            phis0=phis0,
-            alb0=alb0,
-            fmask_l=fmask_l,
-            stl_am=stl_am,
-            stl_lm=stl_lm,
-            rhcapl=rhcapl,
-            cdland=cdland,
-            stlcl_ob=stlcl_ob,
-            snowcl_ob=snowcl_ob,
-            soilwcl_ob=soilwcl_ob,
-            fmask_s=fmask_s
+            fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
+            phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
+            phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
+            alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
+            fmask_l=fmask_l if fmask_l is not None else jnp.zeros((nodal_shape)),
+            stl_am=stl_am if stl_am is not None else jnp.zeros((nodal_shape)),
+            stl_lm=stl_lm if stl_lm is not None else jnp.zeros((nodal_shape)),
+            rhcapl=rhcapl if rhcapl is not None else jnp.zeros((nodal_shape)),
+            cdland=cdland if cdland is not None else jnp.zeros((nodal_shape)),
+            stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
+            snowcl_ob=snowcl_ob if snowcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
+            soilwcl_ob=soilwcl_ob if soilwcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
+            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else True,
+            fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
         )
 
-    def copy(self,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None):
+    def copy(self,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None, land_coupling_flag=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             phi0=phi0 if phi0 is not None else self.phi0,
@@ -80,11 +82,13 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     # Annual-mean surface albedo
     alb0 = jnp.asarray(xr.open_dataset(surface_filename)["alb"])
 
-    # Apply some sanity checks
+    # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all(fmask >= 0.0), "Land-sea mask must be between 0 and 1"
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
+    nodal_shape = fmask.shape[0:2]
 
-    boundaries = BoundaryData.new(fmask=fmask, phi0=phi0, phis0=phis0, alb0=alb0)
-    boundaries = land_model_init(surface_filename,boundaries)
+    boundaries = BoundaryData.new(nodal_shape,fmask=fmask, phi0=phi0, phis0=phis0, alb0=alb0)
+    if boundaries.lfluxland:
+        boundaries = land_model_init(surface_filename,boundaries)
 
     return boundaries
