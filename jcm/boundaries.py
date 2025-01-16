@@ -21,6 +21,24 @@ class BoundaryData:
 
     fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
+    @classmethod
+    def new(cls,fmask,phi0,phis0,alb0,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None):
+        return BoundaryData(
+            fmask=fmask,
+            phi0=phi0,
+            phis0=phis0,
+            alb0=alb0,
+            fmask_l=fmask_l,
+            stl_am=stl_am,
+            stl_lm=stl_lm,
+            rhcapl=rhcapl,
+            cdland=cdland,
+            stlcl_ob=stlcl_ob,
+            snowcl_ob=snowcl_ob,
+            soilwcl_ob=soilwcl_ob,
+            fmask_s=fmask_s
+        )
+
     def copy(self,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,stl_am=None,stl_lm=None,rhcapl=None,cdland=None,stlcl_ob=None,snowcl_ob=None,soilwcl_ob=None,fmask_s=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
@@ -38,13 +56,14 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else self.fmask_s
         )
 
-# this function should probably call the land_model_init and sea_model_init functions
+#this function calls land_model_init and eventually will call sea_model_init
 def initialize_boundaries(surface_filename, primitive, truncation_number):
     """
     Initialize the boundary conditions
     """
     from physical_constants import grav
     from jcm.physics import spectral_truncation
+    from jcm.land_model import land_model_init
     import xarray as xr
     import numpy as np
 
@@ -65,4 +84,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     assert jnp.all(fmask >= 0.0), "Land-sea mask must be between 0 and 1"
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
 
-    return BoundaryData(fmask=fmask, phi0=phi0, phis0=phis0, alb0=alb0)
+    boundaries = BoundaryData.new(fmask=fmask, phi0=phi0, phis0=phis0, alb0=alb0)
+    boundaries = land_model_init(surface_filename,boundaries)
+
+    return boundaries

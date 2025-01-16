@@ -15,15 +15,16 @@ flandmin = 1.0/3.0 # Minimum fraction of land for the definition of anomalies
 hcapl  = depth_soil*2.50e+6 # Heat capacities per m^2 (depth*heat_cap/m^3)
 hcapli = depth_lice*1.93e+6
 
-# this should get called from either boundaries.py or model.py
-def land_model_init(land_filename, snow_filename, soil_filename, surface_filename, boundaries):
+land_filename = 'land.nc'
+snow_filename = 'snow.nc'
+soil_filename = 'soil.nc'
+
+def land_model_init(surface_filename, boundaries):
     import xarray as xr
     from params import delt
     # =========================================================================
     # Initialize land-surface boundary conditions
     # =========================================================================
-    # reading from the files - we want ix, il, nmonths. speedy uses a bunch of loops to read these in
-    # we might want to reformat speedy boundary files to make this smoother (and more flexible)
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
