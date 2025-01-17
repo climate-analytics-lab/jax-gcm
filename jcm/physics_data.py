@@ -170,29 +170,6 @@ class ModRadConData:
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
-class SeaModelData:
-    tsea: jnp.ndarray # SST, should come from sea_model.py
-    
-    @classmethod
-    def zeros(self, nodal_shape, tsea=None):
-        return SeaModelData(
-            tsea = tsea if tsea is not None else jnp.zeros((nodal_shape))
-        )
-    
-    @classmethod
-    def ones(self, nodal_shape, tsea=None):
-        return SeaModelData(
-            tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
-        )
-
-    def copy(self, tsea=None):
-        return SeaModelData(
-            tsea=tsea if tsea is not None else self.tsea, 
-        )
-
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
-@tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
     dtlsc: jnp.ndarray
@@ -391,6 +368,54 @@ class LandModelData:
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
+@tree_math.struct
+class SeaModelData:
+    tsea: jnp.ndarray # SST, should come from sea_model.py
+    
+    @classmethod
+    def zeros(self, nodal_shape, tsea=None):
+        return SeaModelData(
+            tsea = tsea if tsea is not None else jnp.zeros((nodal_shape))
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, tsea=None):
+        return SeaModelData(
+            tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
+        )
+
+    def copy(self, tsea=None):
+        return SeaModelData(
+            tsea=tsea if tsea is not None else self.tsea, 
+        )
+
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+    
+@tree_math.struct
+class IceModelData:
+    sice_am: jnp.ndarray # SST, should come from sea_model.py
+    
+    @classmethod
+    def zeros(self, nodal_shape, sice_am=None):
+        return IceModelData(
+            sice_am = sice_am if sice_am is not None else jnp.zeros((nodal_shape))
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, sice_am=None):
+        return IceModelData(
+            sice_am = sice_am if sice_am is not None else jnp.ones((nodal_shape))
+        )
+
+    def copy(self, sice_am=None):
+        return IceModelData(
+            sice_am=sice_am if sice_am is not None else self.sice_am, 
+        )
+
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
 class PhysicsData:
@@ -404,9 +429,10 @@ class PhysicsData:
     date: DateData
     sea_model: SeaModelData
     land_model: LandModelData
+    ice_model: IceModelData
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
+    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
@@ -418,10 +444,11 @@ class PhysicsData:
             date = date if date is not None else DateData.zeros(),
             sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape),
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
+            ice_model = ice_model if ice_model is not None else IceModelData.zeros(nodal_shape)
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
@@ -433,9 +460,10 @@ class PhysicsData:
             date = date if date is not None else DateData.ones(),
             sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape),
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
+            ice_model = ice_model if ice_model is not None else IceModelData.ones(nodal_shape)
         )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -447,6 +475,7 @@ class PhysicsData:
             date=date if date is not None else self.date,
             sea_model=sea_model if sea_model is not None else self.sea_model,
             land_model=land_model if land_model is not None else self.land_model,
+            ice_model=ice_model if ice_model is not None else self.ice_model
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
@@ -464,6 +493,7 @@ class PhysicsData:
             date=0, 
             sea_model=self.sea_model.isnan(),
             land_model=self.land_model.isnan(),
+            ice_model=self.ice_model.isnan()
         )
     
     def any_true(self):

@@ -104,7 +104,8 @@ def couple_land_atm(state, physics_data, boundaries):
         stl_am = boundaries.stlcl_ob[:,:,day]
 
     # update land physics data
-    physics_data = physics_data.copy(stl_am=stl_am, stl_lm=stl_lm)
+    land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)
+    physics_data = physics_data.copy(land_model=land_model_data)
     physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendency, physics_data

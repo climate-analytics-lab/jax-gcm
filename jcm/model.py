@@ -30,10 +30,10 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
     from jcm.land_model import couple_land_atm
+    from jcm.forcing import set_forcing
 
     physics_terms = [
-        # call set_forcing(), only happens once a day, so set_forcing 
-        # should check the model time step? 
+        set_forcing,
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
