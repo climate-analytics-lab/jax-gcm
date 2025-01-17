@@ -21,7 +21,7 @@ class BoundaryData:
     lfluxland: jnp.bool
     land_coupling_flag: jnp.bool # 0 or 1
 
-    fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
+    fmask_s: jnp.ndarray # sea mask - set bt sea_model_init() once we have a model (instead of fixed ssts)
 
     @classmethod
     def zeros(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):

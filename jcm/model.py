@@ -58,7 +58,6 @@ def fixed_ssts(ix):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
 
-#  add boundaries argument
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
     from jcm.physics_data import PhysicsData, SeaModelData
     from jcm.physics import get_physical_tendencies
