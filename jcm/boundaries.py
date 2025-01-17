@@ -37,7 +37,7 @@ class BoundaryData:
             stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else True,
+            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
         )
