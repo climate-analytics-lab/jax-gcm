@@ -1,8 +1,6 @@
 import jax.numpy as jnp
 import tree_math
 
-# we might want to separate this into sub-dataclasses (sea-model and land-model) for clarity
-# need to pull sea-model out of PhysicsData
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
@@ -61,7 +59,7 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else self.fmask_s
         )
 
-#this function calls land_model_init and eventually will call sea_model_init
+#this function calls land_model_init and eventually will call init for sea and ice models
 def initialize_boundaries(surface_filename, primitive, truncation_number):
     """
     Initialize the boundary conditions

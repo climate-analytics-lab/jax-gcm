@@ -9,9 +9,6 @@ from jcm.mod_radcon import epslw
 from jcm.params import nstrad
 from jax import lax
 
-ablco2 =  6.0 # Absorptivity of air in CO2 band
-increase_co2 = False
-
 @jit
 def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries):
     ''''
@@ -179,6 +176,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, bou
     # 5. Initialization of longwave radiation model
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
+    ablco2 = physics_data.mod_radcon.ablco2
 
     # Base absorptivities
     absorptivity = jnp.stack([

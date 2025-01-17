@@ -2,6 +2,8 @@ import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
 from jax import tree_util
+
+ablco2_ref = 6.0
  
 @tree_math.struct
 class LWRadiationData:
@@ -129,6 +131,7 @@ class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
+    ablco2: jnp.float32 # CO2 absorptivity
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
     alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
     albsfc: jnp.ndarray # Combined surface albedo (land + sea)
@@ -140,8 +143,9 @@ class ModRadConData:
     flux: jnp.ndarray         # Radiative flux in different spectral bands
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def zeros(self, nodal_shape, node_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
+            ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.zeros((nodal_shape)),
             alb_s = alb_s if alb_s is not None else jnp.zeros((nodal_shape)),
             albsfc = albsfc if albsfc is not None else jnp.zeros((nodal_shape)),
@@ -153,8 +157,9 @@ class ModRadConData:
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def ones(self, nodal_shape, node_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
+            ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.ones((nodal_shape)),
             alb_s = alb_s if alb_s is not None else jnp.ones((nodal_shape)),
             albsfc = albsfc if albsfc is not None else jnp.ones((nodal_shape)),
@@ -165,8 +170,9 @@ class ModRadConData:
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
         )
 
-    def copy(self, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
+            ablco2=ablco2 if ablco2 is not None else self.ablco2,
             alb_l=alb_l if alb_l is not None else self.alb_l,
             alb_s=alb_s if alb_s is not None else self.alb_s,
             albsfc=albsfc if albsfc is not None else self.albsfc,
