@@ -10,9 +10,6 @@ albsn  = 0.60  # Albedo over snow (for snow cover = 1)
 epslw  = 0.05  # Fraction of blackbody spectrum absorbed/emitted by PBL only
 emisfc = 0.98  # Longwave surface emissivity
 
-# Placeholder for CO2-related variable
-ablco2_ref = None  # To be initialized elsewhere
-
 n_temperatures = 301
 n_bands = 4
 

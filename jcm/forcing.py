@@ -1,8 +1,8 @@
 import jax.numpy as jnp
-
+from jcm.shortwave_radiation import ablco2
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005
-imode = 0 # this won't work if you want to re-run the model without restarting the program entirely
+ablco2_ref = ablco2
 
 # need to call once on initialization, (or just need to know if its the first call)
 def set_forcing(state, physics_data, boundaries):
@@ -14,15 +14,10 @@ def set_forcing(state, physics_data, boundaries):
     from jcm.physics import PhysicsTendency
     from jcm.physical_constants import rgas
     from jcm.land_model import sd2sc
-    from jcm.mod_radcon import ablco2_ref, albsea, albice, albsn
+    from jcm.mod_radcon import albsea, albice, albsn
     from jcm.shortwave_radiation import ablco2
 
     # time variables for interpolation are set by newdate
-
-    # 1. time-independent parts of physical parametrizations
-    if (imode == 0):
-        imode = 1
-        ablco2_ref = ablco2
 
     # 2. daily-mean radiative forcing
     # incoming solar radiation

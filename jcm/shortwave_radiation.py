@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
-from jcm.boundaries import BoundaryData
 from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
@@ -14,7 +13,7 @@ ablco2 =  6.0 # Absorptivity of air in CO2 band
 increase_co2 = False
 
 @jit
-def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
+def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -223,7 +222,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, bou
 
 
 @jit
-def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
+def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
@@ -297,7 +296,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
     return physics_tendencies, physics_data
 
 @jit
-def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
+def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries):
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -387,7 +386,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryD
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
-    clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
+    clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
