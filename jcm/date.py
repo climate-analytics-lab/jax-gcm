@@ -162,24 +162,30 @@ class Timestamp:
 @tree_math.struct
 class DateData:
     tyear: jnp.float32 # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    model_year: jnp.int32
 
     @classmethod
-    def zeros(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0)
+    def zeros(self, model_time=None, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
+          model_year=model_year if model_year is not None else 1950)
     
     @classmethod
-    def set_date(self, model_time):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time))
+    def set_date(self, model_time, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time),
+          model_year=model_year if model_year is not None else 1950)
     
     @classmethod
-    def ones(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0)
+    def ones(self, model_time=None, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
+          model_year=model_year if model_year is not None else 1950)
  
-    def copy(self, tyear=None):
-        return DateData(tyear if tyear is not None else self.tyear)
-    
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
+    def copy(self, tyear=None, model_year=None):
+        return DateData(
+          tyear=tyear if tyear is not None else self.tyear,
+          model_year=model_year if model_year is not None else self.model_year)
 
 
 def fraction_of_year_elapsed(dt):

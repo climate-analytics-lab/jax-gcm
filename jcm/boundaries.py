@@ -24,7 +24,7 @@ class BoundaryData:
     fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
     @classmethod
-    def new(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def zeros(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -92,8 +92,9 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
 
     nodal_shape = fmask.shape
-    boundaries = BoundaryData.new(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
+    boundaries = BoundaryData.zeros(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
     boundaries = land_model_init(surface_filename,boundaries)
-    # call sea model init -- set tsea and set fmask_s
+    # call sea model init 
+    # call ice model init
 
     return boundaries

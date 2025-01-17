@@ -43,7 +43,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         get_surface_fluxes,
         get_upward_longwave_rad_fluxes,
         get_vertical_diffusion_tend,
-        couple_land_atm
+        couple_land_atm # eventually couple sea model and ice model here
     ]
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)

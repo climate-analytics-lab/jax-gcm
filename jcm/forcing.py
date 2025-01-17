@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
-iyear_ref = 1950
 del_co2   = 0.005
 imode = 0 # this won't work if you want to re-run the model without restarting the program entirely
 
@@ -16,7 +15,7 @@ def set_forcing(state, physics_data, boundaries):
     from jcm.physical_constants import rgas
     from jcm.land_model import sd2sc
     from jcm.mod_radcon import ablco2_ref, albsea, albice, albsn
-    from jcm.shortwave_radiation import ablco2, increase_co2
+    from jcm.shortwave_radiation import ablco2
 
     # time variables for interpolation are set by newdate
 
@@ -45,33 +44,11 @@ def set_forcing(state, physics_data, boundaries):
     albsfc = alb_s + fmask_l * (alb_l - alb_s)
 
     # CO2 effect calculation
+    increase_co2 = physics_data.shortwave_radiation.increase_co2
+    iyear_ref = physics_data.shortwave_radiation.iyear_ref
+    model_year = physics_data.date.model_year
     if increase_co2:
-        ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_datetime%year + tyear - iyear_ref))
-
-    # POSSIBLE WE DON"T NEED THIS BECAUSE ITS HANDLED IN DINOSAUR
-    # # 3. temperature correction term for horizontal diffusion
-    # setgam(gamlat)
-
-    # do j = 1, il
-    #     do i = 1, ix
-    #         corh(i,j) = gamlat(j) * phis0(i,j)
-
-    # tcorh = grid_to_spec(corh)
-
-    # # 4. humidity correction term for horizontal diffusion
-    # do j = 1, il
-    #     pexp = 1./(rgas * gamlat(j))
-    #     do i = 1, ix
-    #         tsfc(i,j) = fmask_l(i,j) * stl_am(i,j) + fmask_s(i,j) * sst_am(i,j)
-    #         tref(i,j) = tsfc(i,j) + corh(i,j)
-    #         psfc(i,j) = (tsfc(i,j)/tref(i,j))**pexp
-
-    # qref = get_qsat(tref, psfc/psfc, -1.0_p)
-    # qsfc = get_qsat(tsfc, psfc, 1.0_p)
-
-    # corh = refrh1 * (qref - qsfc)
-
-    # qcorh = grid_to_spec(corh)
+        ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_year + tyear - iyear_ref))
 
     # update alb_l, alb_s, alsfc, etc
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
@@ -79,12 +56,3 @@ def set_forcing(state, physics_data, boundaries):
     physics_data = physics_data.copy(mod_radcon=mod_radcon)
 
     return physics_tendencies, physics_data
-
-# Compute reference lapse rate as a function of latitude and date
-# def setgam(gamlat):
-#     from physical_constants import grav, gamma
-
-#     gamlat(1) = gamma/(1000. * grav)
-#     gamlat = gamlat.at[1:il].set(gamlat[0])
-    
-#     return gamlat

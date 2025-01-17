@@ -54,9 +54,11 @@ class SWRadiationData:
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
+    increase_co2: jnp.bool # CO2 increase flag
+    co2_year_ref: jnp.int32 # Reference year for CO2 increase
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.zeros((nodal_shape)),
             fsol = fsol if fsol is not None else jnp.zeros((nodal_shape)),
@@ -71,11 +73,13 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.zeros((nodal_shape)),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros((nodal_shape)),
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
-            dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,)))
+            dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,))),
+            increase_co2 = increase_co2 if increase_co2 is not None else False,
+            co2_year_ref = co2_year_ref if co2_year_ref is not None else 1950
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.ones((nodal_shape)),
             fsol = fsol if fsol is not None else jnp.ones((nodal_shape)),
@@ -90,10 +94,12 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.ones((nodal_shape)),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones((nodal_shape)),
             ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
-            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,)))
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,))),
+            increase_co2 = increase_co2 if increase_co2 is not None else False,
+            co2_year_ref = co2_year_ref if co2_year_ref is not None else 1950
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -108,10 +114,14 @@ class SWRadiationData:
             cloudc=cloudc if cloudc is not None else self.cloudc,
             cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
             ftop=ftop if ftop is not None else self.ftop,
-            dfabs=dfabs if dfabs is not None else self.dfabs
+            dfabs=dfabs if dfabs is not None else self.dfabs,
+            increase_co2=increase_co2 if increase_co2 is not None else self.increase_co2,
+            co2_year_ref=co2_year_ref if co2_year_ref is not None else self.co2_year_ref
         )
     
     def isnan(self):
+        self.increase_co2 = 0
+        self.co2_year_ref = 0
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -334,10 +344,7 @@ class SurfaceFluxData:
             t0=t0 if t0 is not None else self.t0
         )
     
-    # Ignoring lfluxland in the isnan check because it is a boolean. We use this check on gradients with respect to SurfaceFluxData, 
-    # which will be NaN for lfluxland. 
     def isnan(self):
-        self.lfluxland = 0
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
