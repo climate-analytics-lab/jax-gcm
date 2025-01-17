@@ -72,8 +72,8 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundarie
     lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
-    stl_am = physics_data.surface_flux.stl_am
-    soilw_am = physics_data.surface_flux.soilw_am
+    stl_am = physics_data.land_model.stl_am
+    soilw_am = boundaries.soilw_am
     ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa
@@ -82,21 +82,21 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundarie
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = physics_data.surface_flux.fmask
+    fmask = boundaries.fmask_l
 
-    lfluxland = physics_data.surface_flux.lfluxland
+    lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.longwave_rad.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = physics_data.surface_flux.phi0 # surface geopotentail
+    phi0 = boundaries.phi0 # surface geopotentail
+    phis0 = boundaries.phis0
     tsea = physics_data.sea_model.tsea
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
     alb_s = physics_data.mod_radcon.alb_s
 
-    # this takes spectrally truncated phi0, not phi0 itself
     forog = set_orog_land_sfc_drag(phis0)
 
     # Initialize variables

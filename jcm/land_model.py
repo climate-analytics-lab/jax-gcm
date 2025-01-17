@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-
+from jcm.physics import PhysicsTendency
 # should these be moved to params.py?
 sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 # Soil moisture parameters
@@ -55,7 +55,7 @@ def land_model_init(surface_filename, boundaries):
     # Read soil moisture
     sdep1 = 70.0
     idep2 = 3
-    sdep2 = idep2*sdep1
+    # sdep2 = idep2*sdep1
 
     swwil2 = idep2*swwil
     rsw    = 1.0/(swcap + idep2*(swcap - swwil))
@@ -89,19 +89,22 @@ def land_model_init(surface_filename, boundaries):
     return boundaries_new
 
 # Exchanges fluxes between land and atmosphere.
-# day = index for day of the year -- get this from tyear
-def couple_land_atm(day, boundaries):
+def couple_land_atm(state, physics_data, boundaries):
+
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):
-        stl_lm = run_land_model(boundaries.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
+        # stl_lm need to persist from time step to time step? what does this get from the model?
+        stl_lm = run_land_model(physics_data.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
         stl_am = stl_lm
     # Otherwise get the land surface from climatology
     else:
         stl_am = boundaries.stlcl_ob[:,:,day]
 
-    # need to set boundaries.snowd_am, soilw_am, stl_am
-    boundaries_new = boundaries.copy(stl_am=stl_am, stl_lm=stl_lm)
-    return boundaries_new
+    # update land physics data
+    physics_data = physics_data.copy(stl_am=stl_am, stl_lm=stl_lm)
+    physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
+
+    return physics_tendency, physics_data
 
 #Integrates slab land-surface model for one day.
 def run_land_model(stl_lm, stlcl_ob, cdland, rhcapl):

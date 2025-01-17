@@ -16,6 +16,7 @@ from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
 from jax import tree_util
+from jcm.boundaries import BoundaryData
 
 @tree_math.struct
 class PhysicsState:

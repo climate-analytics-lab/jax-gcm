@@ -298,10 +298,6 @@ class HumidityData:
 
 @tree_math.struct
 class SurfaceFluxData:
-    # TODO: check if any of these (fmask, phi0) need to be initialized and/or should be moved somewhere else
-    stl_am: jnp.ndarray # Land surface temperature, should come from land_model.py
-    soilw_am: jnp.ndarray # Soil water availability, should come from land_model.py
-    lfluxland: bool # Land surface fluxes true or false, hard coded in physics.f90
     ustr: jnp.ndarray # u-stress
     vstr: jnp.ndarray # v-stress
     shf: jnp.ndarray # Sensible heat flux
@@ -313,15 +309,10 @@ class SurfaceFluxData:
     u0: jnp.ndarray # Near-surface u-wind
     v0: jnp.ndarray # Near-surface v-wind
     t0: jnp.ndarray # Near-surface temperature
-    fmask: jnp.ndarray # Fractional land-sea mask, should come from boundaries.py 
-    phi0: jnp.ndarray # Surface geopotential (i.e. orography), should come from boundaries.py
 
     @classmethod
-    def zeros(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+    def zeros(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
-            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 288.0),
-            soilw_am = soilw_am if soilw_am is not None else jnp.full((nodal_shape), 0.5),
-            lfluxland = lfluxland if lfluxland is not None else True,
             ustr = ustr if ustr is not None else jnp.zeros((nodal_shape)+(3,)),
             vstr = vstr if vstr is not None else jnp.zeros((nodal_shape)+(3,)),
             shf = shf if shf is not None else jnp.zeros((nodal_shape)+(3,)),
@@ -332,17 +323,12 @@ class SurfaceFluxData:
             tskin = tskin if tskin is not None else jnp.zeros((nodal_shape)),
             u0 = u0 if u0 is not None else jnp.zeros((nodal_shape)),
             v0 = v0 if v0 is not None else jnp.zeros((nodal_shape)),
-            t0 = t0 if t0 is not None else jnp.zeros((nodal_shape)),
-            fmask = fmask if fmask is not None else jnp.zeros((nodal_shape)),
-            phi0 = phi0 if phi0 is not None else jnp.zeros((nodal_shape))
+            t0 = t0 if t0 is not None else jnp.zeros((nodal_shape))
         )
     
     @classmethod
-    def ones(self, nodal_shape, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+    def ones(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
-            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 1.0),
-            soilw_am = soilw_am if soilw_am is not None else jnp.full((nodal_shape), 1.0),
-            lfluxland = lfluxland if lfluxland is not None else True,
             ustr = ustr if ustr is not None else jnp.ones((nodal_shape)+(3,)),
             vstr = vstr if vstr is not None else jnp.ones((nodal_shape)+(3,)),
             shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
@@ -353,16 +339,11 @@ class SurfaceFluxData:
             tskin = tskin if tskin is not None else jnp.ones((nodal_shape)),
             u0 = u0 if u0 is not None else jnp.ones((nodal_shape)),
             v0 = v0 if v0 is not None else jnp.ones((nodal_shape)),
-            t0 = t0 if t0 is not None else jnp.ones((nodal_shape)),
-            fmask = fmask if fmask is not None else jnp.ones((nodal_shape)),
-            phi0 = phi0 if phi0 is not None else jnp.ones((nodal_shape))
+            t0 = t0 if t0 is not None else jnp.ones((nodal_shape))
         )
 
-    def copy(self, stl_am=None, soilw_am=None, lfluxland=None, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None, fmask=None, phi0=None):
+    def copy(self, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
-            stl_am=stl_am if stl_am is not None else self.stl_am,
-            soilw_am=soilw_am if soilw_am is not None else self.soilw_am,
-            lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             ustr=ustr if ustr is not None else self.ustr,
             vstr=vstr if vstr is not None else self.vstr,
             shf=shf if shf is not None else self.shf,
@@ -373,15 +354,41 @@ class SurfaceFluxData:
             tskin=tskin if tskin is not None else self.tskin,
             u0=u0 if u0 is not None else self.u0,
             v0=v0 if v0 is not None else self.v0,
-            t0=t0 if t0 is not None else self.t0,
-            fmask=fmask if fmask is not None else self.fmask,
-            phi0=phi0 if phi0 is not None else self.phi0
+            t0=t0 if t0 is not None else self.t0
         )
     
     # Ignoring lfluxland in the isnan check because it is a boolean. We use this check on gradients with respect to SurfaceFluxData, 
     # which will be NaN for lfluxland. 
     def isnan(self):
         self.lfluxland = 0
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
+class LandModelData:
+    stl_lm: jnp.ndarray 
+    stl_am: jnp.ndarray
+    
+    @classmethod
+    def zeros(self, nodal_shape, stl_lm=None, stl_am=None):
+        return LandModelData(
+            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 288.0),
+            stl_lm = stl_lm if stl_lm is not None else jnp.full((nodal_shape), 288.0)
+        )
+    
+    @classmethod
+    def ones(self, nodal_shape, stl_lm=None, stl_am=None):
+        return LandModelData(
+            stl_am = stl_am if stl_am is not None else jnp.ones((nodal_shape)),
+            stl_lm = stl_lm if stl_lm is not None else jnp.ones((nodal_shape))
+        )
+
+    def copy(self, stl_lm=None, stl_am=None):
+        return LandModelData(
+            stl_am = stl_am if stl_am is not None else self.stl_am,
+            stl_lm = stl_lm if stl_lm is not None else self.stl_lm
+        )
+
+    def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
@@ -396,9 +403,10 @@ class PhysicsData:
     surface_flux: SurfaceFluxData
     date: DateData
     sea_model: SeaModelData
+    land_model: LandModelData
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
@@ -408,11 +416,12 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.zeros(),
-            sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape)
+            sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape),
+            land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
@@ -422,10 +431,11 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
             date = date if date is not None else DateData.ones(),
-            sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape)
+            sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape),
+            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
         )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -435,7 +445,8 @@ class PhysicsData:
             condensation=condensation if condensation is not None else self.condensation,
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             date=date if date is not None else self.date,
-            sea_model=sea_model if sea_model is not None else self.sea_model
+            sea_model=sea_model if sea_model is not None else self.sea_model,
+            land_model=land_model if land_model is not None else self.land_model,
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
@@ -451,7 +462,8 @@ class PhysicsData:
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
             date=0, 
-            sea_model=self.sea_model.isnan()
+            sea_model=self.sea_model.isnan(),
+            land_model=self.land_model.isnan(),
         )
     
     def any_true(self):
