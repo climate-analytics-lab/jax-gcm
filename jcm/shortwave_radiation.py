@@ -10,6 +10,9 @@ from jcm.mod_radcon import epslw
 from jcm.params import nstrad
 from jax import lax
 
+ablco2 =  6.0 # Absorptivity of air in CO2 band
+increase_co2 = False
+
 @jit
 def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
     ''''
@@ -48,7 +51,6 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, bou
 
     # Longwave absorptivities (for dp = 10^5 Pa)
     ablwin = 0.3   # Absorptivity of air in "window" band
-    ablco2 = 6.0   # Absorptivity of air in CO2 band
     ablwv1 = 0.7   # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
     ablwv2 = 50.0  # Absorptivity of water vapour in H2O band 2 (strong) (for dq = 1 g/kg)
     ablcl1 = 12.0  # Absorptivity of "thick" clouds in window band (below cloud top)

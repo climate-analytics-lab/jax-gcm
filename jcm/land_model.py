@@ -90,7 +90,7 @@ def land_model_init(surface_filename, boundaries):
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(state, physics_data, boundaries):
-    from date import days_year
+    from jcm.date import days_year
 
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
 

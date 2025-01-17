@@ -97,7 +97,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundarie
     alb_l = physics_data.mod_radcon.alb_l
     alb_s = physics_data.mod_radcon.alb_s
 
-    forog = set_orog_land_sfc_drag(phis0)
+    forog = boundaries.forog
 
     # Initialize variables
     esbc  = emisfc*sbc

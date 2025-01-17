@@ -6,6 +6,7 @@ import tree_math
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
+    forog: jnp.ndarray
     phi0: jnp.ndarray  # surface geopotential (ix, il)
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
@@ -23,9 +24,10 @@ class BoundaryData:
     fmask_s: jnp.ndarray # sea mask - set bt sea_model_init()
 
     @classmethod
-    def new(self,nodal_shape,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def new(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
+            forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
@@ -40,9 +42,10 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
         )
 
-    def copy(self,fmask=None,phi0=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def copy(self,fmask=None,phi0=None,forog=None,phis0=None,alb0=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
+            forog=forog if forog is not None else self.forog,
             phi0=phi0 if phi0 is not None else self.phi0,
             phis0=phis0 if phis0 is not None else self.phis0,
             alb0=alb0 if alb0 is not None else self.alb0,
@@ -66,6 +69,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     from physical_constants import grav
     from jcm.physics import spectral_truncation
     from jcm.land_model import land_model_init
+    from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
     import numpy as np
 
@@ -75,6 +79,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     # Also store spectrally truncated surface geopotential for the land drag term
     #TODO: See if we can get the truncation number from the primitive equation object
     phis0 = spectral_truncation(primitive, phi0, truncation_number)
+    forog = set_orog_land_sfc_drag(phis0)
 
     # Read land-sea mask
     fmask = jnp.asarray(xr.open_dataset(surface_filename)["lsm"])
@@ -85,9 +90,9 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all(fmask >= 0.0), "Land-sea mask must be between 0 and 1"
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
-    
+
     nodal_shape = fmask.shape
-    boundaries = BoundaryData.new(nodal_shape,fmask=fmask, phi0=phi0, phis0=phis0, alb0=alb0)
+    boundaries = BoundaryData.new(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
     boundaries = land_model_init(surface_filename,boundaries)
     # call sea model init -- set tsea and set fmask_s
 

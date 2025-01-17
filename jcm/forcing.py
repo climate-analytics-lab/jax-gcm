@@ -1,38 +1,42 @@
 import jax.numpy as jnp
 
+# linear trend of co2 absorptivity (del_co2: rate of change per year)
+iyear_ref = 1950
+del_co2   = 0.005
 
-def set_forcing(imode):
+# need to call once on initialization, (or just need to know if its the first call)
+def set_forcing(state, physics_data, boundaries):
     '''
     imode = Mode -> 0 = initialization step, 1 = daily update
     '''
-    use dynamical_constants, only: refrh1
-    use params
-    use horizontal_diffusion, only: tcorh, qcorh
-    use physical_constants, only: rgas
-    use boundaries, only: phis0, alb0
-    use surface_fluxes, only: set_orog_land_sfc_drag
-    use date, only: model_datetime, tyear
-    use land_model, only: stl_am, snowd_am, fmask_l, sd2sc
-    use sea_model, only: fmask_s, sst_am, sice_am
-    use mod_radcon, only: ablco2_ref, albsea, albice, snowc, albsn, alb_l, alb_s, albsfc
-    use shortwave_radiation, only: get_zonal_average_fields, ablco2, increase_co2
-    use longwave_radiation, only: radset
-    use humidity, only: get_qsat
-    use spectral, only: grid_to_spec
+    from dynamical_constants import refrh1
+    from jcm.params import ?
+    from jcm.date import days_year
+    from horizontal_diffusion import tcorh, qcorh
+    from jcm.shortwave_radiation import get_zonal_average_fields
+    from jcm.physical_constants import rgas
+    from jcm.land_model import sd2sc
+    from jcm.mod_radcon import ablco2_ref, albsea, albice, albsn
+    from jcm.shortwave_radiation import ablco2, increase_co2
 
     # time variables for interpolation are set by newdate
 
     # 1. time-independent parts of physical parametrizations
     if (imode == 0):
-        radset()
-        set_orog_land_sfc_drag(phis0)
         ablco2_ref = ablco2
 
     # 2. daily-mean radiative forcing
     # incoming solar radiation
+    tyear = physics_data.date.tyear
     get_zonal_average_fields(tyear)
+    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
 
     # total surface albedo
+    snowd_am = boundaries.snowd_am[:,:,day]
+    fmask_l = boundaries.fmaks_l
+    snowc = physics_data.mod_radcon.snowc
+
+    alb0 = boundaries.alb0
 
     do i = 1, ix
         do j = 1, il
@@ -41,37 +45,37 @@ def set_forcing(imode):
             alb_s(i,j)  = albsea + sice_am(i,j) * (albice - albsea)
             albsfc(i,j) = alb_s(i,j) + fmask_l(i,j) * (alb_l(i,j) - alb_s(i,j))
 
-    # linear trend of co2 absorptivity (del_co2: rate of change per year)
-    iyear_ref = 1950
-    del_co2   = 0.005
-    # del_co2   = 0.0033
-
     if (increase_co2):
-        ablco2 = ablco2_ref * exp(del_co2 * (model_datetime%year + tyear - iyear_ref))
+        ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_datetime%year + tyear - iyear_ref))
 
-    # 3. temperature correction term for horizontal diffusion
-    setgam(gamlat)
+    # POSSIBLE WE DON"T NEED THIS BECAUSE ITS HANDLED IN DINOSAUR
+    # # 3. temperature correction term for horizontal diffusion
+    # setgam(gamlat)
 
-    do j = 1, il
-        do i = 1, ix
-            corh(i,j) = gamlat(j) * phis0(i,j)
+    # do j = 1, il
+    #     do i = 1, ix
+    #         corh(i,j) = gamlat(j) * phis0(i,j)
 
-    tcorh = grid_to_spec(corh)
+    # tcorh = grid_to_spec(corh)
 
-    # 4. humidity correction term for horizontal diffusion
-    do j = 1, il
-        pexp = 1./(rgas * gamlat(j))
-        do i = 1, ix
-            tsfc(i,j) = fmask_l(i,j) * stl_am(i,j) + fmask_s(i,j) * sst_am(i,j)
-            tref(i,j) = tsfc(i,j) + corh(i,j)
-            psfc(i,j) = (tsfc(i,j)/tref(i,j))**pexp
+    # # 4. humidity correction term for horizontal diffusion
+    # do j = 1, il
+    #     pexp = 1./(rgas * gamlat(j))
+    #     do i = 1, ix
+    #         tsfc(i,j) = fmask_l(i,j) * stl_am(i,j) + fmask_s(i,j) * sst_am(i,j)
+    #         tref(i,j) = tsfc(i,j) + corh(i,j)
+    #         psfc(i,j) = (tsfc(i,j)/tref(i,j))**pexp
 
-    qref = get_qsat(tref, psfc/psfc, -1.0_p)
-    qsfc = get_qsat(tsfc, psfc, 1.0_p)
+    # qref = get_qsat(tref, psfc/psfc, -1.0_p)
+    # qsfc = get_qsat(tsfc, psfc, 1.0_p)
 
-    corh = refrh1 * (qref - qsfc)
+    # corh = refrh1 * (qref - qsfc)
 
-    qcorh = grid_to_spec(corh)
+    # qcorh = grid_to_spec(corh)
+
+    # update alb_l, alb_s, alsfc, etc
+
+    return physics_tendencies, physics_data
 
 # Compute reference lapse rate as a function of latitude and date
 def setgam(gamlat):
