@@ -12,6 +12,8 @@ import jax
 from typing import Any, Callable, Generic, TypeVar
 import numpy as np
 
+days_year = 365.25
+
 # Generic types.
 #
 Dtype = jax.typing.DTypeLike | Any
@@ -193,13 +195,13 @@ def fraction_of_year_elapsed(dt):
 
     # Get the year without using the `to_datetime64` method to avoid the need for a JAX transformation
     # Convert the number of days since 1970 into a year, accounting for leap years
-    year = 1970 + dt.delta.days // 365.25
+    year = 1970 + dt.delta.days // days_year
 
     # Calculate the number of days elapsed in the year without using numpy
-    days_elapsed = dt.delta.days - (year - 1970) * 365.25
+    days_elapsed = dt.delta.days - (year - 1970) * days_year
     
     # Add the seconds to the days elapsed
     days_elapsed += dt.delta.seconds / (24 * 60 * 60)
 
     # Calculate the fraction of the year elapsed
-    return jnp.float32(days_elapsed / 365.25)
+    return jnp.float32(days_elapsed / days_year)

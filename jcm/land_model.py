@@ -40,9 +40,9 @@ def land_model_init(surface_filename, boundaries):
     stlcl_ob = jnp.where(bmask_l > 0.0 & (stlcl_ob < 0.0 | stlcl_ob > 400.0), 273.0, stlcl_ob)
 
     # Snow depth
-    snowcl_ob = jnp.asarray(xr.open_dataset(snow_filename)["snowd"])
+    snowd_am = jnp.asarray(xr.open_dataset(snow_filename)["snowd"])
     # simple sanity check - same method ras above for stl12 
-    snowcl_ob = jnp.where(bmask_l > 0.0 & (snowcl_ob < 0.0 | snowcl_ob > 20000.0), 0.0, snowcl_ob)
+    snowd_am = jnp.where(bmask_l > 0.0 & (snowd_am < 0.0 | snowd_am > 20000.0), 0.0, snowd_am)
 
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
@@ -68,9 +68,9 @@ def land_model_init(surface_filename, boundaries):
     # Compute the intermediate max term
     max_term = jnp.maximum(0.0, swroot - swwil2)
     # Compute the soil water content
-    soilwcl_ob = jnp.minimum(1.0, rsw * (swl1 + veg * max_term))
+    soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg * max_term))
     # simple sanity check - same method ras above for stl12 
-    soilwcl_ob = jnp.where(bmask_l > 0.0 & (soilwcl_ob < 0.0 | soilwcl_ob > 10.0), 0.0, soilwcl_ob)
+    soilw_am = jnp.where(bmask_l > 0.0 & (soilw_am < 0.0 | soilw_am > 10.0), 0.0, soilw_am)
 
     # =========================================================================
     # Set heat capacities and dissipation times for soil and ice-sheet layers
@@ -85,11 +85,14 @@ def land_model_init(surface_filename, boundaries):
     rhcapl = jnp.where(boundaries.alb0 < 0.4, delt / hcapl, delt / hcapli)
     cdland = dmask*tdland/(1.0+dmask*tdland)
 
-    boundaries_new = boundaries.copy(rhcapl=rhcapl, cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowcl_ob=snowcl_ob, soilwcl_ob=soilwcl_ob)
+    boundaries_new = boundaries.copy(rhcapl=rhcapl, cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
     return boundaries_new
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(state, physics_data, boundaries):
+    from date import days_year
+
+    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
 
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):

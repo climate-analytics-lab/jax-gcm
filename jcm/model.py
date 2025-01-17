@@ -29,7 +29,11 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
+    from jcm.land_model import couple_land_atm
+
     physics_terms = [
+        # call set_forcing(), only happens once a day, so set_forcing 
+        # should check the model time step? 
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
@@ -39,7 +43,8 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
         get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend
+        get_vertical_diffusion_tend,
+        couple_land_atm
     ]
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
