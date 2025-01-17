@@ -9,6 +9,7 @@ from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav, grd
 from jcm.geometry import coa
 from jcm.mod_radcon import emisfc
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.date import days_year
 
 # constants for surface fluxes
 fwind0 = 0.95 # Ratio of near-sfc wind to lowest-level wind
@@ -72,8 +73,9 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundarie
     lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
+    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
     stl_am = physics_data.land_model.stl_am
-    soilw_am = boundaries.soilw_am
+    soilw_am = boundaries.soilw_am[:,:,day]
     ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa

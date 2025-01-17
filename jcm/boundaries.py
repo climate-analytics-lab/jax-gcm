@@ -13,9 +13,9 @@ class BoundaryData:
     fmask_l: jnp.ndarray # land mask - set by land_model_init()
     rhcapl: jnp.ndarray # 1/heat capacity (land)
     cdland: jnp.ndarray # 1/dissipation time (land)
-    stlcl_ob: jnp.ndarray # climatology for land temperature - might not need this and stl_lm
-    snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
-    soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
+    stlcl_ob: jnp.ndarray # 365 days of land temperature 
+    snowd_am: jnp.ndarray # 365 days of snow depth - used to be snowcl_ob in fortran
+    soilw_am: jnp.ndarray # 365 days of soil water content - used to be soilwcl_ob in fortran
     lfluxland: jnp.bool
     land_coupling_flag: jnp.bool # 0 or 1
 
