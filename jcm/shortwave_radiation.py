@@ -6,7 +6,6 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
 from jcm.mod_radcon import epslw
-from jcm.params import nstrad
 from jax import lax
 
 @jit
