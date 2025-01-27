@@ -3,7 +3,20 @@ Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 '''
 import tree_math
-from jcm.convection import ConvectionParameters
+import jax.numpy as jnp
+
+@tree_math.struct
+class ConvectionParameters:
+    psmin = jnp.array(0.8) # Minimum (normalised) surface pressure for the occurrence of convection
+    trcnv = jnp.array(6.0) # Time of relaxation (in hours) towards reference state
+    rhil = jnp.array(0.7) # Relative humidity threshold in intermeduate layers for secondary mass flux
+    rhbl = jnp.array(0.9) # Relative humidity threshold in the boundary layer
+    entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
+    smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
+
+@tree_math.struct
+class Parameters:
+    convection: ConvectionParameters
 
 # Time stepping parameters
 nsteps = 36     # Number of time steps in one day

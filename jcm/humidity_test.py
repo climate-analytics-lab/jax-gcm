@@ -41,7 +41,7 @@ class TestHumidityUnit(unittest.TestCase):
         lfluxland=True
             
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)

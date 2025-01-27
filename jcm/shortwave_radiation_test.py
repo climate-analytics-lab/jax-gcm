@@ -99,8 +99,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
+        global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
                PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw
+        from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
@@ -127,7 +128,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * np.ones(xy, dtype=int)
         fmask = .7 * np.ones(xy)
 
-        surface_flux = SurfaceFluxData.zeros(xy,fmask=fmask)
+        surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
@@ -139,8 +140,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
-
-        _, physics_data = clouds(state, physics_data)
+        boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
+        _, physics_data = clouds(state, physics_data, boundaries)
         _, physics_data = get_zonal_average_fields(state, physics_data)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data)
         
@@ -294,7 +295,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * jnp.ones(xy, dtype=int)
         fmask = .7 * jnp.ones(xy)
 
-        surface_flux = SurfaceFluxData.zeros(xy,fmask=fmask)
+        surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
@@ -362,7 +363,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * jnp.ones(xy, dtype=int)
         fmask = .7 * jnp.ones(xy)
 
-        surface_flux = SurfaceFluxData.zeros(xy,fmask=fmask)
+        surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
@@ -374,14 +375,14 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
-
+        boundaries = BoundaryData.zeros(xy,fmask=fmask)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(clouds, state, physics_data) 
+        primals, f_vjp = jax.vjp(clouds, state, physics_data, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstates, df_ddatas = f_vjp(input)
-
+        df_dstate, df_ddatas, df_dboundaries = f_vjp(input)
+        
         self.assertFalse(df_ddatas.isnan().any_true())
-        self.assertFalse(df_dstates.isnan().any_true())
-
+        self.assertFalse(df_dstate.isnan().any_true())
+        self.assertFalse(df_dboundaries.has_nans())

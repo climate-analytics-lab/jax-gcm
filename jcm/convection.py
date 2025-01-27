@@ -7,9 +7,12 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
+
+
 from jcm.geometry import dhs, fsg
 import tree_math
 
@@ -25,7 +28,7 @@ class ConvectionParameters:
 
 
 @jit
-def diagnose_convection(psa, se, qa, qsat, psmin, rhbl, alhc):
+def diagnose_convection(psa, se, qa, qsat, parameters):
     """
     Diagnose convectively unstable gridboxes  
 
@@ -60,7 +63,7 @@ def diagnose_convection(psa, se, qa, qsat, psmin, rhbl, alhc):
 
     # Minimum of moist static energy in the lowest two levels
     # Mask for psa > psmin
-    mask_psa = psa > psmin
+    mask_psa = psa > parameters.convection.psmin
 
     mse0 = se[:, :, kx-1] + alhc * qa[:, :, kx-1]
     mse1 = se[:, :, kx-2] + alhc * qa[:, :, kx-2]
@@ -89,8 +92,8 @@ def diagnose_convection(psa, se, qa, qsat, psmin, rhbl, alhc):
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[:, :, jnp.newaxis] - 1, axis=-1), axis=-1)
 
     # Check 3: RH > RH_c at both k=kx and k=kx-1
-    qthr0 = rhbl * qsat[:, :, kx-1]
-    qthr1 = rhbl * qsat[:, :, kx-2]
+    qthr0 = parameters.convection.rhbl * qsat[:, :, kx-1]
+    qthr1 = parameters.convection.rhbl * qsat[:, :, kx-2]
     lqthr = (qa[:, :, kx-1] > qthr0) & (qa[:, :, kx-2] > qthr1)
 
     case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
@@ -102,7 +105,7 @@ def diagnose_convection(psa, se, qa, qsat, psmin, rhbl, alhc):
     return iptop, qdif
 
 @jit
-def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, boundary_data: BoundaryData, parameters: Parameters):
+def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundary_data: BoundaryData=None):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
@@ -139,14 +142,14 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, bo
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
-    entr *= entmax / sentr
+    entr *= parameters.convection.entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
-    fm0 = p0*dhs[-1]/(grav*trcnv*3600.0) #prefactor for mass fluxes
-    rdps=2.0/(1.0 - psmin)
+    fm0 = p0*dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
+    rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, qa, qsat)
+    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters)
 
     # 3. Convection over selected grid-points
     mask = iptop < kx
@@ -163,7 +166,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, bo
     sb, qb = _sb_3d[:, :, k], jnp.minimum(_qb_3d, qa)[:, :, k]
     
     # Cloud-base mass flux
-    fpsa = psa * jnp.minimum(1.0, (psa - psmin) * rdps)
+    fpsa = psa * jnp.minimum(1.0, (psa - parameters.convection.psmin) * rdps)
     fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
     cbmf = mask * fmass
 
@@ -199,9 +202,9 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, bo
     dfqa = dfqa.at[:, :, :-1].add(loop_mask[:, :, :-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=-1)))
 
     # Secondary moisture flux
-    delq = loop_mask * (rhil * qsat - qa)
+    delq = loop_mask * (parameters.convection.rhil * qsat - qa)
     moisture_flux_mask = delq > 0.
-    fsq_masked = moisture_flux_mask * smf * cbmf[:, :, jnp.newaxis] * delq
+    fsq_masked = moisture_flux_mask * parameters.convection.smf * cbmf[:, :, jnp.newaxis] * delq
     dfqa += fsq_masked
     dfqa = dfqa.at[:, :, -1].add(-jnp.sum(fsq_masked, axis=-1))
 

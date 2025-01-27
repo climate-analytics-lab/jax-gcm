@@ -9,8 +9,9 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData, \
+        global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData, \
                PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency
+        from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
@@ -27,32 +28,33 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
             
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        primals, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data)
+        boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland)
+        primals, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, boundaries)
 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy, kx)
 
         input_tensors = (tends, datas)
 
-        df_dstate, df_ddatas = f_vjp(input_tensors)
-
+        df_dstate, df_ddatas, df_dboundaries = f_vjp(input_tensors)
+        
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
+        self.assertFalse(df_dboundaries.has_nans())
 
     def test_updated_surface_flux(self):
         xy, xyz = (ix, il), (ix, il, kx)
@@ -64,22 +66,22 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = jnp.ones(xyz) * 0.5   
         phi = jnp.ones(xyz) * (jnp.arange(kx))[None, None, ::-1]
         phi0 = jnp.zeros(xy) 
-        fmask = 0.5 * jnp.ones(xy)
+        fmask_l = 0.5 * jnp.ones(xy)
         tsea = jnp.ones(xy) * 292 # this needs to overwrite what is in sea_model? 
         rsds = 400 * jnp.ones(xy)
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
-
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        boundaries = BoundaryData.ones(xy, phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland, soilw_am=soilw_am)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
 
         self.assertTrue(jnp.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
@@ -105,23 +107,24 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-            
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        forog = set_orog_land_sfc_drag(phi0)
+        boundaries = BoundaryData.zeros(xy, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
 
         # old outputs: ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
@@ -137,7 +140,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         
         # pulling the subset of return values to be testsed against the test data
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
-
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
@@ -155,23 +157,24 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
+        forog = set_orog_land_sfc_drag(phi0)
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
 
 
@@ -204,23 +207,24 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        forog = set_orog_land_sfc_drag(phi0)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
 
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.05182373e+02, 4.66440842e-02,
@@ -252,7 +256,9 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
+        forog = set_orog_land_sfc_drag(phi0)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
@@ -260,15 +266,15 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        boundaries = BoundaryData.zeros(xy,phi0=phi0,fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
 
         test_data = jnp.array([[-1.98534015e-03,-1.98534015e-03, 3.40381584e+01, 2.68966686e-02,
@@ -300,22 +306,24 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
+        forog = set_orog_land_sfc_drag(phi0)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy,phi0=phi0,fmask=fmask,lfluxland=lfluxland)
+        sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-
-        _, physics_data = get_surface_fluxes(state, physics_data)
+        boundaries = BoundaryData.zeros(xy,phi0=phi0,fmask_l=fmask_l,soilw_am=soilw_am,forog=forog,lfluxland=lfluxland)
+        _, physics_data = get_surface_fluxes(state, physics_data, boundaries)
         sflux_data = physics_data.surface_flux
         
         test_data = jnp.array([[-6.3609974e-03,-6.3609974e-03, 1.5656566e+02, 5.3803049e-02,

@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
+from jcm.boundaries import BoundaryData
 from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
@@ -10,7 +11,7 @@ from jcm.params import nstrad
 from jax import lax
 
 @jit
-def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries):
+def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -220,7 +221,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, bou
 
 
 @jit
-def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries):
+def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData=None):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
@@ -294,7 +295,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
     return physics_tendencies, physics_data
 
 @jit
-def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries):
+def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData):
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
