@@ -1,6 +1,7 @@
 import dinosaur
 from dinosaur.scales import units
 import jax.numpy as jnp
+from jcm.boundaries import BoundaryData
 from jcm.physics_data import PhysicsData
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import coordinate_systems
@@ -84,7 +85,7 @@ class HeldSuarezForcing:
             cutoff[jnp.newaxis, jnp.newaxis, :] * jnp.cos(self.lat[:, :, jnp.newaxis]) ** 4
     )
 
-    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData):
+    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData):
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
