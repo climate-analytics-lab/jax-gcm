@@ -108,10 +108,6 @@ class TestModelUnit(unittest.TestCase):
         from dinosaur import primitive_equations
         from jcm.physics_data import PhysicsData
 
-        jax.config.update('jax_disable_jit', False) # Turn off JIT because of an issue in shortwave_radiation.py:169
-        jax.config.update("jax_debug_infs", True) # doesn't add any time since the saved time is otherwise spent getting the nodal quantities
-        jax.config.update("jax_debug_nans", False) # some physics fields might be nan
-
         def make_ones_dinosaur_StateWithTime_object(state, choose_sim_time = jnp.float32(1.0)):
             vorticity = jnp.ones_like(state.vorticity)
             divergence = jnp.ones_like(state.divergence)
@@ -153,10 +149,6 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import SpeedyModel
         from dinosaur import primitive_equations
         from jcm.physics_data import PhysicsData
-
-        jax.config.update('jax_disable_jit', False) # Turn off JIT because of an issue in shortwave_radiation.py:169
-        jax.config.update("jax_debug_infs", True) # doesn't add any time since the saved time is otherwise spent getting the nodal quantities
-        jax.config.update("jax_debug_nans", False) # some physics fields might be nan
 
         def make_ones_dinosaur_StateWithTime_object(state, choose_sim_time = jnp.float32(1.0)):
             vorticity = jnp.ones_like(state.vorticity)
