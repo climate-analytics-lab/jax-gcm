@@ -23,7 +23,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     initialize_modules(kx = grid_shape[0], il = grid_shape[2])
     
     from jcm.humidity import spec_hum_to_rel_hum
-    from jcm.convection import convection_wrapper
+    from jcm.convection import get_convection_tendencies
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
     from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
@@ -35,6 +35,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     physics_terms = [
         set_forcing,
         spec_hum_to_rel_hum,
+        get_convection_tendencies,
         get_large_scale_condensation_tendencies,
         clouds,
         get_shortwave_rad_fluxes,

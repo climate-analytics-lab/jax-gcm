@@ -1,10 +1,12 @@
+from jcm.params import Parameters
+from jcm.physics_data import ablco2_ref, PhysicsData
+from jcm.boundaries import BoundaryData
+from jcm.physics import PhysicsState
 import jax.numpy as jnp
-from jcm.physics_data import ablco2_ref
-import jax
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005
 
-def set_forcing(state, physics_data, boundaries):
+def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
 
     from jcm.date import days_year
     from jcm.shortwave_radiation import get_zonal_average_fields

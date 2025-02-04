@@ -8,6 +8,7 @@ from dinosaur import coordinate_systems
 from dinosaur import primitive_equations
 from dinosaur import scales
 from dinosaur import typing
+from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
 
 Quantity = units.Quantity
@@ -85,7 +86,7 @@ class HeldSuarezForcing:
             cutoff[jnp.newaxis, jnp.newaxis, :] * jnp.cos(self.lat[:, :, jnp.newaxis]) ** 4
     )
 
-    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData):
+    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 

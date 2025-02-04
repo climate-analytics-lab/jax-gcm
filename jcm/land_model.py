@@ -1,6 +1,10 @@
+
+from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
-from jcm.physics import PhysicsTendency
-import jax
+
 # should these be moved to params.py?
 sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 # Soil moisture parameters
@@ -89,7 +93,7 @@ def land_model_init(surface_filename, boundaries):
     return boundaries_new
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state, physics_data, boundaries):
+def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
     from jcm.date import days_year
 
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
