@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-
+import jax
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
@@ -71,8 +71,8 @@ class BoundaryData:
             rhcapl=rhcapl if rhcapl is not None else self.rhcapl,
             cdland=cdland if cdland is not None else self.cdland,
             stlcl_ob=stlcl_ob if stlcl_ob is not None else self.stlcl_ob,
-            snowcl_ob=snowd_am if snowd_am is not None else self.snowd_am,
-            soilwcl_ob=soilw_am if soilw_am is not None else self.soilw_am,
+            snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
+            # soilwcl_ob=soilw_am if soilw_am is not None else self.soilw_am,
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else self.land_coupling_flag,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
@@ -103,8 +103,8 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     import numpy as np
 
     # Read surface geopotential (i.e. orography)
-    phi0 = grav* jnp.asarray(xr.open_dataset(surface_filename)["orog"])
-
+    phi0 = grav* jnp.asarray(xr.open_dataset(surface_filename)["orog"]).T
+    jax.debug.print(f"phi0 {phi0.shape}")
     # Also store spectrally truncated surface geopotential for the land drag term
     #TODO: See if we can get the truncation number from the primitive equation object
     phis0 = spectral_truncation(primitive, phi0, truncation_number)
@@ -112,10 +112,8 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
 
     # Read land-sea mask
     fmask = jnp.asarray(xr.open_dataset(surface_filename)["lsm"])
-
     # Annual-mean surface albedo
     alb0 = jnp.asarray(xr.open_dataset(surface_filename)["alb"])
-
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all(fmask >= 0.0), "Land-sea mask must be between 0 and 1"
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
@@ -123,6 +121,10 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     nodal_shape = fmask.shape
     boundaries = BoundaryData.zeros(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
     boundaries = land_model_init(surface_filename,boundaries)
+    # jax.debug.print(f"boundaries new {boundaries.alb0.shape}")
+    # temp = 
+    # jax.debug.print(f"boundaries new {boundaries.snowd_am.shape}")
+
     # call sea model init 
     # call ice model init
 

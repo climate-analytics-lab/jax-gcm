@@ -23,7 +23,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     initialize_modules(kx = grid_shape[0], il = grid_shape[2])
     
     from jcm.humidity import spec_hum_to_rel_hum
-    from jcm.convection import get_convection_tendencies
+    from jcm.convection import convection_wrapper
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
     from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
@@ -35,7 +35,6 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     physics_terms = [
         set_forcing,
         spec_hum_to_rel_hum,
-        get_convection_tendencies,
         get_large_scale_condensation_tendencies,
         clouds,
         get_shortwave_rad_fluxes,
@@ -94,7 +93,7 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file='boundaries.nc', parameters=None) -> None:
+                 start_date=None, boundary_file='data/bc/t30/clim/boundaries.nc', horizontal_resolution=31, parameters=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -116,9 +115,19 @@ class SpeedyModel:
         save_every = save_interval * units.day
         total_time = total_time * units.day
 
+        resolution_map = {
+            31: dinosaur.spherical_harmonic.Grid.T31(),
+            42: dinosaur.spherical_harmonic.Grid.T42(),
+            85: dinosaur.spherical_harmonic.Grid.T85(),
+            213: dinosaur.spherical_harmonic.Grid.T213()
+        }
+
+        if horizontal_resolution not in resolution_map:
+            raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
+
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=dinosaur.spherical_harmonic.Grid.T42(), # truncation 
+            horizontal=resolution_map[horizontal_resolution], # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
         # Not sure why we need this...
@@ -153,7 +162,7 @@ class SpeedyModel:
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
         # TODO: make the truncation number a parameter consistent with the grid shape        
-        boundaries = initialize_boundaries(boundary_file, self.primitive, 42)
+        boundaries = initialize_boundaries(boundary_file, self.primitive, 31)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
                                                         self.physics_terms, self.start_date, 

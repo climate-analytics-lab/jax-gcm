@@ -17,6 +17,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
 from jax import tree_util
 from jcm.boundaries import BoundaryData
+import jax
 
 @tree_math.struct
 class PhysicsState:
@@ -239,16 +240,13 @@ def get_physical_tendencies(
     return dynamics_tendency
 
 def spectral_truncation(dynamics: PrimitiveEquations, fg1, trunc):
-    # given fsp, a spectral representation of a field, return a truncated version
-    nx = trunc+2 # Number of total wavenumbers for spectral storage arrays
-    mx = trunc+1 # Number of zonal wavenumbers for spectral storage arrays
-
     fsp = dynamics.coords.horizontal.to_modal(fg1)
-
+    nx,mx = fsp.shape
     n_indices, m_indices = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx), indexing='ij')
     total_wavenumber = m_indices + n_indices
+
     fsp = jnp.where(total_wavenumber > trunc, 0.0, fsp)
 
-    fg2 = dynamics.coords.horizontal.to_nodal(fg1)
+    fg2 = dynamics.coords.horizontal.to_nodal(fsp)
 
     return fg2

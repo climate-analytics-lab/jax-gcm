@@ -239,3 +239,11 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend,specific_humidity=qtend)
     
     return physics_tendencies, physics_data
+
+
+@jit
+def convection_wrapper (state: PhysicsState, physics_data: PhysicsData, boundary_data: BoundaryData=None):
+    parameters = Parameters(
+            convection=ConvectionParameters()
+        )
+    get_convection_tendencies(state, physics_data, parameters, boundary_data)

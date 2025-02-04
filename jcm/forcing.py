@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jcm.physics_data import ablco2_ref
-
+import jax
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005
 
@@ -16,12 +16,12 @@ def set_forcing(state, physics_data, boundaries):
     # 2. daily-mean radiative forcing
     # incoming solar radiation
     tyear = physics_data.date.tyear
-    get_zonal_average_fields(tyear)
+    get_zonal_average_fields(state, physics_data)
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
 
     # total surface albedo
-    snowd_am = boundaries.snowd_am[:,:,day]
-    fmask_l = boundaries.fmaks_l
+    snowd_am = boundaries.snowd_am[day,:,:]
+    fmask_l = boundaries.fmask_l
     snowc = physics_data.mod_radcon.snowc
     sice_am = physics_data.ice_model.sice_am
 
@@ -30,18 +30,16 @@ def set_forcing(state, physics_data, boundaries):
     snowc = jnp.minimum(1.0, snowd_am / sd2sc)
     alb_l = alb0 + snowc * (albsn - alb0)
     alb_s = albsea + sice_am * (albice - albsea)
-    albsfc = alb_s + fmask_l * (alb_l - alb_s)
+    albsfc = alb_s.T + fmask_l * (alb_l - alb_s.T)
 
-    # CO2 effect calculation
-    increase_co2 = physics_data.shortwave_radiation.increase_co2
-    iyear_ref = physics_data.shortwave_radiation.iyear_ref
+    increase_co2 = physics_data.shortwave_rad.increase_co2
+    iyear_ref = physics_data.shortwave_rad.co2_year_ref
     model_year = physics_data.date.model_year
     if increase_co2:
         ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_year + tyear - iyear_ref))
-
+        mod_radcon = physics_data.mod_radcon.copy(ablco2=ablco2,albsfc=albsfc, alb_l=alb_l, alb_s=alb_s)
+        physics_data = physics_data.copy(mod_radcon=mod_radcon)
     # update alb_l, alb_s, alsfc, etc
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
-    mod_radcon = physics_data.mod_radcon.copy(ablco2=ablco2,albsfc=albsfc, alb_l=alb_l, alb_s=alb_s)
-    physics_data = physics_data.copy(mod_radcon=mod_radcon)
 
     return physics_tendencies, physics_data
