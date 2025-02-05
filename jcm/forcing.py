@@ -22,7 +22,7 @@ def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Para
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
 
     # total surface albedo
-    snowd_am = boundaries.snowd_am[day,:,:]
+    snowd_am = boundaries.snowd_am
     fmask_l = boundaries.fmask_l
     snowc = physics_data.mod_radcon.snowc
     sice_am = physics_data.ice_model.sice_am
@@ -32,7 +32,7 @@ def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Para
     snowc = jnp.minimum(1.0, snowd_am / sd2sc)
     alb_l = alb0 + snowc * (albsn - alb0)
     alb_s = albsea + sice_am * (albice - albsea)
-    albsfc = alb_s.T + fmask_l * (alb_l - alb_s.T)
+    albsfc = alb_s + fmask_l * (alb_l - alb_s)
 
     increase_co2 = physics_data.shortwave_rad.increase_co2
     iyear_ref = physics_data.shortwave_rad.co2_year_ref

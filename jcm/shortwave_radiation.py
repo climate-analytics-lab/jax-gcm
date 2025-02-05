@@ -389,7 +389,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
     jax.debug.print(f"clstrl {clstrl.shape}")
     jax.debug.print(f"clstr {clstr.shape}")
-    clstr = clstr.T + boundaries.fmask_l * (clstrl.T - clstr.T)
+    clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

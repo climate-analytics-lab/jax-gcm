@@ -76,7 +76,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     '''
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
     stl_am = physics_data.land_model.stl_am
-    soilw_am = boundaries.soilw_am[:,:,day]
+    soilw_am = boundaries.soilw_am
     ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa

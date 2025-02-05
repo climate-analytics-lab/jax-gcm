@@ -194,7 +194,9 @@ class SpeedyModel:
         return self.step_fn(state)
     
     def post_process(self, state):
+        from jcm.boundaries import BoundaryData, initialize_boundaries
         from jcm.date import DateData
+        from jcm.params import ConvectionParameters
         from jcm.physics_data import PhysicsData, SeaModelData
         from jcm.physics import dynamics_state_to_physics_state
 
@@ -219,7 +221,7 @@ class SpeedyModel:
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
-            _, data = term(physics_state, data)
+            _, data = term(physics_state, data, Parameters(convection=ConvectionParameters()), BoundaryData.zeros((96,48)))
         
         return {
             'dynamics': state,
