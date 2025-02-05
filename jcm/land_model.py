@@ -1,6 +1,11 @@
+
+from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
+from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
-from jcm.physics import PhysicsTendency
 import jax
+
 # should these be moved to params.py?
 sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 # Soil moisture parameters
@@ -35,13 +40,13 @@ def land_model_init(surface_filename, boundaries):
                         jnp.where(boundaries.fmask > (1.0 - thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
-    stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])
+    stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])[:,:,0]
     # instead of using a check forchk, we check that 0.0 < stl12 < 400 and if it isn't we set it to 273
     # this might not work exactly because stl12 is ix,il,12 and bmask is ix,il
     stlcl_ob = jnp.where((bmask_l > 0.0) & ((stlcl_ob < 0.0) | (stlcl_ob > 400.0)), 273.0, stlcl_ob)
 
     # Snow depth
-    snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])
+    snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])[:,:,0]
     # simple sanity check - same method ras above for stl12 
     snowd_am = jnp.where((bmask_l > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
     # Read soil moisture and compute soil water availability using vegetation fraction
@@ -61,13 +66,17 @@ def land_model_init(surface_filename, boundaries):
     rsw    = 1.0/(swcap + idep2*(swcap - swwil))
 
     # Combine soil water content from two top layers
-    swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])
+    swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])[:,:,0]
     swl2 = jnp.asarray(xr.open_dataset(surface_filename)["swl2"])
     
     swroot = idep2 * swl2
     # Compute the intermediate max term
-    max_term = jnp.maximum(0.0, swroot - swwil2)
+    max_term = jnp.maximum(0.0, swroot - swwil2)[:,:,0]
     # Compute the soil water content
+    # jax.debug.print(f"rsw {rsw.shape}")
+    jax.debug.print(f"swl1 {swl1.shape}")
+    jax.debug.print(f"veg {veg.shape}")
+    jax.debug.print(f"max_term {max_term.shape}")
     soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg * max_term))
     # simple sanity check - same method ras above for stl12 
     soilw_am = jnp.where((bmask_l > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
@@ -89,11 +98,11 @@ def land_model_init(surface_filename, boundaries):
     return boundaries_new
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state, physics_data, boundaries):
+def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
     from jcm.date import days_year
 
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
-
+    stl_lm=None
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):
         # stl_lm need to persist from time step to time step? what does this get from the model?
@@ -101,7 +110,7 @@ def couple_land_atm(state, physics_data, boundaries):
         stl_am = stl_lm
     # Otherwise get the land surface from climatology
     else:
-        stl_am = boundaries.stlcl_ob[:,:,day]
+        stl_am = boundaries.stlcl_ob
 
     # update land physics data
     land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)

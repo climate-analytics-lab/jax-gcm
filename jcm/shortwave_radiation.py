@@ -2,6 +2,7 @@ import jax.numpy as jnp
 from jax import jit
 from jax import vmap
 from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
@@ -9,9 +10,10 @@ from jcm.geometry import sia, coa, fsg, dhs
 from jcm.mod_radcon import epslw
 from jcm.params import nstrad
 from jax import lax
+import jax
 
 @jit
-def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
+def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData = None):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -295,7 +297,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
     return physics_tendencies, physics_data
 
 @jit
-def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData):
+def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -385,6 +387,8 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryD
     clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
+    jax.debug.print(f"clstrl {clstrl.shape}")
+    jax.debug.print(f"clstr {clstr.shape}")
     clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 

@@ -3,6 +3,7 @@ from jax import jit
 
 # importing custom functions from library
 from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav, grdsig, grdscp
@@ -41,7 +42,7 @@ lskineb = True   # true : redefine skin temp. from energy balance
 hdrag = 2000.0 # Height scale for orographic correction
 
 @jit
-def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData = None):
+def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData = None):
     '''
 
     Parameters
@@ -75,7 +76,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, boundarie
     '''
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
     stl_am = physics_data.land_model.stl_am
-    soilw_am = boundaries.soilw_am[:,:,day]
+    soilw_am = boundaries.soilw_am
     ix, il, kx = state.temperature.shape
 
     psa = physics_data.convection.psa

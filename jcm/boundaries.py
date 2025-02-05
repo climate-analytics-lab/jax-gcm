@@ -103,8 +103,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     import numpy as np
 
     # Read surface geopotential (i.e. orography)
-    phi0 = grav* jnp.asarray(xr.open_dataset(surface_filename)["orog"]).T
-    jax.debug.print(f"phi0 {phi0.shape}")
+    phi0 = grav* jnp.asarray(xr.open_dataset(surface_filename)["orog"])
     # Also store spectrally truncated surface geopotential for the land drag term
     #TODO: See if we can get the truncation number from the primitive equation object
     phis0 = spectral_truncation(primitive, phi0, truncation_number)
@@ -119,6 +118,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
 
     nodal_shape = fmask.shape
+    jax.debug.print(f"fmask {fmask.shape}")
     boundaries = BoundaryData.zeros(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
     boundaries = land_model_init(surface_filename,boundaries)
     # jax.debug.print(f"boundaries new {boundaries.alb0.shape}")

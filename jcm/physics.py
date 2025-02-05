@@ -222,7 +222,7 @@ def get_physical_tendencies(
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:
-        tend, data = term(physics_state, data, boundaries)
+        tend, data = term(physics_state, data, parameters, boundaries)
         physics_tendency += tend
 
     # the actual timestep size seems to be 1/3 of time_step
