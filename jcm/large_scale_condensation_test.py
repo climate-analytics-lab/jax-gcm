@@ -11,9 +11,11 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, get_large_scale_condensation_tendencies
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, ConvectionParameters, Parameters, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.params import Parameters, ConvectionParameters
+        from jcm.boundaries import BoundaryData
         from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 
     def test_get_large_scale_condensation_tendencies(self):
@@ -28,8 +30,12 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = state = PhysicsState.zeros(xyz, specific_humidity=qa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
+        params = Parameters(
+            convection=ConvectionParameters()
+        )
+        boundaries = BoundaryData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, params, boundaries)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
@@ -50,8 +56,12 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = PhysicsState.zeros(xyz, specific_humidity=qa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
+        params = Parameters(
+            convection=ConvectionParameters()
+        )
+        boundaries = BoundaryData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, params, boundaries)
         
         np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([[[0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]]]), atol=1e-4, rtol=0)
@@ -66,9 +76,13 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
+        params = Parameters(
+            convection=ConvectionParameters()
+        )
+        boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data) 
+        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, params, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
