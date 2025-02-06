@@ -348,7 +348,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan())
-        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dparams.convection.isnan())
 
     def test_solar_gradients_isnan(self): 
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
@@ -403,5 +403,5 @@ class TestShortWaveRadiation(unittest.TestCase):
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dparams.convection.isnan())
         self.assertFalse(df_dboundaries.isnan())

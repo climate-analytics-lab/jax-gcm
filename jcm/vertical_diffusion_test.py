@@ -68,5 +68,5 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dparams.convection.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan())

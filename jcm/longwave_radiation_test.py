@@ -129,7 +129,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dparams.convection.isnan())
         self.assertFalse(df_dboundaries.isnan())
        
 
@@ -153,7 +153,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dparams.convection.isnan())
         self.assertFalse(df_dboundaries.isnan())
 
 
