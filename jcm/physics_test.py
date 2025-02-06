@@ -4,7 +4,7 @@ from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
 from datetime import datetime
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
+from jcm.params import Parameters, ConvectionParameters
 
 class TestPhysicsUnit(unittest.TestCase):
     def test_speedy_model_HS94(self):
@@ -39,7 +39,9 @@ class TestPhysicsUnit(unittest.TestCase):
             include_vertical_advection=include_vertical_advection)
 
         hsf = HeldSuarezForcing(hs_model.coords, hs_model.physics_specs, hs_model.ref_temps)
-        params = Parameters()
+        params = Parameters(
+            convection=ConvectionParameters()
+        )
         boundaries = BoundaryData.zeros(hs_model.ref_temps.shape[0:2])
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
