@@ -65,7 +65,7 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
         self.assertFalse(df_dparams.convection.isnan())
-        self.assertFalse(df_dboundaries.isnan())
+        self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_get_qsat(self):
         temp = self.temp_standard

@@ -17,6 +17,7 @@ class ConvectionParameters:
 
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
+    
 @tree_math.struct
 class Parameters:
     convection: ConvectionParameters

@@ -72,7 +72,6 @@ class BoundaryData:
             cdland=cdland if cdland is not None else self.cdland,
             stlcl_ob=stlcl_ob if stlcl_ob is not None else self.stlcl_ob,
             snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
-            # soilwcl_ob=soilw_am if soilw_am is not None else self.soilw_am,
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else self.land_coupling_flag,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
@@ -80,7 +79,13 @@ class BoundaryData:
         )
     
     def isnan(self):
+        self.lfluxland = 0
+        self.land_coupling_flag = 0
         return tree_util.tree_map(jnp.isnan, self)
+    
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
     
 
 
