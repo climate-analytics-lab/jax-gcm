@@ -83,7 +83,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             sea_model=sea_model
         )
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data, boundaries, parameters)
+        return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, data=data, boundaries=boundaries, parameters=parameters)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:

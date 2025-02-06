@@ -42,7 +42,7 @@ lskineb = True   # true : redefine skin temp. from energy balance
 hdrag = 2000.0 # Height scale for orographic correction
 
 @jit
-def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData = None):
+def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
     '''
 
     Parameters

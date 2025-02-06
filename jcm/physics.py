@@ -202,7 +202,7 @@ def get_physical_tendencies(
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     data: PhysicsData = None,
     boundaries: BoundaryData = None,
-    parameters: Parameters = None
+    parameters: Parameters = None,
 ):
     """
     Computes the physical tendencies given the current state and a list of physics functions.
