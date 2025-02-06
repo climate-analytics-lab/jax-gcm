@@ -60,10 +60,12 @@ class TestHumidityUnit(unittest.TestCase):
         datas = PhysicsData.ones(xy, kx)
         input = (tends, datas)
         
-        df_dstates, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan())
 
     def test_get_qsat(self):
         temp = self.temp_standard

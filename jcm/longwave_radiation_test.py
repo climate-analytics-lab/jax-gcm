@@ -30,8 +30,10 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, Parameters, ConvectionParameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, PhysicsData
+        from jcm.params import Parameters, ConvectionParameters
+        from jcm.boundaries import BoundaryData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
@@ -40,13 +42,18 @@ class TestDownwardLongwave(unittest.TestCase):
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
         xyz = (ix, il, kx)
+        xy = (ix, il)
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
+        boundaries = BoundaryData.ones(xy)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         state = PhysicsState.zeros(xyz,temperature=ta)
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data)
+        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries)
 
         # fortran values
         # print(fsfcd[:5, :5])
@@ -108,16 +115,22 @@ class TestDownwardLongwave(unittest.TestCase):
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
+        boundaries = BoundaryData.ones(xy)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data) 
+        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstates, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan())
        
 
     def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
@@ -126,15 +139,21 @@ class TestDownwardLongwave(unittest.TestCase):
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
+        boundaries = BoundaryData.ones(xy)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data) 
+        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstates, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan())
 
 

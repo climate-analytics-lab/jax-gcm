@@ -79,14 +79,8 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else self.fmask_s
         )
     
-    def has_nans(self):
-        def check_nans(x):
-            if isinstance(x, jnp.ndarray):
-                return jnp.any(jnp.isnan(x))
-            return False
-        return tree_util.tree_reduce(lambda x, y: x or y,
-                                   tree_util.tree_map(check_nans, self),
-                                   False)
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
     
 
 

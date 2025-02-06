@@ -100,13 +100,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw
+               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw, Parameters, ConvectionParameters
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
+        from jcm.params import Parameters, ConvectionParameters
 
     def test_shortwave_radiation(self):   
         from datetime import datetime
@@ -133,6 +134,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -141,9 +145,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
-        _, physics_data = clouds(state, physics_data, boundaries)
+        _, physics_data = clouds(state, physics_data, parameters, boundaries)
         _, physics_data = get_zonal_average_fields(state, physics_data)
-        _, physics_data = get_shortwave_rad_fluxes(state, physics_data)
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries)
         
         np.testing.assert_allclose(physics_data.shortwave_rad.rsds[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
@@ -199,6 +203,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(xyz)
+
         _, new_data = get_zonal_average_fields(state, physics_data)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
@@ -216,7 +221,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+       
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
         topsr = solar(date_data.tyear)
@@ -231,7 +238,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+
         state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        
         _, physics_data = get_zonal_average_fields(state, physics_data)
 
         fs0 = 6.0
@@ -324,16 +333,22 @@ class TestShortWaveRadiation(unittest.TestCase):
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
+        boundaries = BoundaryData.ones(xy)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data) 
+        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstates, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan())
+        self.assertFalse(df_dparams.isnan().any_true())
 
     def test_solar_gradients_isnan(self): 
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
@@ -368,6 +383,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
+        parameters = Parameters(
+            convection=ConvectionParameters()
+        )
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -377,12 +395,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy,fmask=fmask)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(clouds, state, physics_data, boundaries) 
+        primals, f_vjp = jax.vjp(clouds, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstate, df_ddatas, df_dboundaries = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dboundaries.has_nans())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan())

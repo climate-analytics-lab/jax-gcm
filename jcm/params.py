@@ -4,6 +4,7 @@ For storing variables used by multiple physics schemes.
 '''
 import tree_math
 import jax.numpy as jnp
+from jax import tree_util 
 
 @tree_math.struct
 class ConvectionParameters:
@@ -14,9 +15,21 @@ class ConvectionParameters:
     entmax = jnp.array(0.5) # Maximum entrainment as a fraction of cloud-base mass flux
     smf = jnp.array(0.8) # Ratio between secondary and primary mass flux at cloud-base
 
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
 @tree_math.struct
 class Parameters:
     convection: ConvectionParameters
+
+    def isnan(self):
+        return Parameters(
+            convection = self.convection.isnan()
+        )
+    
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
+    
 
 # Time stepping parameters
 nsteps = 36     # Number of time steps in one day

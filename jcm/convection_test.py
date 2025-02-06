@@ -60,11 +60,12 @@ class TestConvectionUnit(unittest.TestCase):
         datas = PhysicsData.ones(xy, kx)
         input = (tends, datas)
         
-        df_dstate, df_ddatas, df_params, df_dboundaries = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dboundaries.has_nans())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.is_nan())
 
 
     def test_diagnose_convection_moist_adiabat(self):

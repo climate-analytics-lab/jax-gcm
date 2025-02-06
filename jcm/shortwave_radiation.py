@@ -223,7 +223,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
 
 @jit
-def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData=None):
+def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
