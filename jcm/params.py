@@ -34,7 +34,3 @@ issty0 = 1979   # Starting year for SST anomaly file
 # User-specified parameters
 nstdia = 36 * 5 # Period (number of steps) for diagnostic print-out
 nsteps_out = 1  # Number of time steps between outputs
-
-@tree_math.struct
-class Parameters:
-    convection: ConvectionParameters
