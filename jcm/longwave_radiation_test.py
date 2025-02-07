@@ -33,6 +33,8 @@ class TestDownwardLongwave(unittest.TestCase):
         global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, PhysicsData
         from jcm.params import Parameters
+        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.boundaries import BoundaryData
         parameters = Parameters.init()
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
