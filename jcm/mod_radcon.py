@@ -1,5 +1,6 @@
 from jax import jit
 import jax.numpy as jnp
+from jcm.params import Parameters
 
 n_temperatures = 301
 n_bands = 4
@@ -34,8 +35,9 @@ def radset(initial_array, parameters):
     
     return result
 
+parameters = Parameters.init()
 # Calculate final fband values
-fband = radset(fband_initial)
+fband = radset(fband_initial, parameters)
 
 
 
