@@ -26,15 +26,15 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries):
                         jnp.where(boundaries.fmask > (1.0 - parameters.land_model.thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
-    stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])[:,:,0]
+    stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])
     # instead of using a check forchk, we check that 0.0 < stl12 < 400 and if it isn't we set it to 273
     # this might not work exactly because stl12 is ix,il,12 and bmask is ix,il
-    stlcl_ob = jnp.where((bmask_l > 0.0) & ((stlcl_ob < 0.0) | (stlcl_ob > 400.0)), 273.0, stlcl_ob)
+    stlcl_ob = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((stlcl_ob < 0.0) | (stlcl_ob > 400.0)), 273.0, stlcl_ob)
 
     # Snow depth
-    snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])[:,:,0]
+    snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])
     # simple sanity check - same method ras above for stl12 
-    snowd_am = jnp.where((bmask_l > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
+    snowd_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
     veg_high = jnp.asarray(xr.open_dataset(surface_filename)["vegh"])
@@ -52,20 +52,18 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries):
     rsw    = 1.0/(parameters.land_model.swcap + idep2*(parameters.land_model.swcap - parameters.land_model.swwil))
 
     # Combine soil water content from two top layers
-    swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])[:,:,0]
+    swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])
     swl2 = jnp.asarray(xr.open_dataset(surface_filename)["swl2"])
     
     swroot = idep2 * swl2
     # Compute the intermediate max term
-    max_term = jnp.maximum(0.0, swroot - swwil2)[:,:,0]
+    max_term = jnp.maximum(0.0, swroot - swwil2)
     # Compute the soil water content
-    # jax.debug.print(f"rsw {rsw.shape}")
-    jax.debug.print(f"swl1 {swl1.shape}")
-    jax.debug.print(f"veg {veg.shape}")
-    jax.debug.print(f"max_term {max_term.shape}")
-    soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg * max_term))
+
+    soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg[:,:,jnp.newaxis] * max_term))
+
     # simple sanity check - same method ras above for stl12 
-    soilw_am = jnp.where((bmask_l > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
+    soilw_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
 
     # =========================================================================
     # Set heat capacities and dissipation times for soil and ice-sheet layers
@@ -84,7 +82,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries):
     return boundaries_new
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
+def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=jnp.newaxis):
     from jcm.date import days_year
 
     day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)

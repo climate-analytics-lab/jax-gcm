@@ -357,8 +357,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     clstr = fstab * jnp.maximum(parameters.shortwave_radiation.clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[:, :, kx - 1]
-    jax.debug.print(f"clstrl {clstrl.shape}")
-    jax.debug.print(f"clstr {clstr.shape}")
     clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 

@@ -412,13 +412,13 @@ class IceModelData:
     @classmethod
     def zeros(self, nodal_shape, sice_am=None):
         return IceModelData(
-            sice_am = sice_am if sice_am is not None else jnp.zeros((nodal_shape))
+            sice_am = sice_am if sice_am is not None else jnp.zeros((nodal_shape+(365,)))
         )
     
     @classmethod
     def ones(self, nodal_shape, sice_am=None):
         return IceModelData(
-            sice_am = sice_am if sice_am is not None else jnp.ones((nodal_shape))
+            sice_am = sice_am if sice_am is not None else jnp.ones((nodal_shape+(365,)))
         )
 
     def copy(self, sice_am=None):
