@@ -30,11 +30,10 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, Parameters, ConvectionParameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, PhysicsData
-        from jcm.params import Parameters, ConvectionParameters
-        from jcm.boundaries import BoundaryData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.params import Parameters
+        parameters = Parameters.init()
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):        
@@ -47,10 +46,7 @@ class TestDownwardLongwave(unittest.TestCase):
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
-
+        
         state = PhysicsState.zeros(xyz,temperature=ta)
         
         _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries)
@@ -116,10 +112,6 @@ class TestDownwardLongwave(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
-
         # Calculate gradient
         _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
@@ -140,9 +132,6 @@ class TestDownwardLongwave(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 

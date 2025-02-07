@@ -1,6 +1,6 @@
 import unittest
 from dinosaur import primitive_equations_states
-from jcm.params import Parameters, ConvectionParameters
+from jcm.params import Parameters
 
 class TestModelUnit(unittest.TestCase):
 
@@ -60,9 +60,7 @@ class TestModelUnit(unittest.TestCase):
             save_interval=1,
             total_time=2,
             layers=layers, 
-            parameters=Parameters(
-            convection=ConvectionParameters()
-            )
+            parameters=Parameters.init()
         )
     
         state = model.get_initial_state()

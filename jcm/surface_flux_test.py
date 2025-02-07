@@ -10,11 +10,13 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData, \
-               PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency, Parameters, ConvectionParameters
+               PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency, parameters
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.params import Parameters, ConvectionParameters
+        from jcm.params import Parameters
+        parameters = Parameters.init()
+        
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 
     def test_grad_surface_flux(self):
@@ -44,9 +46,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         _, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, parameters, boundaries)
 
@@ -87,9 +86,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.ones(xy, phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland, soilw_am=soilw_am)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
@@ -132,11 +128,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
-        forog = set_orog_land_sfc_drag(phi0)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
         boundaries = BoundaryData.zeros(xy, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
 
@@ -176,7 +169,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
-        forog = set_orog_land_sfc_drag(phi0)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
@@ -187,9 +180,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
         
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
@@ -225,7 +215,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        forog = set_orog_land_sfc_drag(phi0)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
@@ -241,9 +231,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.zeros(xy, phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
@@ -279,7 +266,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
-        forog = set_orog_land_sfc_drag(phi0)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
@@ -295,9 +282,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.zeros(xy,phi0=phi0,fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
@@ -333,7 +317,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
-        forog = set_orog_land_sfc_drag(phi0)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
@@ -348,9 +332,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sea_data = SeaModelData.zeros(xy,tsea=tsea)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
         boundaries = BoundaryData.zeros(xy,phi0=phi0,fmask_l=fmask_l,soilw_am=soilw_am,forog=forog,lfluxland=lfluxland)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
@@ -376,7 +357,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
     def test_surface_fluxes_drag_test(self):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
 
-        forog_test = set_orog_land_sfc_drag( phi0 )
+        forog_test = set_orog_land_sfc_drag(phi0, parameters)
         
         test_data = [1.0000012824780082, 1.0000012824780082, 1.0000012824780082]
         self.assertAlmostEqual(jnp.max(forog_test),test_data[0])

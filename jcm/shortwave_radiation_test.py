@@ -100,14 +100,15 @@ class TestShortWaveRadiation(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw, Parameters, ConvectionParameters
+               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw, parameters
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
-        from jcm.params import Parameters, ConvectionParameters
+        from jcm.params import Parameters
+        parameters = Parameters.init()
 
     def test_shortwave_radiation(self):   
         from datetime import datetime
@@ -134,9 +135,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -334,9 +332,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries) 
@@ -383,9 +378,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()

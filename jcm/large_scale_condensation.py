@@ -11,12 +11,6 @@ from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, cp, alhc, grav
 from jcm.geometry import fsg, dhs
 
-# Constants for large-scale condensation
-trlsc = 4.0   # Relaxation time (in hours) for specific humidity
-rhlsc = 0.9   # Maximum relative humidity threshold (at sigma=1)
-drhlsc = 0.1  # Vertical range of relative humidity threshold
-rhblsc = 0.95 # Relative humidity threshold for boundary layer
-
 # Compute large-scale condensation and associated tendencies of temperature and 
 # moisture
 @jit
@@ -48,7 +42,7 @@ def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: P
     # Constants for computation
     qsmax = 10.0
 
-    rtlsc = 1.0 / (trlsc * 3600.0)
+    rtlsc = 1.0 / (parameters.condensation.trlsc * 3600.0)
     tfact = alhc / cp
     prg = p0 / grav
 
@@ -61,8 +55,8 @@ def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: P
     # Compute sig2, rhref, and dqmax arrays
     sig2 = fsg**2.0
     
-    rhref = rhlsc + drhlsc * (sig2 - 1.0)
-    rhref = jnp.maximum(rhref, rhblsc)
+    rhref = parameters.condensation.rhlsc + parameters.condensation.drhlsc * (sig2 - 1.0)
+    rhref = jnp.maximum(rhref, parameters.condensation.rhblsc)
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array

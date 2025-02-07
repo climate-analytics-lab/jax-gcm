@@ -1,14 +1,5 @@
 from jax import jit
 import jax.numpy as jnp
-# Radiation and cloud constants
-# Albedo values
-albsea = 0.07  # Albedo over sea
-albice = 0.60  # Albedo over sea ice (for ice fraction = 1)
-albsn  = 0.60  # Albedo over snow (for snow cover = 1)
-
-# Longwave parameters
-epslw  = 0.05  # Fraction of blackbody spectrum absorbed/emitted by PBL only
-emisfc = 0.98  # Longwave surface emissivity
 
 n_temperatures = 301
 n_bands = 4
@@ -17,11 +8,11 @@ n_bands = 4
 fband_initial = jnp.zeros((n_temperatures, n_bands))
 
 @jit
-def radset(initial_array):
+def radset(initial_array, parameters):
     """
     Set the energy fraction emitted in each LW band = f(T)
     """
-    eps1 = 1.0 - epslw
+    eps1 = 1.0 - parameters.mod_radcon.epslw
     t_min, t_max = 200, 320
     jtemp = jnp.arange(t_min, t_max + 1)
     

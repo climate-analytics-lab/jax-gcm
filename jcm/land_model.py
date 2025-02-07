@@ -6,25 +6,11 @@ from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
 import jax
 
-# should these be moved to params.py?
-sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
-# Soil moisture parameters
-swcap = 0.30 # Soil wetness at field capacity (volume fraction)
-swwil = 0.17 # Soil wetness at wilting point  (volume fraction)
-thrsh = 0.1 # Threshold for land-sea mask definition (i.e. minimum fraction of either land or sea)
-# Model parameters (default values)
-depth_soil = 1.0 # Soil layer depth (m)
-depth_lice = 5.0 # Land-ice depth (m)
-tdland  = 40.0 # Dissipation time (days) for land-surface temp. anomalies
-flandmin = 1.0/3.0 # Minimum fraction of land for the definition of anomalies
-hcapl  = depth_soil*2.50e+6 # Heat capacities per m^2 (depth*heat_cap/m^3)
-hcapli = depth_lice*1.93e+6
-
 # land_filename = 'land.nc'
 # snow_filename = 'snow.nc'
 # soil_filename = 'soil.nc'
 
-def land_model_init(surface_filename, boundaries):
+def land_model_init(surface_filename, parameters: Parameters, boundaries):
     import xarray as xr
     from jcm.params import delt
     # =========================================================================
@@ -33,11 +19,11 @@ def land_model_init(surface_filename, boundaries):
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
-    bmask_l = jnp.where(fmask_l >= thrsh, 1.0, 0.0)
+    bmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 1.0, 0.0)
 
     # Update fmask_l based on the conditions
-    fmask_l = jnp.where(fmask_l >= thrsh, 
-                        jnp.where(boundaries.fmask > (1.0 - thrsh), 1.0, fmask_l), 0.0)
+    fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 
+                        jnp.where(boundaries.fmask > (1.0 - parameters.land_model.thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
     stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])[:,:,0]
@@ -62,8 +48,8 @@ def land_model_init(surface_filename, boundaries):
     idep2 = 3
     # sdep2 = idep2*sdep1
 
-    swwil2 = idep2*swwil
-    rsw    = 1.0/(swcap + idep2*(swcap - swwil))
+    swwil2 = idep2*parameters.land_model.swwil
+    rsw    = 1.0/(parameters.land_model.swcap + idep2*(parameters.land_model.swcap - parameters.land_model.swwil))
 
     # Combine soil water content from two top layers
     swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])[:,:,0]
@@ -88,11 +74,11 @@ def land_model_init(surface_filename, boundaries):
     # 2. Compute constant fields
     # Set domain mask (blank out sea points)
     dmask = jnp.ones_like(fmask_l)
-    dmask = jnp.where(fmask_l < flandmin, 0, dmask)
+    dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
     # Set time_step/heat_capacity and dissipation fields
-    rhcapl = jnp.where(boundaries.alb0 < 0.4, delt / hcapl, delt / hcapli)
-    cdland = dmask*tdland/(1.0+dmask*tdland)
+    rhcapl = jnp.where(boundaries.alb0 < 0.4, delt / parameters.land_model.hcapl, delt / parameters.land_model.hcapli)
+    cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
 
     boundaries_new = boundaries.copy(rhcapl=rhcapl, cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
     return boundaries_new

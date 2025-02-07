@@ -90,7 +90,7 @@ class BoundaryData:
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(surface_filename, primitive, truncation_number):
+def initialize_boundaries(surface_filename, primitive, truncation_number, parameters):
     """
     Initialize the boundary conditions
     """
@@ -106,7 +106,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     # Also store spectrally truncated surface geopotential for the land drag term
     #TODO: See if we can get the truncation number from the primitive equation object
     phis0 = spectral_truncation(primitive, phi0, truncation_number)
-    forog = set_orog_land_sfc_drag(phis0)
+    forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # Read land-sea mask
     fmask = jnp.asarray(xr.open_dataset(surface_filename)["lsm"])
@@ -119,7 +119,7 @@ def initialize_boundaries(surface_filename, primitive, truncation_number):
     nodal_shape = fmask.shape
     jax.debug.print(f"fmask {fmask.shape}")
     boundaries = BoundaryData.zeros(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
-    boundaries = land_model_init(surface_filename,boundaries)
+    boundaries = land_model_init(surface_filename, parameters, boundaries)
     # jax.debug.print(f"boundaries new {boundaries.alb0.shape}")
     # temp = 
     # jax.debug.print(f"boundaries new {boundaries.snowd_am.shape}")

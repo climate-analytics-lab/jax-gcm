@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import sbc, wvi, grdscp
-from jcm.mod_radcon import epslw, emisfc, fband
+from jcm.mod_radcon import fband
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
@@ -91,9 +91,9 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
             flux = flux.at[:, :, jb].set((tau2[:, :, k, jb] * flux[:, :, jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
             dfabs = dfabs.at[:, :, k].add(-flux[:, :, jb])
 
-    rlds = jnp.sum(emisfc * flux, axis=-1)
+    rlds = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
 
-    corlw = epslw * emisfc * st4a[:,:,kx-1,0]
+    corlw = parameters.mod_radcon.epslw * parameters.mod_radcon.emisfc * st4a[:,:,kx-1,0]
     dfabs = dfabs.at[:,:,kx-1].add(-corlw)
     rlds = rlds + corlw
 
@@ -136,7 +136,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     fsfcu = physics_data.surface_flux.slru[:,:,2] 
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
-    refsfc = 1.0 - emisfc
+    refsfc = 1.0 - parameters.mod_radcon.emisfc
     fsfc = fsfcu - rlds
     
     ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
@@ -146,7 +146,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     # Troposphere
     # correction for 'black' band
-    dfabs = dfabs.at[:,:,-1].set(dfabs[:,:,-1] + epslw * fsfcu)
+    dfabs = dfabs.at[:,:,-1].set(dfabs[:,:,-1] + parameters.mod_radcon.epslw * fsfcu)
 
     for jb in range(nband):
         for k in range(kx-1, 0, -1):

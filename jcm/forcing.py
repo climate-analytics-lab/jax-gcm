@@ -12,8 +12,6 @@ def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Para
     from jcm.shortwave_radiation import get_zonal_average_fields
     from jcm.physics import PhysicsTendency
     from jcm.physical_constants import rgas
-    from jcm.land_model import sd2sc
-    from jcm.mod_radcon import albsea, albice, albsn
 
     # 2. daily-mean radiative forcing
     # incoming solar radiation
@@ -29,9 +27,9 @@ def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Para
 
     alb0 = boundaries.alb0
 
-    snowc = jnp.minimum(1.0, snowd_am / sd2sc)
-    alb_l = alb0 + snowc * (albsn - alb0)
-    alb_s = albsea + sice_am * (albice - albsea)
+    snowc = jnp.minimum(1.0, snowd_am / parameters.land_model.sd2sc)
+    alb_l = alb0 + snowc * (parameters.mod_radcon.albsn - alb0)
+    alb_s = parameters.mod_radcon.albsea + sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
     albsfc = alb_s + fmask_l * (alb_l - alb_s)
 
     increase_co2 = physics_data.shortwave_rad.increase_co2

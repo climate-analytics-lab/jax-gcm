@@ -163,7 +163,7 @@ class SpeedyModel:
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
         # TODO: make the truncation number a parameter consistent with the grid shape        
-        boundaries = initialize_boundaries(boundary_file, self.primitive, 31)
+        boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
                                                         self.physics_terms, self.start_date, 
@@ -196,7 +196,6 @@ class SpeedyModel:
     def post_process(self, state):
         from jcm.boundaries import BoundaryData, initialize_boundaries
         from jcm.date import DateData
-        from jcm.params import ConvectionParameters
         from jcm.physics_data import PhysicsData, SeaModelData
         from jcm.physics import dynamics_state_to_physics_state
 
@@ -221,7 +220,7 @@ class SpeedyModel:
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
-            _, data = term(physics_state, data, Parameters(convection=ConvectionParameters()), BoundaryData.zeros((96,48)))
+            _, data = term(physics_state, data, Parameters.init(), BoundaryData.zeros((96,48)))
         
         return {
             'dynamics': state,

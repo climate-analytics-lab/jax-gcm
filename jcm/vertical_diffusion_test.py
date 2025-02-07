@@ -11,9 +11,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
-            Parameters, ConvectionParameters, BoundaryData
+            parameters, BoundaryData
         from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
-        from jcm.params import Parameters, ConvectionParameters
+        from jcm.params import Parameters
+        parameters = Parameters.init()
         from jcm.boundaries import BoundaryData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.vertical_diffusion import get_vertical_diffusion_tend
@@ -33,9 +34,6 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=phi)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
         physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, boundaries)
@@ -55,9 +53,6 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
         boundaries = BoundaryData.ones(xy)
-        parameters = Parameters(
-            convection=ConvectionParameters()
-        )
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries) 
