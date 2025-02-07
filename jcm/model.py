@@ -94,7 +94,7 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file='data/bc/t30/clim/boundaries.nc', horizontal_resolution=31, parameters=None) -> None:
+                 start_date=None, boundary_file='data/bc/t30/clim/boundaries_daily.nc', horizontal_resolution=31, parameters=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
