@@ -7,7 +7,7 @@ from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
 from jcm.held_suarez import HeldSuarezForcing
-from jcm.boundaries import Boundaries
+from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
@@ -16,7 +16,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
         parameters = Parameters.init()
 
         # Held Suarez doesn't use these boundaries, so it doesn't matter what they are
-        boundaries = Boundaries()
+        boundaries = BoundaryData.zeros((1,1))
 
         return get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters)
     return ExplicitODE.from_functions(physical_tendencies)
