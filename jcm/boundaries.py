@@ -97,10 +97,10 @@ def default_boundaries(primitive, truncation_number, orography, parameters):
     from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
 
-    boundaries = BoundaryData.zeros(orography.shape)
     # Read surface geopotential (i.e. orography)
-    phi0 = orography
-    phis0 = orography
+    orog = primitive.coords.horizontal.to_nodal(orography)
+    phi0 = orog
+    phis0 = orog
     #TODO: See if we can get the truncation number from the primitive equation object
     forog = set_orog_land_sfc_drag(phi0, parameters)
 

@@ -168,7 +168,13 @@ class SpeedyModel:
             boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
         else:       
             boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
-            # TODO: overwrite the default orography with the orography from the boundaries object
+            #overwrite orography if we read in something specific
+            new_orog = self.primitive.coords.horizontal.to_nodal(boundaries.phis0)
+            self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
+                self.ref_temps,
+                new_orog,
+                self.coords,
+                self.physics_specs)
         
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
