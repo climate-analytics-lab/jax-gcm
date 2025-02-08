@@ -160,6 +160,9 @@ class SpeedyModel:
             self.coords,
             self.physics_specs)
         
+        # this implicitly calls initialize_modules, must be before we set boundaries
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
             boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
@@ -167,8 +170,6 @@ class SpeedyModel:
             boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
             # TODO: overwrite the default orography with the orography from the boundaries object
         
-
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
                                                         self.physics_terms, self.start_date, 
