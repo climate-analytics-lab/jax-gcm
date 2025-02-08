@@ -94,7 +94,7 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file='data/bc/t30/clim/boundaries_daily.nc', horizontal_resolution=31, parameters=None) -> None:
+                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -108,7 +108,7 @@ class SpeedyModel:
 
         """
         from datetime import datetime
-        from jcm.boundaries import initialize_boundaries
+        from jcm.boundaries import initialize_boundaries, default_boundaries
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -160,10 +160,15 @@ class SpeedyModel:
             self.coords,
             self.physics_specs)
         
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        # TODO: make the truncation number a parameter consistent with the grid shape
+        if boundary_file is None:
+            boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
+        else:       
+            boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
+            # TODO: overwrite the default orography with the orography from the boundaries object
+        
 
-        # TODO: make the truncation number a parameter consistent with the grid shape        
-        boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
                                                         self.physics_terms, self.start_date, 

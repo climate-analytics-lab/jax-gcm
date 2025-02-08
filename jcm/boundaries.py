@@ -87,10 +87,7 @@ class BoundaryData:
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
     
-
-
-#this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(surface_filename, primitive, truncation_number, parameters):
+def default_boundaries(primitive, truncation_number, orography, parameters):
     """
     Initialize the boundary conditions
     """
@@ -99,26 +96,50 @@ def initialize_boundaries(surface_filename, primitive, truncation_number, parame
     from jcm.land_model import land_model_init
     from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
-    import numpy as np
+
+    boundaries = BoundaryData.zeros(orography.shape)
+    # Read surface geopotential (i.e. orography)
+    phi0 = orography
+    phis0 = orography
+    #TODO: See if we can get the truncation number from the primitive equation object
+    forog = set_orog_land_sfc_drag(phi0, parameters)
+
+    # land-sea mask
+    fmask = jnp.zeros_like(orography)
+    boundaries = boundaries.copy(phi0=phi0, phis0=phis0, fmask=fmask, forog=forog)
+    
+    return boundaries
+
+
+#this function calls land_model_init and eventually will call init for sea and ice models
+def initialize_boundaries(filename, primitive, truncation_number, parameters):
+    """
+    Initialize the boundary conditions
+    """
+    from jcm.physical_constants import grav
+    from jcm.physics import spectral_truncation
+    from jcm.land_model import land_model_init
+    from jcm.surface_flux import set_orog_land_sfc_drag
+    import xarray as xr
 
     # Read surface geopotential (i.e. orography)
-    phi0 = grav* jnp.asarray(xr.open_dataset(surface_filename)["orog"])
+    phi0 = grav* jnp.asarray(xr.open_dataset(filename)["orog"])
     # Also store spectrally truncated surface geopotential for the land drag term
     #TODO: See if we can get the truncation number from the primitive equation object
     phis0 = spectral_truncation(primitive, phi0, truncation_number)
     forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # Read land-sea mask
-    fmask = jnp.asarray(xr.open_dataset(surface_filename)["lsm"])
+    fmask = jnp.asarray(xr.open_dataset(filename)["lsm"])
     # Annual-mean surface albedo
-    alb0 = jnp.asarray(xr.open_dataset(surface_filename)["alb"])
+    alb0 = jnp.asarray(xr.open_dataset(filename)["alb"])
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all(fmask >= 0.0), "Land-sea mask must be between 0 and 1"
     assert jnp.all(fmask <= 1.0), "Land-sea mask must be between 0 and 1"
 
     nodal_shape = fmask.shape
     boundaries = BoundaryData.zeros(nodal_shape,fmask=fmask,forog=forog,phi0=phi0, phis0=phis0, alb0=alb0)
-    boundaries = land_model_init(surface_filename, parameters, boundaries)
+    boundaries = land_model_init(filename, parameters, boundaries)
     # temp = 
 
     # call sea model init 

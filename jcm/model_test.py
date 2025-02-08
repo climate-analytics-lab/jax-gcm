@@ -55,6 +55,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import SpeedyModel
 
         layers = 7
+        # optionally add a boundary conditions file
         model = SpeedyModel(
             time_step=720,
             save_interval=1,
