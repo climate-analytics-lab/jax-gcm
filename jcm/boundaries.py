@@ -106,7 +106,7 @@ def default_boundaries(primitive, truncation_number, orography, parameters):
 
     # land-sea mask
     fmask = jnp.zeros_like(orography)
-    boundaries = boundaries.copy(phi0=phi0, phis0=phis0, fmask=fmask, forog=forog)
+    boundaries = BoundaryData.zeros(orog.shape,phi0=phi0, phis0=phis0, fmask=fmask, forog=forog)
     
     return boundaries
 
