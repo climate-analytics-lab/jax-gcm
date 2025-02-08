@@ -132,7 +132,7 @@ class TestModelUnit(unittest.TestCase):
                 'physics' : physics_data}  
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=3, total_time=(1/48.0), layers=8) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(time_step=30, save_interval=3, total_time=(1/48.0), layers=8, parameters=Parameters.init()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -174,7 +174,7 @@ class TestModelUnit(unittest.TestCase):
                 'physics' : physics_data}  
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=3, total_time=(10/48.0), layers=8) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(time_step=30, save_interval=3, total_time=(10/48.0), layers=8, parameters=Parameters.init()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients
