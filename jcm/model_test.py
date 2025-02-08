@@ -69,8 +69,8 @@ class TestModelUnit(unittest.TestCase):
         # Specify humidity perturbation in kg/kg
         state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_x = 85
-        modal_y = 44
+        modal_x = model.coords.modal_shape[1]
+        modal_y = model.coords.modal_shape[2]
         modal_zxy = (layers, modal_x, modal_y)
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
     
