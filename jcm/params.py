@@ -110,6 +110,8 @@ class SurfaceFluxParameters:
     hdrag = 2000.0 # Height scale for orographic correction
 
     def isnan(self):
+        self.lscasym = 0
+        self.lskineb = 0
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
