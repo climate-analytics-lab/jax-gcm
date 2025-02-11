@@ -94,7 +94,7 @@ def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: 
         stl_am = stl_lm
     # Otherwise get the land surface from climatology
     else:
-        stl_am = boundaries.stlcl_ob
+        stl_am = boundaries.stlcl_ob[:,:,day]
 
     # update land physics data
     land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)
