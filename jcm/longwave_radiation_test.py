@@ -35,7 +35,7 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.params import Parameters
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):        
@@ -123,7 +123,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
        
 
@@ -144,7 +144,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
 

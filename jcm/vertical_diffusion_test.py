@@ -14,7 +14,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
             parameters, BoundaryData
         from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.vertical_diffusion import get_vertical_diffusion_tend
@@ -63,5 +63,5 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())

@@ -14,7 +14,7 @@ class TestConvectionUnit(unittest.TestCase):
         global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
@@ -59,7 +59,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
 

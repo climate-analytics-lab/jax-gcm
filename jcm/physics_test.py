@@ -39,7 +39,7 @@ class TestPhysicsUnit(unittest.TestCase):
             include_vertical_advection=include_vertical_advection)
 
         hsf = HeldSuarezForcing(hs_model.coords, hs_model.physics_specs, hs_model.ref_temps)
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         boundaries = BoundaryData.zeros(hs_model.ref_temps.shape[0:2])
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]

@@ -155,7 +155,7 @@ class Parameters:
     land_model: LandModelParameters
 
     @classmethod
-    def init(self):
+    def default(self):
         return Parameters(
             convection = ConvectionParameters(),
             condensation = CondensationParameters(),
@@ -165,3 +165,15 @@ class Parameters:
             vertical_diffusion = VerticalDiffusionParameters(),
             land_model = LandModelParameters(),
         )
+    
+    def isnan(self):
+        return Parameters(
+            convection=self.convection.isnan(),
+            condensation=self.condensation.isnan(),
+            shortwave_radiation=self.shortwave_radiation.isnan(),
+            mod_radcon = self.mod_radcon.isnan(),
+            surface_flux = self.surface_flux.isnan(),
+            vertical_diffusion = self.vertical_diffusion.isnan(),
+            land_model = self.land_model.isnan(),
+        )
+    

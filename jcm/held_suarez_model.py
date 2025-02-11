@@ -13,7 +13,7 @@ from jcm.params import Parameters
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
     def physical_tendencies(state):
 
-        parameters = Parameters.init()
+        parameters = Parameters.default()
 
         # Held Suarez doesn't use these boundaries, so it doesn't matter what they are
         boundaries = BoundaryData.zeros((1,1))

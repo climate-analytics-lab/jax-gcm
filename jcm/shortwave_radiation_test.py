@@ -108,7 +108,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
 
     def test_shortwave_radiation(self):   
         from datetime import datetime
@@ -343,7 +343,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
 
     def test_solar_gradients_isnan(self): 
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
@@ -395,5 +395,5 @@ class TestShortWaveRadiation(unittest.TestCase):
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())

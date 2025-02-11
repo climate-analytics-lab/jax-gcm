@@ -230,10 +230,13 @@ class SpeedyModel:
             sea_model=sea_model
         )
 
+        # need to have the right boundaries initialized here for this to work. 
+
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
-            _, data = term(physics_state, data, Parameters.init(), BoundaryData.zeros((96,48)))
+            _, data = term(physics_state, data, Parameters.default(), BoundaryData.zeros((96,48)))
         
+        # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
             'dynamics': state,
             'physics': data,

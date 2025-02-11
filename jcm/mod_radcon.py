@@ -35,7 +35,7 @@ def radset(initial_array, parameters):
     
     return result
 
-parameters = Parameters.init()
+parameters = Parameters.default()
 # Calculate final fband values
 fband = radset(fband_initial, parameters)
 

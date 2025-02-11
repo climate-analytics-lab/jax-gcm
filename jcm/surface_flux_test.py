@@ -15,7 +15,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, SeaModelData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         
         from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 
@@ -58,7 +58,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_updated_surface_flux(self):

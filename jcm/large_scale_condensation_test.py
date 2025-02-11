@@ -15,7 +15,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
         from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 
@@ -82,7 +82,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
 

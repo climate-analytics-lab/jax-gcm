@@ -18,7 +18,7 @@ class TestHumidityUnit(unittest.TestCase):
         from jcm.geometry import fsg
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
-        parameters = Parameters.init()
+        parameters = Parameters.default()
         
         self.temp_standard = jnp.ones((ix,il,kx))*273
         self.pressure_standard = jnp.ones((ix,il))*0.5
@@ -62,7 +62,7 @@ class TestHumidityUnit(unittest.TestCase):
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dparams.convection.isnan())
+        self.assertFalse(df_dparams.isnan())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_get_qsat(self):
