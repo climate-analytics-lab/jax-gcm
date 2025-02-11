@@ -124,10 +124,16 @@ class TestModelUnit(unittest.TestCase):
                                                     tracers = tracers, sim_time = sim_time)
 
         def make_ones_prediction_object(pred): 
+            # what is "additional"? should it be there?
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.surface_flux.lfluxland = jnp.array([])
+            physics_data.shortwave_rad.increase_co2 = jnp.array([])
+            physics_data.shortwave_rad.co2_year_ref = jnp.array([])
+            physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
+            physics_data.date.model_year = jnp.array([])
+
+            # why is choose sim time an empty array? 
             return{'dynamics': make_ones_dinosaur_StateWithTime_object(pred['dynamics'], jnp.array([])), 
                 'physics' : physics_data}  
         
@@ -137,7 +143,10 @@ class TestModelUnit(unittest.TestCase):
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
+        jax.debug.print("make_ones:{}", make_ones_prediction_object(primals[1]))
+        
         input = (make_ones_dinosaur_StateWithTime_object(primals[0]), make_ones_prediction_object(primals[1]))
+
         df_dstate = f_vjp(input) 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
@@ -168,8 +177,11 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.surface_flux.lfluxland = jnp.array([])
+            physics_data.shortwave_rad.increase_co2 = jnp.array([])
+            physics_data.shortwave_rad.co2_year_ref = jnp.array([])
+            physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
+            physics_data.date.model_year = jnp.array([])
             return{'dynamics': make_ones_dinosaur_StateWithTime_object(pred['dynamics'], jnp.array([])), 
                 'physics' : physics_data}  
         
