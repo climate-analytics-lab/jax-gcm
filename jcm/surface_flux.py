@@ -10,6 +10,11 @@ from jcm.physical_constants import p0, rgas, cp, alhc, sbc, sigl, wvi, grav, grd
 from jcm.geometry import coa
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.date import days_year
+import jax
+
+@jit 
+def pass_fn(operand):
+    return operand
 
 @jit
 def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
@@ -63,7 +68,6 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
-    phis0 = boundaries.phis0
     tsea = physics_data.sea_model.tsea
 
     snowc = physics_data.mod_radcon.snowc
@@ -88,22 +92,18 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     qsat0 = jnp.zeros((ix, il, 2))
     denvvs = jnp.zeros((ix, il, 3))
 
+    u0 = parameters.surface_flux.fwind0*ua[:, :, kx-1]
+    v0 = parameters.surface_flux.fwind0*va[:, :, kx-1]
     ##########################################################
     # Land surface
     ##########################################################
 
-    lfluxland = True # so that jax can trace the function
-    if lfluxland: # leaving this here in case we want to implement a better workaround later
-
-        # 1. Extrapolation of wind, temp, hum. and density to the surface
-
+    def land_fluxes(operand):
+        u0,v0,ustr,vstr,shf,evap,slru,hfluxn,t1,q1,t2,qsat0,denvvs,tskin = operand
         # 1.1 Wind components
-        u0 = parameters.surface_flux.fwind0*ua[:, :, kx-1]
-        v0 = parameters.surface_flux.fwind0*va[:, :, kx-1]
-
-        gtemp0 = 1.0 - parameters.surface_flux.ftemp0
         rcp = 1.0/cp 
         nl1 = kx-1
+        gtemp0 = 1.0 - parameters.surface_flux.ftemp0
 
         # substituting the for loop at line 109
         # Temperature difference between lowest level and sfc
@@ -138,8 +138,8 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
         # 2.2 Stability Correlation
         rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
-        if parameters.surface_flux.lscasym: astab = 0.5
-        else: astab = 1.0
+
+        astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
 
         dthl = jnp.where(
             tskin > t2[:, :, 0], 
@@ -157,14 +157,21 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         # 2.4 Computing Sensible Heat Flux
         chlcp = parameters.surface_flux.chl * cp
         shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
-
+            
         # 2.5 Computing Evaporation
-        if parameters.surface_flux.fhum0 > 0.0:
-            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, 0], psa, 1.0, rh[:, :, kx-1])
-            q1 = q1.at[:, :, 0].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[:, :, kx-1])
-            qsat0 = qsat0.at[:, :, 0].set(qsat0_val)
-        else:
-            q1 = q1.at[:, :, 0].set(qa[:, :, kx-1])
+        def compute_evap_true(operand):
+            q1, qsat0, idx = operand
+            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[:, :, kx-1])
+            q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[:, :, kx-1])
+            qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
+            return q1, qsat0
+    
+        def compute_evap_false(operand):
+            q1, qsat0, idx = operand
+            q1 = q1.at[:, :, idx].set(qa[:, :, kx-1])
+            return q1, qsat0
+        
+        q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 0))
 
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
@@ -183,7 +190,9 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
                     )
 
         # 3.2 Re-definition of skin temperature from energy balance
-        if parameters.surface_flux.lskineb:
+        def skin_temp(operand):
+            hfluxn, slru, evap, shf, tskin, qsat0 = operand
+            
             # Compute net heat flux including flux into ground
             clamb = parameters.surface_flux.clambda + (snowc * (parameters.surface_flux.clambsn - parameters.surface_flux.clambda))
             hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
@@ -208,6 +217,10 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
             evap = evap.at[:, :, 0].set(evap[:, :, 0] + parameters.surface_flux.chl*denvvs[:, :, 1]*qsat0[:, :, 1]*dtskin)
             slru = slru.at[:, :, 0].set(slru[:, :, 0] + dslr*dtskin)
             hfluxn = hfluxn.at[:, :, 0].set(clamb*(tskin - stl_am))
+            
+            return (hfluxn, slru, evap, shf, tskin, qsat0)
+        
+        hfluxn, slru, evap, shf, tskin, qsat0 = jax.lax.cond(parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, slru, evap, shf, tskin, qsat0))
 
         dths = jnp.where(
             tsea > t2[:, :, 1],
@@ -217,12 +230,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         
         denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
 
-        if parameters.surface_flux.fhum0 > 0.0:
-            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, 1], psa, 1.0, rh[:, :, kx-1])
-            q1 = q1.at[:, :, 1].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[:, :, kx-1])
-            qsat0 = qsat0.at[:, :, 1].set(qsat0_val)
-        else:
-            q1 = q1.at[:, :, 1].set(qa[:, :, kx-1])
+        q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
 
         # 4.2 Wind Stress
         ks = 2
@@ -231,6 +239,10 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         ustr = ustr.at[:, :, 1].set(-cdsdv * ua[:, :, kx-1])
         vstr = vstr.at[:, :, 1].set(-cdsdv * va[:, :, kx-1])
 
+        return (u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin)
+    
+    tskin = jnp.zeros_like(stl_am)
+    u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin = jax.lax.cond(lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin))
     ##########################################################
     # Sea Surface
     ##########################################################
@@ -249,8 +261,11 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
-    if lfluxland:
-        weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
+    weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
+
+    def weight_avg_landfluxes(operand):
+        
+        ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin = operand
         ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
         vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
         shf = shf.at[:, :, 2].set(weighted_average(shf))
@@ -261,7 +276,13 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
+
+        return (ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin)
     
+    t0 = jnp.zeros_like(t1[:,:,0])
+    tsfc = jnp.zeros_like(stl_am)
+    ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin = jax.lax.cond(lfluxland, weight_avg_landfluxes, pass_fn, operand=(ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin))
+
     surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, slru=slru, hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
 
