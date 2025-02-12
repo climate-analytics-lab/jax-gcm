@@ -110,6 +110,8 @@ class SpeedyModel:
         from datetime import datetime
         from jcm.boundaries import initialize_boundaries, default_boundaries
 
+        parameters = parameters or Parameters.default()
+
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         dt_si = time_step * units.minute
@@ -167,9 +169,9 @@ class SpeedyModel:
         if boundary_file is None:
             boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
         else:       
-            boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters)
+            boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters, dt_si)
             #overwrite orography if we read in something specific
-            new_orog = self.primitive.coords.horizontal.to_nodal(boundaries.phis0)
+            new_orog = self.primitive.coords.horizontal.to_modal(boundaries.phis0)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
                 self.ref_temps,
                 new_orog,

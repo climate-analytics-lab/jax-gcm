@@ -1,4 +1,4 @@
-
+from dinosaur import units
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
@@ -10,12 +10,13 @@ import jax
 # snow_filename = 'snow.nc'
 # soil_filename = 'soil.nc'
 
-def land_model_init(surface_filename, parameters: Parameters, boundaries):
+def land_model_init(surface_filename, parameters: Parameters, boundaries, time_step):
     import xarray as xr
-    from jcm.params import delt
     # =========================================================================
     # Initialize land-surface boundary conditions
     # =========================================================================
+
+    delt = time_step.to(units.second).m
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
