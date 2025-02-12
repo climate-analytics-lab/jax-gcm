@@ -59,7 +59,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
-        self.assertFalse(df_dparams.isnan())
+        self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
 
