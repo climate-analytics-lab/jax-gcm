@@ -3,6 +3,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
 import dinosaur
+from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
@@ -62,7 +63,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
         
         date = DateData.set_date(
             model_time = reference_date + Timedelta(
-                seconds=dynamics.physics_specs.dimensionalize(state.sim_time, units.second).m
+                seconds=state.sim_time
             )
         )
 
@@ -107,14 +108,12 @@ class SpeedyModel:
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
-
-        # Define the coordinate system
-        self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=dinosaur.spherical_harmonic.Grid.T42(),
-            vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
-        # Not sure why we need this...
-        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
+        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
+
+        self.coords = dinosaur.coordinate_systems.CoordinateSystem(
+            horizontal=dinosaur.spherical_harmonic.Grid.T42(radius=self.physics_specs.radius),
+            vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
 
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
@@ -177,7 +176,7 @@ class SpeedyModel:
 
         date = DateData.set_date(
             model_time = self.start_date + Timedelta(
-                seconds=self.physics_specs.dimensionalize(state.sim_time, units.second).m
+                seconds=state.sim_time
                 )
         )
 
@@ -238,9 +237,9 @@ class SpeedyModel:
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
-        u_nodal = self.physics_specs.dimensionalize(jnp.asarray(u_nodal), units.meter / units.second).m
-        v_nodal = self.physics_specs.dimensionalize(jnp.asarray(v_nodal), units.meter / units.second).m
-        diagnostic_state_preds.temperature_variation = (288 * units.kelvin + self.physics_specs.dimensionalize(diagnostic_state_preds.temperature_variation, units.kelvin)).m
+        # u_nodal = jnp.asarray(u_nodal)
+        # v_nodal = jnp.asarray(v_nodal)
+        diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
 
         # prepare physics predictions for xarray conversion:

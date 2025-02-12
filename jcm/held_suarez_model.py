@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from jcm.physics import get_physical_tendencies
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
+from dinosaur import scales
 from jcm.held_suarez import HeldSuarezForcing
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
@@ -37,14 +38,13 @@ class HeldSuarezModel:
         save_every = save_interval * units.day
         total_time = total_time * units.day
 
+        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
+
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=dinosaur.spherical_harmonic.Grid.T42(),
+            horizontal=dinosaur.spherical_harmonic.Grid.T42(radius=self.physics_specs.radius),
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
-        # Not sure why we need this...
-        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
-
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
