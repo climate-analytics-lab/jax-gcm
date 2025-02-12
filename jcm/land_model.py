@@ -1,4 +1,4 @@
-from dinosaur import units
+from dinosaur.scales import units
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
