@@ -170,11 +170,13 @@ class SpeedyModel:
             boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
         else:       
             boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters, dt_si)
-            #overwrite orography if we read in something specific
-            new_orog = self.primitive.coords.horizontal.to_modal(boundaries.phis0)
+            new_orog_nodal = self.physics_specs.nondimensionalize(
+                boundaries.phis0 * units.meter ** 2 / units.second ** 2
+            )
+            new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
                 self.ref_temps,
-                new_orog,
+                new_orog_modal,
                 self.coords,
                 self.physics_specs)
         
