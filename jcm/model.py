@@ -110,7 +110,7 @@ class SpeedyModel:
         from datetime import datetime
         from jcm.boundaries import initialize_boundaries, default_boundaries
 
-        parameters = parameters or Parameters.default()
+        self.parameters = parameters or Parameters.default()
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -167,11 +167,11 @@ class SpeedyModel:
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
-            boundaries = default_boundaries(self.primitive, 31, orography, parameters) 
+            self.boundaries = default_boundaries(self.primitive, 31, orography, self.parameters) 
         else:       
-            boundaries = initialize_boundaries(boundary_file, self.primitive, 31, parameters, dt_si)
+            self.boundaries = initialize_boundaries(boundary_file, self.primitive, 31, self.parameters, dt_si)
             new_orog_nodal = self.physics_specs.nondimensionalize(
-                boundaries.phis0 * units.meter ** 2 / units.second ** 2
+                self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
             )
             new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
@@ -183,7 +183,7 @@ class SpeedyModel:
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
                                                         self.physics_terms, self.start_date, 
-                                                        boundaries, parameters)
+                                                        self.boundaries, self.parameters)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
@@ -238,7 +238,7 @@ class SpeedyModel:
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
-            _, data = term(physics_state, data, Parameters.default(), BoundaryData.zeros((96,48)))
+            _, data = term(physics_state, data, self.parameters, self.boundaries)
         
         # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
