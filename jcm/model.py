@@ -237,8 +237,6 @@ class SpeedyModel:
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
-        # u_nodal = jnp.asarray(u_nodal)
-        # v_nodal = jnp.asarray(v_nodal)
         diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
 
