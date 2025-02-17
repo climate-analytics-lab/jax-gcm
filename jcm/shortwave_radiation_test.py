@@ -316,11 +316,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data) 
-        tends = PhysicsTendency.ones(xyz)
+        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data) 
         datas = PhysicsData.ones(xy,kx) 
-        input = (tends, datas)
-        df_dstates, df_ddatas = f_vjp(input)
+        df_dstates, df_ddatas = f_vjp(datas)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
