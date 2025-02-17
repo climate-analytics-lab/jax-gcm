@@ -56,11 +56,9 @@ class SWRadiationData:
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
-    increase_co2: jnp.bool # CO2 increase flag
-    co2_year_ref: jnp.int32 # Reference year for CO2 increase
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
+    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.zeros((nodal_shape)),
             fsol = fsol if fsol is not None else jnp.zeros((nodal_shape)),
@@ -75,13 +73,11 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.zeros((nodal_shape)),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros((nodal_shape)),
             ftop = ftop if ftop is not None else jnp.zeros((nodal_shape)),
-            dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,))),
-            increase_co2 = increase_co2 if increase_co2 is not None else False,
-            co2_year_ref = co2_year_ref if co2_year_ref is not None else 1950
+            dfabs = dfabs if dfabs is not None else jnp.zeros((nodal_shape + (node_levels,)))
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.ones((nodal_shape)),
             fsol = fsol if fsol is not None else jnp.ones((nodal_shape)),
@@ -96,12 +92,10 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.ones((nodal_shape)),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones((nodal_shape)),
             ftop = ftop if ftop is not None else jnp.ones((nodal_shape)),
-            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,))),
-            increase_co2 = increase_co2 if increase_co2 is not None else False,
-            co2_year_ref = co2_year_ref if co2_year_ref is not None else 1950
+            dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,)))
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, increase_co2=None, co2_year_ref=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -116,14 +110,10 @@ class SWRadiationData:
             cloudc=cloudc if cloudc is not None else self.cloudc,
             cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
             ftop=ftop if ftop is not None else self.ftop,
-            dfabs=dfabs if dfabs is not None else self.dfabs,
-            increase_co2=increase_co2 if increase_co2 is not None else self.increase_co2,
-            co2_year_ref=co2_year_ref if co2_year_ref is not None else self.co2_year_ref
+            dfabs=dfabs if dfabs is not None else self.dfabs
         )
     
     def isnan(self):
-        self.increase_co2 = 0
-        self.co2_year_ref = 0
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -381,54 +371,6 @@ class LandModelData:
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
-@tree_math.struct
-class SeaModelData:
-    tsea: jnp.ndarray # SST, should come from sea_model.py
-    
-    @classmethod
-    def zeros(self, nodal_shape, tsea=None):
-        return SeaModelData(
-            tsea = tsea if tsea is not None else jnp.zeros((nodal_shape))
-        )
-    
-    @classmethod
-    def ones(self, nodal_shape, tsea=None):
-        return SeaModelData(
-            tsea = tsea if tsea is not None else jnp.ones((nodal_shape))
-        )
-
-    def copy(self, tsea=None):
-        return SeaModelData(
-            tsea=tsea if tsea is not None else self.tsea, 
-        )
-
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
-    
-@tree_math.struct
-class IceModelData:
-    sice_am: jnp.ndarray # SST, should come from sea_model.py
-    
-    @classmethod
-    def zeros(self, nodal_shape, sice_am=None):
-        return IceModelData(
-            sice_am = sice_am if sice_am is not None else jnp.zeros((nodal_shape+(365,)))
-        )
-    
-    @classmethod
-    def ones(self, nodal_shape, sice_am=None):
-        return IceModelData(
-            sice_am = sice_am if sice_am is not None else jnp.ones((nodal_shape+(365,)))
-        )
-
-    def copy(self, sice_am=None):
-        return IceModelData(
-            sice_am=sice_am if sice_am is not None else self.sice_am, 
-        )
-
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
-
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
 class PhysicsData:
@@ -440,12 +382,10 @@ class PhysicsData:
     condensation: CondensationData
     surface_flux: SurfaceFluxData
     date: DateData
-    sea_model: SeaModelData
     land_model: LandModelData
-    ice_model: IceModelData
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
+    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
@@ -455,13 +395,11 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.zeros(),
-            sea_model = sea_model if sea_model is not None else SeaModelData.zeros(nodal_shape),
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
-            ice_model = ice_model if ice_model is not None else IceModelData.zeros(nodal_shape)
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return PhysicsData(        
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
@@ -471,12 +409,9 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
             date = date if date is not None else DateData.ones(),
-            sea_model = sea_model if sea_model is not None else SeaModelData.ones(nodal_shape),
-            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
-            ice_model = ice_model if ice_model is not None else IceModelData.ones(nodal_shape)
-        )
+            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, sea_model=None, land_model=None, ice_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -486,9 +421,7 @@ class PhysicsData:
             condensation=condensation if condensation is not None else self.condensation,
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             date=date if date is not None else self.date,
-            sea_model=sea_model if sea_model is not None else self.sea_model,
-            land_model=land_model if land_model is not None else self.land_model,
-            ice_model=ice_model if ice_model is not None else self.ice_model
+            land_model=land_model if land_model is not None else self.land_model
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
@@ -504,9 +437,7 @@ class PhysicsData:
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
             date=0, 
-            sea_model=self.sea_model.isnan(),
-            land_model=self.land_model.isnan(),
-            ice_model=self.ice_model.isnan()
+            land_model=self.land_model.isnan()
         )
     
     def any_true(self):

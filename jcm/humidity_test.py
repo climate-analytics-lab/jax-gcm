@@ -11,8 +11,8 @@ class TestHumidityUnit(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg, PhysicsTendency, \
-        SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, SeaModelData, parameters, BoundaryData
-        from jcm.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, SeaModelData
+        SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData
+        from jcm.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
         from jcm.geometry import fsg
@@ -41,7 +41,7 @@ class TestHumidityUnit(unittest.TestCase):
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        boundaries = BoundaryData.ones(xy,lfluxland=True)
+        boundaries = BoundaryData.ones(xy,tsea=tsea, fmask=fmask,phi0=phi0,lfluxland=True)
             
         state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
@@ -49,8 +49,7 @@ class TestHumidityUnit(unittest.TestCase):
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
-        sea_data = SeaModelData.zeros(xy,tsea=tsea)
-        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad, sea_model=sea_data)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
 
         _, f_vjp = jax.vjp(spec_hum_to_rel_hum, state, physics_data, parameters, boundaries) 
         

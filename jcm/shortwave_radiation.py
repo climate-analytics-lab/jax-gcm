@@ -271,9 +271,8 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
 
     swrad_out = physics_data.shortwave_rad.copy(fsol=fsol, ozupp=ozupp, ozone=ozone, zenit=zenit, stratz=stratz)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
     
-    return physics_tendencies, physics_data
+    return physics_data
 
 @jit
 def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):

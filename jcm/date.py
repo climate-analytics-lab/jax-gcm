@@ -181,7 +181,10 @@ class DateData:
         return DateData(
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
           model_year=model_year if model_year is not None else 1950)
- 
+
+    def model_day(self):
+        return jnp.round(self.tyear*days_year).astype(jnp.int32)
+
     def copy(self, tyear=None, model_year=None):
         return DateData(
           tyear=tyear if tyear is not None else self.tyear,

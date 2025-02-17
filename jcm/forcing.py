@@ -7,23 +7,20 @@ import jax.numpy as jnp
 del_co2   = 0.005
 
 def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
-
-    from jcm.date import days_year
     from jcm.shortwave_radiation import get_zonal_average_fields
     from jcm.physics import PhysicsTendency
     from jcm.physical_constants import rgas
 
     # 2. daily-mean radiative forcing
-    # incoming solar radiation
+    physics_data = get_zonal_average_fields(state, physics_data)
     tyear = physics_data.date.tyear
-    get_zonal_average_fields(state, physics_data)
-    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
+    day = physics_data.date.model_day()
+    model_year = physics_data.date.model_year
 
     # total surface albedo
     snowd_am = boundaries.snowd_am[:,:,day]
     fmask_l = boundaries.fmask_l
-    snowc = physics_data.mod_radcon.snowc
-    sice_am = physics_data.ice_model.sice_am[:,:,day]
+    sice_am = boundaries.sice_am[:,:,day]
 
     alb0 = boundaries.alb0
 
@@ -32,14 +29,16 @@ def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Para
     alb_s = parameters.mod_radcon.albsea + sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
     albsfc = alb_s + fmask_l * (alb_l - alb_s)
 
-    increase_co2 = physics_data.shortwave_rad.increase_co2
-    iyear_ref = physics_data.shortwave_rad.co2_year_ref
-    model_year = physics_data.date.model_year
+    increase_co2 = parameters.forcing.increase_co2
+    iyear_ref = parameters.forcing.co2_year_ref
+
     if increase_co2:
         ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_year + tyear - iyear_ref))
-        mod_radcon = physics_data.mod_radcon.copy(ablco2=ablco2,albsfc=albsfc, alb_l=alb_l, alb_s=alb_s)
-        physics_data = physics_data.copy(mod_radcon=mod_radcon)
-    # update alb_l, alb_s, alsfc, etc
+        mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, ablco2=ablco2,albsfc=albsfc, alb_l=alb_l, alb_s=alb_s)
+    else: 
+        mod_radcon = physics_data.modrad_con.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc)
+
+    physics_data = physics_data.copy(mod_radcon=mod_radcon)
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendencies, physics_data

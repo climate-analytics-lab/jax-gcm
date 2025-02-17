@@ -4,19 +4,20 @@ from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
-import jax
 
-# land_filename = 'land.nc'
-# snow_filename = 'snow.nc'
-# soil_filename = 'soil.nc'
-
-def land_model_init(surface_filename, parameters: Parameters, boundaries, time_step):
+def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData, time_step):
+    '''
+        surface_filename: filename storing boundary data
+        parameters: initialized model parameters
+        boundaries: partially initialized boundary data
+        time_step: time step - model timestep in minutes
+    '''
     import xarray as xr
     # =========================================================================
     # Initialize land-surface boundary conditions
     # =========================================================================
 
-    delt = time_step.to(units.second).m
+    delt = time_step.to(units.second).s
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
@@ -84,14 +85,13 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries, time_s
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=jnp.newaxis):
-    from jcm.date import days_year
 
-    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
+    day = physics_data.date.model_day()
     stl_lm=None
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):
         # stl_lm need to persist from time step to time step? what does this get from the model?
-        stl_lm = run_land_model(physics_data.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
+        stl_lm = run_land_model(physics_data.surface_flux.hfluxn, physics_data.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
         stl_am = stl_lm
     # Otherwise get the land surface from climatology
     else:
@@ -105,9 +105,7 @@ def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: 
     return physics_tendency, physics_data
 
 #Integrates slab land-surface model for one day.
-def run_land_model(stl_lm, stlcl_ob, cdland, rhcapl):
-    from jcm.auxiliaries import hfluxn
-
+def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
     # Land-surface (soil/ice-sheet) layer
     # Anomaly w.r.t. final-time climatological temperature
     tanom = stl_lm - stlcl_ob

@@ -49,7 +49,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
-    day = jnp.round(physics_data.date.tyear*days_year).astype(jnp.int32)
+    day = physics_data.date.model_day()
     stl_am = physics_data.land_model.stl_am
     soilw_am = boundaries.soilw_am[:,:,day]
     ix, il, kx = state.temperature.shape
@@ -68,7 +68,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
-    tsea = physics_data.sea_model.tsea
+    tsea = boundaries.tsea
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
@@ -99,7 +99,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     ##########################################################
 
     def land_fluxes(operand):
-        u0,v0,ustr,vstr,shf,evap,slru,hfluxn,t1,q1,t2,qsat0,denvvs,tskin = operand
+        u0,v0,ustr,vstr,shf,evap,slru,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
         # 1.1 Wind components
         rcp = 1.0/cp 
         nl1 = kx-1
@@ -239,10 +239,10 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         ustr = ustr.at[:, :, 1].set(-cdsdv * ua[:, :, kx-1])
         vstr = vstr.at[:, :, 1].set(-cdsdv * va[:, :, kx-1])
 
-        return (u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin)
+        return (u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
     
     tskin = jnp.zeros_like(stl_am)
-    u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin = jax.lax.cond(lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, tskin))
+    u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin = jax.lax.cond(lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin))
     ##########################################################
     # Sea Surface
     ##########################################################

@@ -49,17 +49,8 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
         physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
-def fixed_ssts(ix):
-    """
-    Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
-    Obtained from Neale, R.B. and Hoskins, B.J. (2000), "A standard test for AGCMs including their physical parametrizations: I: the proposal." Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
-    """
-    from jcm.geometry import radang
-    sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
-
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
-    from jcm.physics_data import PhysicsData, SeaModelData
+    from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
 
@@ -71,16 +62,10 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             )
         )
 
-        sea_model = SeaModelData.zeros(
-            dynamics.coords.nodal_shape[1:],
-            tsea = fixed_ssts(dynamics.coords.nodal_shape[1])
-        )
-
         data = PhysicsData.zeros(
             dynamics.coords.nodal_shape[1:],
             dynamics.coords.nodal_shape[0],
-            date=date,
-            sea_model=sea_model
+            date=date
         )
 
         return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, boundaries=boundaries, parameters=parameters, data=data)
@@ -167,9 +152,9 @@ class SpeedyModel:
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
-            self.boundaries = default_boundaries(self.primitive, 31, orography, self.parameters) 
+            self.boundaries = default_boundaries(self.primitive, orography, self.parameters) 
         else:       
-            self.boundaries = initialize_boundaries(boundary_file, self.primitive, 31, self.parameters, dt_si)
+            self.boundaries = initialize_boundaries(boundary_file, self.primitive, horizontal_resolution, self.parameters, dt_si)
             new_orog_nodal = self.physics_specs.nondimensionalize(
                 self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
             )
@@ -210,9 +195,8 @@ class SpeedyModel:
         return self.step_fn(state)
     
     def post_process(self, state):
-        from jcm.boundaries import BoundaryData, initialize_boundaries
         from jcm.date import DateData
-        from jcm.physics_data import PhysicsData, SeaModelData
+        from jcm.physics_data import PhysicsData
         from jcm.physics import dynamics_state_to_physics_state
 
         date = DateData.set_date(
@@ -221,17 +205,10 @@ class SpeedyModel:
                 )
         )
 
-        # TODO: factor this out into boundary conditions object
-        sea_model = SeaModelData.zeros(
-            self.coords.nodal_shape[1:],
-            tsea = fixed_ssts(self.coords.nodal_shape[1])
-        )
-
         data = PhysicsData.zeros(
             self.coords.nodal_shape[1:],
             self.coords.nodal_shape[0],
-            date=date,
-            sea_model=sea_model
+            date=date
         )
 
         # need to have the right boundaries initialized here for this to work. 

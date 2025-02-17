@@ -127,8 +127,6 @@ class TestModelUnit(unittest.TestCase):
             # what is "additional"? should it be there?
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.shortwave_rad.increase_co2 = jnp.array([])
-            physics_data.shortwave_rad.co2_year_ref = jnp.array([])
             physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
             physics_data.date.model_year = jnp.array([])
@@ -177,8 +175,6 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.shortwave_rad.increase_co2 = jnp.array([])
-            physics_data.shortwave_rad.co2_year_ref = jnp.array([])
             physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
             physics_data.date.model_year = jnp.array([])

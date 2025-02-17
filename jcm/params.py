@@ -30,6 +30,23 @@ class ConvectionParameters:
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
+class ForcingParameters:
+    increase_co2: jnp.bool # Minimum (normalised) surface pressure for the occurrence of convection
+    co2_year_ref: jnp.int32 # Time of relaxation (in hours) towards reference state
+
+    @classmethod
+    def default(self):
+        return ForcingParameters(
+            increase_co2 = True,
+            co2_year_ref = 1950,
+        )
+
+    def isnan(self):
+        self.increase_co2 = 0
+        self.co2_year_ref = 0
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
 class CondensationParameters:
     trlsc: jnp.ndarray   # Relaxation time (in hours) for specific humidity
     rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
@@ -257,6 +274,7 @@ class Parameters:
     surface_flux: SurfaceFluxParameters
     vertical_diffusion: VerticalDiffusionParameters
     land_model: LandModelParameters
+    forcing: ForcingParameters
 
     @classmethod
     def default(self):
@@ -268,6 +286,7 @@ class Parameters:
             surface_flux = SurfaceFluxParameters.default(),
             vertical_diffusion = VerticalDiffusionParameters.default(),
             land_model = LandModelParameters.default(),
+            forcing = ForcingParameters.default()
         )
     
     def isnan(self):
@@ -279,6 +298,7 @@ class Parameters:
             surface_flux = self.surface_flux.isnan(),
             vertical_diffusion = self.vertical_diffusion.isnan(),
             land_model = self.land_model.isnan(),
+            forcing = self.forcing.isnan()
         )
     
     def any_true(self):
