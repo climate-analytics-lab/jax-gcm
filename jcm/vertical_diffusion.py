@@ -1,19 +1,14 @@
 import jax.numpy as jnp
 from jax import jit
+from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from jcm.physical_constants import cp, alhc, sigh
 from jcm.geometry import fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
-trshc = jnp.array(6.0)  # Relaxation time (in hours) for shallow convection
-trvdi = jnp.array(24.0)  # Relaxation time (in hours) for moisture diffusion
-trvds = jnp.array(6.0)  # Relaxation time (in hours) for super-adiabatic conditions
-redshc = jnp.array(0.5)  # Reduction factor of shallow convection in areas of deep convection
-rhgrad = jnp.array(0.5)  # Maximum gradient of relative humidity (d_RH/d_sigma)
-segrad = jnp.array(0.1)  # Minimum gradient of dry static energy (d_DSE/d_phi)
-
 @jit
-def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
+def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
     
     '''
     Inputs:
@@ -45,18 +40,18 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     cshc = dhs[kx - 1] / 3600.0
     cvdi = (sigh[nl1-1] - sigh[1]) / ((nl1 - 1) * 3600.0)
     
-    fshcq = cshc / trshc
-    fshcse = cshc / (trshc * cp)
+    fshcq = cshc / parameters.vertical_diffusion.trshc
+    fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
     
-    fvdiq = cvdi / trvdi
-    fvdise = cvdi / (trvds * cp)
+    fvdiq = cvdi / parameters.vertical_diffusion.trvdi
+    fvdise = cvdi / (parameters.vertical_diffusion.trvds * cp)
 
     rsig = 1.0 / dhs
     rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - sigh[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
-    drh0 = rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
+    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
     fvdiq2 = fvdiq * sigh[nl1]
 
     # Calculate dmse and drh arrays
@@ -67,7 +62,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     fcnv = jnp.ones((ix, il))
 
     # Apply condition where icnv > 0 and set fcnv to redshc
-    fcnv = jnp.where(jnp.logical_and(icnv > 0, dmse >= 0), redshc, fcnv)
+    fcnv = jnp.where(jnp.logical_and(icnv > 0, dmse >= 0), parameters.vertical_diffusion.redshc, fcnv)
 
     # Calculate fluxse where dmse >= 0.0
     fluxse = jnp.where(dmse >= 0.0, fcnv * fshcse * dmse, 0)
@@ -100,7 +95,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     condition = sigh[k_range + 1] > 0.5
 
     # Vectorized calculation of drh0 and fvdiq2 for all selected k values
-    drh0 = rhgrad * (fsg[k_range + 1] - fsg[k_range])  # Shape: (len(k_range),)
+    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[k_range + 1] - fsg[k_range])  # Shape: (len(k_range),)
     fvdiq2 = fvdiq * sigh[k_range + 1]  # Shape: (len(k_range),)
 
     # Calculate drh for all selected k values across the entire ix and il dimensions
@@ -114,7 +109,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData):
     qtenvd = qtenvd.at[:, :, k_range + 1].add(-fluxq * rsig[k_range + 1][jnp.newaxis, jnp.newaxis, :])
 
     # Step 4: Damping of super-adiabatic lapse rate
-    se0 = se[:, :, 1:nl1+1] + segrad * (phi[:, :, :nl1] - phi[:, :, 1:nl1+1])
+    se0 = se[:, :, 1:nl1+1] + parameters.vertical_diffusion.segrad * (phi[:, :, :nl1] - phi[:, :, 1:nl1+1])
 
     condition = se[:, :, :nl1] < se0
     

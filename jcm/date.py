@@ -12,6 +12,8 @@ import jax
 from typing import Any, Callable, Generic, TypeVar
 import numpy as np
 
+days_year = 365.25
+
 # Generic types.
 #
 Dtype = jax.typing.DTypeLike | Any
@@ -160,24 +162,33 @@ class Timestamp:
 @tree_math.struct
 class DateData:
     tyear: jnp.float32 # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    model_year: jnp.int32
 
     @classmethod
-    def zeros(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0)
+    def zeros(self, model_time=None, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
+          model_year=model_year if model_year is not None else 1950)
     
     @classmethod
-    def set_date(self, model_time):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time))
+    def set_date(self, model_time, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time),
+          model_year=model_year if model_year is not None else 1950)
     
     @classmethod
-    def ones(self, model_time=None):        
-        return DateData(tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0)
- 
-    def copy(self, tyear=None):
-        return DateData(tyear if tyear is not None else self.tyear)
-    
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
+    def ones(self, model_time=None, model_year=None):        
+        return DateData(
+          tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
+          model_year=model_year if model_year is not None else 1950)
+
+    def model_day(self):
+        return jnp.round(self.tyear*days_year).astype(jnp.int32)
+
+    def copy(self, tyear=None, model_year=None):
+        return DateData(
+          tyear=tyear if tyear is not None else self.tyear,
+          model_year=model_year if model_year is not None else self.model_year)
 
 
 def fraction_of_year_elapsed(dt):
@@ -193,13 +204,13 @@ def fraction_of_year_elapsed(dt):
 
     # Get the year without using the `to_datetime64` method to avoid the need for a JAX transformation
     # Convert the number of days since 1970 into a year, accounting for leap years
-    year = 1970 + dt.delta.days // 365.25
+    year = 1970 + dt.delta.days // days_year
 
     # Calculate the number of days elapsed in the year without using numpy
-    days_elapsed = dt.delta.days - (year - 1970) * 365.25
+    days_elapsed = dt.delta.days - (year - 1970) * days_year
     
     # Add the seconds to the days elapsed
     days_elapsed += dt.delta.seconds / (24 * 60 * 60)
 
     # Calculate the fraction of the year elapsed
-    return jnp.float32(days_elapsed / 365.25)
+    return jnp.float32(days_elapsed / days_year)

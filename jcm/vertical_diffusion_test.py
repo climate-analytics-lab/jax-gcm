@@ -10,8 +10,12 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend
+        global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
+            parameters, BoundaryData
         from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
+        from jcm.params import Parameters
+        parameters = Parameters.default()
+        from jcm.boundaries import BoundaryData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.vertical_diffusion import get_vertical_diffusion_tend
 
@@ -24,13 +28,15 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         iptop = jnp.ones((ix,il), dtype=int)*1
         
         xyz = (ix, il, kx)
+        xy = (ix, il)
         humidity_data = HumidityData.zeros((ix,il), kx, rh=rh, qsat=qsat)
         convection_data = ConvectionData.zeros((ix,il), kx, iptop=iptop, se=se)
         physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
         state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=phi)
+        boundaries = BoundaryData.ones(xy)
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
-        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data)
+        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, boundaries)
 
         utenvd, vtenvd, ttenvd, qtenvd = physics_tendencies.u_wind, physics_tendencies.v_wind, physics_tendencies.temperature, physics_tendencies.specific_humidity
 
@@ -46,13 +52,16 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(xyz)
+        boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data) 
+        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(xyz)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstate, df_ddatas = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan().any_true())

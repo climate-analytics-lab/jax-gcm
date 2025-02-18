@@ -11,10 +11,12 @@ from typing import Callable
 from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
+from jcm.params import Parameters
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations, PrimitiveEquationsSpecs
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations
 from jax import tree_util
+from jcm.boundaries import BoundaryData
 
 @tree_math.struct
 class PhysicsState:
@@ -197,6 +199,8 @@ def get_physical_tendencies(
     dynamics: PrimitiveEquations,
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
+    boundaries: BoundaryData,
+    parameters: Parameters,
     data: PhysicsData = None
 ):
     """
@@ -217,7 +221,7 @@ def get_physical_tendencies(
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:
-        tend, data = term(physics_state, data)
+        tend, data = term(physics_state, data, parameters, boundaries)
         physics_tendency += tend
 
     # the actual timestep size seems to be 1/3 of time_step

@@ -1,15 +1,17 @@
 import jax.numpy as jnp
 from jax import jit
 from jax import vmap
+from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.geometry import sia, coa, fsg, dhs
-from jcm.mod_radcon import epslw
 from jax import lax
+import jax
 
 @jit
-def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
+def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
     ''''
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -32,26 +34,6 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     # mod_radcon inputs
     albsfc = physics_data.mod_radcon.albsfc
 
-    # Shortwave radiation and cloud constants
-    albcl   = 0.43  # Cloud albedo (for cloud cover = 1)
-    albcls  = 0.50  # Stratiform cloud albedo (for st. cloud cover = 1)
-    
-    # Shortwave absorptivities (for dp = 10^5 Pa)
-    absdry =  0.033 # Absorptivity of dry air (visible band)
-    absaer =  0.033 # Absorptivity of aerosols (visible band)
-    abswv1 =  0.022 # Absorptivity of water vapour
-    abswv2 = 15.000 # Absorptivity of water vapour
-    abscl1 =  0.015 # Absorptivity of clouds (visible band, maximum value)
-    abscl2 =  0.15  # Absorptivity of clouds
-
-    # Longwave absorptivities (for dp = 10^5 Pa)
-    ablwin = 0.3   # Absorptivity of air in "window" band
-    ablco2 = 6.0   # Absorptivity of air in CO2 band
-    ablwv1 = 0.7   # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
-    ablwv2 = 50.0  # Absorptivity of water vapour in H2O band 2 (strong) (for dq = 1 g/kg)
-    ablcl1 = 12.0  # Absorptivity of "thick" clouds in window band (below cloud top)
-    ablcl2 = 0.6   # Absorptivity of "thin" upper clouds in window and H2O bands
-
     nl1 = kx - 1
 
     fband2 = 0.05
@@ -62,33 +44,33 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     mask = icltop < kx  
     clamped_icltop = jnp.clip(icltop, 0, tau2.shape[2] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
     tau2 = tau2.at[:, :, clamped_icltop, 2].set(
-        jnp.where(mask, albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
+        jnp.where(mask, parameters.shortwave_radiation.albcl * cloudc, tau2[:, :, clamped_icltop, 2])   # Start with tau2 and update the values where the mask is true
     )
     
-    tau2 = tau2.at[:, :, kx - 1, 2].set(albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
+    tau2 = tau2.at[:, :, kx - 1, 2].set(parameters.shortwave_radiation.albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
 
     # 2. Shortwave transmissivity:
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
     psaz = psa*physics_data.shortwave_rad.zenit
-    acloud = cloudc*jnp.minimum(abscl1*physics_data.shortwave_rad.qcloud, abscl2)
-    tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*absdry))
+    acloud = cloudc*jnp.minimum(parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud, parameters.shortwave_radiation.abscl2)
+    tau2 = tau2.at[:,:,0,0].set(jnp.exp(-psaz*dhs[0]*parameters.shortwave_radiation.absdry))
 
-    abs1 = absdry + absaer * fsg[1:nl1] ** 2
+    abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
     cloudy = jnp.arange(1, nl1)[jnp.newaxis, jnp.newaxis, :] >= icltop[:, :, jnp.newaxis]
     
     tau2 = tau2.at[:, :, 1:nl1, 0].set(
         jnp.exp(-psaz[:, :, jnp.newaxis] * dhs[jnp.newaxis, jnp.newaxis, 1:nl1] * (
             abs1[jnp.newaxis, jnp.newaxis, :] +
-            abswv1 * qa[:, :, 1:nl1] +
+            parameters.shortwave_radiation.abswv1 * qa[:, :, 1:nl1] +
             cloudy * acloud[:, :, jnp.newaxis]
         ))
     )
 
-    abs1 = absdry + absaer*fsg[kx - 1]**2
-    tau2 = tau2.at[:,:,kx-1,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + abswv1*qa[:,:,kx - 1])))
+    abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer*fsg[kx - 1]**2
+    tau2 = tau2.at[:,:,kx-1,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[:,:,kx - 1])))
 
-    tau2 = tau2.at[:,:,1:kx,1].set(jnp.exp(-psaz[:, :, jnp.newaxis]*dhs[jnp.newaxis, jnp.newaxis, 1:kx]*abswv2*qa[:,:,1:kx]))
+    tau2 = tau2.at[:,:,1:kx,1].set(jnp.exp(-psaz[:, :, jnp.newaxis]*dhs[jnp.newaxis, jnp.newaxis, 1:kx]*parameters.shortwave_radiation.abswv2*qa[:,:,1:kx]))
 
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
@@ -176,13 +158,14 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     # 5. Initialization of longwave radiation model
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
+    ablco2 = physics_data.mod_radcon.ablco2
 
     # Base absorptivities
     absorptivity = jnp.stack([
-        ablwin * jnp.ones_like(qa),
+        parameters.shortwave_radiation.ablwin * jnp.ones_like(qa),
         ablco2 * jnp.ones_like(qa),
-        ablwv1 * qa,
-        ablwv2 * qa
+        parameters.shortwave_radiation.ablwv1 * qa,
+        parameters.shortwave_radiation.ablwv2 * qa
     ], axis=-1)
 
     # Upper stratosphere (k = 0): no water vapor
@@ -192,7 +175,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     #   Leave absorptivity unchanged
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
-    acloud1, acloud2 = (cloudc[:, :, jnp.newaxis, jnp.newaxis]*a for a in (ablcl1, ablcl2))
+    acloud1, acloud2 = (cloudc[:, :, jnp.newaxis, jnp.newaxis]*a for a in (parameters.shortwave_radiation.ablcl1, parameters.shortwave_radiation.ablcl2))
 
     absorptivity = absorptivity.at[:, :, 2:kx-1, 0].add(jnp.where(jnp.arange(2, kx-1)[jnp.newaxis, jnp.newaxis, :] > icltop[:, :, jnp.newaxis], acloud1.reshape(ix, il, 1), acloud2.reshape(ix, il, 1)))
     absorptivity = absorptivity.at[:, :, 2:kx-1, 2:].set(jnp.maximum(absorptivity[:, :, 2:kx-1, 2:], jnp.tile(acloud2, (1, 1, kx-3, 2))))
@@ -201,7 +184,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData):
     tau2 = jnp.exp(-absorptivity*psa[:, :, jnp.newaxis, jnp.newaxis]*dhs[jnp.newaxis, jnp.newaxis, :, jnp.newaxis])
     
     # 5.2  Stratospheric correction terms
-    eps1 = epslw/(dhs[0] + dhs[1])
+    eps1 = parameters.mod_radcon.epslw/(dhs[0] + dhs[1])
     stratc = jnp.zeros((ix, il, 2))
     stratc = stratc.at[:,:,0].set(physics_data.shortwave_rad.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
@@ -288,12 +271,11 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
 
     swrad_out = physics_data.shortwave_rad.copy(fsol=fsol, ozupp=ozupp, ozone=ozone, zenit=zenit, stratz=stratz)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
     
-    return physics_tendencies, physics_data
+    return physics_data
 
 @jit
-def clouds(state: PhysicsState, physics_data: PhysicsData):
+def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
     '''
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -323,19 +305,10 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     kx = state.temperature.shape[2]
 
     # Constants
-    rhcl1   = 0.30  # Relative humidity threshold corresponding to cloud cover = 0
-    rhcl2   = 1.00  # Relative humidity correponding to cloud cover = 1
-    qacl    = 0.20  # Specific humidity threshold for cloud cover
-    wpcl    = 0.2   # Cloud cover weight for the square-root of precipitation (for p = 1 mm/day)
-    pmaxcl  = 10.0  # Maximum value of precipitation (mm/day) contributing to cloud cover
-    clsmax  = 0.60  # Maximum stratiform cloud cover
-    clsminl = 0.15  # Minimum stratiform cloud cover over land (for RH = 1)
-    gse_s0  = 0.25  # Gradient of dry static energy corresponding to stratiform cloud cover = 0
-    gse_s1  = 0.40  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
-
+    
     nl1  = kx-2
     nlp  = kx
-    rrcl = 1./(rhcl2-rhcl1)
+    rrcl = 1./(parameters.shortwave_radiation.rhcl2-parameters.shortwave_radiation.rhcl1)
 
     # 1.  Cloud cover, defined as the sum of:
     #     - a term proportional to the square-root of precip. rate
@@ -347,13 +320,13 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
     #       the level of maximum relative humidity.
 
     #First for loop (2 levels)
-    mask = humidity.rh[:, :, nl1] > rhcl1  # Create a mask where the condition is true
-    cloudc = jnp.where(mask, humidity.rh[:, :, nl1] - rhcl1, 0.0)  # Compute cloudc values where the mask is true
+    mask = humidity.rh[:, :, nl1] > parameters.shortwave_radiation.rhcl1  # Create a mask where the condition is true
+    cloudc = jnp.where(mask, humidity.rh[:, :, nl1] - parameters.shortwave_radiation.rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
     #Second for loop (three levels)
-    drh = humidity.rh[:, :, 2:kx-2] - rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[:, :, jnp.newaxis]) & (state.specific_humidity[:, :, 2:kx-2] > qacl)  # Create a boolean mask where the conditions are met
+    drh = humidity.rh[:, :, 2:kx-2] - parameters.shortwave_radiation.rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
+    mask = (drh > cloudc[:, :, jnp.newaxis]) & (state.specific_humidity[:, :, 2:kx-2] > parameters.shortwave_radiation.qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[:, :, jnp.newaxis])  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=2)   # Only update cloudc when the condition is met; use np.max along axis 2
 
@@ -364,8 +337,8 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
-    pr1 = jnp.minimum(pmaxcl, 86.4 * (conv.precnv + condensation.precls))
-    cloudc = jnp.minimum(1.0, wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
+    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(conv.iptop, icltop)
 
@@ -374,16 +347,16 @@ def clouds(state: PhysicsState, physics_data: PhysicsData):
 
     # 3. Stratiform clouds at the top of PBL
     clfact = 1.2
-    rgse   = 1.0/(gse_s1 - gse_s0)
+    rgse   = 1.0/(parameters.shortwave_radiation.gse_s1 - parameters.shortwave_radiation.gse_s0)
 
     #Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (gse - gse_s0), 0.0, 1.0)
+    fstab = jnp.clip(rgse * (gse - parameters.shortwave_radiation.gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
-    clstr = fstab * jnp.maximum(clsmax - clfact * cloudc, 0.0)
+    clstr = fstab * jnp.maximum(parameters.shortwave_radiation.clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
-    clstrl = jnp.maximum(clstr, clsminl) * humidity.rh[:, :, kx - 1]
-    clstr = clstr + physics_data.surface_flux.fmask * (clstrl - clstr)
+    clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[:, :, kx - 1]
+    clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

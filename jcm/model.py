@@ -8,6 +8,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
 from dinosaur import primitive_equations_states
 from jcm.date import Timestamp, Timedelta
+from jcm.params import Parameters
 
 def initialize_modules(kx=8, il=64):
     from jcm.geometry import initialize_geometry
@@ -24,37 +25,32 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds, get_zonal_average_fields
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
+    from jcm.land_model import couple_land_atm
+    from jcm.forcing import set_forcing
+
     physics_terms = [
+        set_forcing,
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
         clouds,
-        get_zonal_average_fields,
         get_shortwave_rad_fluxes,
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
         get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend
+        get_vertical_diffusion_tend,
+        couple_land_atm # eventually couple sea model and ice model here
     ]
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
     return physics_terms
 
-def fixed_ssts(ix):
-    """
-    Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
-    Obtained from Neale, R.B. and Hoskins, B.J. (2000), "A standard test for AGCMs including their physical parametrizations: I: the proposal." Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
-    """
-    from jcm.geometry import radang
-    sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
-
-def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date):
-    from jcm.physics_data import PhysicsData, SeaModelData
+def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
+    from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
 
@@ -66,19 +62,13 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             )
         )
 
-        sea_model = SeaModelData.zeros(
-            dynamics.coords.nodal_shape[1:],
-            tsea = fixed_ssts(dynamics.coords.nodal_shape[1])
-        )
-
         data = PhysicsData.zeros(
             dynamics.coords.nodal_shape[1:],
             dynamics.coords.nodal_shape[0],
-            date=date,
-            sea_model=sea_model
+            date=date
         )
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, data)
+        return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, boundaries=boundaries, parameters=parameters, data=data)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class SpeedyModel:
@@ -88,7 +78,8 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, start_date=None) -> None:
+    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
+                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -98,9 +89,13 @@ class SpeedyModel:
             total_time: Total integration time in days
             layers: Number of vertical layers
             start_date: Start date of the simulation
+            boundary_file: Path to the boundary conditions file including land-sea mask and albedo
 
         """
         from datetime import datetime
+        from jcm.boundaries import initialize_boundaries, default_boundaries
+
+        self.parameters = parameters or Parameters.default()
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -108,9 +103,19 @@ class SpeedyModel:
         save_every = save_interval * units.day
         total_time = total_time * units.day
 
+        resolution_map = {
+            31: dinosaur.spherical_harmonic.Grid.T31(),
+            42: dinosaur.spherical_harmonic.Grid.T42(),
+            85: dinosaur.spherical_harmonic.Grid.T85(),
+            213: dinosaur.spherical_harmonic.Grid.T213()
+        }
+
+        if horizontal_resolution not in resolution_map:
+            raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
+
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=dinosaur.spherical_harmonic.Grid.T42(),
+            horizontal=resolution_map[horizontal_resolution], # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
         
         # Not sure why we need this...
@@ -142,9 +147,28 @@ class SpeedyModel:
             self.coords,
             self.physics_specs)
         
+        # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        
+        # TODO: make the truncation number a parameter consistent with the grid shape
+        if boundary_file is None:
+            self.boundaries = default_boundaries(self.primitive, orography, self.parameters) 
+        else:       
+            self.boundaries = initialize_boundaries(boundary_file, self.primitive, horizontal_resolution, self.parameters, dt_si)
+            new_orog_nodal = self.physics_specs.nondimensionalize(
+                self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
+            )
+            new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
+            self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
+                self.ref_temps,
+                new_orog_modal,
+                self.coords,
+                self.physics_specs)
+        
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, self.physics_terms, reference_date=self.start_date)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
+                                                        self.physics_terms, self.start_date, 
+                                                        self.boundaries, self.parameters)
 
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
 
@@ -172,7 +196,7 @@ class SpeedyModel:
     
     def post_process(self, state):
         from jcm.date import DateData
-        from jcm.physics_data import PhysicsData, SeaModelData
+        from jcm.physics_data import PhysicsData
         from jcm.physics import dynamics_state_to_physics_state
 
         date = DateData.set_date(
@@ -181,23 +205,19 @@ class SpeedyModel:
                 )
         )
 
-        # TODO: factor this out into boundary conditions object
-        sea_model = SeaModelData.zeros(
-            self.coords.nodal_shape[1:],
-            tsea = fixed_ssts(self.coords.nodal_shape[1])
-        )
-
         data = PhysicsData.zeros(
             self.coords.nodal_shape[1:],
             self.coords.nodal_shape[0],
-            date=date,
-            sea_model=sea_model
+            date=date
         )
+
+        # need to have the right boundaries initialized here for this to work. 
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
-            _, data = term(physics_state, data)
+            _, data = term(physics_state, data, self.parameters, self.boundaries)
         
+        # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
             'dynamics': state,
             'physics': data,
