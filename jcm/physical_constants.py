@@ -26,3 +26,16 @@ sigh = None # Half-level sigma
 grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
 grdscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
 wvi = None # Weights for vertical interpolation
+
+gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
+hscale = 7.5       # Reference scale height for pressure (in km)
+hshum  = 2.5       # Reference scale height for specific humidity (in km)
+refrh1 = 0.7       # Reference relative humidity of near-surface air
+thd    = 2.4       # Max damping time (in hours) for horizontal diffusion
+                                             # (del^6) of temperature and vorticity
+thdd   = 2.4       # Max damping time (in hours) for horizontal diffusion
+                                             # (del^6) of divergence
+thds   = 12.0      # Max damping time (in hours) for extra diffusion
+                                             ## (del^2) in the stratosphere
+tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
+                                             # in the stratosphere

@@ -1,5 +1,6 @@
 import unittest
 from dinosaur import primitive_equations_states
+from jcm.params import Parameters
 
 class TestModelUnit(unittest.TestCase):
 
@@ -54,11 +55,13 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import SpeedyModel
 
         layers = 7
+        # optionally add a boundary conditions file
         model = SpeedyModel(
             time_step=720,
             save_interval=1,
             total_time=2,
-            layers=layers
+            layers=layers, 
+            parameters=Parameters.default()
         )
     
         state = model.get_initial_state()
@@ -66,8 +69,8 @@ class TestModelUnit(unittest.TestCase):
         # Specify humidity perturbation in kg/kg
         state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_x = 85
-        modal_y = 44
+        modal_x = model.coords.modal_shape[1]
+        modal_y = model.coords.modal_shape[2]
         modal_zxy = (layers, modal_x, modal_y)
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
     
@@ -121,20 +124,27 @@ class TestModelUnit(unittest.TestCase):
                                                     tracers = tracers, sim_time = sim_time)
 
         def make_ones_prediction_object(pred): 
+            # what is "additional"? should it be there?
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.surface_flux.lfluxland = jnp.array([])
+            physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
+            physics_data.date.model_year = jnp.array([])
+
+            # why is choose sim time an empty array? 
             return{'dynamics': make_ones_dinosaur_StateWithTime_object(pred['dynamics'], jnp.array([])), 
                 'physics' : physics_data}  
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=3, total_time=(1/48.0), layers=8) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(time_step=30, save_interval=3, total_time=(1/48.0), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
+        jax.debug.print("make_ones:{}", make_ones_prediction_object(primals[1]))
+        
         input = (make_ones_dinosaur_StateWithTime_object(primals[0]), make_ones_prediction_object(primals[1]))
+
         df_dstate = f_vjp(input) 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
@@ -165,13 +175,14 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             (additional, ix, il, kx) = pred['physics'].shortwave_rad.dfabs.shape
             physics_data = PhysicsData.ones((additional, ix, il), kx)
-            physics_data.surface_flux.lfluxland = jnp.array([])
+            physics_data.mod_radcon.ablco2 = jnp.array([])
             physics_data.date.tyear = jnp.array([])
+            physics_data.date.model_year = jnp.array([])
             return{'dynamics': make_ones_dinosaur_StateWithTime_object(pred['dynamics'], jnp.array([])), 
                 'physics' : physics_data}  
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=3, total_time=(10/48.0), layers=8) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(time_step=30, save_interval=3, total_time=(10/48.0), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients

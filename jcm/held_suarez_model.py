@@ -8,10 +8,18 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
 from dinosaur import scales
 from jcm.held_suarez import HeldSuarezForcing
+from jcm.boundaries import BoundaryData
+from jcm.params import Parameters
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
     def physical_tendencies(state):
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms)
+
+        parameters = Parameters.default()
+
+        # Held Suarez doesn't use these boundaries, so it doesn't matter what they are
+        boundaries = BoundaryData.zeros((1,1))
+
+        return get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class HeldSuarezModel:
