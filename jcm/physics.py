@@ -12,6 +12,7 @@ from jcm.geometry import hsg, fsg, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 from jcm.params import Parameters
+from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations
@@ -138,17 +139,15 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
         dynamics.reference_temperature,
         dynamics.orography,
         dynamics.coords.vertical,
+        dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
+        dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
     )
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
-    # note: surface pressure is nondimensionalized by assuming mean(log_sp) = 0, which means it uses a pressure scale of 1e5, different from the scales used by other quantities, so we don't dimensionalize it here
-    u = dynamics.physics_specs.dimensionalize(u, units.meter / units.second).m
-    v = dynamics.physics_specs.dimensionalize(v, units.meter / units.second).m
-    t = dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis] + dynamics.physics_specs.dimensionalize(t, units.kelvin).m
+    t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
-    phi = dynamics.physics_specs.dimensionalize(phi, units.meter ** 2 / units.second ** 2).m
 
     physics_state = PhysicsState(
         u.transpose(1, 2, 0),
@@ -172,11 +171,12 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    nondimensionalize = lambda tend, unit: dynamics.physics_specs.nondimensionalize(tend.transpose(2, 0, 1) * unit / units.second)
-    u_tend = nondimensionalize(physics_tendency.u_wind, units.meter / units.second)
-    v_tend = nondimensionalize(physics_tendency.v_wind, units.meter / units.second)
-    t_tend = nondimensionalize(physics_tendency.temperature, units.kelvin)
-    q_tend = nondimensionalize(physics_tendency.specific_humidity, units.gram / units.kilogram)
+    u_tend = physics_tendency.u_wind.transpose(2, 0, 1)
+    v_tend = physics_tendency.v_wind.transpose(2, 0, 1)
+    t_tend = physics_tendency.temperature.transpose(2, 0, 1)
+    q_tend = physics_tendency.specific_humidity.transpose(2, 0, 1)
+    
+    q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
     
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
