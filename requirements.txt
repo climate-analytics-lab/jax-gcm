@@ -1,6 +1,6 @@
 jax
 tree-math
-dinosaur-dycore  
+dinosaur  
 hydra-core
 
 # I/O requirements
