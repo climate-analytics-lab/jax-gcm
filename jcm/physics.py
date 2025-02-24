@@ -18,6 +18,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
+from jax import jit
 
 @tree_math.struct
 class PhysicsState:
@@ -50,6 +51,7 @@ class PhysicsState:
             surface_pressure if surface_pressure is not None else jnp.ones(shape[0:2])
         )
     
+    @jit
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
@@ -91,6 +93,7 @@ class PhysicsTendency:
             specific_humidity if specific_humidity is not None else jnp.ones(shape)
         )
     
+    @jit
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
         return PhysicsTendency(
             u_wind if u_wind is not None else self.u_wind,

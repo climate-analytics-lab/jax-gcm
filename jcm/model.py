@@ -161,7 +161,7 @@ class SpeedyModel:
             new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
                 self.ref_temps,
-                new_orog_modal,
+                new_orog_modal * 1e-3,
                 self.coords,
                 self.physics_specs)
         
@@ -187,7 +187,7 @@ class SpeedyModel:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
         state.tracers = {
-            'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            'specific_humidity': 0 * 1e-2 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 

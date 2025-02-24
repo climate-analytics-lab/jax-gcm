@@ -11,6 +11,7 @@ import dataclasses
 import jax
 from typing import Any, Callable, Generic, TypeVar
 import numpy as np
+from jax import jit
 
 days_year = 365.25
 
@@ -185,12 +186,13 @@ class DateData:
     def model_day(self):
         return jnp.round(self.tyear*days_year).astype(jnp.int32)
 
+    @jit
     def copy(self, tyear=None, model_year=None):
         return DateData(
           tyear=tyear if tyear is not None else self.tyear,
           model_year=model_year if model_year is not None else self.model_year)
 
-
+@jit
 def fraction_of_year_elapsed(dt):
     """
     Calculate the fraction of the year that has elapsed at the given datetime.

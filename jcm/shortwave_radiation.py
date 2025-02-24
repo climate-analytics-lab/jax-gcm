@@ -338,7 +338,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
     pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
-    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(pr1) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(1e-9, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(conv.iptop, icltop)
 
@@ -366,7 +366,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
 
     return physics_tendencies, physics_data
 
-@jit
+# @jit
 def solar(tyear, csol=4.0*solc):
 
     """
@@ -407,7 +407,7 @@ def solar(tyear, csol=4.0*solc):
     csolp = csol / pigr
 
     # Calculate the solar radiation at the top of the atmosphere for each latitude
-    ch0 = jnp.clip(-tdecl * sia / coa, -1.0, 1.0)
+    ch0 = jnp.clip(-tdecl * sia / coa, -.99, .99)
     h0 = jnp.arccos(ch0)
     sh0 = jnp.sin(h0)
 

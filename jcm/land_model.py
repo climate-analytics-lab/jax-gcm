@@ -4,6 +4,7 @@ from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
+from jax import jit
 
 def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData, time_step):
     '''
@@ -17,7 +18,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     # Initialize land-surface boundary conditions
     # =========================================================================
 
-    delt = time_step.to(units.second).s
+    delt = time_step.to(units.second).m
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
@@ -105,6 +106,7 @@ def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: 
     return physics_tendency, physics_data
 
 #Integrates slab land-surface model for one day.
+@jit
 def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
     # Land-surface (soil/ice-sheet) layer
     # Anomaly w.r.t. final-time climatological temperature
