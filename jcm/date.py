@@ -190,6 +190,7 @@ class DateData:
           tyear=tyear if tyear is not None else self.tyear,
           model_year=model_year if model_year is not None else self.model_year)
 
+
 def fraction_of_year_elapsed(dt):
     """
     Calculate the fraction of the year that has elapsed at the given datetime.
