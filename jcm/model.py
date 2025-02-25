@@ -125,7 +125,7 @@ class SpeedyModel:
         self.outer_steps = int(total_time / save_every)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
-        # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
+        # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
         p1 = 5e3 * units.pascal
 
@@ -210,19 +210,16 @@ class SpeedyModel:
             date=date
         )
 
-        # need to have the right boundaries initialized here for this to work. 
-
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         for term in self.physics_terms:
             _, data = term(physics_state, data, self.parameters, self.boundaries)
         
-        # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
             'dynamics': state,
             'physics': data,
         }
     
-    def unroll(self, state: dinosaur.primitive_equations.StateWithTime, parameters: Parameters) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
+    def unroll(self, state: dinosaur.primitive_equations.StateWithTime, parameters: Parameters = None) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
         self.parameters = parameters or self.parameters
         self.set_up_step_fn()
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(

@@ -407,7 +407,7 @@ def solar(tyear, csol=4.0*solc):
     csolp = csol / pigr
 
     # Calculate the solar radiation at the top of the atmosphere for each latitude
-    ch0 = jnp.clip(-tdecl * sia / coa, -.99, .99)
+    ch0 = jnp.clip(-tdecl * sia / coa, -1+1e-9, 1-1e-9)
     h0 = jnp.arccos(ch0)
     sh0 = jnp.sin(h0)
 
