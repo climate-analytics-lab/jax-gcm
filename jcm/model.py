@@ -3,6 +3,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
 import dinosaur
+from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations
@@ -58,7 +59,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
         
         date = DateData.set_date(
             model_time = reference_date + Timedelta(
-                seconds=dynamics.physics_specs.dimensionalize(state.sim_time, units.second).m
+                seconds=state.sim_time
             )
         )
 
@@ -79,7 +80,8 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None) -> None:
+                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None,
+                 post_process=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -90,12 +92,16 @@ class SpeedyModel:
             layers: Number of vertical layers
             start_date: Start date of the simulation
             boundary_file: Path to the boundary conditions file including land-sea mask and albedo
+            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, 213)
+            parameters: Model parameters
+            post_process: Whether to post-process the model output
 
         """
         from datetime import datetime
         from jcm.boundaries import initialize_boundaries, default_boundaries
 
         self.parameters = parameters or Parameters.default()
+        self.post_process_physics = post_process
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -103,11 +109,13 @@ class SpeedyModel:
         save_every = save_interval * units.day
         total_time = total_time * units.day
 
+        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
+
         resolution_map = {
-            31: dinosaur.spherical_harmonic.Grid.T31(),
-            42: dinosaur.spherical_harmonic.Grid.T42(),
-            85: dinosaur.spherical_harmonic.Grid.T85(),
-            213: dinosaur.spherical_harmonic.Grid.T213()
+            31: dinosaur.spherical_harmonic.Grid.T31(radius=self.physics_specs.radius),
+            42: dinosaur.spherical_harmonic.Grid.T42(radius=self.physics_specs.radius),
+            85: dinosaur.spherical_harmonic.Grid.T85(radius=self.physics_specs.radius),
+            213: dinosaur.spherical_harmonic.Grid.T213(radius=self.physics_specs.radius),
         }
 
         if horizontal_resolution not in resolution_map:
@@ -117,9 +125,6 @@ class SpeedyModel:
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
             horizontal=resolution_map[horizontal_resolution], # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
-        
-        # Not sure why we need this...
-        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si()
 
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
@@ -201,7 +206,7 @@ class SpeedyModel:
 
         date = DateData.set_date(
             model_time = self.start_date + Timedelta(
-                seconds=self.physics_specs.dimensionalize(state.sim_time, units.second).m
+                seconds=state.sim_time
                 )
         )
 
@@ -211,12 +216,13 @@ class SpeedyModel:
             date=date
         )
 
-        # need to have the right boundaries initialized here for this to work. 
+        if self.post_process_physics:
+            physics_state = dynamics_state_to_physics_state(state, self.primitive)
+            for term in self.physics_terms:
+                _, data = term(physics_state, data, self.parameters, self.boundaries)
+        else:
+            pass # Return an empty physics data object
 
-        physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        for term in self.physics_terms:
-            _, data = term(physics_state, data, self.parameters, self.boundaries)
-        
         # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
             'dynamics': state,
@@ -258,9 +264,7 @@ class SpeedyModel:
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
-        u_nodal = self.physics_specs.dimensionalize(jnp.asarray(u_nodal), units.meter / units.second).m
-        v_nodal = self.physics_specs.dimensionalize(jnp.asarray(v_nodal), units.meter / units.second).m
-        diagnostic_state_preds.temperature_variation = (288 * units.kelvin + self.physics_specs.dimensionalize(diagnostic_state_preds.temperature_variation, units.kelvin)).m
+        diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
 
         # prepare physics predictions for xarray conversion:
