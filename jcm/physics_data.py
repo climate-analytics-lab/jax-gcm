@@ -2,7 +2,6 @@ import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
 from jax import tree_util
-from jax import jit
 
 ablco2_ref = 6.0
  
@@ -31,7 +30,6 @@ class LWRadiationData:
             slr = slr if slr is not None else jnp.ones((nodal_shape)),
         )
 
-    @jit
     def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
         return LWRadiationData(
             rlds=rlds if rlds is not None else self.rlds,
@@ -97,7 +95,6 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.ones((nodal_shape + (node_levels,)))
         )
 
-    @jit
     def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
@@ -163,7 +160,6 @@ class ModRadConData:
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
         )
 
-    @jit
     def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             ablco2=ablco2 if ablco2 is not None else self.ablco2,
@@ -201,7 +197,6 @@ class CondensationData:
             dqlsc = dqlsc if dqlsc is not None else jnp.ones((nodal_shape+(node_levels,))),
         )
 
-    @jit
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
         return CondensationData(
             precls=precls if precls is not None else self.precls, 
@@ -240,7 +235,6 @@ class ConvectionData:
             precnv = precnv if precnv is not None else jnp.ones((nodal_shape)),
         )
     
-    @jit
     def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             psa=psa if psa is not None else self.psa,
@@ -276,7 +270,6 @@ class HumidityData:
             qsat = qsat if qsat is not None else jnp.ones((nodal_shape+(node_levels,)))
         )
 
-    @jit
     def copy(self, rh=None, qsat=None):
         return HumidityData(
             rh=rh if rh is not None else self.rh, 
@@ -332,7 +325,6 @@ class SurfaceFluxData:
             t0 = t0 if t0 is not None else jnp.ones((nodal_shape))
         )
 
-    @jit
     def copy(self, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
             ustr=ustr if ustr is not None else self.ustr,
@@ -370,7 +362,6 @@ class LandModelData:
             stl_lm = stl_lm if stl_lm is not None else jnp.ones((nodal_shape))
         )
 
-    @jit
     def copy(self, stl_lm=None, stl_am=None):
         return LandModelData(
             stl_am = stl_am if stl_am is not None else self.stl_am,
@@ -420,7 +411,6 @@ class PhysicsData:
             date = date if date is not None else DateData.ones(),
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
 
-    @jit
     def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,

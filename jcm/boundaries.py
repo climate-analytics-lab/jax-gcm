@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-from jax import jit
 
 @tree_math.struct
 class BoundaryData:
@@ -67,7 +66,6 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
-    @jit
     def copy(self,fmask=None,phi0=None,forog=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
@@ -153,7 +151,7 @@ def initialize_boundaries(filename, primitive, truncation_number, parameters, ti
     # Annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
     # Apply some sanity checks -- might want to check this shape against the model shape?
-    # assert jnp.all(0.0 <= fmask <= 1.0), "Land-sea mask must be between 0 and 1"
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
     nodal_shape = fmask.shape
     tsea = fixed_ssts(primitive.coords.nodal_shape[1]) # until we have a sea model

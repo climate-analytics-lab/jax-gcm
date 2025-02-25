@@ -366,7 +366,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
 
     return physics_tendencies, physics_data
 
-# @jit
+@jit
 def solar(tyear, csol=4.0*solc):
 
     """
