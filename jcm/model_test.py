@@ -122,7 +122,6 @@ class TestModelUnit(unittest.TestCase):
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
-        jax.debug.print("make_ones:{}", make_ones_prediction_object(primals[1]))
         
         input = (make_ones_dinosaur_StateWithTime_object(primals[0]), make_ones_prediction_object(primals[1]))
         df_dstate = f_vjp(input)
