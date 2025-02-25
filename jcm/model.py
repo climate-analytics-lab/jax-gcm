@@ -105,7 +105,7 @@ class SpeedyModel:
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
-        self.dt_si = time_step * units.minute
+        dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day
 
@@ -126,9 +126,9 @@ class SpeedyModel:
             horizontal=resolution_map[horizontal_resolution], # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
 
-        self.inner_steps = int(save_every / self.dt_si)
+        self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
-        self.dt = self.physics_specs.nondimensionalize(self.dt_si)
+        self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
@@ -159,23 +159,27 @@ class SpeedyModel:
         if boundary_file is None:
             self.boundaries = default_boundaries(self.primitive, orography, self.parameters) 
         else:       
-            self.boundaries = initialize_boundaries(boundary_file, self.primitive, horizontal_resolution, self.parameters, self.dt_si)
+            self.boundaries = initialize_boundaries(boundary_file, self.primitive, horizontal_resolution, self.parameters, dt_si)
             new_orog_nodal = self.physics_specs.nondimensionalize(
                 self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
             )
             new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
                 self.ref_temps,
-                new_orog_modal * 1e-3,
+                new_orog_modal * 1e-3, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
                 self.coords,
                 self.physics_specs)
         
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, self.dt_si.m, 
-                                                        self.physics_terms, self.start_date, 
-                                                        self.boundaries, self.parameters)
+        speedy_forcing = convert_tendencies_to_equation(self.primitive,
+                                                        time_step,
+                                                        self.physics_terms,
+                                                        self.start_date,
+                                                        self.boundaries,
+                                                        self.parameters)
+        
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
@@ -185,11 +189,11 @@ class SpeedyModel:
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
+    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> dinosaur.primitive_equations.StateWithTime:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
         state.tracers = {
-            'specific_humidity': 0 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
         return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
 
