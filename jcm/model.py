@@ -80,7 +80,8 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None) -> None:
+                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None,
+                 post_process=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -91,12 +92,16 @@ class SpeedyModel:
             layers: Number of vertical layers
             start_date: Start date of the simulation
             boundary_file: Path to the boundary conditions file including land-sea mask and albedo
+            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, 213)
+            parameters: Model parameters
+            post_process: Whether to post-process the model output
 
         """
         from datetime import datetime
         from jcm.boundaries import initialize_boundaries, default_boundaries
 
         self.parameters = parameters or Parameters.default()
+        self.post_process_physics = post_process
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
@@ -210,10 +215,13 @@ class SpeedyModel:
             date=date
         )
 
-        physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        for term in self.physics_terms:
-            _, data = term(physics_state, data, self.parameters, self.boundaries)
-        
+        if self.post_process_physics:
+            physics_state = dynamics_state_to_physics_state(state, self.primitive)
+            for term in self.physics_terms:
+                _, data = term(physics_state, data, self.parameters, self.boundaries)
+        else:
+            pass # Return an empty physics data object
+
         return {
             'dynamics': state,
             'physics': data,
