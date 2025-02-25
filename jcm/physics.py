@@ -132,13 +132,16 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     nodal_state = compute_diagnostic_state(state, dynamics.coords)
     t = nodal_state.temperature_variation
     q = nodal_state.tracers['specific_humidity']
-    
+
     phi_spectral = get_geopotential(
         state.temperature_variation,
         dynamics.reference_temperature,
         dynamics.orography,
         dynamics.coords.vertical,
+        gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
+        ideal_gas_constant=dynamics.physics_specs.ideal_gas_constant
     )
+ 
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
