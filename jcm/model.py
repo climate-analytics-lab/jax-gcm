@@ -188,15 +188,15 @@ class SpeedyModel:
 
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
+    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.State:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
         state.tracers = {
             'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
-        return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
+        return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
+    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
         return self.step_fn(state)
     
     def post_process(self, state):
@@ -229,7 +229,7 @@ class SpeedyModel:
             'physics': data,
         }
     
-    def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
+    def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
