@@ -233,8 +233,7 @@ class SpeedyModel:
             start_with_input=True,
             post_process_fn=self.post_process,
         ))
-        final_state, predictions = integrate_fn(state)
-        return self.post_process(final_state), predictions
+        return integrate_fn(state)
     
     def data_to_xarray(self, data, just_final_state=False):
         from dinosaur.xarray_utils import data_to_xarray
