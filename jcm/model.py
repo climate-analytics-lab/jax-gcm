@@ -170,8 +170,6 @@ class SpeedyModel:
                 self.coords,
                 self.physics_specs)
         
-        # Define trajectory times, expects start_with_input=False
-        self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive,
                                                         time_step,
@@ -179,6 +177,9 @@ class SpeedyModel:
                                                         self.start_date,
                                                         self.boundaries,
                                                         self.parameters)
+        
+        # Define trajectory times, expects start_with_input=False
+        self.times = save_every * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
@@ -239,15 +240,11 @@ class SpeedyModel:
         ))
         return integrate_fn(state)
     
-    def data_to_xarray(self, data, just_final_state=False):
+    def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
-        return data_to_xarray(data, coords=self.coords, times=self.times if not just_final_state else jnp.array([0.])*units.day)
+        return data_to_xarray(data, coords=self.coords, times=self.times)
     
-    def predictions_to_xarray(self, predictions, just_final_state=False):
-        if just_final_state:
-            import jax.tree_util as jtu
-            predictions = jtu.tree_map(lambda x: x[jnp.newaxis], predictions)
-
+    def predictions_to_xarray(self, predictions):
         from dinosaur.xarray_utils import data_to_xarray
 
         # extract dynamics predictions (State format)
@@ -299,15 +296,15 @@ class SpeedyModel:
         }
         broken_keys = ['cos_lat_u', 'cos_lat_grad_log_sp', 'cos_lat_grad_log_sp', ] # These are tuples which are not supported by xarray
         broken_keys += ['sigma_dot_explicit', 'sigma_dot_full'] # These have one less time step for some reason...
-        pred_ds = self.data_to_xarray({k: v for k, v in nodal_predictions.items() if k not in broken_keys}, just_final_state=just_final_state)
+        pred_ds = self.data_to_xarray({k: v for k, v in nodal_predictions.items() if k not in broken_keys})
         pred_ds = pred_ds.rename_vars({'temperature_variation': 'temperature'})
-        pred_ds['u'] = self.data_to_xarray({'u': u_nodal}, just_final_state=just_final_state)['u']
-        pred_ds['v'] = self.data_to_xarray({'v': v_nodal}, just_final_state=just_final_state)['v']
-        pred_ds['surface_pressure'] = self.data_to_xarray({'surface_pressure': surface_pressure_nodal}, just_final_state=just_final_state)['surface_pressure']
+        pred_ds['u'] = self.data_to_xarray({'u': u_nodal})['u']
+        pred_ds['v'] = self.data_to_xarray({'v': v_nodal})['v']
+        pred_ds['surface_pressure'] = self.data_to_xarray({'surface_pressure': surface_pressure_nodal})['surface_pressure']
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
         # convert integer time (in days) to datetime
-        if not just_final_state: pred_ds['time'] = (self.start_date.delta.days + pred_ds.time).astype('datetime64[D]')
+        pred_ds['time'] = (self.start_date.delta.days + pred_ds.time).astype('datetime64[D]')
         
         return pred_ds
