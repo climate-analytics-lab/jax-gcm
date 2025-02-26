@@ -284,10 +284,6 @@ class SpeedyModel:
                     {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
                 )
                 del physics_state_preds[k]
-        # convert x, y, z to z, x, y to match dinosaur dimension ordering
-        for k, v in physics_state_preds.items():
-            if v.shape[1:4] == self.coords.nodal_shape[1:] + (self.coords.nodal_shape[0],):
-                physics_state_preds[k] = jnp.moveaxis(v, (0, 1, 2, 3), (0, 2, 3, 1))
 
         # create xarray dataset
         nodal_predictions = {

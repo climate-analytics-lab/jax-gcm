@@ -21,15 +21,15 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_grad_surface_flux(self):
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx,ix,il)
 
         psa = jnp.ones((ix,il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
@@ -37,7 +37,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
             
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -48,7 +48,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         _, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, parameters, boundaries)
 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy, kx)
 
         input_tensors = (tends, datas)
@@ -61,14 +61,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_updated_surface_flux(self):
-        xy, xyz = (ix, il), (ix, il, kx)
+        xy, zxy = (ix, il), (kx,ix,il)
         psa = jnp.ones(xy)
-        ua = jnp.ones(xyz)
-        va = jnp.ones(xyz)
-        ta = jnp.ones(xyz) * 290
-        qa = jnp.ones(xyz)
-        rh = jnp.ones(xyz) * 0.5   
-        phi = jnp.ones(xyz) * (jnp.arange(kx))[None, None, ::-1]
+        ua = jnp.ones(zxy)
+        va = jnp.ones(zxy)
+        ta = jnp.ones(zxy) * 290
+        qa = jnp.ones(zxy)
+        rh = jnp.ones(zxy) * 0.5   
+        phi = jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, jnp.newaxis, jnp.newaxis]
         phi0 = jnp.zeros(xy) 
         fmask_l = 0.5 * jnp.ones(xy)
         tsea = jnp.ones(xy) * 292 # this needs to overwrite what is in sea_model? 
@@ -76,7 +76,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -102,14 +102,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test1(self):
         xy = (ix,il)
-        xyz = (ix,il,kx)
+        zxy = (kx,ix,il)
         psa = jnp.ones((ix,il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
@@ -118,7 +118,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -151,14 +151,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test2(self):
         xy = (ix,il)
-        xyz = (ix, il, kx)
+        zxy = (kx,ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
@@ -168,7 +168,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         forog = set_orog_land_sfc_drag(phi0, parameters)
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -201,14 +201,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test3(self):
         xy = (ix,il)
-        xyz = (ix, il, kx)
+        zxy = (kx,ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 288. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         forog = set_orog_land_sfc_drag(phi0, parameters)
@@ -218,7 +218,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -250,14 +250,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test4(self):
         xy = (ix,il)
-        xyz = (ix, il, kx)
+        zxy = (kx,ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 300. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 300. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
@@ -268,7 +268,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
@@ -300,14 +300,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def test_surface_fluxes_test5(self):
         xy = (ix,il)
-        xyz = (ix,il,kx)
+        zxy = (kx,ix,il)
         psa = jnp.ones((ix, il)) #surface pressure
-        ua = jnp.ones(((ix, il, kx))) #zonal wind
-        va = jnp.ones(((ix, il, kx))) #meridional wind
-        ta = 285. * jnp.ones(((ix, il, kx))) #temperature
-        qa = 5. * jnp.ones(((ix, il, kx))) #temperature
-        rh = 0.8 * jnp.ones(((ix, il, kx))) #relative humidity
-        phi = 5000. * jnp.ones(((ix, il, kx))) #geopotential
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 285. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
@@ -317,7 +317,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
 
-        state = PhysicsState.zeros(xyz,ua, va, ta, qa, phi)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
