@@ -279,7 +279,7 @@ class SpeedyModel:
         _original_keys = list(physics_state_preds.keys())
         for k in _original_keys:
             v = physics_state_preds[k]
-            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[-1] != self.coords.nodal_shape[0]):
+            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
                 physics_state_preds.update(
                     {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
                 )
