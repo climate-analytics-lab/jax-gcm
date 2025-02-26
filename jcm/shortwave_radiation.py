@@ -95,7 +95,6 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     flux_1 = flux_1.at[k].set(tau2[k, :, :, 0] * (flux_1[k] - physics_data.shortwave_rad.ozone * psa))
     dfabs = dfabs.at[k].add(- flux_1[k])
     
-    # FIXME
     # 3.3 Absorption and reflection in the troposphere
     # scan alert!
     # here's the function that will compute the flux
@@ -140,7 +139,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     )
     flux_1 = flux_1.at[:-1].set(flux_1_scan[::-1])
         
-    dfabs = dfabs.at[...].add(flux_1*(1 - tau2[:,:,:,0]))
+    dfabs += flux_1*(1 - tau2[:,:,:,0])
 
     flux_1 = flux_1.at[1:].set(flux_1[:-1])
     flux_1 = flux_1.at[0].set(tau2[0,:,:,0]*flux_1[0] + tau2[0,:,:,2])

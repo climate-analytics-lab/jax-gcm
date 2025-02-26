@@ -268,7 +268,7 @@ class SpeedyModel:
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
 
         # prepare physics predictions for xarray conversion:
-        # unpack into single dictionary, and unpack/transpose individual fields
+        # unpack into single dictionary, and unpack individual fields
         # unpack PhysicsData struct
         physics_state_preds = {
             f"{module}.{field}": value # avoids name conflicts between fields of different modules

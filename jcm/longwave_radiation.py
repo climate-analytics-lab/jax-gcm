@@ -91,7 +91,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
             flux = flux.at[:,:,jb].set((tau2[k,:,:,jb] * flux[:,:,jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
             dfabs = dfabs.at[k].add(-flux[:,:,jb])
 
-    rlds = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1) #FIXME
+    rlds = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
 
     corlw = parameters.mod_radcon.epslw * parameters.mod_radcon.emisfc * st4a[kx-1,:,:,0]
     dfabs = dfabs.at[kx-1].add(-corlw)
