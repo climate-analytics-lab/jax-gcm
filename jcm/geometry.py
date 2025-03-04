@@ -6,6 +6,9 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 from jcm.physical_constants import akap, omega
 
+# to prevent blowup of gradients
+epsilon = 1e-9
+
 # Declare global variables
 hsg = None
 dhs = None
