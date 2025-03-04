@@ -6,7 +6,7 @@ from jcm.params import Parameters
 from jcm.physical_constants import epssw, solc, grdscp
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.geometry import sia, coa, fsg, dhs
+from jcm.geometry import epsilon, sia, coa, fsg, dhs
 from jax import lax
 import jax
 
@@ -338,7 +338,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     #Third for loop (two levels)
     # Perform the calculations (Two Loops)
     pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
-    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(1e-9, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(conv.iptop, icltop)
 
@@ -407,7 +407,7 @@ def solar(tyear, csol=4.0*solc):
     csolp = csol / pigr
 
     # Calculate the solar radiation at the top of the atmosphere for each latitude
-    ch0 = jnp.clip(-tdecl * sia / coa, -1+1e-9, 1-1e-9)
+    ch0 = jnp.clip(-tdecl * sia / coa, -1+epsilon, 1-epsilon)
     h0 = jnp.arccos(ch0)
     sh0 = jnp.sin(h0)
 
