@@ -110,7 +110,7 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
 
-        def make_ones_dinosaur_StateWithTime_object(state, choose_sim_time = jnp.float32(1.0)):
+        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
             return jtu.tree_map(lambda x: jnp.ones_like(x), state)
 
         def make_ones_prediction_object(pred): 
@@ -123,7 +123,7 @@ class TestModelUnit(unittest.TestCase):
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
         
-        input = (make_ones_dinosaur_StateWithTime_object(primals[0]), make_ones_prediction_object(primals[1]))
+        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
         df_dstate = f_vjp(input)
         
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
@@ -138,7 +138,7 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
 
-        def make_ones_dinosaur_StateWithTime_object(state, choose_sim_time = jnp.float32(1.0)):
+        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
             return jtu.tree_map(lambda x: jnp.ones_like(x), state)
         
         def make_ones_prediction_object(pred): 
@@ -150,7 +150,7 @@ class TestModelUnit(unittest.TestCase):
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
         
-        input = (make_ones_dinosaur_StateWithTime_object(primals[0]), make_ones_prediction_object(primals[1]))
+        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
         df_dstate = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
