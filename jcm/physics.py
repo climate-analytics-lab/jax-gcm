@@ -36,7 +36,7 @@ class PhysicsState:
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
+            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
         )
     
     @classmethod
@@ -47,7 +47,7 @@ class PhysicsState:
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[0:2])
+            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
         )
     
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
@@ -149,15 +149,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    physics_state = PhysicsState(
-        u.transpose(1, 2, 0),
-        v.transpose(1, 2, 0),
-        t.transpose(1, 2, 0),
-        q.transpose(1, 2, 0),
-        phi.transpose(1, 2, 0),
-        jnp.squeeze(sp.transpose(1, 2, 0))
-    )
-    return physics_state
+    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
 
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
@@ -171,10 +163,10 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    u_tend = physics_tendency.u_wind.transpose(2, 0, 1)
-    v_tend = physics_tendency.v_wind.transpose(2, 0, 1)
-    t_tend = physics_tendency.temperature.transpose(2, 0, 1)
-    q_tend = physics_tendency.specific_humidity.transpose(2, 0, 1)
+    u_tend = physics_tendency.u_wind
+    v_tend = physics_tendency.v_wind
+    t_tend = physics_tendency.temperature
+    q_tend = physics_tendency.specific_humidity
     
     q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
     

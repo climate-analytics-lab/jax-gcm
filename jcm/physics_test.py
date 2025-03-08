@@ -40,7 +40,7 @@ class TestPhysicsUnit(unittest.TestCase):
 
         hsf = HeldSuarezForcing(hs_model.coords, hs_model.physics_specs, hs_model.ref_temps)
         parameters = Parameters.default()
-        boundaries = BoundaryData.zeros(hs_model.ref_temps.shape[0:2])
+        boundaries = BoundaryData.zeros(hs_model.ref_temps.shape[1:])
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 

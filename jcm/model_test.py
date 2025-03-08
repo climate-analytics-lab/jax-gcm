@@ -14,7 +14,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=2,
             layers=layers
         )
-    
+
         state = model.get_initial_state()
         state.tracers = {'specific_humidity': 1e-4 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
@@ -22,7 +22,7 @@ class TestModelUnit(unittest.TestCase):
         modal_y = 44
         modal_zxy = (layers, modal_x, modal_y)
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
-    
+
         final_state, predictions = model.unroll(state)
 
         self.assertIsNotNone(final_state)
@@ -113,7 +113,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
             return jtu.tree_map(lambda x: jnp.ones_like(x), state)
 
-        def make_ones_prediction_object(pred): 
+        def make_ones_prediction_object(pred):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
@@ -124,7 +124,8 @@ class TestModelUnit(unittest.TestCase):
         primals, f_vjp = jax.vjp(model.unroll, state) 
         
         input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
-        df_dstate = f_vjp(input)
+
+        df_dstate = f_vjp(input) 
         
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
@@ -149,9 +150,8 @@ class TestModelUnit(unittest.TestCase):
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
-        
         input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
-        df_dstate = f_vjp(input)
+        df_dstate = f_vjp(input) 
 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))

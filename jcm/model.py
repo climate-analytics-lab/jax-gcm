@@ -268,7 +268,7 @@ class SpeedyModel:
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
 
         # prepare physics predictions for xarray conversion:
-        # unpack into single dictionary, and unpack/transpose individual fields
+        # unpack into single dictionary, and unpack individual fields
         # unpack PhysicsData struct
         physics_state_preds = {
             f"{module}.{field}": value # avoids name conflicts between fields of different modules
@@ -279,15 +279,11 @@ class SpeedyModel:
         _original_keys = list(physics_state_preds.keys())
         for k in _original_keys:
             v = physics_state_preds[k]
-            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[-1] != self.coords.nodal_shape[0]):
+            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
                 physics_state_preds.update(
                     {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
                 )
                 del physics_state_preds[k]
-        # convert x, y, z to z, x, y to match dinosaur dimension ordering
-        for k, v in physics_state_preds.items():
-            if v.shape[1:4] == self.coords.nodal_shape[1:] + (self.coords.nodal_shape[0],):
-                physics_state_preds[k] = jnp.moveaxis(v, (0, 1, 2, 3), (0, 2, 3, 1))
 
         # create xarray dataset
         nodal_predictions = {

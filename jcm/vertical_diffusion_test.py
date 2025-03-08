@@ -20,19 +20,19 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         from jcm.vertical_diffusion import get_vertical_diffusion_tend
 
     def test_get_vertical_diffusion_tend(self):
-        se = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(400,300,kx)[jnp.newaxis, jnp.newaxis, :]
-        rh = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[jnp.newaxis, jnp.newaxis, :]
-        qa = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[jnp.newaxis, jnp.newaxis, :]
-        qsat = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[jnp.newaxis, jnp.newaxis, :]
-        phi = jnp.ones((ix,il))[:,:,jnp.newaxis] * jnp.linspace(150000,0,kx)[jnp.newaxis, jnp.newaxis, :]
+        se = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(400,300,kx)[:, jnp.newaxis, jnp.newaxis]
+        rh = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[:, jnp.newaxis, jnp.newaxis]
+        qa = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[:, jnp.newaxis, jnp.newaxis]
+        qsat = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[:, jnp.newaxis, jnp.newaxis]
+        phi = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(150000,0,kx)[:, jnp.newaxis, jnp.newaxis]
         iptop = jnp.ones((ix,il), dtype=int)*1
         
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         xy = (ix, il)
         humidity_data = HumidityData.zeros((ix,il), kx, rh=rh, qsat=qsat)
         convection_data = ConvectionData.zeros((ix,il), kx, iptop=iptop, se=se)
         physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
-        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=phi)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=phi)
         boundaries = BoundaryData.ones(xy)
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
@@ -42,21 +42,21 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         self.assertTrue(np.allclose(utenvd, np.zeros_like(utenvd), atol=1e-4))
         self.assertTrue(np.allclose(vtenvd, np.zeros_like(vtenvd), atol=1e-4))
-        self.assertTrue(np.allclose(ttenvd[0,0,:], np.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
+        self.assertTrue(np.allclose(ttenvd[:,0,0], np.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
         3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-4))
-        self.assertTrue(np.allclose(qtenvd[0,0,:], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
+        self.assertTrue(np.allclose(qtenvd[:,0,0], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-4))
 
     def test_get_vertical_diffusion_gradients_isnan_ones(self): 
         """Test that we can calculate gradients of vertical diffusion without getting NaN values"""
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries) 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
         df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
