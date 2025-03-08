@@ -70,7 +70,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         xy = (ix, il)
         xyz = (ix, il, kx)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        state = PhysicsState.ones(xyz)
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
