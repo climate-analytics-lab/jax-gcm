@@ -130,7 +130,7 @@ class SpeedyModel:
         self.outer_steps = int(total_time / save_every)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
-        # Get the reference temerature and orography. This also returns the initial state function (if wanted to start from rest)
+        # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         p0 = 100e3 * units.pascal
         p1 = 5e3 * units.pascal
 
@@ -166,37 +166,39 @@ class SpeedyModel:
             new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
             self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
                 self.ref_temps,
-                new_orog_modal,
+                new_orog_modal * 1e-3, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
                 self.coords,
                 self.physics_specs)
         
 
-        speedy_forcing = convert_tendencies_to_equation(self.primitive, time_step, 
-                                                        self.physics_terms, self.start_date, 
-                                                        self.boundaries, self.parameters)
-
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
-
+        speedy_forcing = convert_tendencies_to_equation(self.primitive,
+                                                        time_step,
+                                                        self.physics_terms,
+                                                        self.start_date,
+                                                        self.boundaries,
+                                                        self.parameters)
+        
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
-
+        
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             dinosaur.time_integration.exponential_step_filter(
-                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),
+                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
+            ),
         ]
-
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.StateWithTime:
+    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> dinosaur.primitive_equations.State:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure = state.log_surface_pressure * 1e-3
         state.tracers = {
-            'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
-        return dinosaur.primitive_equations.StateWithTime(**state.asdict(), sim_time=sim_time)
+        return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def advance(self, state: dinosaur.primitive_equations.StateWithTime) -> dinosaur.primitive_equations.StateWithTime:
+    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
         return self.step_fn(state)
     
     def post_process(self, state):
@@ -223,13 +225,12 @@ class SpeedyModel:
         else:
             pass # Return an empty physics data object
 
-        # does this need to return state? doesn't the dinosaur time integration already return the state?
         return {
             'dynamics': state,
             'physics': data,
         }
     
-    def unroll(self, state: dinosaur.primitive_equations.StateWithTime) -> tuple[dinosaur.primitive_equations.StateWithTime, dinosaur.primitive_equations.StateWithTime]:
+    def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
@@ -241,7 +242,6 @@ class SpeedyModel:
     
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
-        
         return data_to_xarray(data, coords=self.coords, times=self.times)
     
     def predictions_to_xarray(self, predictions):
@@ -259,7 +259,7 @@ class SpeedyModel:
                                                 dynamics_predictions.divergence)
         # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
         # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
-        log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure))
+        log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
         surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal) * 1e5
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 

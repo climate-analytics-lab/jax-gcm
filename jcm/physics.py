@@ -15,7 +15,7 @@ from jcm.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 
@@ -115,7 +115,7 @@ def initialize_physics():
     pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
     pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
-def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
+def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -152,7 +152,7 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -177,7 +177,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = StateWithTime(vor_tend_modal,
+    dynamics_tendency = State(vor_tend_modal,
                                       div_tend_modal,
                                       t_tend_modal,
                                       log_sp_tend_modal,
@@ -187,7 +187,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 
 
 def get_physical_tendencies(
-    state: StateWithTime,
+    state: State,
     dynamics: PrimitiveEquations,
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],

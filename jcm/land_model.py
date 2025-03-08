@@ -17,7 +17,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     # Initialize land-surface boundary conditions
     # =========================================================================
 
-    delt = time_step.to(units.second).s
+    delt = time_step.to(units.second).m
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
