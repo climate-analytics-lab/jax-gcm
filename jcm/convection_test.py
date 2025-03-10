@@ -11,16 +11,36 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg
+        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg, rgas, cp
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
         parameters = Parameters.default()
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
-        from jcm.physical_constants import grdscp, grdsig
+        from jcm.physical_constants import grdscp, grdsig, rgas, cp
         from jcm.humidity import get_qsat
         from jcm.geometry import fsg
+
+    def test_diagnose_convection_varying(self):
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.02 * jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+
+        qa = (jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix) * qsat * 2.5
+
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        se = cp * ta + phi
+
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters)
+
+        from os import path
+        jax_gcm_path = path.dirname(path.dirname(path.realpath(__file__)))
+        iptop_f90 = jnp.load(f'{jax_gcm_path}/data/iptop.npy')
+        qdif_f90 = jnp.load(f'{jax_gcm_path}/data/qdif.npy')
+
+        assert jnp.allclose(iptop, iptop_f90, atol=1e-4)
+        assert jnp.allclose(qdif, qdif_f90, atol=1e-4)
 
     def test_diagnose_convection_isothermal(self):
         psa = jnp.ones((ix, il))
