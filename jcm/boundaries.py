@@ -151,7 +151,7 @@ def initialize_boundaries(filename, primitive, truncation_number, parameters, ti
     # Annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
     # Apply some sanity checks -- might want to check this shape against the model shape?
-    assert jnp.all(0.0 <= fmask <= 1.0), "Land-sea mask must be between 0 and 1"
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
     nodal_shape = fmask.shape
     tsea = fixed_ssts(primitive.coords.nodal_shape[1]) # until we have a sea model

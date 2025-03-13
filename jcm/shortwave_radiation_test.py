@@ -120,8 +120,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         se = .1*geopotential
 
         xy = (ix, il)
-        xyz = (ix, il, kx)
-        broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
         psa = jnp.ones(xy)
@@ -141,7 +141,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
         _, physics_data = clouds(state, physics_data, parameters, boundaries)
         physics_data = get_zonal_average_fields(state, physics_data)
@@ -177,7 +177,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             284.20954594, 288.1834261, 291.08877534
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[0, :], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
             0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
             4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
             8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
@@ -187,7 +187,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             13.45775005
         ], atol=1e-4))
 
-        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=1)[0, :], [
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
         ], atol=1e-4))
 
@@ -196,11 +196,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.date import Timestamp
         # Ensure that the output shapes are correct
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-        state = PhysicsState.zeros(xyz)
+        state = PhysicsState.zeros(zxy)
 
         new_data = get_zonal_average_fields(state, physics_data)
         
@@ -215,12 +215,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         from datetime import datetime
         from jcm.date import Timestamp
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
        
         physics_data = get_zonal_average_fields(state, physics_data)
 
@@ -232,12 +232,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         from datetime import datetime
         from jcm.date import Timestamp
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         
         physics_data = get_zonal_average_fields(state, physics_data)
 
@@ -250,11 +250,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         from datetime import datetime
         from jcm.date import Timestamp
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-        state = PhysicsState(jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xyz), jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         physics_data = get_zonal_average_fields(state, physics_data)
 
         # Expected form for ozone based on the provided formula
@@ -266,11 +266,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         from datetime import datetime
         from jcm.date import Timestamp
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-        state = PhysicsState.zeros(xyz)
+        state = PhysicsState.zeros(zxy)
         physics_data = get_zonal_average_fields(state, physics_data)
         
         # Ensure outputs are consistent and within expected ranges
@@ -292,8 +292,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         se = .1*geopotential
 
         xy = (ix, il)
-        xyz = (ix, il, kx)
-        broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
         psa = jnp.ones(xy)
@@ -313,7 +313,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data) 
@@ -326,14 +326,14 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_get_shortwave_rad_fluxes_gradients_isnan_ones(self): 
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries) 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
@@ -361,8 +361,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         se = .1*geopotential
 
         xy = (ix, il)
-        xyz = (ix, il, kx)
-        broadcast = lambda a: jnp.tile(a[jnp.newaxis, jnp.newaxis, :], xy + (1,))
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
         psa = jnp.ones(xy)
@@ -382,11 +382,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(xyz, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy,fmask=fmask)
         # Calculate gradient
         primals, f_vjp = jax.vjp(clouds, state, physics_data, parameters, boundaries) 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)

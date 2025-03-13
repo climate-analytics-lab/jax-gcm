@@ -15,7 +15,7 @@ from jcm.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, StateWithTime, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 
@@ -36,7 +36,7 @@ class PhysicsState:
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[0:2])
+            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
         )
     
     @classmethod
@@ -47,7 +47,7 @@ class PhysicsState:
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[0:2])
+            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
         )
     
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
@@ -115,7 +115,7 @@ def initialize_physics():
     pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
     pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
 
-def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEquations) -> PhysicsState:
+def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
 
@@ -150,18 +150,10 @@ def dynamics_state_to_physics_state(state: StateWithTime, dynamics: PrimitiveEqu
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    physics_state = PhysicsState(
-        u.transpose(1, 2, 0),
-        v.transpose(1, 2, 0),
-        t.transpose(1, 2, 0),
-        q.transpose(1, 2, 0),
-        phi.transpose(1, 2, 0),
-        jnp.squeeze(sp.transpose(1, 2, 0))
-    )
-    return physics_state
+    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
 
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> StateWithTime:
+def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """
     Convert the physics tendencies to the dynamics tendencies.
 
@@ -172,10 +164,10 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     Returns:
         Dynamics tendencies
     """
-    u_tend = physics_tendency.u_wind.transpose(2, 0, 1)
-    v_tend = physics_tendency.v_wind.transpose(2, 0, 1)
-    t_tend = physics_tendency.temperature.transpose(2, 0, 1)
-    q_tend = physics_tendency.specific_humidity.transpose(2, 0, 1)
+    u_tend = physics_tendency.u_wind
+    v_tend = physics_tendency.v_wind
+    t_tend = physics_tendency.temperature
+    q_tend = physics_tendency.specific_humidity
     
     q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
     
@@ -186,7 +178,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = StateWithTime(vor_tend_modal,
+    dynamics_tendency = State(vor_tend_modal,
                                       div_tend_modal,
                                       t_tend_modal,
                                       log_sp_tend_modal,
@@ -196,7 +188,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 
 
 def get_physical_tendencies(
-    state: StateWithTime,
+    state: State,
     dynamics: PrimitiveEquations,
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],

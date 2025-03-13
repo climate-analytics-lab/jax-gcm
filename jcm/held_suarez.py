@@ -65,12 +65,12 @@ class HeldSuarezForcing:
       
     def equilibrium_temperature(self, nodal_surface_pressure):
         p_over_p0 = (
-            self.sigma[jnp.newaxis, jnp.newaxis, :] * nodal_surface_pressure[:, :, jnp.newaxis] / self.p0
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis] / self.p0
         )
         temperature = p_over_p0**self.physics_specs.kappa * (
             self.maxT
-            - self.dTy * jnp.sin(self.lat[:, :, jnp.newaxis]) ** 2
-            - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat[:, :, jnp.newaxis]) ** 2
+            - self.dTy * jnp.sin(self.lat[jnp.newaxis]) ** 2
+            - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat[jnp.newaxis]) ** 2
         )
         return jnp.maximum(self.minT, temperature)
    
@@ -78,12 +78,12 @@ class HeldSuarezForcing:
         kv_coeff = self.kf * (
             jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         )
-        return kv_coeff[jnp.newaxis, jnp.newaxis, :]
+        return kv_coeff[:, jnp.newaxis, jnp.newaxis]
 
     def kt(self):
         cutoff = jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         return self.ka + (self.ks - self.ka) * (
-            cutoff[jnp.newaxis, jnp.newaxis, :] * jnp.cos(self.lat[:, :, jnp.newaxis]) ** 4
+            cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat[jnp.newaxis]) ** 4
     )
 
     def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):

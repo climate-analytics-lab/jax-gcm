@@ -5,9 +5,9 @@ import jax
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
-    ta = jnp.zeros((ix, il, kx))
+    ta = jnp.zeros((kx, ix, il))
     fsfcd = jnp.zeros((ix, il))
-    st4a = jnp.zeros((ix, il, kx, 2))     # Blackbody emission from full and half atmospheric levels
+    st4a = jnp.zeros((kx, ix, il, 2))     # Blackbody emission from full and half atmospheric levels
     flux = jnp.zeros((ix, il, 4))         # Radiative flux in different spectral bands
 
     # Set the min and max values
@@ -18,7 +18,7 @@ def initialize_arrays(ix, il, kx):
     total_elements = ix * il * kx
     step_size = (max_val - min_val) / (total_elements - 1)
 
-    ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((2, 1, 0))
+    ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((0, 2, 1))
     
     return ta, fsfcd, st4a, flux
 
@@ -42,14 +42,14 @@ class TestDownwardLongwave(unittest.TestCase):
 
         #FIXME: This array doens't need to be this big once we fix the interfaces
         # -> We only test teh first 5x5 elements
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         xy = (ix, il)
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
         boundaries = BoundaryData.ones(xy)
         
-        state = PhysicsState.zeros(xyz,temperature=ta)
+        state = PhysicsState.zeros(zxy,temperature=ta)
         
         _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries)
 
@@ -99,8 +99,8 @@ class TestDownwardLongwave(unittest.TestCase):
                      [78.51081,10.1671 ]]]
         
         self.assertTrue(np.allclose(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds), atol=1e-4))
-        self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[0, 0, :], f90_dfabs, atol=1e-4))
-        self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:5, :5, :, :], axis=2), np.asarray(f90_st4a), atol=1e-4))
+        self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[:, 0, 0], f90_dfabs, atol=1e-4))
+        self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:, :5, :5, :], axis=0), np.asarray(f90_st4a), atol=1e-4))
 
     def test_upward_longwave_rad_fluxes(self):
         # TODO: Implement this test
@@ -110,13 +110,13 @@ class TestDownwardLongwave(unittest.TestCase):
     def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
         # Calculate gradient
         _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
@@ -130,14 +130,14 @@ class TestDownwardLongwave(unittest.TestCase):
     def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
-        xyz = (ix, il, kx)
+        zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(xyz)
+        state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
-        tends = PhysicsTendency.ones(xyz)
+        tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
