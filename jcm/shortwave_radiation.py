@@ -102,7 +102,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     
     # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        lambda carry, i: (propagate_flux_1(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
+        jax.checkpoint(lambda carry, i: (propagate_flux_1(carry, i),)*2), #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
         flux_1[1], #initial value
         tau2[2:kx]) #pass tau2 directly rather than indexing
     
@@ -116,7 +116,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     flux_2 = flux_2.at[1].set(flux_2[0])
     propagate_flux_2 = lambda flux, tau: flux * tau[:, :, 1]
     _, flux_2_scan = lax.scan(
-        lambda carry, i: (propagate_flux_2(carry, i),)*2,
+        jax.checkpoint(lambda carry, i: (propagate_flux_2(carry, i),)*2),
         flux_2[1],
         tau2[1:kx])
     flux_2 = flux_2.at[1:kx].set(flux_2_scan)
@@ -133,7 +133,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
     propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
     _, flux_1_scan = lax.scan(
-        lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
+        jax.checkpoint(lambda carry, tau: (propagate_flux_up(carry, tau),) * 2),
         flux_1[-1],
         tau2[1:kx][::-1]
     )

@@ -100,9 +100,6 @@ class HeldSuarezModel:
     def get_initial_state(self, random_seed=0, sim_time=0.0) -> dinosaur.primitive_equations.State:
         state =  self.initial_state_fn(jax.random.PRNGKey(random_seed))
         return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
-
-    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
-        return self.step_fn(state)
                                  
     def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(

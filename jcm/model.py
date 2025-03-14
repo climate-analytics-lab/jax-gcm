@@ -35,19 +35,19 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
 
     physics_terms = [
         set_forcing,
-        spec_hum_to_rel_hum,
-        get_convection_tendencies,
-        get_large_scale_condensation_tendencies,
-        clouds,
-        get_shortwave_rad_fluxes,
-        get_downward_longwave_rad_fluxes,
-        get_surface_fluxes,
-        get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend,
+        jax.checkpoint(spec_hum_to_rel_hum),
+        jax.checkpoint(get_convection_tendencies),
+        jax.checkpoint(get_large_scale_condensation_tendencies),
+        jax.checkpoint(clouds),
+        jax.checkpoint(get_shortwave_rad_fluxes),
+        jax.checkpoint(get_downward_longwave_rad_fluxes),
+        jax.checkpoint(get_surface_fluxes),
+        jax.checkpoint(get_upward_longwave_rad_fluxes),
+        jax.checkpoint(get_vertical_diffusion_tend),
         couple_land_atm # eventually couple sea model and ice model here
     ]
     if sea_coupling_flag > 0:
-        physics_terms.insert(-3, get_surface_fluxes)
+        physics_terms.insert(-3, jax.checkpoint(get_surface_fluxes))
     return physics_terms
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
@@ -197,9 +197,6 @@ class SpeedyModel:
             'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
         return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
-
-    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
-        return self.step_fn(state)
     
     def post_process(self, state):
         from jcm.date import DateData
@@ -232,7 +229,7 @@ class SpeedyModel:
     
     def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            self.step_fn,
+            jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
