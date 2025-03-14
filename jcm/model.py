@@ -112,10 +112,10 @@ class SpeedyModel:
         self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
 
         resolution_map = {
-            31: dinosaur.spherical_harmonic.Grid.T31(radius=self.physics_specs.radius),
-            42: dinosaur.spherical_harmonic.Grid.T42(radius=self.physics_specs.radius),
-            85: dinosaur.spherical_harmonic.Grid.T85(radius=self.physics_specs.radius),
-            213: dinosaur.spherical_harmonic.Grid.T213(radius=self.physics_specs.radius),
+            31: dinosaur.spherical_harmonic.Grid.T31,
+            42: dinosaur.spherical_harmonic.Grid.T42,
+            85: dinosaur.spherical_harmonic.Grid.T85,
+            213: dinosaur.spherical_harmonic.Grid.T213,
         }
 
         if horizontal_resolution not in resolution_map:
@@ -123,7 +123,7 @@ class SpeedyModel:
 
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=resolution_map[horizontal_resolution], # truncation 
+            horizontal=resolution_map[horizontal_resolution](radius=self.physics_specs.radius, latitude_spacing='equiangular'), # truncation 
             vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
 
         self.inner_steps = int(save_every / dt_si)
