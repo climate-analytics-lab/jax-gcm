@@ -159,3 +159,47 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+
+    def test_speedy_model_param_gradients_isnan_jvp(self):
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import jax.tree_util as jtu
+        from jcm.model import SpeedyModel
+        from jcm.params import Parameters
+
+        def make_ones_parameters_object(params):
+            def make_tangent(x):
+                if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
+                    return np.ones((), dtype=jax.dtypes.float0)
+                elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
+                    return np.ones((), dtype=jax.dtypes.float0)
+                else:
+                    return jnp.ones_like(x)
+            return jtu.tree_map(lambda x: make_tangent(x), params)
+        
+        def create_model(params):
+            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
+                parameters=params, post_process=True)
+            return model
+        
+        def model_run_wrapper(params):
+            model = create_model(params)
+            state = model.get_initial_state()
+            final_state, predictions = model.unroll(state)
+            return predictions
+        
+        # Calculate gradients using JVP
+        params = Parameters.default()
+        tangent = make_ones_parameters_object(params)
+        y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
+        state = jvp_sum['dynamics']
+        physics_data = jvp_sum['physics']
+
+        self.assertFalse(jnp.any(jnp.isnan(state[0].vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(state[0].divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(state[0].temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(state[0].log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(state[0].tracers['specific_humidity'])))
+        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
