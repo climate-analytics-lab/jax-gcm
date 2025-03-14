@@ -163,10 +163,7 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         import jax.numpy as jnp
-        import numpy as np
-        import jax.tree_util as jtu
         from jcm.model import SpeedyModel
-        from jcm.params import Parameters
         
         def create_model(params):
             model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
@@ -195,9 +192,7 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        import jax.tree_util as jtu
         from jcm.model import SpeedyModel
-        from jcm.params import Parameters
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
