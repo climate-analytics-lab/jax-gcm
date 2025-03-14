@@ -197,9 +197,9 @@ class TestModelUnit(unittest.TestCase):
         state = jvp_sum['dynamics']
         physics_data = jvp_sum['physics']
 
-        self.assertFalse(jnp.any(jnp.isnan(state[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(state[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(state[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(state[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(state[0].tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(state.tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
