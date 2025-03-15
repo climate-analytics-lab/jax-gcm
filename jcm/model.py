@@ -17,7 +17,7 @@ def initialize_modules(kx=8, il=64):
     from jcm.physics import initialize_physics
     initialize_physics()
 
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
@@ -35,20 +35,26 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
 
     physics_terms = [
         set_forcing,
-        jax.checkpoint(spec_hum_to_rel_hum),
-        jax.checkpoint(get_convection_tendencies),
-        jax.checkpoint(get_large_scale_condensation_tendencies),
-        jax.checkpoint(clouds),
-        jax.checkpoint(get_shortwave_rad_fluxes),
-        jax.checkpoint(get_downward_longwave_rad_fluxes),
-        jax.checkpoint(get_surface_fluxes),
-        jax.checkpoint(get_upward_longwave_rad_fluxes),
-        jax.checkpoint(get_vertical_diffusion_tend),
+        spec_hum_to_rel_hum,
+        get_convection_tendencies,
+        get_large_scale_condensation_tendencies,
+        clouds,
+        get_shortwave_rad_fluxes,
+        get_downward_longwave_rad_fluxes,
+        get_surface_fluxes,
+        get_upward_longwave_rad_fluxes,
+        get_vertical_diffusion_tend,
         couple_land_atm # eventually couple sea model and ice model here
     ]
     if sea_coupling_flag > 0:
-        physics_terms.insert(-3, jax.checkpoint(get_surface_fluxes))
-    return physics_terms
+        physics_terms.insert(-3, get_surface_fluxes)
+
+    static_argnums = {
+        set_forcing: (2,),
+        couple_land_atm: (3,),
+    }
+
+    return physics_terms, static_argnums
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
     from jcm.physics_data import PhysicsData
@@ -81,7 +87,7 @@ class SpeedyModel:
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
                  start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None,
-                 post_process=True) -> None:
+                 post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -153,7 +159,10 @@ class SpeedyModel:
             self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        self.physics_terms, static_argnums = get_speedy_physics_terms(self.coords.nodal_shape)
+
+        if checkpoint_terms:
+            self.physics_terms = [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in self.physics_terms]
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
