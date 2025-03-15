@@ -21,8 +21,6 @@ sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
 epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
 # Functions of sigma and latitude (initial. in INPHYS)
-sigl = None # Logarithm of full-level sigma
-sigh = None # Half-level sigma
 grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
 grdscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
 wvi = None # Weights for vertical interpolation

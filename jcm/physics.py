@@ -8,7 +8,7 @@ from collections import abc
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.geometry import hsg, fsg, dhs
+from jcm.geometry import hsg, fsg, sigl, dhs
 from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
 from jcm.params import Parameters
@@ -101,8 +101,6 @@ class PhysicsTendency:
 
 def initialize_physics():
     # 1.2 Functions of sigma and latitude
-    pc.sigh = hsg
-    pc.sigl = jnp.log(fsg)
     pc.grdsig = pc.grav/(dhs*pc.p0)
     pc.grdscp = pc.grdsig/pc.cp
 
@@ -111,9 +109,9 @@ def initialize_physics():
     # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
     # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
     pc.wvi = jnp.zeros((fsg.shape[0], 2))
-    pc.wvi = pc.wvi.at[:-1, 0].set(1./(pc.sigl[1:]-pc.sigl[:-1]))
-    pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(pc.sigh[1:-1])-pc.sigl[:-1])*pc.wvi[:-1, 0])
-    pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-pc.sigl[-1])*pc.wvi[-2,0])
+    pc.wvi = pc.wvi.at[:-1, 0].set(1./(sigl[1:]-sigl[:-1]))
+    pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(hsg[1:-1])-sigl[:-1])*pc.wvi[:-1, 0])
+    pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-sigl[-1])*pc.wvi[-2,0])
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
