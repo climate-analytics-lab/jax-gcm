@@ -49,12 +49,15 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, checkpoint_terms=T
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
 
+    if not checkpoint_terms:
+        return physics_terms
+
     static_argnums = {
         set_forcing: (2,),
         couple_land_atm: (3,),
     }
-
-    return physics_terms, static_argnums
+    
+    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in physics_terms]
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
     from jcm.physics_data import PhysicsData
@@ -159,10 +162,7 @@ class SpeedyModel:
             self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms, static_argnums = get_speedy_physics_terms(self.coords.nodal_shape)
-
-        if checkpoint_terms:
-            self.physics_terms = [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in self.physics_terms]
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
