@@ -132,13 +132,12 @@ class TestConvectionUnit(unittest.TestCase):
         ttend_f90 = dfse_f90.at[1:].set(dfse_f90[1:] * rps[jnp.newaxis] * grdscp[1:, jnp.newaxis, jnp.newaxis])
         qtend_f90 = dfqa_f90.at[1:].set(dfqa_f90[1:] * rps[jnp.newaxis] * grdsig[1:, jnp.newaxis, jnp.newaxis])
 
-        # FIXME: These tests are failing due to a bug in calculating dfse and dfqa
-        # assert jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4)
-        # assert jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4)
+        assert jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4)
+        assert jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4)
 
     def test_get_convection_tendencies_isothermal(self):
         psa = jnp.ones((ix, il))
-        
+
         se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
        304056.8 , 293391.7 ])
         qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
@@ -161,7 +160,7 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_tendencies.temperature, jnp.zeros((kx, ix, il))))
-        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, jnp.zeros((kx, ix, il))))    
+        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, jnp.zeros((kx, ix, il))))
 
     def test_get_convection_tendencies_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
@@ -202,8 +201,8 @@ class TestConvectionUnit(unittest.TestCase):
 
         #check a few values of the fluxes
         self.assertAlmostEqual(physics_tendencies.temperature[4,0,0], test_ttend[4], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[5,0,0], test_ttend[5], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[6,0,0], test_ttend[6], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2)
