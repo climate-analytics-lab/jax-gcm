@@ -23,7 +23,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
         flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
-        rlds: Downward flux of long-wave radiation at the surface
+        slrd: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
     """
     kx, ix, il = state.temperature.shape
@@ -63,7 +63,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     st4a =  st4a.at[2:kx,:,:,1].set(4.0 * st3a * st4a[2:kx,:,:,1])
 
     # 2. Initialization of fluxes
-    rlds = jnp.zeros((ix, il))
+    slrd = jnp.zeros((ix, il))
     dfabs = jnp.zeros((kx, ix, il))
 
     # 3. Emission and absorption of longwave downward flux.
@@ -91,13 +91,13 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
             flux = flux.at[:,:,jb].set((tau2[k,:,:,jb] * flux[:,:,jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
             dfabs = dfabs.at[k].add(-flux[:,:,jb])
 
-    rlds = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
+    slrd = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
 
     corlw = parameters.mod_radcon.epslw * parameters.mod_radcon.emisfc * st4a[kx-1,:,:,0]
     dfabs = dfabs.at[kx-1].add(-corlw)
-    rlds = rlds + corlw
+    slrd = slrd + corlw
 
-    longwave_out = physics_data.longwave_rad.copy(rlds=rlds, dfabs=dfabs)
+    longwave_out = physics_data.longwave_rad.copy(slrd=slrd, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
     physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
@@ -112,7 +112,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     Args:
         ta: Absolute temperature
         ts: Surface temperature - surface_fluxes.tsfc
-        rlds: Downward flux of long-wave radiation at the surface
+        slrd: Downward flux of long-wave radiation at the surface
         fsfcu: Surface blackbody emission - taken from slru from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
@@ -127,17 +127,17 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     kx, _, _ = state.temperature.shape
     ta = state.temperature
     dfabs = physics_data.longwave_rad.dfabs
-    rlds = physics_data.longwave_rad.rlds
+    slrd = physics_data.surface_flux.slrd
 
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_flux.slru[:,:,2]
+    fsfcu = physics_data.surface_flux.slru[:,:,2] # FIXME
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
-    fsfc = fsfcu - rlds
+    fsfc = fsfcu - slrd
     
     ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
     ta_rounded = jnp.round(ta).astype(int)  # Rounded ta
@@ -172,9 +172,10 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     ftop += jnp.sum(flux, axis = -1)
 
-    longwave_out = physics_data.longwave_rad.copy(rlds=fsfc, ftop=ftop, dfabs=dfabs)
-    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
-    physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
+    surface_flux_out = physics_data.surface_flux.copy(slr=fsfc)
+    longwave_out = physics_data.longwave_rad.copy(ftop=ftop, dfabs=dfabs)
+    mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a, flux=flux)
+    physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     
     # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
     ttend_lwr = dfabs*grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis]

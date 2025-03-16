@@ -22,7 +22,7 @@ def initialize_arrays(ix, il, kx):
     
     return ta, fsfcd, st4a, flux
 
-class TestDownwardLongwave(unittest.TestCase):
+class TestLongwave(unittest.TestCase):
     
     def setUp(self):
         global ix, il, kx
@@ -30,8 +30,8 @@ class TestDownwardLongwave(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
 
-        global ModRadConData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-        from jcm.physics_data import ModRadConData, PhysicsData
+        global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
         from jcm.params import Parameters
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
@@ -55,7 +55,7 @@ class TestDownwardLongwave(unittest.TestCase):
 
         # fortran values
         # print(fsfcd[:5, :5])
-        f90_rlds = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
+        f90_slrd = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
                     [186.708473, 187.680627, 188.656572, 189.636231, 190.6197  ],
                     [186.718628, 187.69074 , 188.666658, 189.646441, 190.630014],
                     [186.728719, 187.700953, 188.676876, 189.656632, 190.640263],
@@ -98,14 +98,45 @@ class TestDownwardLongwave(unittest.TestCase):
                      [78.02499,10.12045],
                      [78.51081,10.1671 ]]]
         
-        self.assertTrue(np.allclose(physics_data.longwave_rad.rlds[:5, :5], np.asarray(f90_rlds), atol=1e-4))
+        self.assertTrue(np.allclose(physics_data.surface_flux.slrd[:5, :5], np.asarray(f90_slrd), atol=1e-4))
         self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[:, 0, 0], f90_dfabs, atol=1e-4))
         self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:, :5, :5, :], axis=0), np.asarray(f90_st4a), atol=1e-4))
 
     def test_upward_longwave_rad_fluxes(self):
-        # TODO: Implement this test
+        ta = jnp.ones((kx, ix, il)) * 300
+        ts = jnp.ones((ix, il)) * 300
+        fsfcd = jnp.ones((ix, il))
+        fsfcu = jnp.ones((ix, il))
+        dfabs = jnp.ones((kx, ix, il))
+        st4a = jnp.ones((kx, ix, il, 2))
+        flux = jnp.ones((ix, il, 4))
+        tau2 = jnp.ones((kx, ix, il, 4))
+        stratc = jnp.ones((ix, il, 2))
 
-        pass
+        state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
+        input_physics_data = PhysicsData.zeros((ix, il), kx).copy(
+            longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
+            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
+            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(slru=jnp.zeros((ix,il,3)).at[:,:,2].set(fsfcu), slrd=fsfcd, tsfc=ts),
+        )
+
+        # skip testing ttend since we have access to dfabs
+        _, output_physics_data = get_upward_longwave_rad_fluxes(state=state, physics_data=input_physics_data, parameters=parameters, boundaries=BoundaryData.zeros((ix, il), kx))
+
+        fsfc = output_physics_data.surface_flux.slr
+        ftop = output_physics_data.longwave_rad.ftop
+        dfabs = output_physics_data.longwave_rad.dfabs
+        flux = output_physics_data.mod_radcon.flux
+
+        fsfc_f90 = 0.0
+        ftop_f90 = 2.17
+        dfabs_f90 = jnp.array([-5e-2, 0.91, 1., 1., 1., 1., 1., 1.05])
+        flux_f90 = jnp.array([0.20036869, 0.15259434, 0.35659941, 0.32043748])
+
+        self.assertTrue(jnp.allclose(fsfc[0, 0], fsfc_f90, atol=1e-5))
+        self.assertTrue(jnp.allclose(ftop[0, 0], ftop_f90, atol=1e-5))
+        self.assertTrue(jnp.allclose(dfabs[:, 0, 0], dfabs_f90, atol=1e-5))
+        self.assertTrue(jnp.allclose(flux[0, 0, :], flux_f90, atol=1e-5))
 
     def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""

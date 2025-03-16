@@ -44,8 +44,8 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         - Sea-surface temperature, physics_data.sea_model.tsea
     rsds : 2D array 
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
-    rlds : 2D array 
-        - Downward flux of long-wave radiation at the surface, physics_data.longwave_rad.rlds
+    slrd : 2D array 
+        - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.slrd
     lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
@@ -64,7 +64,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
     lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
-    rlds = physics_data.longwave_rad.rlds
+    slrd = physics_data.surface_flux.slrd
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
@@ -185,7 +185,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
 
         hfluxn = hfluxn.at[:, :, 0].set(
-                        rsds * (1.0 - alb_l) + rlds -\
+                        rsds * (1.0 - alb_l) + slrd -\
                             (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                     )
 
@@ -258,7 +258,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     
     # 4.5 Lw emission and net heat fluxes
     slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + slrd - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])

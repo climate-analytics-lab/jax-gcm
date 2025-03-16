@@ -37,8 +37,8 @@ class TestConvectionUnit(unittest.TestCase):
         iptop_f90 = jnp.load(test_data_dir + '/iptop.npy')
         qdif_f90 = jnp.load(test_data_dir + '/qdif.npy')
 
-        assert jnp.allclose(iptop, iptop_f90, atol=1e-4)
-        assert jnp.allclose(qdif, qdif_f90, atol=1e-4)
+        self.assertTrue(jnp.allclose(iptop, iptop_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(qdif, qdif_f90, atol=1e-4))
 
     def test_diagnose_convection_isothermal(self):
         psa = jnp.ones((ix, il))
@@ -124,16 +124,16 @@ class TestConvectionUnit(unittest.TestCase):
         dfse_f90 = jnp.load(test_data_dir + '/dfse.npy')
         dfqa_f90 = jnp.load(test_data_dir + '/dfqa.npy')
 
-        assert jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4)
-        assert jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4)
-        assert jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4)
+        self.assertTrue(jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4))
 
         rps = 1/ps
         ttend_f90 = dfse_f90.at[1:].set(dfse_f90[1:] * rps[jnp.newaxis] * grdscp[1:, jnp.newaxis, jnp.newaxis])
         qtend_f90 = dfqa_f90.at[1:].set(dfqa_f90[1:] * rps[jnp.newaxis] * grdsig[1:, jnp.newaxis, jnp.newaxis])
 
-        assert jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4)
-        assert jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4)
+        self.assertTrue(jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4))
 
     def test_get_convection_tendencies_isothermal(self):
         psa = jnp.ones((ix, il))
