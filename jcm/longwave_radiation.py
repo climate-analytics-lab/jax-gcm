@@ -174,7 +174,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     ftop += jnp.sum(flux, axis = -1)
 
-    surface_flux_out = physics_data.surface_flux.copy(rls=fsfc)
+    surface_flux_out = physics_data.surface_flux.copy(rlns=fsfc)
     longwave_out = physics_data.longwave_rad.copy(ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a, flux=flux)
     physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)

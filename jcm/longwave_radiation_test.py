@@ -123,7 +123,7 @@ class TestLongwave(unittest.TestCase):
         # skip testing ttend since we have access to dfabs
         _, output_physics_data = get_upward_longwave_rad_fluxes(state=state, physics_data=input_physics_data, parameters=parameters, boundaries=BoundaryData.zeros((ix, il), kx))
 
-        fsfc = output_physics_data.surface_flux.rls
+        fsfc = output_physics_data.surface_flux.rlns
         ftop = output_physics_data.longwave_rad.ftop
         dfabs = output_physics_data.longwave_rad.dfabs
         flux = output_physics_data.mod_radcon.flux
