@@ -110,7 +110,7 @@ class TestLongwave(unittest.TestCase):
         dfabs = jnp.ones((kx, ix, il))
         st4a = jnp.ones((kx, ix, il, 2))
         flux = jnp.ones((ix, il, 4))
-        tau2 = jnp.ones((kx, ix, il, 4))
+        tau2 = jnp.ones((kx, ix, il, 4)) + jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis, jnp.newaxis] * .1
         stratc = jnp.ones((ix, il, 2))
 
         state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
@@ -129,9 +129,9 @@ class TestLongwave(unittest.TestCase):
         flux = output_physics_data.mod_radcon.flux
 
         fsfc_f90 = 0.0
-        ftop_f90 = 2.17
-        dfabs_f90 = jnp.array([-5e-2, 0.91, 1., 1., 1., 1., 1., 1.05])
-        flux_f90 = jnp.array([0.20036869, 0.15259434, 0.35659941, 0.32043748])
+        ftop_f90 = -2.037812334328966
+        dfabs_f90 = jnp.array([-5e-2, 1.2938921, 1.6556535, 1.7784461, 1.7685201, 1.6721002, 1.5397001, 1.4595001])
+        flux_f90 = jnp.array([-0.55618826, -0.35694631, -1.20774518, -1.05693259])
 
         self.assertTrue(jnp.allclose(fsfc[0, 0], fsfc_f90, atol=1e-5))
         self.assertTrue(jnp.allclose(ftop[0, 0], ftop_f90, atol=1e-5))

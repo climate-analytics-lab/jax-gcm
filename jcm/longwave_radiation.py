@@ -74,32 +74,33 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     # 3.1 Stratosphere
     ta_rounded = jnp.round(ta).astype(int)
     k = 0
-    for jb in range(2):
-        emis = 1 - tau2[k,:,:,jb]
-        brad = fband[ta_rounded[k]-100, jb] * (st4a[k,:,:,0] + emis*st4a[k,:,:,1])
-        flux = flux.at[:,:,jb].set(emis * brad)
-        dfabs = dfabs.at[k].set(dfabs[k] - flux[:,:,jb])
-    
-    flux = flux.at[2:nband].set(0.0)
+    emis = 1 - tau2
+    brad = fband[ta_rounded-100] * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
+    emis_brad = emis * brad
+    flux = emis_brad[k].at[:,:,2:nband].set(0.0)
+    dfabs = dfabs.at[k].add(-jnp.sum(flux,axis=-1))
 
-    # 3.2 Troposhere
-    for jb in range(nband):
-        for k in range(1,kx):
-            emis = 1 - tau2[k,:,:,jb]
-            brad = fband[ta_rounded[k]-100, jb] * (st4a[k,:,:,0] + emis*st4a[k,:,:,1])
-            dfabs = dfabs.at[k].add(flux[:,:,jb])  # Equivalent to dfabs[:,:,k] += flux[:,:,jb]
-            flux = flux.at[:,:,jb].set((tau2[k,:,:,jb] * flux[:,:,jb]) + (emis * brad))  # Equivalent to flux[:,:,jb] = tau2[:,:,k,jb]*flux[:,:,jb] + emis*brad
-            dfabs = dfabs.at[k].add(-flux[:,:,jb])
+    # 3.2 Troposphere
+    _flux_3d = jnp.zeros((kx, ix, il, nband)).at[0].set(flux)
+    _flux_3d = _flux_3d.at[1:].set(jax.lax.scan(
+        jax.checkpoint(lambda carry, k: 2*(tau2[k] * carry + emis_brad[k],)),
+        flux,
+        jnp.arange(1, kx) # scan from TOA to surface
+    )[1])
+    flux = _flux_3d[-1]
+    
+    dfabs = dfabs.at[1:].add(-jnp.diff(jnp.sum(_flux_3d, axis=-1), axis=0))
 
     slrd = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
 
     corlw = parameters.mod_radcon.epslw * parameters.mod_radcon.emisfc * st4a[kx-1,:,:,0]
-    dfabs = dfabs.at[kx-1].add(-corlw)
-    slrd = slrd + corlw
+    dfabs = dfabs.at[-1].add(-corlw)
+    slrd += corlw
 
-    longwave_out = physics_data.longwave_rad.copy(slrd=slrd, dfabs=dfabs)
+    surface_flux_out = physics_data.surface_flux.copy(slrd=slrd)
+    longwave_out = physics_data.longwave_rad.copy(dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
-    physics_data = physics_data.copy(longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
+    physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
 
     return physics_tendencies, physics_data
@@ -124,7 +125,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
     """
-    kx, _, _ = state.temperature.shape
+    kx, ix, il = state.temperature.shape
     ta = state.temperature
     dfabs = physics_data.longwave_rad.dfabs
     slrd = physics_data.surface_flux.slrd
@@ -139,35 +140,36 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     refsfc = 1.0 - parameters.mod_radcon.emisfc
     fsfc = fsfcu - slrd
     
-    ts_rounded = jnp.round(ts).astype(int)  # Rounded ts
-    ta_rounded = jnp.round(ta).astype(int)  # Rounded ta
+    ts_rounded = jnp.round(ts).astype(int)
+    ta_rounded = jnp.round(ta).astype(int)
 
     flux = fband[ts_rounded-100,:] * fsfcu[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
-    dfabs = dfabs.at[-1].set(dfabs[-1] + parameters.mod_radcon.epslw * fsfcu)
+    dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * fsfcu)
 
-    for jb in range(nband):
-        for k in range(kx-1, 0, -1):
-            emis = 1.0 - tau2[k,:,:,jb]
-            brad = fband[ta_rounded[k]-100, jb] * (st4a[k,:,:,0] - emis*st4a[k,:,:,1])
-            dfabs = dfabs.at[k].add(flux[:,:,jb])
-            flux = flux.at[:,:,jb].set(tau2[k,:,:,jb] * flux[:,:,jb] + emis * brad)
-            dfabs = dfabs.at[k].add(-flux[:,:,jb])
+    emis = 1. - tau2
+    brad = fband[ta_rounded-100] * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
+    emis_brad = emis * brad
 
-    k = 0
-    for jb in range(2):
-        emis = 1.0 - tau2[k,:,:,jb]
-        brad = fband[ta_rounded[k]-100, jb] * (st4a[k,:,:,0] - emis*st4a[k,:,:,1])
-        dfabs = dfabs.at[k].add(flux[:,:,jb])
-        flux = flux.at[:,:,jb].set(tau2[k,:,:,jb] * flux[:,:,jb] + emis * brad)
-        dfabs = dfabs.at[k].add(-flux[:,:,jb])
+    _flux_3d = jnp.zeros((kx, ix, il, nband)).at[-1].set(flux)
+    _flux_3d = _flux_3d.at[:-1].set(jax.lax.scan(
+        jax.checkpoint(lambda carry, k: 2*(tau2[k] * carry + emis_brad[k],)),
+        flux,
+        jnp.arange(kx-1, 0, -1) # scan from surface to TOA
+    )[1][::-1])
+    flux = _flux_3d[0]
+
+    dfabs = dfabs.at[1:].add(jnp.diff(jnp.sum(_flux_3d, axis=-1), axis=0))
+
+    flux = flux.at[:,:,:2].set((tau2[0] * flux + emis_brad[0])[:,:,:2])
+    dfabs = dfabs.at[0].add(jnp.sum((_flux_3d[0] - flux)[:,:,:2], axis=-1))
 
     corlw1 = dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
     corlw2 = dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
-    dfabs = dfabs.at[0].set(dfabs[0] - corlw1)
-    dfabs = dfabs.at[1].set(dfabs[1] - corlw2)
+    dfabs = dfabs.at[0].add(-corlw1)
+    dfabs = dfabs.at[1].add(-corlw2)
     ftop = corlw1 + corlw2
 
     ftop += jnp.sum(flux, axis = -1)
