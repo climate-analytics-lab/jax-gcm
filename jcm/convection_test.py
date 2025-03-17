@@ -11,16 +11,34 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.model import initialize_modules
         initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg
+        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg, rgas, cp
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
         parameters = Parameters.default()
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
-        from jcm.physical_constants import grdscp, grdsig
+        from jcm.physical_constants import grdscp, grdsig, rgas, cp
         from jcm.humidity import get_qsat
         from jcm.geometry import fsg
+
+    def test_diagnose_convection_varying(self):
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        se = cp * ta + phi
+        
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters)
+
+        from os import path
+        test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
+        iptop_f90 = jnp.load(test_data_dir + '/iptop.npy')
+        qdif_f90 = jnp.load(test_data_dir + '/qdif.npy')
+
+        self.assertTrue(jnp.allclose(iptop, iptop_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(qdif, qdif_f90, atol=1e-4))
 
     def test_diagnose_convection_isothermal(self):
         psa = jnp.ones((ix, il))
@@ -62,7 +80,6 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
-
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
 
@@ -83,9 +100,44 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertEqual(itop[0,0], test_itop)
         self.assertAlmostEqual(qdif[0,0],test_qdif,places=4)
 
-    def test_get_convective_tendencies_isothermal(self):
+    def test_get_convection_tendencies_varying(self):
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        se = cp * ta + phi
+
+        convection = ConvectionData.zeros((ix, il), kx, psa=ps, se=se)
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
+        state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
+        boundaries = BoundaryData.zeros((ix,il))
+
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
+
+        from os import path
+        test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
+        iptop_f90 = jnp.load(test_data_dir + '/iptop.npy')
+        cmbf_f90 = jnp.load(test_data_dir + '/cbmf.npy')
+        precnv_f90 = jnp.load(test_data_dir + '/precnv.npy')
+        dfse_f90 = jnp.load(test_data_dir + '/dfse.npy')
+        dfqa_f90 = jnp.load(test_data_dir + '/dfqa.npy')
+
+        self.assertTrue(jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4))
+
+        rps = 1/ps
+        ttend_f90 = dfse_f90.at[1:].set(dfse_f90[1:] * rps[jnp.newaxis] * grdscp[1:, jnp.newaxis, jnp.newaxis])
+        qtend_f90 = dfqa_f90.at[1:].set(dfqa_f90[1:] * rps[jnp.newaxis] * grdsig[1:, jnp.newaxis, jnp.newaxis])
+
+        self.assertTrue(jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4))
+
+    def test_get_convection_tendencies_isothermal(self):
         psa = jnp.ones((ix, il))
-        
+
         se = jnp.array([594060.  , 483714.2 , 422181.7 , 378322.1 , 344807.97, 320423.78,
        304056.8 , 293391.7 ])
         qa = jnp.array([0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ])
@@ -108,10 +160,9 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_tendencies.temperature, jnp.zeros((kx, ix, il))))
-        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, jnp.zeros((kx, ix, il))))    
+        self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, jnp.zeros((kx, ix, il))))
 
-     
-    def test_get_convective_tendencies_moist_adiabat(self):
+    def test_get_convection_tendencies_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
         zxy = (kx, ix, il)
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
@@ -150,8 +201,8 @@ class TestConvectionUnit(unittest.TestCase):
 
         #check a few values of the fluxes
         self.assertAlmostEqual(physics_tendencies.temperature[4,0,0], test_ttend[4], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[5,0,0], test_ttend[5], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[6,0,0], test_ttend[6], places=2)
-        self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2) 
+        self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2)

@@ -45,7 +45,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     rsds : 2D array 
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array 
-        - Downward flux of long-wave radiation at the surface, physics_data.longwave_rad.rlds
+        - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
     lfluxland : boolean, physics_data.surface_flux.lfluxland
 
     '''
@@ -64,7 +64,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
     lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
-    rlds = physics_data.longwave_rad.rlds
+    rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
@@ -84,7 +84,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     vstr = jnp.zeros((ix, il, 3))
     shf = jnp.zeros((ix, il, 3))
     evap = jnp.zeros((ix, il, 3))
-    slru = jnp.zeros((ix, il, 3))
+    rlus = jnp.zeros((ix, il, 3))
     hfluxn = jnp.zeros((ix, il, 2))
     t1 = jnp.zeros((ix, il, 2))
     q1 = jnp.zeros((ix, il, 2))
@@ -99,7 +99,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     ##########################################################
 
     def land_fluxes(operand):
-        u0,v0,ustr,vstr,shf,evap,slru,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
+        u0,v0,ustr,vstr,shf,evap,rlus,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
         # 1.1 Wind components
         rcp = 1.0/cp 
         nl1 = kx-1
@@ -181,17 +181,17 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
         # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
         tsk3 = tskin ** 3.0
-        dslr = 4.0 * esbc * tsk3
-        slru = slru.at[:, :, 0].set(esbc * tsk3 * tskin)
+        drls = 4.0 * esbc * tsk3
+        rlus = rlus.at[:, :, 0].set(esbc * tsk3 * tskin)
 
         hfluxn = hfluxn.at[:, :, 0].set(
                         rsds * (1.0 - alb_l) + rlds -\
-                            (slru[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
+                            (rlus[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
                     )
 
         # 3.2 Re-definition of skin temperature from energy balance
         def skin_temp(operand):
-            hfluxn, slru, evap, shf, tskin, qsat0 = operand
+            hfluxn, rlus, evap, shf, tskin, qsat0 = operand
             
             # Compute net heat flux including flux into ground
             clamb = parameters.surface_flux.clambda + (snowc * (parameters.surface_flux.clambsn - parameters.surface_flux.clambda))
@@ -209,18 +209,18 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
                 )
 
             # Redefine skin temperature to balance the heat budget
-            dtskin = hfluxn[:, :, 0] / (clamb + dslr + (parameters.surface_flux.chl * denvvs[:, :, 1] * (cp + (alhc * qsat0[:, :, 1]))))
+            dtskin = hfluxn[:, :, 0] / (clamb + drls + (parameters.surface_flux.chl * denvvs[:, :, 1] * (cp + (alhc * qsat0[:, :, 1]))))
             tskin = tskin + dtskin
 
             # Add linear corrections to heat fluxes
             shf = shf.at[:, :, 0].set(shf[:, :, 0] + chlcp*denvvs[:, :, 1]*dtskin)
             evap = evap.at[:, :, 0].set(evap[:, :, 0] + parameters.surface_flux.chl*denvvs[:, :, 1]*qsat0[:, :, 1]*dtskin)
-            slru = slru.at[:, :, 0].set(slru[:, :, 0] + dslr*dtskin)
+            rlus = rlus.at[:, :, 0].set(rlus[:, :, 0] + drls*dtskin)
             hfluxn = hfluxn.at[:, :, 0].set(clamb*(tskin - stl_am))
             
-            return (hfluxn, slru, evap, shf, tskin, qsat0)
+            return (hfluxn, rlus, evap, shf, tskin, qsat0)
         
-        hfluxn, slru, evap, shf, tskin, qsat0 = jax.lax.cond(parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, slru, evap, shf, tskin, qsat0))
+        hfluxn, rlus, evap, shf, tskin, qsat0 = jax.lax.cond(parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, rlus, evap, shf, tskin, qsat0))
 
         dths = jnp.where(
             tsea > t2[:, :, 1],
@@ -239,10 +239,10 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
         vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
 
-        return (u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
+        return (u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
     
     tskin = jnp.zeros_like(stl_am)
-    u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin = jax.lax.cond(lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, slru, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin))
+    u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin = jax.lax.cond(lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin))
     ##########################################################
     # Sea Surface
     ##########################################################
@@ -257,33 +257,33 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     evap = evap.at[:, :, 1].set(parameters.surface_flux.chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
     
     # 4.5 Lw emission and net heat fluxes
-    slru = slru.at[:, :, 1].set(esbc * (tsea ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - slru[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    rlus = rlus.at[:, :, 1].set(esbc * (tsea ** 4.0))
+    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
 
     def weight_avg_landfluxes(operand):
         
-        ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin = operand
+        ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = operand
         ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
         vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
         shf = shf.at[:, :, 2].set(weighted_average(shf))
         evap = evap.at[:, :, 2].set(weighted_average(evap))
-        slru = slru.at[:, :, 2].set(weighted_average(slru))
+        rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
 
         t0 = weighted_average(t1)
 
         tsfc  = tsea + fmask * (stl_am - tsea)
         tskin = tsea + fmask * (tskin  - tsea)
 
-        return (ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin)
+        return (ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
     
     t0 = jnp.zeros_like(t1[:,:,0])
     tsfc = jnp.zeros_like(stl_am)
-    ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin = jax.lax.cond(lfluxland, weight_avg_landfluxes, pass_fn, operand=(ustr, vstr, shf, evap, slru, t1, t0, tsfc, tskin))
+    ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = jax.lax.cond(lfluxland, weight_avg_landfluxes, pass_fn, operand=(ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin))
 
-    surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, slru=slru, hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
+    surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, rlus=rlus, hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
 
     # Compute tendencies due to surface fluxes (physics.f90:197-205)
