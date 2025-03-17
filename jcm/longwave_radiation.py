@@ -23,7 +23,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
         flux: Radiative flux in different spectral bands - modradcon.flux
 
     Returns:
-        slrd: Downward flux of long-wave radiation at the surface
+        rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
     """
     kx, ix, il = state.temperature.shape
@@ -63,7 +63,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     st4a =  st4a.at[2:kx,:,:,1].set(4.0 * st3a * st4a[2:kx,:,:,1])
 
     # 2. Initialization of fluxes
-    slrd = jnp.zeros((ix, il))
+    rlds = jnp.zeros((ix, il))
     dfabs = jnp.zeros((kx, ix, il))
 
     # 3. Emission and absorption of longwave downward flux.
@@ -91,13 +91,13 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     
     dfabs = dfabs.at[1:].add(-jnp.diff(jnp.sum(_flux_3d, axis=-1), axis=0))
 
-    slrd = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
+    rlds = jnp.sum(parameters.mod_radcon.emisfc * flux, axis=-1)
 
     corlw = parameters.mod_radcon.epslw * parameters.mod_radcon.emisfc * st4a[kx-1,:,:,0]
     dfabs = dfabs.at[-1].add(-corlw)
-    slrd += corlw
+    rlds += corlw
 
-    surface_flux_out = physics_data.surface_flux.copy(slrd=slrd)
+    surface_flux_out = physics_data.surface_flux.copy(rlds=rlds)
     longwave_out = physics_data.longwave_rad.copy(dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
     physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
@@ -113,8 +113,8 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     Args:
         ta: Absolute temperature
         ts: Surface temperature - surface_fluxes.tsfc
-        slrd: Downward flux of long-wave radiation at the surface
-        fsfcu: Surface blackbody emission - taken from slru from surface fluxes
+        rlds: Downward flux of long-wave radiation at the surface
+        fsfcu: Surface blackbody emission - taken from rlus from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
@@ -128,17 +128,17 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     kx, ix, il = state.temperature.shape
     ta = state.temperature
     dfabs = physics_data.longwave_rad.dfabs
-    slrd = physics_data.surface_flux.slrd
+    rlds = physics_data.surface_flux.rlds
 
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_flux.slru[:,:,2] # FIXME
+    fsfcu = physics_data.surface_flux.rlus[:,:,2] # FIXME
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
-    fsfc = fsfcu - slrd
+    fsfc = fsfcu - rlds
     
     ts_rounded = jnp.round(ts).astype(int)
     ta_rounded = jnp.round(ta).astype(int)
@@ -174,7 +174,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
 
     ftop += jnp.sum(flux, axis = -1)
 
-    surface_flux_out = physics_data.surface_flux.copy(slr=fsfc)
+    surface_flux_out = physics_data.surface_flux.copy(rls=fsfc)
     longwave_out = physics_data.longwave_rad.copy(ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a, flux=flux)
     physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)

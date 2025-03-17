@@ -19,7 +19,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     cloudc(ix,il)    # Total cloud cover
     clstr(ix,il)     # Stratiform cloud cover
     rsds(ix,il)    # Total downward flux of short-wave radiation at the surface
-    ssr(ix,il)     # Net downward flux of short-wave radiation at the surface
+    rss(ix,il)     # Net downward flux of short-wave radiation at the surface
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
@@ -75,7 +75,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
     
-    ssr = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
+    rss = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
     dfabs = jnp.zeros((kx,ix,il)) # Flux of short-wave radiation absorbed in each atmospheric layer
     ftop = physics_data.shortwave_rad.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
@@ -127,7 +127,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     # 4.1  Absorption and reflection at the surface
     rsds = flux_1[kx-1] + flux_2[kx-1]
     flux_1 = flux_1.at[kx-1].multiply(albsfc)
-    ssr = rsds - flux_1[kx-1]
+    rss = rsds - flux_1[kx-1]
 
     # 4.2  Absorption of upward flux
 
@@ -183,7 +183,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
     flux = physics_data.mod_radcon.flux.at[:,:,0].set(flux_1[0]).at[:,:,1].set(flux_2[kx-1])
     mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
-    shortwave_rad_out = physics_data.shortwave_rad.copy(ssr=ssr, ftop=ftop, dfabs=dfabs, rsds=rsds)
+    shortwave_rad_out = physics_data.shortwave_rad.copy(rss=rss, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162

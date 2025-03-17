@@ -40,11 +40,11 @@ class TestHumidityUnit(unittest.TestCase):
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
-        slrd = 400. * jnp.ones((ix, il)) #surface downward longwave
+        rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         boundaries = BoundaryData.ones(xy,tsea=tsea, fmask=fmask,phi0=phi0,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy, slrd=slrd)
+        sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)

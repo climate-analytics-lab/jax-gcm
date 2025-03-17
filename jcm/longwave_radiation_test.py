@@ -55,7 +55,7 @@ class TestLongwave(unittest.TestCase):
 
         # fortran values
         # print(fsfcd[:5, :5])
-        f90_slrd = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
+        f90_rlds = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
                     [186.708473, 187.680627, 188.656572, 189.636231, 190.6197  ],
                     [186.718628, 187.69074 , 188.666658, 189.646441, 190.630014],
                     [186.728719, 187.700953, 188.676876, 189.656632, 190.640263],
@@ -98,7 +98,7 @@ class TestLongwave(unittest.TestCase):
                      [78.02499,10.12045],
                      [78.51081,10.1671 ]]]
         
-        self.assertTrue(np.allclose(physics_data.surface_flux.slrd[:5, :5], np.asarray(f90_slrd), atol=1e-4))
+        self.assertTrue(np.allclose(physics_data.surface_flux.rlds[:5, :5], np.asarray(f90_rlds), atol=1e-4))
         self.assertTrue(np.allclose(physics_data.longwave_rad.dfabs[:, 0, 0], f90_dfabs, atol=1e-4))
         self.assertTrue(np.allclose(np.mean(physics_data.mod_radcon.st4a[:, :5, :5, :], axis=0), np.asarray(f90_st4a), atol=1e-4))
 
@@ -117,13 +117,13 @@ class TestLongwave(unittest.TestCase):
         input_physics_data = PhysicsData.zeros((ix, il), kx).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
-            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(slru=jnp.zeros((ix,il,3)).at[:,:,2].set(fsfcu), slrd=fsfcd, tsfc=ts),
+            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(fsfcu), rlds=fsfcd, tsfc=ts),
         )
 
         # skip testing ttend since we have access to dfabs
         _, output_physics_data = get_upward_longwave_rad_fluxes(state=state, physics_data=input_physics_data, parameters=parameters, boundaries=BoundaryData.zeros((ix, il), kx))
 
-        fsfc = output_physics_data.surface_flux.slr
+        fsfc = output_physics_data.surface_flux.rls
         ftop = output_physics_data.longwave_rad.ftop
         dfabs = output_physics_data.longwave_rad.dfabs
         flux = output_physics_data.mod_radcon.flux
