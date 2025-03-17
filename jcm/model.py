@@ -17,7 +17,7 @@ def initialize_modules(kx=8, il=64):
     from jcm.physics import initialize_physics
     initialize_physics()
 
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
@@ -48,7 +48,16 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0):
     ]
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
-    return physics_terms
+
+    if not checkpoint_terms:
+        return physics_terms
+
+    static_argnums = {
+        set_forcing: (2,),
+        couple_land_atm: (3,),
+    }
+    
+    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in physics_terms]
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
     from jcm.physics_data import PhysicsData
@@ -81,7 +90,7 @@ class SpeedyModel:
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
                  start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None,
-                 post_process=True) -> None:
+                 post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
                 
@@ -153,7 +162,7 @@ class SpeedyModel:
             self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape)
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:
@@ -197,9 +206,6 @@ class SpeedyModel:
             'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
         return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
-
-    def advance(self, state: dinosaur.primitive_equations.State) -> dinosaur.primitive_equations.State:
-        return self.step_fn(state)
     
     def post_process(self, state):
         from jcm.date import DateData
@@ -232,7 +238,7 @@ class SpeedyModel:
     
     def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            self.step_fn,
+            jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
