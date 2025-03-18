@@ -11,17 +11,17 @@ from dinosaur import primitive_equations_states
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 
-def initialize_modules(kx=8, il=64):
+def initialize_modules(kx=8, il=64, coords=None):
     from jcm.geometry import initialize_geometry
-    initialize_geometry(kx=kx, il=il)
+    initialize_geometry(kx=kx, il=il, coords=coords)
     from jcm.physics import initialize_physics
     initialize_physics()
 
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, checkpoint_terms=True):
+def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
-    initialize_modules(kx = grid_shape[0], il = grid_shape[2])
+    initialize_modules(kx = grid_shape[0], il = grid_shape[2], coords=coords)
     
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
@@ -121,19 +121,29 @@ class SpeedyModel:
         self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
 
         resolution_map = {
-            31: dinosaur.spherical_harmonic.Grid.T31(radius=self.physics_specs.radius),
-            42: dinosaur.spherical_harmonic.Grid.T42(radius=self.physics_specs.radius),
-            85: dinosaur.spherical_harmonic.Grid.T85(radius=self.physics_specs.radius),
-            213: dinosaur.spherical_harmonic.Grid.T213(radius=self.physics_specs.radius),
+            31: dinosaur.spherical_harmonic.Grid.T31,
+            42: dinosaur.spherical_harmonic.Grid.T42,
+            85: dinosaur.spherical_harmonic.Grid.T85,
+            213: dinosaur.spherical_harmonic.Grid.T213,
         }
 
         if horizontal_resolution not in resolution_map:
             raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
+        
+        sigma_layer_boundaries = {
+            5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
+            7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]), # FIXME: the .02 breaks dinosaur
+            8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+        }
+
+        if layers not in sigma_layer_boundaries:
+            raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
 
         # Define the coordinate system
         self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=resolution_map[horizontal_resolution], # truncation 
-            vertical=dinosaur.sigma_coordinates.SigmaCoordinates.equidistant(layers))
+            horizontal=resolution_map[horizontal_resolution](radius=self.physics_specs.radius), # truncation 
+            vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+        )
 
         self.inner_steps = int(save_every / dt_si)
         self.outer_steps = int(total_time / save_every)
@@ -162,7 +172,7 @@ class SpeedyModel:
             self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, checkpoint_terms=checkpoint_terms)
+        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, coords=self.coords, checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_file is None:

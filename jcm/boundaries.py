@@ -102,7 +102,7 @@ def fixed_ssts(ix):
     """
     from jcm.geometry import radang
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis, :], (ix, 1))
+    return jnp.tile(sst_profile[jnp.newaxis], (ix, 1))
 
 def default_boundaries(primitive, orography, parameters):
     """
@@ -138,7 +138,6 @@ def initialize_boundaries(filename, primitive, truncation_number, parameters, ti
     import xarray as xr
 
     ds = xr.open_dataset(filename)
-    ds = ds.reindex(lat=list(reversed(ds.lat)))
 
     # Read surface geopotential (i.e. orography)
     phi0 = grav* jnp.asarray(ds["orog"])
