@@ -69,7 +69,7 @@ class CondensationParameters:
 class ShortwaveRadiationParameters:
     # parameters for `get_zonal_average_fields`
 
-    albcl:  jnp.ndarray  # Cloud albedo (for cloud cover = 1)
+    albcl:  jnp.ndarray # Cloud albedo (for cloud cover = 1)
     albcls: jnp.ndarray # Stratiform cloud albedo (for st. cloud cover = 1)
     
     # Shortwave absorptivities (for dp = 10^5 Pa)
@@ -81,11 +81,11 @@ class ShortwaveRadiationParameters:
     abscl2: jnp.ndarray # Absorptivity of clouds
 
     # Longwave absorptivities (for dp = 10^5 Pa)
-    ablwin: jnp.ndarray   # Absorptivity of air in "window" band
-    ablwv1: jnp.ndarray   # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
+    ablwin: jnp.ndarray # Absorptivity of air in "window" band
+    ablwv1: jnp.ndarray # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
     ablwv2: jnp.ndarray # Absorptivity of water vapour in H2O band 2 (strong) (for dq = 1 g/kg)
     ablcl1: jnp.ndarray # Absorptivity of "thick" clouds in window band (below cloud top)
-    ablcl2: jnp.ndarray   # Absorptivity of "thin" upper clouds in window and H2O bands
+    ablcl2: jnp.ndarray # Absorptivity of "thin" upper clouds in window and H2O bands
 
     # parameters for `clouds`
     

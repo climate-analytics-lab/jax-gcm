@@ -100,11 +100,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         initialize_modules(kx=kx, il=il)
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, sia, epssw, parameters
+               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, sia, epssw, parameters
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes
+        from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
         from jcm.physical_constants import epssw
         from jcm.geometry import sia
         from jcm.params import Parameters
@@ -157,7 +157,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             186.12903619, 185.31120169, 183.42677496
         ], atol=1e-4)
 
-        self.assertTrue(np.allclose(physics_data.shortwave_rad.ssr[0, :], [
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,

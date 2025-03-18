@@ -7,35 +7,27 @@ ablco2_ref = 6.0
  
 @tree_math.struct
 class LWRadiationData:
-    rlds: jnp.ndarray # Downward flux of long-wave radiation at the surface
     dfabs: jnp.ndarray # Flux of long-wave radiation absorbed in each atmospheric layer
     ftop: jnp.ndarray
-    slr: jnp.ndarray
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, rlds=None, dfabs=None, ftop=None, slr=None):
+    def zeros(self, nodal_shape, node_levels, dfabs=None, ftop=None):
         return LWRadiationData(
-            rlds = rlds if rlds is not None else jnp.zeros(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
-            slr = slr if slr is not None else jnp.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, rlds=None, dfabs=None, ftop=None, slr=None):
+    def ones(self, nodal_shape, node_levels, dfabs=None, ftop=None):
         return LWRadiationData(
-            rlds = rlds if rlds is not None else jnp.ones(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
-            slr = slr if slr is not None else jnp.ones(nodal_shape),
         )
 
-    def copy(self, rlds=None, dfabs=None, ftop=None, slr=None):
+    def copy(self, dfabs=None, ftop=None):
         return LWRadiationData(
-            rlds=rlds if rlds is not None else self.rlds,
             dfabs=dfabs if dfabs is not None else self.dfabs,
             ftop=ftop if ftop is not None else self.ftop,
-            slr=slr if slr is not None else self.slr
         )
     
     def isnan(self):
@@ -45,7 +37,7 @@ class SWRadiationData:
     qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
     fsol: jnp.ndarray # Solar radiation at the top
     rsds: jnp.ndarray # Total downward flux of short-wave radiation at the surface
-    ssr: jnp.ndarray # Net downward flux of short-wave radiation at the surface
+    rsns: jnp.ndarray # Net downward flux of short-wave radiation at the surface
     ozone: jnp.ndarray # Ozone concentration in lower stratosphere
     ozupp: jnp.ndarray# Ozone depth in upper stratosphere
     zenit: jnp.ndarray # The Zenit angle
@@ -58,12 +50,12 @@ class SWRadiationData:
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.zeros(nodal_shape),
             fsol = fsol if fsol is not None else jnp.zeros(nodal_shape),
             rsds = rsds if rsds is not None else jnp.zeros(nodal_shape),
-            ssr = ssr if ssr is not None else jnp.zeros(nodal_shape),
+            rsns = rsns if rsns is not None else jnp.zeros(nodal_shape),
             ozone = ozone if ozone is not None else jnp.zeros(nodal_shape),
             ozupp = ozupp if ozupp is not None else jnp.zeros(nodal_shape),
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
@@ -77,12 +69,12 @@ class SWRadiationData:
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.ones(nodal_shape),
             fsol = fsol if fsol is not None else jnp.ones(nodal_shape),
             rsds = rsds if rsds is not None else jnp.ones(nodal_shape),
-            ssr = ssr if ssr is not None else jnp.ones(nodal_shape),
+            rsns = rsns if rsns is not None else jnp.ones(nodal_shape),
             ozone = ozone if ozone is not None else jnp.ones(nodal_shape),
             ozupp = ozupp if ozupp is not None else jnp.ones(nodal_shape),
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
@@ -95,12 +87,12 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape)
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, ssr=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
             rsds=rsds if rsds is not None else self.rsds,
-            ssr=ssr if ssr is not None else self.ssr,
+            rsns=rsns if rsns is not None else self.rsns,
             ozone=ozone if ozone is not None else self.ozone,
             ozupp=ozupp if ozupp is not None else self.ozupp,
             zenit=zenit if zenit is not None else self.zenit,
@@ -285,7 +277,9 @@ class SurfaceFluxData:
     vstr: jnp.ndarray # v-stress
     shf: jnp.ndarray # Sensible heat flux
     evap: jnp.ndarray # Evaporation
-    slru: jnp.ndarray # Upward flux of long-wave radiation at the surface
+    rlus: jnp.ndarray # Upward flux of long-wave radiation at the surface
+    rlds: jnp.ndarray # Downward flux of long-wave radiation at the surface
+    rlns: jnp.ndarray # Net upward flux of long-wave radiation at the surface
     hfluxn: jnp.ndarray # Net downward heat flux
     tsfc: jnp.ndarray # Surface temperature
     tskin: jnp.ndarray # Skin surface temperature
@@ -294,13 +288,15 @@ class SurfaceFluxData:
     t0: jnp.ndarray # Near-surface temperature
 
     @classmethod
-    def zeros(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+    def zeros(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
             ustr = ustr if ustr is not None else jnp.zeros((nodal_shape)+(3,)),
             vstr = vstr if vstr is not None else jnp.zeros((nodal_shape)+(3,)),
             shf = shf if shf is not None else jnp.zeros((nodal_shape)+(3,)),
             evap = evap if evap is not None else jnp.zeros((nodal_shape)+(3,)),
-            slru = slru if slru is not None else jnp.zeros((nodal_shape)+(3,)),
+            rlus = rlus if rlus is not None else jnp.zeros((nodal_shape)+(3,)),
+            rlds = rlds if rlds is not None else jnp.zeros((nodal_shape)),
+            rlns = rlns if rlns is not None else jnp.zeros((nodal_shape)),
             hfluxn = hfluxn if hfluxn is not None else jnp.zeros((nodal_shape)+(2,)),
             tsfc = tsfc if tsfc is not None else jnp.zeros(nodal_shape),
             tskin = tskin if tskin is not None else jnp.zeros(nodal_shape),
@@ -310,13 +306,15 @@ class SurfaceFluxData:
         )
     
     @classmethod
-    def ones(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+    def ones(self, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
             ustr = ustr if ustr is not None else jnp.ones((nodal_shape)+(3,)),
             vstr = vstr if vstr is not None else jnp.ones((nodal_shape)+(3,)),
             shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
             evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
-            slru = slru if slru is not None else jnp.ones((nodal_shape)+(3,)),
+            rlus = rlus if rlus is not None else jnp.ones((nodal_shape)+(3,)),
+            rlds = rlds if rlds is not None else jnp.ones((nodal_shape)), # FIXME these shapes
+            rlns = rlns if rlns is not None else jnp.ones((nodal_shape)),
             hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
             tsfc = tsfc if tsfc is not None else jnp.ones(nodal_shape),
             tskin = tskin if tskin is not None else jnp.ones(nodal_shape),
@@ -325,13 +323,15 @@ class SurfaceFluxData:
             t0 = t0 if t0 is not None else jnp.ones(nodal_shape)
         )
 
-    def copy(self, ustr=None, vstr=None, shf=None, evap=None, slru=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+    def copy(self, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
         return SurfaceFluxData(
             ustr=ustr if ustr is not None else self.ustr,
             vstr=vstr if vstr is not None else self.vstr,
             shf=shf if shf is not None else self.shf,
             evap=evap if evap is not None else self.evap,
-            slru=slru if slru is not None else self.slru,
+            rlus=rlus if rlus is not None else self.rlus,
+            rlds=rlds if rlds is not None else self.rlds,
+            rlns=rlns if rlns is not None else self.rlns,
             hfluxn=hfluxn if hfluxn is not None else self.hfluxn,
             tsfc=tsfc if tsfc is not None else self.tsfc,
             tskin=tskin if tskin is not None else self.tskin,

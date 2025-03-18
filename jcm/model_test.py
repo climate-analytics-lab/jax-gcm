@@ -159,3 +159,78 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+
+    def test_speedy_model_param_gradients_isnan_vjp(self):
+        import jax
+        import jax.numpy as jnp
+        from jcm.model import SpeedyModel
+        
+        def create_model(params):
+            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
+                parameters=params, post_process=True)
+            return model
+        
+        def model_run_wrapper(params):
+            model = create_model(params)
+            state = model.get_initial_state()
+            final_state, predictions = model.unroll(state)
+            return predictions
+        
+        def make_ones_prediction_object(pred): 
+            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
+        
+        # Calculate gradients using VJP
+        params = Parameters.default()
+        primal, f_vjp = jax.vjp(model_run_wrapper, params)
+        df_dparams = f_vjp(make_ones_prediction_object(primal))
+
+        self.assertFalse(df_dparams[0].isnan().any_true())
+    
+
+    def test_speedy_model_param_gradients_isnan_jvp(self):
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from jcm.model import SpeedyModel
+
+        def make_ones_parameters_object(params):
+            def make_tangent(x):
+                if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
+                    return np.ones((), dtype=jax.dtypes.float0)
+                elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
+                    return np.ones((), dtype=jax.dtypes.float0)
+                else:
+                    return jnp.ones_like(x)
+            return jtu.tree_map(lambda x: make_tangent(x), params)
+        
+        def create_model(params):
+            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
+                parameters=params, post_process=True)
+            return model
+        
+        def model_run_wrapper(params):
+            model = create_model(params)
+            state = model.get_initial_state()
+            final_state, predictions = model.unroll(state)
+            return predictions
+        
+        # Calculate gradients using JVP
+        params = Parameters.default()
+        tangent = make_ones_parameters_object(params)
+        y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
+        state = jvp_sum['dynamics']
+        physics_data = jvp_sum['physics']
+
+        # Check dinosaur states
+        self.assertFalse(jnp.any(jnp.isnan(state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(state.tracers['specific_humidity'])))
+        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+        # Check Physics Data object
+        # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+
+

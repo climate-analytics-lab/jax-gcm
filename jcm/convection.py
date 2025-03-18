@@ -182,8 +182,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
     # Calculate flux convergence
-    dfse = dfse.at[:-1].add(loop_mask[:-1] * (jnp.diff(_fus_3d - _fds_3d, axis=0)))
-    dfqa = dfqa.at[:-1].add(loop_mask[:-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=0)))
+    dfse = dfse.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fus_3d - _fds_3d, axis=0)))
+    dfqa = dfqa.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=0)))
 
     # Secondary moisture flux
     delq = loop_mask * (parameters.convection.rhil * qsat - qa)
@@ -194,7 +194,6 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
 
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[jnp.newaxis], axis=0), axis=0)
-    # FIXME: do we need to pad by 1 or 2
     pad_array = lambda array: jnp.pad(array, ((0, 2), (0, 0), (0, 0)), mode='constant', constant_values=0)
     fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop)
                                  for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
@@ -207,8 +206,9 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
 
     # Net flux of dry static energy and moisture
-    dfse = dfse.at[k].set(fus - fds + alhc * precnv)
-    dfqa = dfqa.at[k].set(fuq - fdq - precnv)
+    i, j = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing="ij")
+    dfse = dfse.at[k, i, j].set(fus - fds + alhc * precnv)
+    dfqa = dfqa.at[k, i, j].set(fuq - fdq - precnv)
 
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
     # Another important note is that this goes from 2:kx in the fortran

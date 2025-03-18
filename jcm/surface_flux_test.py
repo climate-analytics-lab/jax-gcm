@@ -38,11 +38,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.zeros(xy, tsea=tsea,phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland)
 
@@ -77,11 +77,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland = True
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.ones(xy, tsea=tsea,phi0=phi0, fmask_l=fmask_l, lfluxland=lfluxland, soilw_am=soilw_am)
 
@@ -92,7 +92,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(sflux_data.vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.slru[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.rlus[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tsfc[0, 0], 290.0, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tskin[0, 0], 297.22821044921875, atol=1e-4))
@@ -119,18 +119,18 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il,365)))    
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         forog = set_orog_land_sfc_drag(phi0, parameters)
         boundaries = BoundaryData.zeros(xy, tsea=tsea, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries)
         sflux_data = physics_data.surface_flux
 
-        # old outputs: ustr, vstr, shf, evap, slru, hfluxn, tsfc, tskin, u0, v0, t0
+        # old outputs: ustr, vstr, shf, evap, rlus, hfluxn, tsfc, tskin, u0, v0, t0
         test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
             4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
             9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
@@ -142,7 +142,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
         
         # pulling the subset of return values to be testsed against the test data
-        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data.T,
@@ -169,11 +169,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         forog = set_orog_land_sfc_drag(phi0, parameters)
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.zeros(xy, tsea=tsea,phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
         
@@ -191,7 +191,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
             9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
             
-        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
@@ -219,11 +219,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.zeros(xy, tsea=tsea,phi0=phi0, fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
 
@@ -240,7 +240,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             4.33961243e+02, 2.99674957e+02, 2.89000000e+02, 2.97482452e+02,
             9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
     
-        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
@@ -269,11 +269,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.zeros(xy,tsea=tsea,phi0=phi0,fmask_l=fmask_l,lfluxland=lfluxland, soilw_am=soilw_am, forog=forog)
 
@@ -290,7 +290,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             4.57831177e+02, 3.00025909e+02, 2.89000000e+02, 3.01831757e+02,
             9.50001001e-01, 9.50001001e-01, 3.00000000e+02]])
 
-        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
@@ -318,11 +318,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lfluxland=True
 
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
-        sflux_data = SurfaceFluxData.zeros(xy)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx,psa=psa)
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
-        lw_rad = LWRadiationData.zeros(xy,kx,rlds=rlds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         boundaries = BoundaryData.zeros(xy,tsea=tsea,phi0=phi0,fmask_l=fmask_l,soilw_am=soilw_am,forog=forog,lfluxland=lfluxland)
 
@@ -339,7 +339,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
             4.1897797e+02, 3.0835028e+02, 2.8900000e+02, 2.9474951e+02,
             9.5000100e-01, 9.5000100e-01, 2.8500000e+02]])
         
-        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.slru, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
+        vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),

@@ -19,7 +19,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     cloudc(ix,il)    # Total cloud cover
     clstr(ix,il)     # Stratiform cloud cover
     rsds(ix,il)    # Total downward flux of short-wave radiation at the surface
-    ssr(ix,il)     # Net downward flux of short-wave radiation at the surface
+    rsns(ix,il)     # Net downward flux of short-wave radiation at the surface
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     '''
@@ -75,7 +75,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
     
-    ssr = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
+    rsns = jnp.zeros((ix, il)) # Net downward flux of short-wave radiation at the surface
     dfabs = jnp.zeros((kx,ix,il)) # Flux of short-wave radiation absorbed in each atmospheric layer
     ftop = physics_data.shortwave_rad.fsol # Net downward flux of short-wave radiation at the top of the atmosphere
 
@@ -102,7 +102,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     
     # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        lambda carry, i: (propagate_flux_1(carry, i),)*2, #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
+        jax.checkpoint(lambda carry, i: (propagate_flux_1(carry, i),)*2), #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
         flux_1[1], #initial value
         tau2[2:kx]) #pass tau2 directly rather than indexing
     
@@ -116,7 +116,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     flux_2 = flux_2.at[1].set(flux_2[0])
     propagate_flux_2 = lambda flux, tau: flux * tau[:, :, 1]
     _, flux_2_scan = lax.scan(
-        lambda carry, i: (propagate_flux_2(carry, i),)*2,
+        jax.checkpoint(lambda carry, i: (propagate_flux_2(carry, i),)*2),
         flux_2[1],
         tau2[1:kx])
     flux_2 = flux_2.at[1:kx].set(flux_2_scan)
@@ -127,13 +127,13 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     # 4.1  Absorption and reflection at the surface
     rsds = flux_1[kx-1] + flux_2[kx-1]
     flux_1 = flux_1.at[kx-1].multiply(albsfc)
-    ssr = rsds - flux_1[kx-1]
+    rsns = rsds - flux_1[kx-1]
 
     # 4.2  Absorption of upward flux
 
     propagate_flux_up = lambda flux, tau: flux * tau[:,:,0] + tau[:,:,2]
     _, flux_1_scan = lax.scan(
-        lambda carry, tau: (propagate_flux_up(carry, tau),) * 2,
+        jax.checkpoint(lambda carry, tau: (propagate_flux_up(carry, tau),) * 2),
         flux_1[-1],
         tau2[1:kx][::-1]
     )
@@ -183,7 +183,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
     flux = physics_data.mod_radcon.flux.at[:,:,0].set(flux_1[0]).at[:,:,1].set(flux_2[kx-1])
     mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
-    shortwave_rad_out = physics_data.shortwave_rad.copy(ssr=ssr, ftop=ftop, dfabs=dfabs, rsds=rsds)
+    shortwave_rad_out = physics_data.shortwave_rad.copy(rsns=rsns, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
