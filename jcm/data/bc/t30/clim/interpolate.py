@@ -2,7 +2,7 @@ import xarray as xr
 import pandas as pd
 
 # get monthly data
-ds_monthly = xr.open_dataset("./boundaries.nc")
+ds_monthly = xr.open_dataset("/jax-gcm/jcm/data/bc/t30/clim/boundaries.nc")
 
 time_vars = [var for var in ds_monthly.data_vars if 'time' in ds_monthly[var].dims]
 non_time_vars = [var for var in ds_monthly.data_vars if 'time' not in ds_monthly[var].dims]
@@ -37,4 +37,4 @@ def spline_interpolation():
 
 ds_daily = linear_interpolation()
 # write to netcdf
-ds_daily.to_netcdf("boundaries_daily.nc")
+ds_daily.to_netcdf("/jax-gcm/jcm/data/bc/t30/clim/boundaries_daily.nc")
