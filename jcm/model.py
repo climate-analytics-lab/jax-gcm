@@ -130,7 +130,7 @@ class SpeedyModel:
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, coords=None,
-                 boundary_file=None, boundary_data=None, physics_specs=None,
+                 boundary_data=None, physics_specs=None,
                  parameters=None, post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -178,26 +178,16 @@ class SpeedyModel:
         )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
-
-        # Governing equations
-        # self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
-        #     self.ref_temps,
-        #     orography,
-        #     self.coords,
-        #     self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, coords=self.coords, checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
-        if boundary_data is None and boundary_file is None:
+        if boundary_data is None:
             truncated_orography = dinosaur.primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters)
+            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, horizontal_resolution, dt_si)
         else:
-            if boundary_data is not None:
-                self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
-            else:
-                self.boundaries = initialize_boundaries(boundary_file, self.coords.horizontal, parameters=self.parameters, time_step=dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(
                 self.physics_specs.nondimensionalize(
                     self.boundaries.phis0 * units.meter ** 2 / units.second ** 2

@@ -106,23 +106,30 @@ def fixed_ssts(grid):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
 
-def default_boundaries(grid, orography, parameters=None):
+def default_boundaries(grid, orography, parameters=None, truncation_number=0, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
     from jcm.surface_flux import set_orog_land_sfc_drag
+    from jcm.utils import spectral_truncation
+
+    parameters = parameters or Parameters.default()
 
     # Read surface geopotential (i.e. orography)
     orog = grid.to_nodal(orography)
     phi0 = orog
-    forog = set_orog_land_sfc_drag(phi0, parameters or Parameters.default())
+    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
+    forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # land-sea mask
     fmask = jnp.zeros_like(orography)
+    alb0 = jnp.zeros_like(orography)
     tsea = fixed_ssts(grid)
-    boundaries = BoundaryData.zeros(orog.shape, phi0=phi0, fmask=fmask, tsea=tsea,forog=forog)
-    
-    return boundaries
+
+    # No land_model_init, but should be fine because fmask = 0
+
+    rhcapl = jnp.where(alb0 < 0.4, 1. / parameters.land_model.hcapl, 1. / parameters.land_model.hcapli) * time_step.to(units.second).m
+    return BoundaryData.zeros(orog.shape, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
@@ -155,10 +162,10 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=0, 
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
-    nodal_shape = fmask.shape
     tsea = fixed_ssts(grid) # until we have a sea model
     rhcapl = jnp.where(alb0 < 0.4, 1. / parameters.land_model.hcapl, 1. / parameters.land_model.hcapli) * time_step.to(units.second).m
-    boundaries = BoundaryData.zeros(nodal_shape, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+    boundaries = BoundaryData.zeros(fmask.shape, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+    
     boundaries = land_model_init(filename, parameters, boundaries)
 
     # call sea model init 
