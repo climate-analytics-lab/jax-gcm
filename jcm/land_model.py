@@ -1,4 +1,3 @@
-from dinosaur.scales import units
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsState, PhysicsTendency
@@ -6,7 +5,7 @@ from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
 from jax import jit
 
-def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData, time_step):
+def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
     '''
         surface_filename: filename storing boundary data
         parameters: initialized model parameters
@@ -17,8 +16,6 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     # =========================================================================
     # Initialize land-surface boundary conditions
     # =========================================================================
-
-    delt = time_step.to(units.second).m
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
@@ -78,11 +75,9 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
     # Set time_step/heat_capacity and dissipation fields
-    rhcapl = jnp.where(boundaries.alb0 < 0.4, delt / parameters.land_model.hcapl, delt / parameters.land_model.hcapli)
     cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
 
-    boundaries_new = boundaries.copy(rhcapl=rhcapl, cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
-    return boundaries_new
+    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=jnp.newaxis):

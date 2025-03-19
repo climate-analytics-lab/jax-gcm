@@ -22,6 +22,10 @@ coa_half = None
 def initialize_geometry(kx = 8, il = 64, coords=None):
     global hsg, dhs, fsg, sigl, radang, sia, coa, sia_half, coa_half
 
+    if coords is not None:
+        kx = len(coords.vertical.boundaries)-1
+        il = coords.horizontal.nodal_shape[1]
+
     # Definition of model levels
     # Layer thicknesses and full (u,v,T) levels
     # FIXME: if coords is not None, hsg, fsg, dhs should be coords.vertical.boundaries, centers, layer_thickness respectively, but there is some issue with coords being jitted
