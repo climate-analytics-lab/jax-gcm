@@ -185,7 +185,7 @@ class SpeedyModel:
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_data is None:
             truncated_orography = dinosaur.primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, horizontal_resolution, dt_si)
+            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, dt_si)
         else:
             self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(
@@ -272,8 +272,6 @@ class SpeedyModel:
         return data_to_xarray(data, coords=self.coords, times=self.times)
     
     def predictions_to_xarray(self, predictions):
-        from dinosaur.xarray_utils import data_to_xarray
-
         # extract dynamics predictions (State format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
