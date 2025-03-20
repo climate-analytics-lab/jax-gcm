@@ -18,9 +18,9 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
-        from jcm.physical_constants import grdscp, grdsig, rgas, cp
+        from jcm.physical_constants import rgas, cp
         from jcm.humidity import get_qsat
-        from jcm.geometry import fsg
+        from jcm.geometry import fsg, grdscp, grdsig
 
     def test_diagnose_convection_varying(self):
         ps = jnp.ones((ix, il))

@@ -3,8 +3,8 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
-from jcm.physical_constants import sbc, wvi, grdscp
-from jcm.geometry import dhs
+from jcm.physical_constants import sbc
+from jcm.geometry import dhs, grdscp, wvi
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 

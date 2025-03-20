@@ -17,8 +17,6 @@ PHYSICS_SPECS = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(sca
 def initialize_modules(kx=8, il=64, coords=None):
     from jcm.geometry import initialize_geometry
     initialize_geometry(kx=kx, il=il, coords=coords)
-    from jcm.physics import initialize_physics
-    initialize_physics()
 
 def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, checkpoint_terms=True):
     """

@@ -3,6 +3,7 @@ Date: 2/1/2024
 For storing all variables related to the model's grid space.
 '''
 import jax.numpy as jnp
+import jcm.physical_constants as pc
 
 # to prevent blowup of gradients
 epsilon = 1e-9
@@ -18,9 +19,14 @@ coa = None
 sia_half = None
 coa_half = None
 
+# Functions of sigma and latitude (initial. in INPHYS)
+grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
+grdscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
+wvi = None # Weights for vertical interpolation
+
 # Initializes all of the model geometry variables.
 def initialize_geometry(kx = 8, il = 64, coords=None):
-    global hsg, dhs, fsg, sigl, radang, sia, coa, sia_half, coa_half
+    global hsg, dhs, fsg, sigl, radang, sia, coa, sia_half, coa_half, grdsig, grdscp, wvi
 
     if coords is not None:
         kx = len(coords.vertical.boundaries)-1
@@ -57,3 +63,16 @@ def initialize_geometry(kx = 8, il = 64, coords=None):
         sia = jnp.concatenate((-sia_half, sia_half[::-1]), axis=0).ravel()
         coa = jnp.concatenate((coa_half, coa_half[::-1]), axis=0).ravel()
         radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
+
+    # 1.2 Functions of sigma and latitude (from initialize_physics in speedy.F90)
+    grdsig = pc.grav/(dhs*pc.p0)
+    grdscp = grdsig/pc.cp
+
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    wvi = jnp.zeros((fsg.shape[0], 2))
+    wvi = wvi.at[:-1, 0].set(1./(sigl[1:]-sigl[:-1]))
+    wvi = wvi.at[:-1, 1].set((jnp.log(hsg[1:-1])-sigl[:-1])*wvi[:-1, 0])
+    wvi = wvi.at[-1, 1].set((jnp.log(0.99)-sigl[-1])*wvi[-2,0])

@@ -6,10 +6,9 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, rgas, cp, alhc, sbc, wvi, grav, grdsig, grdscp
-from jcm.geometry import coa, sigl
+from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
+from jcm.geometry import coa, sigl, grdsig, grdscp, wvi 
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
-from jcm.date import days_year
 import jax
 
 @jit 

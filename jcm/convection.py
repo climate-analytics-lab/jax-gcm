@@ -9,8 +9,8 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, wvi, grav, grdscp, grdsig
-from jcm.geometry import dhs, fsg
+from jcm.physical_constants import p0, alhc, grav
+from jcm.geometry import dhs, fsg, grdscp, grdsig, wvi
 
 @jit
 def diagnose_convection(psa, se, qa, qsat, parameters):

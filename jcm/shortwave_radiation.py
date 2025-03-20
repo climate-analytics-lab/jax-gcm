@@ -3,10 +3,10 @@ from jax import jit
 from jax import vmap
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
-from jcm.physical_constants import epssw, solc, grdscp
+from jcm.physical_constants import epssw, solc
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.geometry import epsilon, sia, coa, fsg, dhs
+from jcm.geometry import epsilon, sia, coa, fsg, dhs, grdscp
 from jax import lax
 import jax
 
