@@ -110,7 +110,7 @@ def get_coords(layers=8, horizontal_resolution=31, physics_specs=PHYSICS_SPECS):
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
     )
 
-def read_boundary_data(boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc', parameters=None, horizontal_resolution=31, truncation_number=0, physics_specs=PHYSICS_SPECS, time_step=30 * units.minute):
+def read_boundary_data(boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc', parameters=None, horizontal_resolution=31, truncation_number=None, physics_specs=PHYSICS_SPECS, time_step=30 * units.minute):
     coords = get_coords(layers=8, horizontal_resolution=horizontal_resolution, physics_specs=physics_specs)
     initialize_modules(coords=coords)
     return initialize_boundaries(

@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber
-def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=0):
+def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
     '''
         grid_field: field in grid space
         trunc: truncation level, # of wavenumbers to keep

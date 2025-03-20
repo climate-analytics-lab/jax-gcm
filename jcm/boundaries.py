@@ -106,7 +106,7 @@ def fixed_ssts(grid):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
 
-def default_boundaries(grid, orography, parameters=None, truncation_number=0, time_step=30*units.minute):
+def default_boundaries(grid, orography, parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
@@ -133,7 +133,7 @@ def default_boundaries(grid, orography, parameters=None, truncation_number=0, ti
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(filename, grid, parameters=None, truncation_number=0, time_step=30*units.minute):
+def initialize_boundaries(filename, grid, parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
