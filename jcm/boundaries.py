@@ -122,8 +122,8 @@ def default_boundaries(grid, orography, parameters=None, truncation_number=0, ti
     forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # land-sea mask
-    fmask = jnp.zeros_like(orography)
-    alb0 = jnp.zeros_like(orography)
+    fmask = jnp.zeros_like(orog)
+    alb0 = jnp.zeros_like(orog)
     tsea = fixed_ssts(grid)
 
     # No land_model_init, but should be fine because fmask = 0
@@ -137,8 +137,6 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=0, 
     """
     Initialize the boundary conditions
     """
-    from jcm.geometry import initialize_geometry
-
     from jcm.physical_constants import grav
     from jcm.utils import spectral_truncation
     from jcm.land_model import land_model_init

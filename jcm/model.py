@@ -157,7 +157,11 @@ class SpeedyModel:
         dt_si = time_step * units.minute
 
         self.physics_specs = physics_specs or PHYSICS_SPECS
-        self.coords = coords or get_coords(layers=layers, horizontal_resolution=horizontal_resolution, physics_specs=self.physics_specs)
+        if coords is not None:
+            self.coords = coords
+            horizontal_resolution = coords.horizontal.total_wavenumbers
+        else:
+            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution, physics_specs=self.physics_specs)
 
         self.inner_steps = int(self.save_interval / dt_si)
         self.outer_steps = int(self.total_time / self.save_interval)
@@ -185,7 +189,7 @@ class SpeedyModel:
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_data is None:
             truncated_orography = dinosaur.primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, dt_si)
+            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
         else:
             self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(
