@@ -4,11 +4,23 @@ import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import sbc, wvi, grdscp
-from jcm.mod_radcon import fband
 from jcm.geometry import dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
+
 nband = 4
+
+@jit
+def radset(temp, parameters):
+    eps1 = 1.0 - parameters.mod_radcon.epslw
+    jtemp = jnp.clip(temp, 200, 320)
+    fband = jnp.stack((
+        jnp.zeros_like(jtemp),
+        0.148 - 3.0e-6 * (jtemp - 247) ** 2,
+        0.356 - 5.2e-6 * (jtemp - 282) ** 2,
+        0.314 + 1.0e-5 * (jtemp - 315) ** 2,
+    ), axis=-1)
+    return eps1 * fband.at[..., 0].set(1. - fband.sum(axis=-1))
 
 @jit
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
@@ -74,8 +86,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     # 3.1 Stratosphere
     k = 0
     emis = 1 - tau2
-    fband_at_ta = jax.vmap(lambda f: jnp.interp(ta - 100, jnp.arange(len(f)), f), in_axes=-1, out_axes=-1)(fband)
-    brad = fband_at_ta * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, parameters) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
     flux = emis_brad[k].at[:,:,2:nband].set(0.0)
     dfabs = dfabs.at[k].add(-jnp.sum(flux,axis=-1))
@@ -140,16 +151,14 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     refsfc = 1.0 - parameters.mod_radcon.emisfc
     fsfc = fsfcu - rlds
     
-    lookup_fband = lambda t: jax.vmap(lambda f: jnp.interp(t - 100, jnp.arange(len(f)), f), in_axes=-1, out_axes=-1)(fband)
-
-    flux = lookup_fband(ts) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
+    flux = radset(ts, parameters) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
     dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * fsfcu)
 
     emis = 1. - tau2
-    brad = lookup_fband(ta) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, parameters) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
 
     _flux_3d = jnp.zeros((kx, ix, il, nband)).at[-1].set(flux)
