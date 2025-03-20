@@ -11,18 +11,6 @@ from jcm.physics_data import PhysicsData
 nband = 4
 
 @jit
-def radset(temp, parameters):
-    eps1 = 1.0 - parameters.mod_radcon.epslw
-    jtemp = jnp.clip(temp, 200, 320)
-    fband = jnp.stack((
-        jnp.zeros_like(jtemp),
-        0.148 - 3.0e-6 * (jtemp - 247) ** 2,
-        0.356 - 5.2e-6 * (jtemp - 282) ** 2,
-        0.314 + 1.0e-5 * (jtemp - 315) ** 2,
-    ), axis=-1)
-    return eps1 * fband.at[..., 0].set(1. - fband.sum(axis=-1))
-
-@jit
 def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
 
     """
@@ -86,7 +74,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     # 3.1 Stratosphere
     k = 0
     emis = 1 - tau2
-    brad = radset(ta, parameters) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, parameters.mod_radcon.epslw) * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
     flux = emis_brad[k].at[:,:,2:nband].set(0.0)
     dfabs = dfabs.at[k].add(-jnp.sum(flux,axis=-1))
@@ -149,16 +137,17 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     fsfcu = physics_data.surface_flux.rlus[:,:,2] # FIXME
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
+    epslw = parameters.mod_radcon.epslw
     fsfc = fsfcu - rlds
     
-    flux = radset(ts, parameters) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
+    flux = radset(ts, epslw) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
     dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * fsfcu)
 
     emis = 1. - tau2
-    brad = radset(ta, parameters) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = radset(ta, epslw) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
 
     _flux_3d = jnp.zeros((kx, ix, il, nband)).at[-1].set(flux)
@@ -192,4 +181,27 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend_lwr)
     
     return physics_tendencies, physics_data
+
+@jit
+def radset(temp, epslw):
+    """
+    Compute energy fractions in longwave bands as a function of temperature
+
+    Args:
+        temp: Absolute temperature
+        epslw: Longwave emissivity in PBL
+
+    Returns:
+        fband: Energy fraction emitted in each LW band
+    """
+    jtemp = jnp.clip(temp, 200, 320) # To retain backwards compatibility with F90 code
     
+    fband = jnp.stack((
+        jnp.zeros_like(jtemp),
+        0.148 - 3.0e-6 * (jtemp - 247) ** 2,
+        0.356 - 5.2e-6 * (jtemp - 282) ** 2,
+        0.314 + 1.0e-5 * (jtemp - 315) ** 2,
+    ), axis=-1)
+    fband = fband.at[..., 0].set(1. - fband.sum(axis=-1))
+    
+    return (1. - epslw) * fband
