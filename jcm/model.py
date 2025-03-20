@@ -113,7 +113,7 @@ class SpeedyModel:
         self.post_process_physics = post_process
 
         # Integration settings
-        self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
+        self.start_date = start_date or Timestamp.from_datetime(datetime(1982, 1, 1))
         dt_si = time_step * units.minute
         save_every = save_interval * units.day
         total_time = total_time * units.day

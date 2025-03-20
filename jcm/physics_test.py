@@ -44,6 +44,6 @@ class TestPhysicsUnit(unittest.TestCase):
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
-        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, datetime(2000, 1, 1), boundaries, parameters)
+        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, datetime(1982, 1, 1), boundaries, parameters)
 
         self.assertIsNotNone(dynamics_tendency)
