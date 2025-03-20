@@ -72,10 +72,10 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     #    added to the average (full-level) emission of each layer.
     
     # 3.1 Stratosphere
-    ta_rounded = jnp.round(ta).astype(int)
     k = 0
     emis = 1 - tau2
-    brad = fband[ta_rounded-100] * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
+    fband_at_ta = jax.vmap(lambda f: jnp.interp(ta - 100, jnp.arange(len(f)), f), in_axes=-1, out_axes=-1)(fband)
+    brad = fband_at_ta * (st4a[:,:,:,0,jnp.newaxis] + emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
     flux = emis_brad[k].at[:,:,2:nband].set(0.0)
     dfabs = dfabs.at[k].add(-jnp.sum(flux,axis=-1))
@@ -140,17 +140,16 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     refsfc = 1.0 - parameters.mod_radcon.emisfc
     fsfc = fsfcu - rlds
     
-    ts_rounded = jnp.round(ts).astype(int)
-    ta_rounded = jnp.round(ta).astype(int)
+    lookup_fband = lambda t: jax.vmap(lambda f: jnp.interp(t - 100, jnp.arange(len(f)), f), in_axes=-1, out_axes=-1)(fband)
 
-    flux = fband[ts_rounded-100,:] * fsfcu[:,:,jnp.newaxis] + refsfc * flux
+    flux = lookup_fband(ts) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
     dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * fsfcu)
 
     emis = 1. - tau2
-    brad = fband[ta_rounded-100] * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
+    brad = lookup_fband(ta) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])
     emis_brad = emis * brad
 
     _flux_3d = jnp.zeros((kx, ix, il, nband)).at[-1].set(flux)
