@@ -143,7 +143,7 @@ class TestLongwave(unittest.TestCase):
         xy = (ix, il)
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(zxy)
+        state = PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
         # Calculate gradient
         _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
@@ -163,7 +163,7 @@ class TestLongwave(unittest.TestCase):
         xy = (ix, il)
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-        state =PhysicsState.ones(zxy)
+        state = PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
