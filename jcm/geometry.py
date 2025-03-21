@@ -53,7 +53,6 @@ class Geometry:
     grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
     wvi: jnp.ndarray # Weights for vertical interpolation
     
-    # Initializes all of the model geometry variables from dinosaur CoordinateSystem
     @classmethod 
     def from_coords(self, coords: CoordinateSystem=None):
         """
@@ -76,7 +75,6 @@ class Geometry:
 
         return Geometry(radang=radang,sia=sia,coa=coa,hsg=hsg,fsg=fsg,dhs=dhs,sigl=sigl,grdsig=grdsig,grdscp=grdscp,wvi=wvi)
     
-    # Initializes all of the model geometry variables from grid dimensions
     @classmethod 
     def initialize_geometry(self, nodal_shape=None, node_levels=None):
         """
