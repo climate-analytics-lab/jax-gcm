@@ -11,7 +11,7 @@ from dinosaur import primitive_equations_states
 from jcm.boundaries import initialize_boundaries, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
-from jcm.geometry import Geometry
+from jcm.geometry import sigma_layer_boundaries, Geometry
 
 PHYSICS_SPECS = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -88,12 +88,6 @@ def get_coords(layers=8, horizontal_resolution=31, physics_specs=PHYSICS_SPECS):
 
     if horizontal_resolution not in resolution_map:
         raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
-    
-    sigma_layer_boundaries = {
-        5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
-        7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]), # FIXME: the .02 breaks dinosaur
-        8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-    }
 
     if layers not in sigma_layer_boundaries:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
@@ -102,16 +96,6 @@ def get_coords(layers=8, horizontal_resolution=31, physics_specs=PHYSICS_SPECS):
     return dinosaur.coordinate_systems.CoordinateSystem(
         horizontal=resolution_map[horizontal_resolution](radius=physics_specs.radius), # truncation 
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
-    )
-
-def read_boundary_data(boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc', parameters=None, horizontal_resolution=31, truncation_number=None, physics_specs=PHYSICS_SPECS, time_step=30 * units.minute):
-    coords = get_coords(layers=8, horizontal_resolution=horizontal_resolution, physics_specs=physics_specs)
-    return initialize_boundaries(
-        filename=boundary_file,
-        coords=coords,
-        parameters=parameters or Parameters.default(),
-        truncation_number=truncation_number,
-        time_step=time_step
     )
 
 class SpeedyModel:
@@ -152,7 +136,7 @@ class SpeedyModel:
         self.physics_specs = physics_specs or PHYSICS_SPECS
         if coords is not None:
             self.coords = coords
-            horizontal_resolution = coords.horizontal.total_wavenumbers
+            horizontal_resolution = coords.horizontal.total_wavenumbers - 2
         else:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution, physics_specs=self.physics_specs)
         self.geometry = Geometry.from_coords(self.coords)

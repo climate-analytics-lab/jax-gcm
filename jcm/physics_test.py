@@ -41,12 +41,11 @@ class TestPhysicsUnit(unittest.TestCase):
 
         hsf = HeldSuarezForcing(hs_model.coords, hs_model.physics_specs, hs_model.ref_temps)
         parameters = Parameters.default()
-        print(hs_model.ref_temps.shape)
         boundaries = BoundaryData.zeros((1,1))
         geometry = Geometry.initialize_geometry((1,1), 8)
 
         physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
-        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, datetime(2000, 1, 1), boundaries=boundaries, parameters=parameters, geometry=geometry)
+        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
 
         self.assertIsNotNone(dynamics_tendency)

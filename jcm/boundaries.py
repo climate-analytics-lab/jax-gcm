@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.scales import units
+from dinosaur.coordinate_systems import HorizontalGridTypes
 from jcm.params import Parameters
 
 @tree_math.struct
@@ -98,7 +99,7 @@ class BoundaryData:
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
     
-def fixed_ssts(grid):
+def _fixed_ssts(grid: HorizontalGridTypes):
     """
     Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
     Obtained from Neale, R.B. and Hoskins, B.J. (2000), "A standard test for AGCMs including their physical parametrizations: I: the proposal." Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
@@ -107,7 +108,7 @@ def fixed_ssts(grid):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
 
-def default_boundaries(grid, orography, parameters=None, truncation_number=None, time_step=30*units.minute):
+def default_boundaries(grid: HorizontalGridTypes, orography, parameters: Parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
@@ -125,7 +126,7 @@ def default_boundaries(grid, orography, parameters=None, truncation_number=None,
     # land-sea mask
     fmask = jnp.zeros_like(orog)
     alb0 = jnp.zeros_like(orog)
-    tsea = fixed_ssts(grid)
+    tsea = _fixed_ssts(grid)
 
     # No land_model_init, but should be fine because fmask = 0
 
@@ -137,7 +138,7 @@ def default_boundaries(grid, orography, parameters=None, truncation_number=None,
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(filename, grid, parameters=None, truncation_number=None, time_step=30*units.minute):
+def initialize_boundaries(filename, grid: HorizontalGridTypes, parameters: Parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
@@ -164,7 +165,7 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=Non
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
-    tsea = fixed_ssts(grid) # until we have a sea model
+    tsea = _fixed_ssts(grid) # until we have a sea model
     rhcapl = jnp.where(alb0 < 0.4, 1. / parameters.land_model.hcapl, 1. / parameters.land_model.hcapli) * time_step.to(units.second).m
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
@@ -177,7 +178,7 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=Non
 
     return boundaries
 
-def update_boundaries_with_timestep(boundaries, parameters=None, time_step=30*units.minute):
+def update_boundaries_with_timestep(boundaries, parameters: Parameters=None, time_step=30*units.minute):
     """
     Update the boundary conditions with the new time step
     """
