@@ -13,105 +13,85 @@ sigma_layer_boundaries = {
     8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
 }
 
+def _initialize_vertical(kx):
+    # Definition of model levels
+    # Layer thicknesses and full (u,v,T) levels
+    if kx not in sigma_layer_boundaries:
+        raise ValueError(f"Invalid number of vertical levels: {kx}")
+    hsg = sigma_layer_boundaries[kx]
+    fsg = (hsg[1:] + hsg[:-1])/2.
+    dhs = jnp.diff(hsg)
+    sigl = jnp.log(fsg)
+
+    # 1.2 Functions of sigma and latitude (from initialize_physics in speedy.F90)
+    grdsig = pc.grav/(dhs*pc.p0)
+    grdscp = grdsig/pc.cp
+
+    # Weights for vertical interpolation at half-levels(1,kx) and surface
+    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
+    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
+    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
+    wvi = jnp.zeros((kx, 2))
+    wvi = wvi.at[:-1, 0].set(1./jnp.diff(sigl))
+    wvi = wvi.at[:-1, 1].set((jnp.log(hsg[1:-1])-sigl[:-1])*wvi[:-1, 0])
+    wvi = wvi.at[-1, 1].set((jnp.log(0.99)-sigl[-1])*wvi[-2,0])
+
+    return hsg, fsg, dhs, sigl, grdsig, grdscp, wvi
+
 @tree_math.struct
 class Geometry:
-    hsg: jnp.ndarray
-    dhs: jnp.ndarray
-    fsg: jnp.ndarray
-    sigl: jnp.ndarray
-    radang: jnp.ndarray
-    sia: jnp.ndarray
-    coa: jnp.ndarray
+    radang: jnp.ndarray # latitude in radians
+    sia: jnp.ndarray # sin of latitude
+    coa: jnp.ndarray # cos of latitude
 
-    # Functions of sigma and latitude (initial. in INPHYS in F90)
+    hsg: jnp.ndarray # sigma layer boundaries
+    fsg: jnp.ndarray # sigma layer midpoints
+    dhs: jnp.ndarray # sigma layer thicknesses
+    sigl: jnp.ndarray # log of sigma layer midpoints
+
     grdsig: jnp.ndarray # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
     grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
     wvi: jnp.ndarray # Weights for vertical interpolation
-
-    def copy(self, hsg=None, dhs=None, fsg=None, sigl=None, radang=None, sia=None, coa=None, grdsig=None, grdscp=None, wvi=None):
-        return Geometry(
-            hsg if hsg is not None else self.hsg,
-            dhs if dhs is not None else self.dhs,
-            fsg if fsg is not None else self.fsg,
-            sigl if sigl is not None else self.sigl,
-            radang if radang is not None else self.radang,
-            sia if sia is not None else self.sia,
-            coa if coa is not None else self.coa,
-            grdsig if grdsig is not None else self.grdsig,
-            grdscp if grdscp is not None else self.grdscp,
-            wvi if wvi is not None else self.wvi
-        )
-
-    def _initialize_physics(self):
-        # 1.2 Functions of sigma and latitude (from initialize_physics in speedy.F90)
-        grdsig = pc.grav/(self.dhs*pc.p0)
-        grdscp = grdsig/pc.cp
-
-        # Weights for vertical interpolation at half-levels(1,kx) and surface
-        # Note that for phys.par. half-lev(k) is between full-lev k and k+1
-        # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
-        # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
-        wvi = self.wvi
-        wvi = wvi.at[:-1, 0].set(1./(self.sigl[1:]-self.sigl[:-1]))
-        wvi = wvi.at[:-1, 1].set((jnp.log(self.hsg[1:-1])-self.sigl[:-1])*wvi[:-1, 0])
-        wvi = wvi.at[-1, 1].set((jnp.log(0.99)-self.sigl[-1])*wvi[-2,0])
-
-        return self.copy(grdsig=grdsig, grdscp=grdscp, wvi=wvi)
-        
     
-    # Initializes all of the model geometry variables.
+    # Initializes all of the model geometry variables from dinosaur CoordinateSystem
     @classmethod 
     def from_coords(self, coords: CoordinateSystem=None):
-        kx = len(coords.vertical.boundaries)-1
-        
-        # Definition of model levels
-        # Layer thicknesses and full (u,v,T) levels
-        # FIXME: hsg, fsg, dhs should be coords.vertical.boundaries, centers, layer_thickness respectively, but there is some issue with coords being jitted
-        if kx not in sigma_layer_boundaries:
-            raise ValueError(f"Invalid number of vertical levels: {kx}")
-        hsg = sigma_layer_boundaries[kx]
-        fsg = 0.5 * (hsg[1:] + hsg[:-1])
-        dhs = hsg[1:] - hsg[:-1]
+        """
+        Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
-        sigl = jnp.log(fsg) # Moved here from physical_constants
+        Args:
+            coords: dinosaur.coordinate_systems.CoordinateSystem object
 
-        # Horizontal functions
-        # Latitudes and functions of latitude
+        Returns:
+            Geometry object
+        """
+
+        # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
-        sia = jnp.sin(radang)
-        coa = jnp.cos(radang)
+        sia, coa = jnp.sin(radang), jnp.cos(radang)
+        
+        # Vertical functions of sigma
+        kx = len(coords.vertical.boundaries)-1
+        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
-        return Geometry(
-            hsg=hsg,
-            dhs=dhs,
-            fsg=fsg,
-            sigl=sigl,
-            radang=radang,
-            sia=sia,
-            coa=coa,
-            grdsig=jnp.zeros(kx),
-            grdscp=jnp.zeros(kx),
-            wvi=jnp.zeros((kx, 2))
-        )._initialize_physics()
+        return Geometry(radang=radang,sia=sia,coa=coa,hsg=hsg,fsg=fsg,dhs=dhs,sigl=sigl,grdsig=grdsig,grdscp=grdscp,wvi=wvi)
     
-        # Initializes all of the model geometry variables.
+    # Initializes all of the model geometry variables from grid dimensions
     @classmethod 
     def initialize_geometry(self, nodal_shape=None, node_levels=None):
-        kx, il = node_levels, nodal_shape[1]
+        """
+        Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
-        # Definition of model levels
-        # Layer thicknesses and full (u,v,T) levels
-        if kx not in sigma_layer_boundaries:
-            raise ValueError(f"Invalid number of vertical levels: {kx}")
-        hsg = sigma_layer_boundaries[kx]
-        fsg = 0.5 * (hsg[1:] + hsg[:-1])
-        dhs = hsg[1:] - hsg[:-1]
+        Args:
+            nodal_shape: Shape of the nodal grid `(ix,il)`
+            node_levels: Number of vertical levels `kx`
 
-        sigl = jnp.log(fsg) # Moved here from physical_constants
+        Returns:
+            Geometry object
+        """
 
-        # Horizontal functions
-        # Latitudes and functions of latitude
-        # NB: J=1 is Southernmost point!
+        # Horizontal functions of latitude (from south to north)
+        il = nodal_shape[1]
         iy = (il + 1)//2
         j = jnp.arange(1, iy + 1)
         sia_half = jnp.cos(jnp.pi * (j - 0.25) / (il + 0.5))
@@ -120,15 +100,8 @@ class Geometry:
         coa = jnp.concatenate((coa_half, coa_half[::-1]), axis=0).ravel()
         radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
 
-        return Geometry(
-            hsg=hsg,
-            dhs=dhs,
-            fsg=fsg,
-            sigl=sigl,
-            radang=radang,
-            sia=sia,
-            coa=coa,
-            grdsig=jnp.zeros(kx),
-            grdscp=jnp.zeros(kx),
-            wvi=jnp.zeros((kx, 2))
-        )._initialize_physics()
+        # Vertical functions of sigma
+        kx = node_levels
+        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
+        
+        return Geometry(radang=radang,sia=sia,coa=coa,hsg=hsg,fsg=fsg,dhs=dhs,sigl=sigl,grdsig=grdsig,grdscp=grdscp,wvi=wvi)
