@@ -3,10 +3,9 @@ from jax import jit
 from jax import vmap
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
-from jcm.physical_constants import epssw, solc
+from jcm.physical_constants import epssw, solc, epsilon
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.geometry import epsilon, sia, coa, fsg, dhs, grdscp
 from jax import lax
 import jax
 
@@ -25,6 +24,9 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     '''
 
     kx, ix, il = state.temperature.shape
+    dhs = boundaries.geometry.dhs
+    fsg = boundaries.geometry.fsg
+
     psa = physics_data.convection.psa
     qa = state.specific_humidity
     icltop = physics_data.shortwave_rad.icltop
@@ -187,14 +189,14 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
-    ttend_swr = dfabs*grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis] # physics.f90:160-162
+    ttend_swr = dfabs*boundaries.geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
     return physics_tendencies, physics_data
 
 
 @jit
-def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
+def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData):
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
@@ -233,7 +235,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
 
     # Solar radiation at the top
     topsr = jnp.zeros(il)
-    topsr = solar(physics_data.date.tyear,4*solc)
+    topsr = solar(physics_data.date.tyear,4*solc,geo=boundaries.geometry)
     
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
@@ -259,7 +261,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData):
 
     vectorized_compute_fields = vmap(compute_fields, in_axes=0, out_axes=1)
 
-    fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(sia, coa, topsr)
+    fsol, ozupp, ozone, zenit, stratz = vectorized_compute_fields(boundaries.geometry.sia, boundaries.geometry.coa, topsr)
 
     swrad_out = physics_data.shortwave_rad.copy(fsol=fsol, ozupp=ozupp, ozone=ozone, zenit=zenit, stratz=stratz)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
@@ -359,7 +361,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     return physics_tendencies, physics_data
 
 @jit
-def solar(tyear, csol=4.0*solc):
+def solar(tyear, csol=4.*solc, geo=None):
 
     """
     Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
@@ -399,10 +401,10 @@ def solar(tyear, csol=4.0*solc):
     csolp = csol / pigr
 
     # Calculate the solar radiation at the top of the atmosphere for each latitude
-    ch0 = jnp.clip(-tdecl * sia / coa, -1+epsilon, 1-epsilon) # Clip to prevent blowup of gradients
+    ch0 = jnp.clip(-tdecl * geo.sia / geo.coa, -1+epsilon, 1-epsilon) # Clip to prevent blowup of gradients
     h0 = jnp.arccos(ch0)
     sh0 = jnp.sin(h0)
 
-    topsr = csolp * fdis * (h0 * sia * sdecl + sh0 * coa * cdecl)
+    topsr = csolp * fdis * (h0 * geo.sia * sdecl + sh0 * geo.coa * cdecl)
 
     return topsr

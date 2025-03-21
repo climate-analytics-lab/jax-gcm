@@ -9,14 +9,14 @@ class TestSolar(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
-        global solar
+        global solar, geo
         from jcm.shortwave_radiation import solar
+        from jcm.geometry import Geometry
+        geo = Geometry.initialize_geometry((ix, il), kx)
 
     def test_solar(self):
-        self.assertTrue(np.allclose(solar(0.2), np.array([
+        self.assertTrue(np.allclose(solar(0.2, geo=geo), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
             261.58627434, 283.95547202, 305.15011948, 325.07762082,
@@ -29,7 +29,7 @@ class TestSolar(unittest.TestCase):
             282.48360014, 260.01911561, 236.4767785 , 211.95903738,
             186.57407167, 160.43718712, 133.67240691, 106.41888862,
             78.84586166,  51.20481384,  24.06562443,   0.89269878]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.4), np.array([
+        self.assertTrue(np.allclose(solar(0.4, geo=geo), np.array([
             0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
             0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
             5.00775958e+01, 7.28770444e+01, 9.68131455e+01, 1.21415906e+02,
@@ -42,7 +42,7 @@ class TestSolar(unittest.TestCase):
             4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
             4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
             4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.6), np.array([
+        self.assertTrue(np.allclose(solar(0.6, geo=geo), np.array([
             0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
             83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
             206.84837586, 230.61437093, 253.6899679, 275.94351445, 297.25534724,
@@ -52,7 +52,7 @@ class TestSolar(unittest.TestCase):
             446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
             410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
             359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.8), np.array([
+        self.assertTrue(np.allclose(solar(0.8, geo=geo), np.array([
             2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
             2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
             3.42958056e+02, 3.60158149e+02, 3.76136095e+02, 3.90759256e+02,
@@ -65,7 +65,7 @@ class TestSolar(unittest.TestCase):
             2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
             1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
             1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(1.0), np.array([
+        self.assertTrue(np.allclose(solar(1.0, geo=geo), np.array([
             553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
             516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
             514.02258691, 515.87725366, 516.65036719, 516.12420873, 514.15095359,
@@ -77,7 +77,7 @@ class TestSolar(unittest.TestCase):
             20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.]), atol=1e-4))
 
         # other csol values
-        self.assertTrue(np.allclose(solar(0.6, 1300), np.array([
+        self.assertTrue(np.allclose(solar(0.6, 1300, geo=geo), np.array([
             0.,          0.,           0.,           0.,
             2.30256929,  16.58242672,  35.58566559,  56.89183219,
             79.47609897, 102.75932685, 126.36068201, 150.00199764,
@@ -96,23 +96,19 @@ class TestShortWaveRadiation(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, sia, epssw, parameters
+               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
-        from jcm.physical_constants import epssw
-        from jcm.geometry import sia
+        from jcm.physical_constants import epssw, solc
         from jcm.params import Parameters
         parameters = Parameters.default()
+        boundaries = BoundaryData.zeros((ix, il), kx)
 
     def test_shortwave_radiation(self):   
-        from datetime import datetime
-        from jcm.date import Timestamp     
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -142,9 +138,9 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
+        boundaries = BoundaryData.zeros(xy, kx, fmask_l=fmask)
         _, physics_data = clouds(state, physics_data, parameters, boundaries)
-        physics_data = get_zonal_average_fields(state, physics_data)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries)
         
         np.testing.assert_allclose(physics_data.shortwave_rad.rsds[0, :], [
@@ -201,8 +197,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
+        boundaries = BoundaryData.zeros(xy, kx)
 
-        new_data = get_zonal_average_fields(state, physics_data)
+        new_data = get_zonal_average_fields(state, physics_data, boundaries)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
         self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
@@ -222,9 +219,9 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
        
-        physics_data = get_zonal_average_fields(state, physics_data)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries)
 
-        topsr = solar(date_data.tyear)
+        topsr = solar(date_data.tyear, geo=boundaries.geometry)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
@@ -239,7 +236,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         
-        physics_data = get_zonal_average_fields(state, physics_data)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries)
 
         fs0 = 6.0
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
@@ -255,10 +252,10 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        physics_data = get_zonal_average_fields(state, physics_data)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries)
 
         # Expected form for ozone based on the provided formula
-        flat2 = 1.5 * sia**2 - 0.5
+        flat2 = 1.5 * boundaries.geometry.sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
@@ -271,7 +268,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
-        physics_data = get_zonal_average_fields(state, physics_data)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries)
         
         # Ensure outputs are consistent and within expected ranges
         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
@@ -282,8 +279,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         
     def test_get_zonal_average_fields_gradients_isnan(self):    
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
-        from datetime import datetime
-        from jcm.date import Timestamp, Timedelta     
 
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -316,9 +311,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data) 
+        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries)
         datas = PhysicsData.ones(xy,kx) 
-        df_dstates, df_ddatas = f_vjp(datas)
+        df_dstates, df_ddatas, _ = f_vjp(datas)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
@@ -329,7 +324,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries) 
@@ -345,11 +340,11 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_solar_gradients_isnan(self): 
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
-        primals, f_vjp = jax.vjp(solar, 0.2) 
+        primals, f_vjp = jax.vjp(solar, 0.2, 4.*solc, boundaries.geometry)
         input = jnp.ones_like(primals)
-        df_dtyear = f_vjp(input)
+        df_dtyear, df_dcsol, df_dgeo = f_vjp(input)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dtyear[0])))
+        self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
 
     def test_clouds_gradients_isnan_with_realistic_values(self):   
         from datetime import datetime
@@ -383,7 +378,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy,fmask=fmask)
+        boundaries = BoundaryData.zeros(xy, kx, fmask=fmask)
         # Calculate gradient
         primals, f_vjp = jax.vjp(clouds, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(zxy)

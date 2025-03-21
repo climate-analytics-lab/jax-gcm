@@ -8,8 +8,6 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 1, 1, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
         global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
@@ -31,7 +29,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = state = PhysicsState.zeros(zxy, specific_humidity=qa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
@@ -54,7 +52,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
         state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis])
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries)
         
@@ -71,7 +69,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, boundaries) 

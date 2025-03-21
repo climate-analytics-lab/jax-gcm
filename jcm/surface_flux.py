@@ -7,7 +7,6 @@ from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
-from jcm.geometry import coa, sigl, grdsig, grdscp, wvi 
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
 import jax
 
@@ -52,6 +51,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
     stl_am = physics_data.land_model.stl_am
     soilw_am = boundaries.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
+    geo = boundaries.geometry
 
     psa = physics_data.convection.psa
     ua = state.u_wind
@@ -107,12 +107,12 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         # substituting the for loop at line 109
         # Temperature difference between lowest level and sfc
         # line 112
-        dt1 = wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
+        dt1 = geo.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
         
         # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
         # line 115 - 116
         t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-        t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*sigl[kx-1]))
+        t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*geo.sigl[kx-1]))
 
         # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
         # line 119 - 120
@@ -133,7 +133,7 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(coa) * rsds * (1.0 - alb_l) * psa
+        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(geo.coa) * rsds * (1.0 - alb_l) * psa
 
         # 2.2 Stability Correlation
         rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
@@ -287,10 +287,10 @@ def get_surface_fluxes(state: PhysicsState, physics_data: PhysicsData, parameter
 
     # Compute tendencies due to surface fluxes (physics.f90:197-205)
     rps = 1.0 / physics_data.convection.psa
-    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*grdsig[-1])
-    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*grdsig[-1])
-    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*grdscp[-1])
-    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*grdsig[-1])
+    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*geo.grdsig[-1])
+    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*geo.grdsig[-1])
+    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*geo.grdscp[-1])
+    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*geo.grdsig[-1])
     physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
 
     return physics_tendencies, physics_data

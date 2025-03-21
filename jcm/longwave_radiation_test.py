@@ -27,8 +27,6 @@ class TestLongwave(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
         global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
@@ -47,7 +45,7 @@ class TestLongwave(unittest.TestCase):
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
         
         state = PhysicsState.zeros(zxy,temperature=ta)
         
@@ -144,7 +142,7 @@ class TestLongwave(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
         # Calculate gradient
         _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
         tends = PhysicsTendency.ones(zxy)
@@ -164,7 +162,7 @@ class TestLongwave(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 

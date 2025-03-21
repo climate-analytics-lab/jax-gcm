@@ -4,7 +4,6 @@ import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import sbc
-from jcm.geometry import dhs, grdscp, wvi
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
@@ -27,6 +26,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
     """
     kx, ix, il = state.temperature.shape
+    geo = boundaries.geometry
     ta = state.temperature
     st4a = physics_data.mod_radcon.st4a
     flux = physics_data.mod_radcon.flux
@@ -41,7 +41,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     # Above the first (top) level, the atmosphere is assumed isothermal.
     
     # Temperature at level boundaries
-    st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
+    st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+geo.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
     
     # Mean temperature in stratospheric layers
     st4a = st4a.at[0,:,:,1].set(0.75 * ta[0] + 0.25 * st4a[0,:,:,0])
@@ -125,6 +125,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     
     """
     kx, ix, il = state.temperature.shape
+    geo = boundaries.geometry
     ta = state.temperature
     dfabs = physics_data.longwave_rad.dfabs
     rlds = physics_data.surface_flux.rlds
@@ -163,8 +164,8 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     flux = flux.at[:,:,:2].set((tau2[0] * flux + emis_brad[0])[:,:,:2])
     dfabs = dfabs.at[0].add(jnp.sum((_flux_3d[0] - flux)[:,:,:2], axis=-1))
 
-    corlw1 = dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
-    corlw2 = dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
+    corlw1 = geo.dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
+    corlw2 = geo.dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
     dfabs = dfabs.at[0].add(-corlw1)
     dfabs = dfabs.at[1].add(-corlw2)
     ftop = corlw1 + corlw2
@@ -177,7 +178,7 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
     
     # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
-    ttend_lwr = dfabs*grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis]
+    ttend_lwr = dfabs*geo.grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis]
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend_lwr)
     
     return physics_tendencies, physics_data

@@ -2,10 +2,13 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.scales import units
+from jcm.geometry import Geometry
 from jcm.params import Parameters
 
 @tree_math.struct
 class BoundaryData:
+    geometry: Geometry
+
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
     forog: jnp.ndarray # orographic factor for land surface drag
     phi0: jnp.ndarray  # surface geopotential (ix, il)
@@ -26,9 +29,11 @@ class BoundaryData:
 
     fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
 
+
     @classmethod
-    def zeros(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def zeros(self,nodal_shape,node_levels,geometry=None,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
+            geometry=geometry if geometry is not None else Geometry.initialize_geometry(nodal_shape, node_levels),
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
@@ -48,8 +53,9 @@ class BoundaryData:
         )
     
     @classmethod
-    def ones(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def ones(self,nodal_shape,node_levels,geometry=None,fmask=None,forog=None,phi0=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
+            geometry=geometry if geometry is not None else Geometry.initialize_geometry(nodal_shape, node_levels),
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
             phi0=phi0 if phi0 is not None else jnp.ones((nodal_shape)),
@@ -68,8 +74,9 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
-    def copy(self,fmask=None,phi0=None,forog=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def copy(self,geometry=None,fmask=None,phi0=None,forog=None,phis0=None,alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
+            geometry=geometry if geometry is not None else self.geometry,
             fmask=fmask if fmask is not None else self.fmask,
             forog=forog if forog is not None else self.forog,
             phi0=phi0 if phi0 is not None else self.phi0,
@@ -106,7 +113,7 @@ def fixed_ssts(grid):
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
 
-def default_boundaries(grid, orography, parameters=None, truncation_number=None, time_step=30*units.minute):
+def default_boundaries(coords, orography, parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
@@ -116,24 +123,29 @@ def default_boundaries(grid, orography, parameters=None, truncation_number=None,
     parameters = parameters or Parameters.default()
 
     # Read surface geopotential (i.e. orography)
-    orog = grid.to_nodal(orography)
+    orog = coords.horizontal.to_nodal(orography)
     phi0 = orog
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
+    phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
     forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # land-sea mask
     fmask = jnp.zeros_like(orog)
     alb0 = jnp.zeros_like(orog)
-    tsea = fixed_ssts(grid)
+    tsea = fixed_ssts(coords.horizontal)
 
     # No land_model_init, but should be fine because fmask = 0
 
     rhcapl = jnp.where(alb0 < 0.4, 1. / parameters.land_model.hcapl, 1. / parameters.land_model.hcapli) * time_step.to(units.second).m
-    return BoundaryData.zeros(orog.shape, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+    
+    return BoundaryData.zeros(
+        nodal_shape=orog.shape,
+        node_levels=len(coords.vertical.boundaries)-1,
+        geometry=Geometry.initialize_geometry(coords=coords),
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(filename, grid, parameters=None, truncation_number=None, time_step=30*units.minute):
+def initialize_boundaries(filename, coords, parameters=None, truncation_number=None, time_step=30*units.minute):
     """
     Initialize the boundary conditions
     """
@@ -150,7 +162,7 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=Non
     # Read surface geopotential (i.e. orography)
     phi0 = grav * jnp.asarray(ds["orog"])
     # Also store spectrally truncated surface geopotential for the land drag term
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
+    phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
     forog = set_orog_land_sfc_drag(phi0, parameters)
 
     # Read land-sea mask
@@ -160,9 +172,13 @@ def initialize_boundaries(filename, grid, parameters=None, truncation_number=Non
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
-    tsea = fixed_ssts(grid) # until we have a sea model
+    tsea = fixed_ssts(coords.horizontal) # until we have a sea model
     rhcapl = jnp.where(alb0 < 0.4, 1. / parameters.land_model.hcapl, 1. / parameters.land_model.hcapli) * time_step.to(units.second).m
-    boundaries = BoundaryData.zeros(fmask.shape, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+    boundaries = BoundaryData.zeros(
+        nodal_shape=fmask.shape,
+        node_levels=len(coords.vertical.boundaries) - 1,
+        geometry=Geometry.initialize_geometry(coords=coords),
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
     
     boundaries = land_model_init(filename, parameters, boundaries)
 

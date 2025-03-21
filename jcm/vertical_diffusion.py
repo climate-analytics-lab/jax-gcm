@@ -3,7 +3,6 @@ from jax import jit
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import cp, alhc
-from jcm.geometry import hsg, fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
@@ -31,14 +30,15 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     phi = state.geopotential
 
     kx, ix, il = state.temperature.shape
+    geo = boundaries.geometry
     icnv = kx - physics_data.convection.iptop - 1 # this comes from physics.f90:132
 
     ttenvd = jnp.zeros((kx,ix,il))
     qtenvd = jnp.zeros((kx,ix,il))
 
     nl1 = kx - 1
-    cshc = dhs[kx - 1] / 3600.0
-    cvdi = (hsg[nl1-1] - hsg[1]) / ((nl1 - 1) * 3600.0)
+    cshc = geo.dhs[kx - 1] / 3600.0
+    cvdi = (geo.hsg[nl1-1] - geo.hsg[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / parameters.vertical_diffusion.trshc
     fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
@@ -46,13 +46,13 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     fvdiq = cvdi / parameters.vertical_diffusion.trvdi
     fvdise = cvdi / (parameters.vertical_diffusion.trvds * cp)
 
-    rsig = 1.0 / dhs
-    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - hsg[1:-1]))
+    rsig = 1.0 / geo.dhs
+    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - geo.hsg[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
-    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
-    fvdiq2 = fvdiq * hsg[nl1]
+    drh0 = parameters.vertical_diffusion.rhgrad * (geo.fsg[kx - 1] - geo.fsg[nl1 - 1])  # 
+    fvdiq2 = fvdiq * geo.hsg[nl1]
 
     # Calculate dmse and drh arrays
     dmse = se[kx - 1] - se[nl1 - 1] + alhc * (qa[kx - 1] - qsat[nl1 -1])
@@ -92,11 +92,11 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     
     # Step 3: Vertical diffusion of moisture above the PBL
     k_range = jnp.arange(2, kx - 2)
-    condition = hsg[k_range + 1] > 0.5
+    condition = geo.hsg[k_range + 1] > 0.5
 
     # Vectorized calculation of drh0 and fvdiq2 for all selected k values
-    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[k_range + 1] - fsg[k_range])  # Shape: (len(k_range),)
-    fvdiq2 = fvdiq * hsg[k_range + 1]  # Shape: (len(k_range),)
+    drh0 = parameters.vertical_diffusion.rhgrad * (geo.fsg[k_range + 1] - geo.fsg[k_range])  # Shape: (len(k_range),)
+    fvdiq2 = fvdiq * geo.hsg[k_range + 1]  # Shape: (len(k_range),)
 
     # Calculate drh for all selected k values across the entire ix and il dimensions
     drh = rh[k_range + 1] - rh[k_range]  # Shape: (ix, il, len(k_range))

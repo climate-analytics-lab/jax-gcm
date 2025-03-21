@@ -14,15 +14,10 @@ from jcm.params import Parameters
 
 PHYSICS_SPECS = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
-def initialize_modules(kx=8, il=64, coords=None):
-    from jcm.geometry import initialize_geometry
-    initialize_geometry(kx=kx, il=il, coords=coords)
-
 def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
-    initialize_modules(kx = grid_shape[0], il = grid_shape[2], coords=coords)
     
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
@@ -110,10 +105,9 @@ def get_coords(layers=8, horizontal_resolution=31, physics_specs=PHYSICS_SPECS):
 
 def read_boundary_data(boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc', parameters=None, horizontal_resolution=31, truncation_number=None, physics_specs=PHYSICS_SPECS, time_step=30 * units.minute):
     coords = get_coords(layers=8, horizontal_resolution=horizontal_resolution, physics_specs=physics_specs)
-    initialize_modules(coords=coords)
     return initialize_boundaries(
         filename=boundary_file,
-        grid=coords.horizontal,
+        coords=coords,
         parameters=parameters or Parameters.default(),
         truncation_number=truncation_number,
         time_step=time_step
@@ -187,7 +181,7 @@ class SpeedyModel:
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_data is None:
             truncated_orography = dinosaur.primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
+            self.boundaries = default_boundaries(self.coords, truncated_orography, self.parameters, time_step=dt_si)
         else:
             self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(

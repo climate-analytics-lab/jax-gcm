@@ -9,10 +9,9 @@ del_co2   = 0.005
 def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
     from jcm.shortwave_radiation import get_zonal_average_fields
     from jcm.physics import PhysicsTendency
-    from jcm.physical_constants import rgas
 
     # 2. daily-mean radiative forcing
-    physics_data = get_zonal_average_fields(state, physics_data)
+    physics_data = get_zonal_average_fields(state, physics_data, boundaries)
     tyear = physics_data.date.tyear
     day = physics_data.date.model_day()
     model_year = physics_data.date.model_year

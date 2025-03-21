@@ -31,3 +31,6 @@ thds   = 12.0      # Max damping time (in hours) for extra diffusion
                                              ## (del^2) in the stratosphere
 tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
                                              # in the stratosphere
+
+# to prevent blowup of gradients
+epsilon = 1e-9

@@ -7,15 +7,12 @@ class TestHumidityUnit(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg, PhysicsTendency, \
         SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData
         from jcm.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
-        from jcm.geometry import fsg
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
         parameters = Parameters.default()
@@ -41,7 +38,7 @@ class TestHumidityUnit(unittest.TestCase):
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        boundaries = BoundaryData.ones(xy,tsea=tsea, fmask=fmask,phi0=phi0,lfluxland=True)
+        boundaries = BoundaryData.ones(xy,kx,tsea=tsea, fmask=fmask,phi0=phi0,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
@@ -95,7 +92,7 @@ class TestHumidityUnit(unittest.TestCase):
         convection_data = ConvectionData.zeros((ix,il), kx, psa=pressure)
         physics_data = PhysicsData.zeros((ix,il), kx, convection=convection_data)
         state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy,kx)
 
         # Edge case: Zero Specific Humidity
         qg = jnp.ones((kx,ix,il))*0
@@ -128,14 +125,14 @@ class TestHumidityUnit(unittest.TestCase):
         qg = self.qg_standard
         zxy = (kx,ix,il)
         xy = (ix,il)
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy, kx)
 
         convection_data = ConvectionData.zeros((ix,il), kx, psa=pressure)
         physics_data = PhysicsData.zeros((ix,il), kx, convection=convection_data)
         state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg,surface_pressure=pressure)
 
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries)
-        qa, qsat = rel_hum_to_spec_hum(temp[0], pressure, fsg[0], physics_data.humidity.rh[0])
+        qa, qsat = rel_hum_to_spec_hum(temp[0], pressure, boundaries.geometry.fsg[0], physics_data.humidity.rh[0])
         # Allow a small tolerance for floating point comparisons
         tolerance = 1e-6
         self.assertTrue(jnp.allclose(qa, qg[0], atol=tolerance), "QA should be close to the original QG when converted from RH")

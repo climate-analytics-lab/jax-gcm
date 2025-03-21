@@ -10,10 +10,9 @@ from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, grav
-from jcm.geometry import dhs, fsg, grdscp, grdsig, wvi
 
 @jit
-def diagnose_convection(psa, se, qa, qsat, parameters):
+def diagnose_convection(psa, se, qa, qsat, parameters, boundaries):
     """
     Diagnose convectively unstable gridboxes  
 
@@ -38,6 +37,7 @@ def diagnose_convection(psa, se, qa, qsat, parameters):
 
     """
     kx, ix, il = se.shape
+    geo = boundaries.geometry
     iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
     qdif = jnp.zeros((ix, il), dtype=float)
 
@@ -57,7 +57,7 @@ def diagnose_convection(psa, se, qa, qsat, parameters):
     # Saturation (or super-saturated) moist static energy in PBL
     mss0 = jnp.maximum(mse0, mss[kx-1])
 
-    mss2 = jnp.pad(mss[:-1] + wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * (mss[1:] - mss[:-1]), ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0) # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
+    mss2 = jnp.pad(mss[:-1] + geo.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * (mss[1:] - mss[:-1]), ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0) # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
 
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
@@ -89,7 +89,7 @@ def diagnose_convection(psa, se, qa, qsat, parameters):
     return iptop, qdif
 
 @jit
-def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundary_data: BoundaryData=None):
+def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
@@ -114,6 +114,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     kx, ix, il = se.shape
     _zeros_3d = lambda: jnp.zeros((kx,ix,il))
     psa = conv.psa
+    geo = boundaries.geometry
     
     # 1. Initialization of output and workspace arrays
 
@@ -124,16 +125,16 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     nlp = kx + 1
 
     # Entrainment profile (up to sigma = 0.5)
-    entr = jnp.maximum(0.0, fsg[1:kx-1] - 0.5)**2.0
+    entr = jnp.maximum(0.0, geo.fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
     entr *= parameters.convection.entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
-    fm0 = p0*dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
+    fm0 = p0*geo.dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
     rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters)
+    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, boundaries)
 
     # 3. Convection over selected grid-points
     mask = iptop < kx
@@ -143,7 +144,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     # Maximum specific humidity in the PBL
     qmax = jnp.maximum(1.01 * qa[-1], qsat[-1])
 
-    interpolate = lambda tracer: tracer[:-1] + wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(tracer, axis=0)
+    interpolate = lambda tracer: tracer[:-1] + geo.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(tracer, axis=0)
     _sb_3d, _qb_3d = (_zeros_3d().at[1:].set(interpolate(tracer)) for tracer in (se, qa))
     
     # Dry static energy and moisture at upper boundary
@@ -215,8 +216,8 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
 
     # Compute tendencies due to convection. Logic from physics.f90:127-130
     rps = 1/psa
-    ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * grdscp[1:, jnp.newaxis, jnp.newaxis])
-    qtend = dfqa.at[1:].set(dfqa[1:] * rps[jnp.newaxis] * grdsig[1:, jnp.newaxis, jnp.newaxis])
+    ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * geo.grdscp[1:, jnp.newaxis, jnp.newaxis])
+    qtend = dfqa.at[1:].set(dfqa[1:] * rps[jnp.newaxis] * geo.grdsig[1:, jnp.newaxis, jnp.newaxis])
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)

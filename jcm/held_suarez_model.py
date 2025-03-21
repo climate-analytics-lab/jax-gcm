@@ -17,7 +17,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
         parameters = Parameters.default()
 
         # Held Suarez doesn't use these boundaries, so it doesn't matter what they are
-        boundaries = BoundaryData.zeros((1,1))
+        boundaries = BoundaryData.zeros((1,1), 8)
 
         return get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters)
     return ExplicitODE.from_functions(physical_tendencies)

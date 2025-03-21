@@ -8,19 +8,20 @@ class TestConvectionUnit(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
         
-        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, diagnose_convection, get_convection_tendencies, grdscp, grdsig, PhysicsTendency, get_qsat, fsg, rgas, cp
+        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
         parameters = Parameters.default()
+        boundaries = BoundaryData.zeros((ix, il), kx)
+        fsg = boundaries.geometry.fsg
+        grdscp = boundaries.geometry.grdscp
+        grdsig = boundaries.geometry.grdsig
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
         from jcm.physical_constants import rgas, cp
         from jcm.humidity import get_qsat
-        from jcm.geometry import fsg, grdscp, grdsig
 
     def test_diagnose_convection_varying(self):
         ps = jnp.ones((ix, il))
@@ -30,7 +31,7 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
         
-        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters)
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, boundaries)
 
         from os import path
         test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
@@ -52,7 +53,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat, (1, ix, il))
         
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries)
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
@@ -65,7 +66,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         state = PhysicsState.ones(zxy)
 
-        boundaries = BoundaryData.ones(xy)
+        boundaries = BoundaryData.ones(xy, kx)
         
         primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries) 
         
@@ -92,7 +93,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
 
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries)
 
         test_itop = 5
         test_qdif = 1.1395
@@ -112,7 +113,7 @@ class TestConvectionUnit(unittest.TestCase):
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
-        boundaries = BoundaryData.zeros((ix,il))
+        boundaries = BoundaryData.zeros((ix,il), kx)
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
 
@@ -152,7 +153,7 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa_broadcast)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
-        boundaries = BoundaryData.zeros((ix,il))
+        boundaries = BoundaryData.zeros((ix,il), kx)
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
 
@@ -179,7 +180,7 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa_broadcast*1000.)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
-        boundaries = BoundaryData.zeros((ix,il))
+        boundaries = BoundaryData.zeros((ix,il), kx)
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
 

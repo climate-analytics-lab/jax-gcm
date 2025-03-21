@@ -12,7 +12,6 @@ from jcm.params import Parameters
 from jcm.physics_data import PhysicsData
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physical_constants import cp
-from jcm.geometry import fsg
 
 @jit
 def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
@@ -23,7 +22,7 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData, paramete
     Args:
         ta: Absolute temperature [K] - PhysicsState.temperature
         ps: Normalized pressure (p/1000 hPa) - Convection.psa
-        sig: Sigma level - fsg from jcm.geometry 
+        sig: Sigma level - fsg from boundaries.geometry 
         qa: Specific humidity - PhysicsState.specific_humidity
 
     Returns:
@@ -38,7 +37,7 @@ def spec_hum_to_rel_hum(state: PhysicsState, physics_data: PhysicsData, paramete
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
-    qsat = map_qsat(state.temperature, psa, fsg)
+    qsat = map_qsat(state.temperature, psa, boundaries.geometry.fsg)
     rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
