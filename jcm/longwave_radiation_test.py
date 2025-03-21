@@ -28,12 +28,14 @@ class TestLongwave(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
 
-        global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, geometry, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
         from jcm.params import Parameters
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
+        from jcm.geometry import Geometry
         parameters = Parameters.default()
+        geometry = Geometry.initialize_geometry((ix, il), kx)
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):        
@@ -45,11 +47,11 @@ class TestLongwave(unittest.TestCase):
         ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
-        boundaries = BoundaryData.ones(xy,kx)
+        boundaries = BoundaryData.ones(xy)
         
         state = PhysicsState.zeros(zxy,temperature=ta)
         
-        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries)
+        _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
 
         # fortran values
         # print(fsfcd[:5, :5])
@@ -119,7 +121,7 @@ class TestLongwave(unittest.TestCase):
         )
 
         # skip testing ttend since we have access to dfabs
-        _, output_physics_data = get_upward_longwave_rad_fluxes(state=state, physics_data=input_physics_data, parameters=parameters, boundaries=BoundaryData.zeros((ix, il), kx))
+        _, output_physics_data = get_upward_longwave_rad_fluxes(state=state, physics_data=input_physics_data, parameters=parameters, boundaries=BoundaryData.zeros((ix, il)), geometry=geometry)
 
         fsfc = output_physics_data.surface_flux.rlns
         ftop = output_physics_data.longwave_rad.ftop
@@ -142,13 +144,13 @@ class TestLongwave(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy,kx)
+        boundaries = BoundaryData.ones(xy)
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
+        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
@@ -162,14 +164,14 @@ class TestLongwave(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy,kx)
+        boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries) 
+        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())

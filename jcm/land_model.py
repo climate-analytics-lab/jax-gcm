@@ -1,5 +1,6 @@
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
+from jcm.geometry import Geometry
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
@@ -80,7 +81,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=jnp.newaxis):
+def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None, geometry: Geometry=None) -> tuple[PhysicsTendency, PhysicsData]:
 
     day = physics_data.date.model_day()
     stl_lm=None

@@ -1,7 +1,6 @@
 import unittest
 import jax.numpy as jnp
 import jax
-from jax import tree_util
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -9,14 +8,16 @@ class TestConvectionUnit(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
         
-        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
+        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters
+        from jcm.geometry import Geometry
         parameters = Parameters.default()
-        boundaries = BoundaryData.zeros((ix, il), kx)
-        fsg = boundaries.geometry.fsg
-        grdscp = boundaries.geometry.grdscp
-        grdsig = boundaries.geometry.grdsig
+        boundaries = BoundaryData.zeros((ix, il))
+        geometry = Geometry.initialize_geometry((ix, il), kx)
+        fsg = geometry.fsg
+        grdscp = geometry.grdscp
+        grdsig = geometry.grdsig
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
@@ -31,7 +32,7 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
         
-        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, boundaries)
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, boundaries, geometry)
 
         from os import path
         test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
@@ -53,7 +54,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat, (1, ix, il))
         
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries, geometry)
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
@@ -66,15 +67,15 @@ class TestConvectionUnit(unittest.TestCase):
         
         state = PhysicsState.ones(zxy)
 
-        boundaries = BoundaryData.ones(xy, kx)
+        boundaries = BoundaryData.ones(xy)
         
-        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries) 
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry) 
         
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy, kx)
         input = (tends, datas)
         
-        df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
@@ -93,7 +94,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
 
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries, geometry)
 
         test_itop = 5
         test_qdif = 1.1395
@@ -113,9 +114,9 @@ class TestConvectionUnit(unittest.TestCase):
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
-        boundaries = BoundaryData.zeros((ix,il), kx)
+        boundaries = BoundaryData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
 
         from os import path
         test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
@@ -153,9 +154,9 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa_broadcast)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
-        boundaries = BoundaryData.zeros((ix,il), kx)
+        boundaries = BoundaryData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
 
         self.assertTrue(jnp.allclose(physics_data.convection.iptop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
@@ -180,9 +181,9 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa_broadcast*1000.)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
-        boundaries = BoundaryData.zeros((ix,il), kx)
+        boundaries = BoundaryData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
 
         test_cbmf = jnp.array(0.019614903)
         test_precnv = jnp.array(0.21752352)

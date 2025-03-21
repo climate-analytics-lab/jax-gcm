@@ -10,6 +10,7 @@ from dinosaur import scales
 from jcm.held_suarez import HeldSuarezForcing
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
+from jcm.geometry import Geometry
 
 def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
     def physical_tendencies(state):
@@ -17,9 +18,11 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms):
         parameters = Parameters.default()
 
         # Held Suarez doesn't use these boundaries, so it doesn't matter what they are
-        boundaries = BoundaryData.zeros((1,1), 8)
+        boundaries = BoundaryData.zeros((1,1))
 
-        return get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters)
+        geometry = Geometry.initialize_geometry((1,1), 8)
+
+        return get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
     return ExplicitODE.from_functions(physical_tendencies)
 
 class HeldSuarezModel:

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import tree_math
 from typing import Callable
 from jcm.physics_data import PhysicsData
+from jcm.geometry import Geometry
 from jcm.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
@@ -176,8 +177,9 @@ def get_physical_tendencies(
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     boundaries: BoundaryData,
     parameters: Parameters,
+    geometry: Geometry,
     data: PhysicsData = None
-):
+    ):
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
@@ -196,7 +198,7 @@ def get_physical_tendencies(
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:
-        tend, data = term(physics_state, data, parameters, boundaries)
+        tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
 
     # the actual timestep size seems to be 1/3 of time_step

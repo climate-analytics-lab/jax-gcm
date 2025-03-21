@@ -1,17 +1,18 @@
+from jcm.geometry import Geometry
 from jcm.params import Parameters
 from jcm.physics_data import ablco2_ref, PhysicsData
 from jcm.boundaries import BoundaryData
-from jcm.physics import PhysicsState
+from jcm.physics import PhysicsState, PhysicsTendency
 import jax.numpy as jnp
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005
 
-def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None):
+def set_forcing(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None, geometry: Geometry=None) -> tuple[PhysicsTendency, PhysicsData]:
     from jcm.shortwave_radiation import get_zonal_average_fields
     from jcm.physics import PhysicsTendency
 
     # 2. daily-mean radiative forcing
-    physics_data = get_zonal_average_fields(state, physics_data, boundaries)
+    physics_data = get_zonal_average_fields(state, physics_data, boundaries=boundaries, geometry=geometry)
     tyear = physics_data.date.tyear
     day = physics_data.date.model_day()
     model_year = physics_data.date.model_year

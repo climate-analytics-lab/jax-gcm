@@ -11,10 +11,11 @@ from dinosaur import primitive_equations_states
 from jcm.boundaries import initialize_boundaries, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
+from jcm.geometry import Geometry
 
 PHYSICS_SPECS = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, checkpoint_terms=True):
+def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
@@ -55,7 +56,7 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, check
     
     return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in physics_terms]
 
-def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
+def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters, geometry):
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
@@ -74,7 +75,7 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             date=date
         )
 
-        return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, boundaries=boundaries, parameters=parameters, data=data)
+        return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, boundaries=boundaries, parameters=parameters, geometry=geometry, data=data)
     return ExplicitODE.from_functions(physical_tendencies)
 
 def get_coords(layers=8, horizontal_resolution=31, physics_specs=PHYSICS_SPECS):
@@ -154,6 +155,7 @@ class SpeedyModel:
             horizontal_resolution = coords.horizontal.total_wavenumbers
         else:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution, physics_specs=self.physics_specs)
+        self.geometry = Geometry.from_coords(self.coords)
 
         self.inner_steps = int(self.save_interval / dt_si)
         self.outer_steps = int(self.total_time / self.save_interval)
@@ -176,12 +178,12 @@ class SpeedyModel:
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, coords=self.coords, checkpoint_terms=checkpoint_terms)
+        self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundary_data is None:
             truncated_orography = dinosaur.primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords, truncated_orography, self.parameters, time_step=dt_si)
+            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
         else:
             self.boundaries = update_boundaries_with_timestep(boundary_data, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(
@@ -202,7 +204,8 @@ class SpeedyModel:
                                                         self.physics_terms,
                                                         self.start_date,
                                                         self.boundaries,
-                                                        self.parameters)
+                                                        self.parameters,
+                                                        self.geometry)
         
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
@@ -244,7 +247,7 @@ class SpeedyModel:
         if self.post_process_physics:
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
             for term in self.physics_terms:
-                _, data = term(physics_state, data, self.parameters, self.boundaries)
+                _, data = term(physics_state, data, self.parameters, self.boundaries, self.geometry)
         else:
             pass # Return an empty physics data object
 
