@@ -8,9 +8,14 @@ from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
 @jit
-def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
-    
-    '''
+def get_vertical_diffusion_tend(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """
     Inputs:
         se(ix,il,kx)     !! Dry static energy
         rh(ix,il,kx)     !! Relative humidity
@@ -18,11 +23,11 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
         qsat(ix,il,kx)   !! Saturated specific humidity [g/kg]
         phi(ix,il,kx)    !! Geopotential
         icnv(ix,il)      !! Sigma-level index of deep convection
-        
+    
     Returns:
         ttenvd(ix,il,kx) !! Temperature tendency
         qtenvd(ix,il,kx) !! Specific humidity tendency
-    '''
+    """
 
     se = physics_data.convection.se
     rh = physics_data.humidity.rh
@@ -51,7 +56,7 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
-    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[kx - 1] - geometry.fsg[nl1 - 1])  # 
+    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[kx - 1] - geometry.fsg[nl1 - 1])
     fvdiq2 = fvdiq * geometry.hsg[nl1]
 
     # Calculate dmse and drh arrays
@@ -84,11 +89,11 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
 
     # Update qtenvd based on fluxq_condition2
     qtenvd = qtenvd.at[nl1 - 1].set(
-                        jnp.where((dmse < 0.0) & (drh > drh0), fluxq_condition2 * rsig[nl1 - 1], qtenvd[nl1 - 1])
-            )
+        jnp.where((dmse < 0.0) & (drh > drh0), fluxq_condition2 * rsig[nl1 - 1], qtenvd[nl1 - 1])
+    )
     qtenvd = qtenvd.at[kx - 1].set(
-                        jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[kx - 1])
-            )
+        jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[kx - 1])
+    )
     
     # Step 3: Vertical diffusion of moisture above the PBL
     k_range = jnp.arange(2, kx - 2)
@@ -102,14 +107,18 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     drh = rh[k_range + 1] - rh[k_range]  # Shape: (ix, il, len(k_range))
 
     # Calculate fluxq where drh >= drh0
-    fluxq = jnp.where((drh >= drh0[:, jnp.newaxis, jnp.newaxis]) & condition[:, jnp.newaxis, jnp.newaxis], fvdiq2[:, jnp.newaxis, jnp.newaxis] * qsat[k_range] * drh, 0)
+    fluxq = jnp.where(
+        (drh >= drh0[:, jnp.newaxis, jnp.newaxis]) & condition[:, jnp.newaxis, jnp.newaxis],
+        fvdiq2[:, jnp.newaxis, jnp.newaxis] * qsat[k_range] * drh,
+        0
+    )
 
     # Update qtenvd for all selected k values
     qtenvd = qtenvd.at[k_range].add(fluxq * rsig[k_range][:, jnp.newaxis, jnp.newaxis])
     qtenvd = qtenvd.at[k_range + 1].add(-fluxq * rsig[k_range + 1][:, jnp.newaxis, jnp.newaxis])
 
     # Step 4: Damping of super-adiabatic lapse rate
-    se0 = se[1:nl1+1] + parameters.vertical_diffusion.segrad * (phi[:nl1] - phi[1:nl1+1])
+    se0 = se[1:] - parameters.vertical_diffusion.segrad * jnp.diff(phi, axis=0)
 
     condition = se[:nl1] < se0
     
@@ -119,9 +128,9 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     
     cumulative_fluxse = jnp.cumsum(fluxse * rsig1[:nl1, jnp.newaxis, jnp.newaxis], axis=0)
     
-    ttenvd = ttenvd.at[1:nl1+1].add(-cumulative_fluxse)
+    ttenvd = ttenvd.at[1:].add(-cumulative_fluxse)
     
-    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape,temperature=ttenvd, specific_humidity=qtenvd)
+    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape, temperature=ttenvd, specific_humidity=qtenvd)
 
-    # have not updated physics_data, can just return the instance we were passed 
+    # have not updated physics_data, can just return the instance we were passed
     return physics_tendencies, physics_data

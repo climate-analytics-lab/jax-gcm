@@ -11,8 +11,13 @@ from jcm.physics_data import PhysicsData
 nband = 4
 
 @jit
-def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
-
+def get_downward_longwave_rad_fluxes(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Calculate the downward longwave radiation fluxes
     
@@ -67,7 +72,7 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     dfabs = jnp.zeros((kx, ix, il))
 
     # 3. Emission and absorption of longwave downward flux.
-    #    For downward emission, a correction term depending on the 
+    #    For downward emission, a correction term depending on the
     #    local temperature gradient and on the layer transmissivity is
     #    added to the average (full-level) emission of each layer.
     
@@ -99,13 +104,26 @@ def get_downward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsD
     surface_flux_out = physics_data.surface_flux.copy(rlds=rlds)
     longwave_out = physics_data.longwave_rad.copy(dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a)
-    physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
-    physics_tendencies = PhysicsTendency(jnp.zeros_like(state.u_wind),jnp.zeros_like(state.v_wind),jnp.zeros_like(state.temperature),jnp.zeros_like(state.temperature))
+    physics_data = physics_data.copy(
+        surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out
+    )
+    physics_tendencies = PhysicsTendency(
+        jnp.zeros_like(state.u_wind),
+        jnp.zeros_like(state.v_wind),
+        jnp.zeros_like(state.temperature),
+        jnp.zeros_like(state.temperature)
+    )
 
     return physics_tendencies, physics_data
 
 @jit
-def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
+def get_upward_longwave_rad_fluxes(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Calculate the upward longwave radiation fluxes
     
@@ -122,7 +140,6 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
         ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
-    
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
@@ -174,10 +191,12 @@ def get_upward_longwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsDat
     surface_flux_out = physics_data.surface_flux.copy(rlns=fsfc)
     longwave_out = physics_data.longwave_rad.copy(ftop=ftop, dfabs=dfabs)
     mod_radcon_out = physics_data.mod_radcon.copy(st4a=st4a, flux=flux)
-    physics_data = physics_data.copy(surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out)
+    physics_data = physics_data.copy(
+        surface_flux=surface_flux_out, longwave_rad=longwave_out, mod_radcon=mod_radcon_out
+    )
     
     # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
-    ttend_lwr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis]
+    ttend_lwr = dfabs * geometry.grdscp[:, jnp.newaxis, jnp.newaxis] / physics_data.convection.psa[jnp.newaxis]
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend_lwr)
     
     return physics_tendencies, physics_data

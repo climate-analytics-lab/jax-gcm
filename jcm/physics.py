@@ -1,8 +1,8 @@
-'''
+"""
 Date: 2/7/2024
 Physics module that interfaces between the dynamics and the physics of the model. Should be agnostic
-to the specific physics being used. 
-'''
+to the specific physics being used.
+"""
 
 from collections import abc
 import jax.numpy as jnp
@@ -37,7 +37,7 @@ class PhysicsState:
             geopotential if geopotential is not None else jnp.zeros(shape),
             surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
         )
-    
+
     @classmethod
     def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
         return PhysicsState(
@@ -48,7 +48,7 @@ class PhysicsState:
             geopotential if geopotential is not None else jnp.ones(shape),
             surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
         )
-    
+
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
@@ -58,10 +58,10 @@ class PhysicsState:
             geopotential if geopotential is not None else self.geopotential,
             surface_pressure if surface_pressure is not None else self.surface_pressure
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
-    
+
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
@@ -80,7 +80,7 @@ class PhysicsTendency:
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape)
         )
-    
+
     @classmethod
     def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
         return PhysicsTendency(
@@ -89,7 +89,7 @@ class PhysicsTendency:
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape)
         )
-    
+
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
         return PhysicsTendency(
             u_wind if u_wind is not None else self.u_wind,
@@ -125,7 +125,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
         dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
     )
- 
+
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
@@ -165,7 +165,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
                                       div_tend_modal,
                                       t_tend_modal,
                                       log_sp_tend_modal,
-                                      sim_time=0., 
+                                      sim_time=0.,
                                       tracers={'specific_humidity': q_tend_modal})
     return dynamics_tendency
 
@@ -179,13 +179,13 @@ def get_physical_tendencies(
     parameters: Parameters,
     geometry: Geometry,
     data: PhysicsData = None
-    ):
+    ) -> State:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
     Args:
         state: Dynamic (dinosaur) State variables
-        dynamics: 
+        dynamics: PrimitiveEquations object
         physics_terms: List of physics functions that take a PhysicsState and return a PhysicsTendency
 
     Returns:
@@ -193,8 +193,8 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
-    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
-    # and implicitly passed to the next physics_term. tendencies are summed 
+    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
+    # and implicitly passed to the next physics_term. tendencies are summed
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:

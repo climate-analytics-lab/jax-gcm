@@ -15,7 +15,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         from jcm.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
-        geometry = Geometry.initialize_geometry((ix, il), kx)
+        geometry = Geometry.from_grid_shape((ix, il), kx)
         from jcm.boundaries import BoundaryData
         from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 

@@ -8,6 +8,6 @@ class TestGeometryUnit(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
     def test_initialize_geometry(self):
-        geo = Geometry.initialize_geometry((ix, il), kx)
+        geo = Geometry.from_grid_shape((ix, il), kx)
         # Check that hsg is not null.
         self.assertIsNotNone(geo.hsg)

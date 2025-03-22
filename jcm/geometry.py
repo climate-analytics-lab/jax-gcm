@@ -1,7 +1,7 @@
-'''
+"""
 Date: 2/1/2024
 For storing all variables related to the model's grid space.
-'''
+"""
 import jax.numpy as jnp
 import tree_math
 import jcm.physical_constants as pc
@@ -52,8 +52,8 @@ class Geometry:
     grdsig: jnp.ndarray # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
     grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
     wvi: jnp.ndarray # Weights for vertical interpolation
-    
-    @classmethod 
+
+    @classmethod
     def from_coords(self, coords: CoordinateSystem=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
@@ -73,10 +73,12 @@ class Geometry:
         kx = len(coords.vertical.boundaries)-1
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
-        return Geometry(radang=radang,sia=sia,coa=coa,hsg=hsg,fsg=fsg,dhs=dhs,sigl=sigl,grdsig=grdsig,grdscp=grdscp,wvi=wvi)
-    
-    @classmethod 
-    def initialize_geometry(self, nodal_shape=None, node_levels=None):
+        return Geometry(radang=radang, sia=sia, coa=coa,
+                        hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
+                        grdsig=grdsig, grdscp=grdscp, wvi=wvi)
+
+    @classmethod
+    def from_grid_shape(self, nodal_shape=None, node_levels=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
@@ -102,4 +104,6 @@ class Geometry:
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
-        return Geometry(radang=radang,sia=sia,coa=coa,hsg=hsg,fsg=fsg,dhs=dhs,sigl=sigl,grdsig=grdsig,grdscp=grdscp,wvi=wvi)
+        return Geometry(radang=radang, sia=sia, coa=coa,
+                        hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
+                        grdsig=grdsig, grdscp=grdscp, wvi=wvi)

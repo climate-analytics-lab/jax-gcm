@@ -10,8 +10,14 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 
 @jit
-def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
-    ''''
+def get_shortwave_rad_fluxes(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
     icltop(ix,il)    # Cloud top level
@@ -21,7 +27,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     rsns(ix,il)     # Net downward flux of short-wave radiation at the surface
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
-    '''
+    """
 
     kx, ix, il = state.temperature.shape
     dhs = geometry.dhs
@@ -45,17 +51,21 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     tau2 = jnp.zeros((kx, ix, il, 4))
     mask = icltop < kx
     clamped_icltop = jnp.clip(icltop, 0, tau2.shape[0] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
+    # Start with tau2 and update the values where the mask is true
     tau2 = tau2.at[clamped_icltop, :, :, 2].set(
-        jnp.where(mask, parameters.shortwave_radiation.albcl * cloudc, tau2[clamped_icltop, :, :, 2])   # Start with tau2 and update the values where the mask is true
+        jnp.where(mask, parameters.shortwave_radiation.albcl * cloudc, tau2[clamped_icltop, :, :, 2])
     )
-    
-    tau2 = tau2.at[kx - 1, :, :, 2].set(parameters.shortwave_radiation.albcls * clstr)  # Update the tau2 values for the second condition (kx index) across the entire array
+    # Update the tau2 values for the second condition (kx index) across the entire array
+    tau2 = tau2.at[kx - 1, :, :, 2].set(parameters.shortwave_radiation.albcls * clstr)
 
     # 2. Shortwave transmissivity:
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
     psaz = psa*physics_data.shortwave_rad.zenit
-    acloud = cloudc*jnp.minimum(parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud, parameters.shortwave_radiation.abscl2)
+    acloud = cloudc*jnp.minimum(
+        parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud,
+        parameters.shortwave_radiation.abscl2
+    )
     tau2 = tau2.at[0,:,:,0].set(jnp.exp(-psaz*dhs[0]*parameters.shortwave_radiation.absdry))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
@@ -71,8 +81,9 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer*fsg[kx - 1]**2
     tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])))
-
-    tau2 = tau2.at[1:kx,:,:,1].set(jnp.exp(-psaz[jnp.newaxis]*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx]))
+    tau2 = tau2.at[1:kx,:,:,1].set(
+        jnp.exp(-psaz[jnp.newaxis]*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx])
+    )
 
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
@@ -104,9 +115,10 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     
     # scan over k = 2:kx
     _, flux_1_scan = lax.scan(
-        jax.checkpoint(lambda carry, i: (propagate_flux_1(carry, i),)*2), #scan wants a tuple of carry and output for the next iteration, I'm just returning the output for both?
+        jax.checkpoint(lambda carry, i: (propagate_flux_1(carry, i),)*2),
         flux_1[1], #initial value
-        tau2[2:kx]) #pass tau2 directly rather than indexing
+        tau2[2:kx] #pass tau2 directly rather than indexing
+    )
     
     # put results in flux_1
     flux_1 = flux_1.at[2:kx].set(flux_1_scan)
@@ -140,7 +152,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
         tau2[1:kx][::-1]
     )
     flux_1 = flux_1.at[:-1].set(flux_1_scan[::-1])
-        
+    
     dfabs += flux_1*(1 - tau2[:,:,:,0])
 
     flux_1 = flux_1.at[1:].set(flux_1[:-1])
@@ -166,7 +178,7 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
     absorptivity = absorptivity.at[0, :, :, 2:].set(0)
     
     # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1)
-    #   Leave absorptivity unchanged
+    # Leave absorptivity unchanged
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     acloud1, acloud2 = (cloudc[jnp.newaxis, :, :, jnp.newaxis]*a for a in (parameters.shortwave_radiation.ablcl1, parameters.shortwave_radiation.ablcl2))
@@ -196,7 +208,12 @@ def get_shortwave_rad_fluxes(state: PhysicsState, physics_data: PhysicsData, par
 
 
 @jit
-def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, boundaries: BoundaryData, geometry: Geometry):
+def get_zonal_average_fields(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> PhysicsData:
     """
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
@@ -236,7 +253,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
     # Solar radiation at the top
     topsr = jnp.zeros(il)
     topsr = solar(physics_data.date.tyear,4*solc,geometry=geometry)
-    
+
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
 
@@ -257,7 +274,7 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
         # Polar night cooling in the stratosphere
         stratz_i_j = jnp.maximum(fs0 - fsol_i_j, 0.0)
 
-        return jnp.full(ix, fsol_i_j), jnp.full(ix, ozupp_i_j), jnp.full(ix, ozone_i_j), jnp.full(ix, zenit_i_j), jnp.full(ix, stratz_i_j)
+        return *(jnp.full(ix, field) for field in (fsol_i_j, ozupp_i_j, ozone_i_j, zenit_i_j, stratz_i_j)),
 
     vectorized_compute_fields = vmap(compute_fields, in_axes=0, out_axes=1)
 
@@ -269,8 +286,14 @@ def get_zonal_average_fields(state: PhysicsState, physics_data: PhysicsData, bou
     return physics_data
 
 @jit
-def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
-    '''
+def clouds(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
@@ -280,14 +303,13 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
         precls: Large-scale condensational precipitation - PhysicsData.Condensation
         iptop: Cloud top level - PhysicsData.Convection
         gse: Vertical gradient of dry static energy - 
-        fmask: Fraction land-sea mask 
+        fmask: Fraction land-sea mask
 
     Returns:
         icltop: Cloud top level
         cloudc: Total cloud cover
         clstr: Stratiform cloud cover
-        
-    '''
+    """
     # Compute gradient of static energy: logic from physics.f90:147
     se = physics_data.convection.se
     phig = state.geopotential
@@ -299,7 +321,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     kx = state.temperature.shape[0]
 
     # Constants
-    
     nl1  = kx-2
     nlp  = kx
     rrcl = 1./(parameters.shortwave_radiation.rhcl2-parameters.shortwave_radiation.rhcl1)
@@ -352,7 +373,7 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
     clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
     clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
-    swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud) 
+    swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
 
     # This function doesn't directly produce tendencies
@@ -362,7 +383,6 @@ def clouds(state: PhysicsState, physics_data: PhysicsData, parameters: Parameter
 
 @jit
 def solar(tyear, csol=4.*solc, geometry: Geometry=None):
-
     """
     Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
     
@@ -387,8 +407,8 @@ def solar(tyear, csol=4.*solc, geometry: Geometry=None):
     ca3 = ca1 * ca2 - sa1 * sa2
     sa3 = sa1 * ca2 + sa2 * ca1
 
-    decl = (0.006918 - 0.399912 * ca1 + 0.070257 * sa1 - 
-            0.006758 * ca2 + 0.000907 * sa2 - 
+    decl = (0.006918 - 0.399912 * ca1 + 0.070257 * sa1 -
+            0.006758 * ca2 + 0.000907 * sa2 -
             0.002697 * ca3 + 0.001480 * sa3)
 
     fdis = 1.000110 + 0.034221 * ca1 + 0.001280 * sa1 + 0.000719 * ca2 + 0.000077 * sa2

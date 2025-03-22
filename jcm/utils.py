@@ -1,12 +1,12 @@
-import jax.numpy as jnp 
+import jax.numpy as jnp
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
-    '''
+    """
         grid_field: field in grid space
         trunc: truncation level, # of wavenumbers to keep
-    '''
+    """
     spectral_field = grid.to_modal(grid_field)
     nx,mx = spectral_field.shape
     n_indices, m_indices = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx), indexing='ij')

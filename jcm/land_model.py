@@ -7,12 +7,12 @@ import jax.numpy as jnp
 from jax import jit
 
 def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
-    '''
+    """
         surface_filename: filename storing boundary data
         parameters: initialized model parameters
         boundaries: partially initialized boundary data
         time_step: time step - model timestep in minutes
-    '''
+    """
     import xarray as xr
     # =========================================================================
     # Initialize land-surface boundary conditions
@@ -23,7 +23,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     bmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 1.0, 0.0)
 
     # Update fmask_l based on the conditions
-    fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 
+    fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh,
                         jnp.where(boundaries.fmask > (1.0 - parameters.land_model.thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
@@ -34,7 +34,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
 
     # Snow depth
     snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])
-    # simple sanity check - same method ras above for stl12 
+    # simple sanity check - same method ras above for stl12
     snowd_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
@@ -63,7 +63,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
 
     soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg[:,:,jnp.newaxis] * max_term))
 
-    # simple sanity check - same method ras above for stl12 
+    # simple sanity check - same method ras above for stl12
     soilw_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
 
     # =========================================================================
@@ -81,7 +81,13 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None, geometry: Geometry=None) -> tuple[PhysicsTendency, PhysicsData]:
+def couple_land_atm(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
 
     day = physics_data.date.model_day()
     stl_lm=None

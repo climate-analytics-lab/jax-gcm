@@ -1,7 +1,7 @@
-'''
+"""
 Date: 1/25/2024
 For storing and initializing physical constants.
-'''
+"""
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)

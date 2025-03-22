@@ -1,8 +1,8 @@
-'''
+"""
 Date: 2/11/2024
 Parametrization of convection. Convection is modelled using a simplified 
 version of the Tiedke (1993) mass-flux convection scheme.
-'''
+"""
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
@@ -13,9 +13,14 @@ from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, grav
 
 @jit
-def diagnose_convection(psa, se, qa, qsat, parameters: Parameters, boundaries: BoundaryData=None, geometry: Geometry=None):
+def diagnose_convection(
+    psa, se, qa, qsat,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Diagnose convectively unstable gridboxes  
+    Diagnose convectively unstable gridboxes
 
     Convection is activated in gridboxes with conditional instability. This
     is diagnosed by checking for any tropopsheric half level where the
@@ -35,7 +40,6 @@ def diagnose_convection(psa, se, qa, qsat, parameters: Parameters, boundaries: B
     Returns:
     iptop: Top of convection (layer index)
     qdif: Excess humidity in convective gridboxes
-
     """
     kx, ix, il = se.shape
     iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
@@ -57,21 +61,25 @@ def diagnose_convection(psa, se, qa, qsat, parameters: Parameters, boundaries: B
     # Saturation (or super-saturated) moist static energy in PBL
     mss0 = jnp.maximum(mse0, mss[kx-1])
 
-    mss2 = jnp.pad(mss[:-1] + geometry.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * (mss[1:] - mss[:-1]), ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0) # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
+    mss2 = jnp.pad(
+        mss[:-1] + geometry.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(mss, axis=0),
+        ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0 # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
+    )
 
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
     # Note ktop1 and ktop2 are 1-indexed to match icltop convention
     possible_cltop_levels = jnp.arange(2, kx-3, dtype=int)
-    get_cloud_top = lambda instability_mask: jnp.where(jnp.any(instability_mask, axis=0),
-                                                       (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
-                                                       jnp.array(kx, dtype=int)) 
+    get_cloud_top = lambda instability_mask: jnp.where(
+        jnp.any(instability_mask, axis=0),
+        (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
+        jnp.array(kx, dtype=int)
+    )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
     ktop1 = get_cloud_top(mss0[jnp.newaxis] > mss2[2:kx-3])
-    
-    # Check 2: gradient of actual moist static energy between lower and upper 
-    # troposphere
+
+    # Check 2: gradient of actual moist static energy between lower and upper troposphere
     ktop2 = get_cloud_top(mse1[jnp.newaxis] > mss2[2:kx-3])
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
@@ -89,12 +97,18 @@ def diagnose_convection(psa, se, qa, qsat, parameters: Parameters, boundaries: B
     return iptop, qdif
 
 @jit
-def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=None, geometry: Geometry=None) -> tuple[PhysicsTendency, PhysicsData]:
+def get_convection_tendencies(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
     Args:
-    psa: Normalised surface pressure [p/p0] 
+    psa: Normalised surface pressure [p/p0]
     se: Dry static energy [c_p.T + g.z]
     qa: Specific humidity [g/kg] - state.specific_humidity
     qsat: Saturation specific humidity [g/kg] - humidity.qsat
@@ -105,7 +119,6 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     precnv: Convective precipitation [g/(m^2 s)]
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
-
     """
     conv = physics_data.convection
     se = conv.se
@@ -120,7 +133,7 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
     #keep indexing consistent with original Speedy
-    nl1 = kx - 1 
+    nl1 = kx - 1
     nlp = kx + 1
 
     # Entrainment profile (up to sigma = 0.5)
@@ -220,6 +233,10 @@ def get_convection_tendencies(state: PhysicsState, physics_data: PhysicsData, pa
 
     convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
-    physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend,specific_humidity=qtend)
+    physics_tendencies = PhysicsTendency.zeros(
+        shape=state.temperature.shape,
+        temperature=ttend,
+        specific_humidity=qtend
+    )
     
     return physics_tendencies, physics_data

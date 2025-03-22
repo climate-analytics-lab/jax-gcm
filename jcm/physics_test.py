@@ -2,7 +2,6 @@ import unittest
 from dinosaur.primitive_equations import PrimitiveEquations
 from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
-from datetime import datetime
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import Geometry

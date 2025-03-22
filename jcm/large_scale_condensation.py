@@ -1,7 +1,7 @@
-'''
+"""
 Date: 2/11/2024
 Parametrization of large-scale condensation.
-'''
+"""
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
@@ -11,10 +11,14 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, cp, alhc, grav
 
-# Compute large-scale condensation and associated tendencies of temperature and 
-# moisture
 @jit
-def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
+def get_large_scale_condensation_tendencies(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
@@ -29,7 +33,6 @@ def get_large_scale_condensation_tendencies(state: PhysicsState, physics_data: P
         precls: Precipitation due to large-scale condensation
         dtlsc: Temperature tendency due to large-scale condensation
         dqlsc: Specific humidity tendency due to large-scale condensation
-
     """
     # 1. Initialization
     humidity = physics_data.humidity

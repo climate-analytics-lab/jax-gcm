@@ -24,8 +24,9 @@ class HeldSuarezForcing:
         ks: Quantity = 1 / (4 * units.day),
         minT: Quantity = 200 * units.degK,
         maxT: Quantity = 315 * units.degK,
-        dTy: Quantity = 60 * units.degK,    
-        dThz: Quantity = 10 * units.degK,):
+        dTy: Quantity = 60 * units.degK,
+        dThz: Quantity = 10 * units.degK,
+    ):
         """Initialize Held-Suarez.
 
         Args:
@@ -58,10 +59,8 @@ class HeldSuarezForcing:
         # Coordinates
         self.sigma = self.coords.vertical.centers
         _, sin_lat = self.coords.horizontal.nodal_mesh
-        self.lat = jnp.arcsin(sin_lat)                                                           
+        self.lat = jnp.arcsin(sin_lat)
 
-
-      
     def equilibrium_temperature(self, nodal_surface_pressure):
         p_over_p0 = (
             self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis] / self.p0
@@ -72,7 +71,7 @@ class HeldSuarezForcing:
             - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat[jnp.newaxis]) ** 2
         )
         return jnp.maximum(self.minT, temperature)
-   
+
     def kv(self):
         kv_coeff = self.kf * (
             jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
@@ -85,7 +84,14 @@ class HeldSuarezForcing:
             cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat[jnp.newaxis]) ** 4
     )
 
-    def held_suarez_forcings(self, state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry) -> tuple[PhysicsTendency, PhysicsData]:
+    def held_suarez_forcings(
+        self,
+        state: PhysicsState,
+        physics_data: PhysicsData,
+        parameters: Parameters,
+        boundaries: BoundaryData,
+        geometry: Geometry
+    ) -> tuple[PhysicsTendency, PhysicsData]:
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 

@@ -17,7 +17,7 @@ class TestHumidityUnit(unittest.TestCase):
         from jcm.params import Parameters
         parameters = Parameters.default()
         from jcm.geometry import Geometry
-        geometry = Geometry.initialize_geometry((ix, il), kx)
+        geometry = Geometry.from_grid_shape((ix, il), kx)
         
         self.temp_standard = jnp.ones((kx,ix,il))*273
         self.pressure_standard = jnp.ones((ix,il))*0.5
