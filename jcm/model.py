@@ -173,7 +173,7 @@ class SpeedyModel:
         self.post_process_physics = post_process
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
-        p0 = 100e3 * units.pascal
+        p0 = 1e5 * units.pascal
         p1 = 5e3 * units.pascal
 
         if initial_state is not None:
@@ -207,7 +207,7 @@ class SpeedyModel:
         
         self.primitive = primitive_equations.PrimitiveEquations(
             self.ref_temps,
-            truncated_orography * 1e-3, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
+            truncated_orography, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
             self.coords,
             self.physics_specs)
 
