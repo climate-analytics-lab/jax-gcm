@@ -127,7 +127,7 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, start_date=None,
+    def __init__(self, time_step=30, save_interval=10, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, initial_state: PhysicsState=None, coords: CoordinateSystem=None,
                  boundaries: BoundaryData=None, parameters: Parameters=None,
                  post_process=True, checkpoint_terms=True) -> None:
@@ -166,7 +166,9 @@ class SpeedyModel:
         self.geometry = Geometry.from_coords(self.coords)
 
         self.inner_steps = int(self.save_interval / dt_si)
+        print('save inner_steps:',self.inner_steps)
         self.outer_steps = int(self.total_time / self.save_interval)
+        print('outer steps:',self.outer_steps)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         self.parameters = parameters or Parameters.default()
