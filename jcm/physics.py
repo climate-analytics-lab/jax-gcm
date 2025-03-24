@@ -1,16 +1,15 @@
-'''
+"""
 Date: 2/7/2024
 Physics module that interfaces between the dynamics and the physics of the model. Should be agnostic
-to the specific physics being used. 
-'''
+to the specific physics being used.
+"""
 
 from collections import abc
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.geometry import hsg, fsg, sigl, dhs
-from jcm import physical_constants as pc
 from jcm.physics_data import PhysicsData
+from jcm.geometry import Geometry
 from jcm.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
@@ -38,7 +37,7 @@ class PhysicsState:
             geopotential if geopotential is not None else jnp.zeros(shape),
             surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
         )
-    
+
     @classmethod
     def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
         return PhysicsState(
@@ -49,7 +48,7 @@ class PhysicsState:
             geopotential if geopotential is not None else jnp.ones(shape),
             surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
         )
-    
+
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
@@ -59,10 +58,10 @@ class PhysicsState:
             geopotential if geopotential is not None else self.geopotential,
             surface_pressure if surface_pressure is not None else self.surface_pressure
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
-    
+
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
@@ -81,7 +80,7 @@ class PhysicsTendency:
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape)
         )
-    
+
     @classmethod
     def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
         return PhysicsTendency(
@@ -90,7 +89,7 @@ class PhysicsTendency:
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape)
         )
-    
+
     def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
         return PhysicsTendency(
             u_wind if u_wind is not None else self.u_wind,
@@ -98,20 +97,6 @@ class PhysicsTendency:
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
-
-def initialize_physics():
-    # 1.2 Functions of sigma and latitude
-    pc.grdsig = pc.grav/(dhs*pc.p0)
-    pc.grdscp = pc.grdsig/pc.cp
-
-    # Weights for vertical interpolation at half-levels(1,kx) and surface
-    # Note that for phys.par. half-lev(k) is between full-lev k and k+1
-    # Fhalf(k) = Ffull(k)+WVI(K,2)*(Ffull(k+1)-Ffull(k))
-    # Fsurf = Ffull(kx)+WVI(kx,2)*(Ffull(kx)-Ffull(kx-1))
-    pc.wvi = jnp.zeros((fsg.shape[0], 2))
-    pc.wvi = pc.wvi.at[:-1, 0].set(1./(sigl[1:]-sigl[:-1]))
-    pc.wvi = pc.wvi.at[:-1, 1].set((jnp.log(hsg[1:-1])-sigl[:-1])*pc.wvi[:-1, 0])
-    pc.wvi = pc.wvi.at[-1, 1].set((jnp.log(0.99)-sigl[-1])*pc.wvi[-2,0])
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
@@ -140,7 +125,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
         dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
     )
- 
+
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
@@ -180,7 +165,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
                                       div_tend_modal,
                                       t_tend_modal,
                                       log_sp_tend_modal,
-                                      sim_time=0., 
+                                      sim_time=0.,
                                       tracers={'specific_humidity': q_tend_modal})
     return dynamics_tendency
 
@@ -192,14 +177,15 @@ def get_physical_tendencies(
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
     boundaries: BoundaryData,
     parameters: Parameters,
+    geometry: Geometry,
     data: PhysicsData = None
-):
+    ) -> State:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
     Args:
         state: Dynamic (dinosaur) State variables
-        dynamics: 
+        dynamics: PrimitiveEquations object
         physics_terms: List of physics functions that take a PhysicsState and return a PhysicsTendency
 
     Returns:
@@ -207,12 +193,12 @@ def get_physical_tendencies(
     """
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
-    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step 
-    # and implicitly passed to the next physics_term. tendencies are summed 
+    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
+    # and implicitly passed to the next physics_term. tendencies are summed
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
     for term in physics_terms:
-        tend, data = term(physics_state, data, parameters, boundaries)
+        tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
 
     # the actual timestep size seems to be 1/3 of time_step

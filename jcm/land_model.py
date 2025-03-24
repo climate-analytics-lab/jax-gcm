@@ -1,31 +1,29 @@
-from dinosaur.scales import units
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
+from jcm.geometry import Geometry
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 import jax.numpy as jnp
 from jax import jit
 
-def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData, time_step):
-    '''
+def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
+    """
         surface_filename: filename storing boundary data
         parameters: initialized model parameters
         boundaries: partially initialized boundary data
         time_step: time step - model timestep in minutes
-    '''
+    """
     import xarray as xr
     # =========================================================================
     # Initialize land-surface boundary conditions
     # =========================================================================
-
-    delt = time_step.to(units.second).m
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
     bmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 1.0, 0.0)
 
     # Update fmask_l based on the conditions
-    fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh, 
+    fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh,
                         jnp.where(boundaries.fmask > (1.0 - parameters.land_model.thrsh), 1.0, fmask_l), 0.0)
 
     # Land-surface temperature
@@ -36,7 +34,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
 
     # Snow depth
     snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])
-    # simple sanity check - same method ras above for stl12 
+    # simple sanity check - same method ras above for stl12
     snowd_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
@@ -65,7 +63,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
 
     soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg[:,:,jnp.newaxis] * max_term))
 
-    # simple sanity check - same method ras above for stl12 
+    # simple sanity check - same method ras above for stl12
     soilw_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
 
     # =========================================================================
@@ -78,14 +76,18 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
     # Set time_step/heat_capacity and dissipation fields
-    rhcapl = jnp.where(boundaries.alb0 < 0.4, delt / parameters.land_model.hcapl, delt / parameters.land_model.hcapli)
     cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
 
-    boundaries_new = boundaries.copy(rhcapl=rhcapl, cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
-    return boundaries_new
+    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
 
 # Exchanges fluxes between land and atmosphere.
-def couple_land_atm(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData=jnp.newaxis):
+def couple_land_atm(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
 
     day = physics_data.date.model_day()
     stl_lm=None

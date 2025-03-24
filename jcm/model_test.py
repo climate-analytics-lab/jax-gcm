@@ -61,7 +61,7 @@ class TestModelUnit(unittest.TestCase):
             time_step=720,
             save_interval=1,
             total_time=2,
-            layers=layers, 
+            layers=layers,
             parameters=Parameters.default()
         )
     

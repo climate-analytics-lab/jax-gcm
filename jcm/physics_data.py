@@ -4,7 +4,7 @@ from jcm.date import DateData
 from jax import tree_util
 
 ablco2_ref = 6.0
- 
+
 @tree_math.struct
 class LWRadiationData:
     dfabs: jnp.ndarray # Flux of long-wave radiation absorbed in each atmospheric layer
@@ -191,8 +191,8 @@ class CondensationData:
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
         return CondensationData(
-            precls=precls if precls is not None else self.precls, 
-            dtlsc=dtlsc if dtlsc is not None else self.dtlsc, 
+            precls=precls if precls is not None else self.precls,
+            dtlsc=dtlsc if dtlsc is not None else self.dtlsc,
             dqlsc=dqlsc if dqlsc is not None else self.dqlsc
         )
     
@@ -201,7 +201,7 @@ class CondensationData:
 
 @tree_math.struct
 class ConvectionData:
-    psa: jnp.ndarray # normalized surface pressure 
+    psa: jnp.ndarray # normalized surface pressure
     se: jnp.ndarray # dry static energy
     iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
@@ -236,8 +236,8 @@ class ConvectionData:
             precnv=precnv if precnv is not None else self.precnv
         )
     
-    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to 
-    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaninful 
+    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to
+    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
     # or intended to be used.
     def isnan(self):
         self.iptop = jnp.zeros_like(self.iptop, dtype=float)
@@ -264,7 +264,7 @@ class HumidityData:
 
     def copy(self, rh=None, qsat=None):
         return HumidityData(
-            rh=rh if rh is not None else self.rh, 
+            rh=rh if rh is not None else self.rh,
             qsat=qsat if qsat is not None else self.qsat
         )
     
@@ -345,7 +345,7 @@ class SurfaceFluxData:
 
 @tree_math.struct
 class LandModelData:
-    stl_lm: jnp.ndarray 
+    stl_lm: jnp.ndarray
     stl_am: jnp.ndarray
     
     @classmethod
@@ -385,8 +385,8 @@ class PhysicsData:
     land_model: LandModelData
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
-        return PhysicsData(        
+    def zeros(self, nodal_shape, node_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+        return PhysicsData(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
             convection = convection if convection is not None else ConvectionData.zeros(nodal_shape, node_levels),
@@ -400,7 +400,7 @@ class PhysicsData:
     
     @classmethod
     def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
-        return PhysicsData(        
+        return PhysicsData(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
             convection = convection if convection is not None else ConvectionData.ones(nodal_shape, node_levels),
@@ -436,7 +436,7 @@ class PhysicsData:
             humidity=self.humidity.isnan(),
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
-            date=0, 
+            date=0,
             land_model=self.land_model.isnan()
         )
     
