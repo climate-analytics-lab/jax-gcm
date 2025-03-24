@@ -287,7 +287,7 @@ class SpeedyModel:
         from dinosaur.xarray_utils import data_to_xarray
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
-    def predictions_to_xarray(self, predictions):
+    def predictions_to_xarray(self, final_state, predictions):
         # extract dynamics predictions (State format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
@@ -301,7 +301,7 @@ class SpeedyModel:
         # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
         # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
         log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal) * 1e5
+        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
