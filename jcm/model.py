@@ -11,6 +11,7 @@ from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_w
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
+from jcm.physics import PhysicsState
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -127,7 +128,7 @@ class SpeedyModel:
     """
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, start_date=None,
-                 layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
+                 layers=8, horizontal_resolution=31, initial_state: PhysicsState=None, coords: CoordinateSystem=None,
                  boundaries: BoundaryData=None, parameters: Parameters=None,
                  post_process=True, checkpoint_terms=True) -> None:
         """
@@ -175,7 +176,10 @@ class SpeedyModel:
         p0 = 100e3 * units.pascal
         p1 = 5e3 * units.pascal
 
-        self.initial_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+        if initial_state is not None:
+            self.initial_state = initial_state
+        
+        self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
             p0=p0,
@@ -187,7 +191,7 @@ class SpeedyModel:
         # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
         
-        # TODO: make the truncation number a parameter consistent with the grid shape
+        # Set the boundaries, either using default or with the given boundaries
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
             self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
@@ -226,12 +230,17 @@ class SpeedyModel:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        state.log_surface_pressure = state.log_surface_pressure * 1e-3
-        state.tracers = {
-            'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
-        }
-        return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        from jcm.physics import physics_state_to_dynamics_state
+        if self.initial_state is not None:
+            state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        else:
+            state = self.default_state_fun(jax.random.PRNGKey(random_seed))
+            state.log_surface_pressure = state.log_surface_pressure * 1e-3
+            state.tracers = {
+                'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            }
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state):
         from jcm.date import DateData

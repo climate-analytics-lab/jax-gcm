@@ -98,6 +98,31 @@ class PhysicsTendency:
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
 
+def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
+    
+    # Calculate vorticity and divergence from u and v
+    modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u, physics_state.v)
+
+    # convert specific humidity to modal (and nondimensionalize)
+    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram / units.second)
+    q_modal = dynamics.coords.horizontal.to_modal(q)
+
+    # convert temperature to a variation and then to modal
+    temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+    temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
+
+    # convert log surface pressure to modal
+    modal_log_sp = dynamics.coords.horizontal.to_modal(jnp.log(physics_state.surface_pressure))
+
+    return State(
+        vorticity=modal_vorticity,
+        divergence=modal_divergence,
+        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
+        log_surface_pressure=modal_log_sp,
+        tracers={'specific_humidity': q_modal}
+        )
+
+
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
