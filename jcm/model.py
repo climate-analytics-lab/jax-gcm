@@ -178,6 +178,8 @@ class SpeedyModel:
 
         if initial_state is not None:
             self.initial_state = initial_state
+        else:
+            self.initial_state = None
         
         self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
