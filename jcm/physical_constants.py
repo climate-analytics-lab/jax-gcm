@@ -1,9 +1,7 @@
-'''
+"""
 Date: 1/25/2024
 For storing and initializing physical constants.
-'''
-
-import jax.numpy as jnp
+"""
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)
@@ -20,10 +18,6 @@ alhs = 2801.0 # Latent heat of sublimation
 sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
 epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
-# Functions of sigma and latitude (initial. in INPHYS)
-grdsig = None # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
-grdscp = None # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
-wvi = None # Weights for vertical interpolation
 
 gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
 hscale = 7.5       # Reference scale height for pressure (in km)
@@ -37,3 +31,6 @@ thds   = 12.0      # Max damping time (in hours) for extra diffusion
                                              ## (del^2) in the stratosphere
 tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
                                              # in the stratosphere
+
+# to prevent blowup of gradients
+epsilon = 1e-9

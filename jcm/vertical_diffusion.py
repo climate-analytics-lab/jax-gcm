@@ -1,16 +1,21 @@
 import jax.numpy as jnp
 from jax import jit
+from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import cp, alhc
-from jcm.geometry import hsg, fsg, dhs
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
 @jit
-def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, parameters: Parameters, boundaries: BoundaryData):
-    
-    '''
+def get_vertical_diffusion_tend(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """
     Inputs:
         se(ix,il,kx)     !! Dry static energy
         rh(ix,il,kx)     !! Relative humidity
@@ -18,11 +23,11 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
         qsat(ix,il,kx)   !! Saturated specific humidity [g/kg]
         phi(ix,il,kx)    !! Geopotential
         icnv(ix,il)      !! Sigma-level index of deep convection
-        
+    
     Returns:
         ttenvd(ix,il,kx) !! Temperature tendency
         qtenvd(ix,il,kx) !! Specific humidity tendency
-    '''
+    """
 
     se = physics_data.convection.se
     rh = physics_data.humidity.rh
@@ -37,8 +42,8 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     qtenvd = jnp.zeros((kx,ix,il))
 
     nl1 = kx - 1
-    cshc = dhs[kx - 1] / 3600.0
-    cvdi = (hsg[nl1-1] - hsg[1]) / ((nl1 - 1) * 3600.0)
+    cshc = geometry.dhs[kx - 1] / 3600.0
+    cvdi = (geometry.hsg[nl1-1] - geometry.hsg[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / parameters.vertical_diffusion.trshc
     fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
@@ -46,13 +51,13 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     fvdiq = cvdi / parameters.vertical_diffusion.trvdi
     fvdise = cvdi / (parameters.vertical_diffusion.trvds * cp)
 
-    rsig = 1.0 / dhs
-    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - hsg[1:-1]))
+    rsig = 1.0 / geometry.dhs
+    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - geometry.hsg[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
-    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[kx - 1] - fsg[nl1 - 1])  # 
-    fvdiq2 = fvdiq * hsg[nl1]
+    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[kx - 1] - geometry.fsg[nl1 - 1])
+    fvdiq2 = fvdiq * geometry.hsg[nl1]
 
     # Calculate dmse and drh arrays
     dmse = se[kx - 1] - se[nl1 - 1] + alhc * (qa[kx - 1] - qsat[nl1 -1])
@@ -84,32 +89,36 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
 
     # Update qtenvd based on fluxq_condition2
     qtenvd = qtenvd.at[nl1 - 1].set(
-                        jnp.where((dmse < 0.0) & (drh > drh0), fluxq_condition2 * rsig[nl1 - 1], qtenvd[nl1 - 1])
-            )
+        jnp.where((dmse < 0.0) & (drh > drh0), fluxq_condition2 * rsig[nl1 - 1], qtenvd[nl1 - 1])
+    )
     qtenvd = qtenvd.at[kx - 1].set(
-                        jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[kx - 1])
-            )
+        jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[kx - 1])
+    )
     
     # Step 3: Vertical diffusion of moisture above the PBL
     k_range = jnp.arange(2, kx - 2)
-    condition = hsg[k_range + 1] > 0.5
+    condition = geometry.hsg[k_range + 1] > 0.5
 
     # Vectorized calculation of drh0 and fvdiq2 for all selected k values
-    drh0 = parameters.vertical_diffusion.rhgrad * (fsg[k_range + 1] - fsg[k_range])  # Shape: (len(k_range),)
-    fvdiq2 = fvdiq * hsg[k_range + 1]  # Shape: (len(k_range),)
+    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[k_range + 1] - geometry.fsg[k_range])  # Shape: (len(k_range),)
+    fvdiq2 = fvdiq * geometry.hsg[k_range + 1]  # Shape: (len(k_range),)
 
     # Calculate drh for all selected k values across the entire ix and il dimensions
     drh = rh[k_range + 1] - rh[k_range]  # Shape: (ix, il, len(k_range))
 
     # Calculate fluxq where drh >= drh0
-    fluxq = jnp.where((drh >= drh0[:, jnp.newaxis, jnp.newaxis]) & condition[:, jnp.newaxis, jnp.newaxis], fvdiq2[:, jnp.newaxis, jnp.newaxis] * qsat[k_range] * drh, 0)
+    fluxq = jnp.where(
+        (drh >= drh0[:, jnp.newaxis, jnp.newaxis]) & condition[:, jnp.newaxis, jnp.newaxis],
+        fvdiq2[:, jnp.newaxis, jnp.newaxis] * qsat[k_range] * drh,
+        0
+    )
 
     # Update qtenvd for all selected k values
     qtenvd = qtenvd.at[k_range].add(fluxq * rsig[k_range][:, jnp.newaxis, jnp.newaxis])
     qtenvd = qtenvd.at[k_range + 1].add(-fluxq * rsig[k_range + 1][:, jnp.newaxis, jnp.newaxis])
 
     # Step 4: Damping of super-adiabatic lapse rate
-    se0 = se[1:nl1+1] + parameters.vertical_diffusion.segrad * (phi[:nl1] - phi[1:nl1+1])
+    se0 = se[1:] - parameters.vertical_diffusion.segrad * jnp.diff(phi, axis=0)
 
     condition = se[:nl1] < se0
     
@@ -119,9 +128,9 @@ def get_vertical_diffusion_tend(state: PhysicsState, physics_data: PhysicsData, 
     
     cumulative_fluxse = jnp.cumsum(fluxse * rsig1[:nl1, jnp.newaxis, jnp.newaxis], axis=0)
     
-    ttenvd = ttenvd.at[1:nl1+1].add(-cumulative_fluxse)
+    ttenvd = ttenvd.at[1:].add(-cumulative_fluxse)
     
-    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape,temperature=ttenvd, specific_humidity=qtenvd)
+    physics_tendencies = PhysicsTendency.zeros(shape=ttenvd.shape, temperature=ttenvd, specific_humidity=qtenvd)
 
-    # have not updated physics_data, can just return the instance we were passed 
+    # have not updated physics_data, can just return the instance we were passed
     return physics_tendencies, physics_data

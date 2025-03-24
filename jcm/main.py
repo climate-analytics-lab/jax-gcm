@@ -19,7 +19,7 @@ def main(cfg: DictConfig):
     )
     
     state = model.get_initial_state()
-            
+    
     final_state, predictions = model.unroll(state)
     ds = model.data_to_xarray(asdict(predictions))
     hydra_cfg = HydraConfig.get()
@@ -31,7 +31,7 @@ def main(cfg: DictConfig):
     else:
         output_dir = base_dir
     
-        
+    
     filename = f"model_state.nc"
     output_path = output_dir / filename
     

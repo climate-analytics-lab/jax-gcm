@@ -5,7 +5,7 @@ import tree_math
 from datetime import datetime
 from jax import tree_util
 
-### NOTE, the below code is taken verbatim from the NeuralGCM experimental branch and should be 
+### NOTE, the below code is taken verbatim from the NeuralGCM experimental branch and should be
 ### imported from there (or wherever it ends up) once it is stable
 import dataclasses
 import jax
@@ -116,7 +116,6 @@ class Timestamp:
 
     >>> Timestamp.from_datetime64(np.datetime64('1970-01-02'))
     Timestamp(delta=Timedelta(days=1, seconds=0))
-
   """
 
   delta: Timedelta
@@ -165,19 +164,19 @@ class DateData:
     model_year: jnp.int32
 
     @classmethod
-    def zeros(self, model_time=None, model_year=None):        
+    def zeros(self, model_time=None, model_year=None):
         return DateData(
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
           model_year=model_year if model_year is not None else 1950)
-    
+
     @classmethod
-    def set_date(self, model_time, model_year=None):        
+    def set_date(self, model_time, model_year=None):
         return DateData(
           tyear=fraction_of_year_elapsed(model_time),
           model_year=model_year if model_year is not None else 1950)
-    
+
     @classmethod
-    def ones(self, model_time=None, model_year=None):        
+    def ones(self, model_time=None, model_year=None):
         return DateData(
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
           model_year=model_year if model_year is not None else 1950)

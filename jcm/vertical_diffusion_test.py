@@ -7,13 +7,13 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
-            parameters, BoundaryData
+            parameters, geometry, BoundaryData
         from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
         from jcm.params import Parameters
+        from jcm.geometry import Geometry
+        geometry = Geometry.from_grid_shape((ix, il), kx)
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
         from jcm.physics import PhysicsState, PhysicsTendency
@@ -36,7 +36,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
-        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, boundaries)
+        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, boundaries, geometry)
 
         utenvd, vtenvd, ttenvd, qtenvd = physics_tendencies.u_wind, physics_tendencies.v_wind, physics_tendencies.temperature, physics_tendencies.specific_humidity
 
@@ -55,11 +55,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries) 
+        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstate, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())

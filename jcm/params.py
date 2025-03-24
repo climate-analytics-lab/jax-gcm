@@ -1,10 +1,10 @@
-'''
+"""
 Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
-'''
+"""
 import tree_math
 import jax.numpy as jnp
-from jax import tree_util 
+from jax import tree_util
 
 @tree_math.struct
 class ConvectionParameters:
@@ -52,7 +52,7 @@ class CondensationParameters:
     rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
     drhlsc: jnp.ndarray  # Vertical range of relative humidity threshold
     rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
-    
+
     @classmethod
     def default(self):
         return CondensationParameters(
@@ -61,7 +61,7 @@ class CondensationParameters:
             drhlsc = jnp.array(0.1),
             rhblsc = jnp.array(0.95)
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
@@ -71,7 +71,7 @@ class ShortwaveRadiationParameters:
 
     albcl:  jnp.ndarray # Cloud albedo (for cloud cover = 1)
     albcls: jnp.ndarray # Stratiform cloud albedo (for st. cloud cover = 1)
-    
+
     # Shortwave absorptivities (for dp = 10^5 Pa)
     absdry: jnp.ndarray # Absorptivity of dry air (visible band)
     absaer: jnp.ndarray # Absorptivity of aerosols (visible band)
@@ -88,7 +88,6 @@ class ShortwaveRadiationParameters:
     ablcl2: jnp.ndarray # Absorptivity of "thin" upper clouds in window and H2O bands
 
     # parameters for `clouds`
-    
     rhcl1: jnp.ndarray  # Relative humidity threshold corresponding to cloud cover = 0
     rhcl2: jnp.ndarray  # Relative humidity correponding to cloud cover = 1
     qacl: jnp.ndarray  # Specific humidity threshold for cloud cover
@@ -99,7 +98,7 @@ class ShortwaveRadiationParameters:
     gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
 
-    @classmethod 
+    @classmethod
     def default(self):
         return ShortwaveRadiationParameters(
             albcl = jnp.array(0.43),
@@ -125,7 +124,7 @@ class ShortwaveRadiationParameters:
             gse_s0 = jnp.array(0.25),
             gse_s1 = jnp.array(0.40)
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
@@ -139,7 +138,7 @@ class ModRadConParameters:
     # Longwave parameters
     epslw: jnp.ndarray  # Fraction of blackbody spectrum absorbed/emitted by PBL only
     emisfc: jnp.ndarray  # Longwave surface emissivity
-    
+
     @classmethod
     def default(self):
         return ModRadConParameters(
@@ -149,7 +148,7 @@ class ModRadConParameters:
             epslw = jnp.array(0.05),
             emisfc = jnp.array(0.98)
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
@@ -183,7 +182,7 @@ class SurfaceFluxParameters:
 
     hdrag: jnp.ndarray # Height scale for orographic correction
 
-    @classmethod 
+    @classmethod
     def default(self):
         return SurfaceFluxParameters(
             fwind0 = jnp.array(0.95),
@@ -203,12 +202,12 @@ class SurfaceFluxParameters:
             lskineb = True,
             hdrag = jnp.array(2000.0)
         )
-    
+
     def isnan(self):
         self.lscasym = 0
         self.lskineb = 0
         return tree_util.tree_map(jnp.isnan, self)
-    
+
 @tree_math.struct
 class VerticalDiffusionParameters:
     trshc: jnp.ndarray  # Relaxation time (in hours) for shallow convection
@@ -228,10 +227,10 @@ class VerticalDiffusionParameters:
             rhgrad = jnp.array(0.5),
             segrad = jnp.array(0.1)
         )
-    
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
-    
+
 @tree_math.struct
 class LandModelParameters:
     sd2sc: jnp.ndarray # Snow depth (mm water) corresponding to snow cover = 1
@@ -247,7 +246,7 @@ class LandModelParameters:
     hcapl: jnp.ndarray # Heat capacities per m^2 (depth*heat_cap/m^3)
     hcapli: jnp.ndarray
 
-    @classmethod 
+    @classmethod
     def default(self):
         return LandModelParameters(
             sd2sc = jnp.array(60.0),
@@ -288,7 +287,7 @@ class Parameters:
             land_model = LandModelParameters.default(),
             forcing = ForcingParameters.default()
         )
-    
+
     def isnan(self):
         return Parameters(
             convection=self.convection.isnan(),
@@ -300,8 +299,6 @@ class Parameters:
             land_model = self.land_model.isnan(),
             forcing = self.forcing.isnan()
         )
-    
+
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
-
-    
