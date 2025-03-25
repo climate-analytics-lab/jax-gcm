@@ -10,7 +10,7 @@ class TestModelUnit(unittest.TestCase):
         layers = 8
         model = HeldSuarezModel(
             time_step=180,
-            save_interval=1,
+            save_interval=1440,
             total_time=2,
             layers=layers
         )
@@ -59,7 +59,7 @@ class TestModelUnit(unittest.TestCase):
         # optionally add a boundary conditions file
         model = SpeedyModel(
             time_step=720,
-            save_interval=1,
+            save_interval=1440,
             total_time=2,
             layers=layers,
             parameters=Parameters.default()
@@ -117,7 +117,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(time_step=30, save_interval=(30.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -145,7 +145,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
+        model = SpeedyModel(time_step=30, save_interval=(30.), total_time=(1/24.), layers=8, parameters=Parameters.default())
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -166,7 +166,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import SpeedyModel
         
         def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+            model = SpeedyModel(time_step=30, save_interval=(30.0), total_time=(2/48.0), layers=8,
                 # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
                 parameters=params, post_process=True)
             return model
@@ -205,7 +205,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
         def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+            model = SpeedyModel(time_step=30, save_interval=(30.0), total_time=(2/48.0), layers=8,
                 # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
                 parameters=params, post_process=True)
             return model

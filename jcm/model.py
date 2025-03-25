@@ -136,7 +136,7 @@ class SpeedyModel:
         
         Args:
             time_step: Model time step in minutes
-            save_interval: Save interval in days
+            save_interval: Save interval in minutes
             total_time: Total integration time in days
             start_date: Start date of the simulation
             layers: Number of vertical layers
@@ -166,11 +166,7 @@ class SpeedyModel:
         self.geometry = Geometry.from_coords(self.coords)
 
         self.inner_steps = int(self.save_interval / dt_si)
-        print('save save interval:',self.save_interval)
-        print('save dt_si:',dt_si)
-        print('save inner_steps:',self.inner_steps)
         self.outer_steps = int(self.total_time / self.save_interval)
-        print('outer steps:',self.outer_steps)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         self.parameters = parameters or Parameters.default()
