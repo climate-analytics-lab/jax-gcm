@@ -138,7 +138,7 @@ def default_boundaries(
     orog = grid.to_nodal(orography)
     phi0 = orog
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phi0, parameters)
+    forog = set_orog_land_sfc_drag(phis0, parameters)
 
     # land-sea mask
     fmask = jnp.zeros_like(orog)
@@ -179,7 +179,7 @@ def initialize_boundaries(
     phi0 = grav * jnp.asarray(ds["orog"])
     # Also store spectrally truncated surface geopotential for the land drag term
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phi0, parameters)
+    forog = set_orog_land_sfc_drag(phis0, parameters)
 
     # Read land-sea mask
     fmask = jnp.asarray(ds["lsm"])

@@ -196,19 +196,19 @@ class SpeedyModel:
         
         # Set the boundaries, either using default or with the given boundaries
         if boundaries is None:
-            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
+            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, n=2)
             self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
         else:
             self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
             truncated_orography = self.coords.horizontal.to_modal(
                 self.physics_specs.nondimensionalize(
-                    self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
+                    self.boundaries.phis0 * units.meter**2 / units.second**2
                 )
             )
         
         self.primitive = primitive_equations.PrimitiveEquations(
             self.ref_temps,
-            truncated_orography, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
+            truncated_orography, #needs to be in modal coordinates
             self.coords,
             self.physics_specs)
 
