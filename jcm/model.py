@@ -181,7 +181,7 @@ class SpeedyModel:
         else:
             self.initial_state = None
         
-        if surface_height is None:
+        if surface_height is not None:
             self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
                 coords=self.coords,
                 physics_specs=self.physics_specs,
