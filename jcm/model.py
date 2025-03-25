@@ -152,7 +152,7 @@ class SpeedyModel:
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(1982, 1, 1))
-        self.save_interval = save_interval * units.day
+        self.save_interval = save_interval * units.minute
         self.total_time = total_time * units.day
         dt_si = time_step * units.minute
 
@@ -166,6 +166,8 @@ class SpeedyModel:
         self.geometry = Geometry.from_coords(self.coords)
 
         self.inner_steps = int(self.save_interval / dt_si)
+        print('save save interval:',self.save_interval)
+        print('save dt_si:',dt_si)
         print('save inner_steps:',self.inner_steps)
         self.outer_steps = int(self.total_time / self.save_interval)
         print('outer steps:',self.outer_steps)
@@ -289,7 +291,7 @@ class SpeedyModel:
         from dinosaur.xarray_utils import data_to_xarray
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
-    def predictions_to_xarray(self, final_state, predictions):
+    def predictions_to_xarray(self, predictions):
         # extract dynamics predictions (State format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
