@@ -12,6 +12,7 @@ class BoundaryData:
     phi0: jnp.ndarray  # surface geopotential (ix, il)
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
+    orog: jnp.ndarray  # surface height (meters) (ix, il)
 
     fmask: jnp.ndarray
     sice_am: jnp.ndarray
@@ -30,7 +31,7 @@ class BoundaryData:
 
     @classmethod
     def zeros(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,
-              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
+              alb0=None,orog=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
               fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
@@ -39,6 +40,7 @@ class BoundaryData:
             phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
+            orog=orog if orog is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
             fmask_l=fmask_l if fmask_l is not None else jnp.zeros((nodal_shape)),
             rhcapl=rhcapl if rhcapl is not None else jnp.zeros((nodal_shape)),
@@ -54,7 +56,7 @@ class BoundaryData:
 
     @classmethod
     def ones(self,nodal_shape,fmask=None,forog=None,phi0=None,phis0=None,
-             alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
+             alb0=None,orog=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
              fmask_s=None,lfluxland=None, land_coupling_flag=None):
         return BoundaryData(
@@ -63,6 +65,7 @@ class BoundaryData:
             phi0=phi0 if phi0 is not None else jnp.ones((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.ones((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
+            orog=orog if orog is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
             fmask_l=fmask_l if fmask_l is not None else jnp.ones((nodal_shape)),
             rhcapl=rhcapl if rhcapl is not None else jnp.ones((nodal_shape)),
@@ -76,7 +79,7 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
-    def copy(self,fmask=None,phi0=None,forog=None,phis0=None,alb0=None,
+    def copy(self,fmask=None,phi0=None,forog=None,phis0=None,alb0=None, orog=None,
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
              snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
              land_coupling_flag=None):
@@ -86,6 +89,7 @@ class BoundaryData:
             phi0=phi0 if phi0 is not None else self.phi0,
             phis0=phis0 if phis0 is not None else self.phis0,
             alb0=alb0 if alb0 is not None else self.alb0,
+            orog=orog if orog is not None else self.orog,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             fmask_l=fmask_l if fmask_l is not None else self.fmask_l,
             rhcapl=rhcapl if rhcapl is not None else self.rhcapl,
@@ -152,7 +156,7 @@ def default_boundaries(
     
     return BoundaryData.zeros(
         nodal_shape=orog.shape,
-        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog, rhcapl=rhcapl)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
@@ -177,7 +181,8 @@ def initialize_boundaries(
     ds = xr.open_dataset(filename)
 
     # Read surface geopotential (i.e. orography)
-    phi0 = grav * jnp.asarray(ds["orog"])
+    orog = jnp.asarray(ds["orog"])
+    phi0 = grav * orog
     # Also store spectrally truncated surface geopotential for the land drag term
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
     forog = set_orog_land_sfc_drag(phis0, parameters)
@@ -193,7 +198,7 @@ def initialize_boundaries(
     rhcapl = jnp.where(alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
-        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, rhcapl=rhcapl)
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog, rhcapl=rhcapl)
     
     boundaries = land_model_init(filename, parameters, boundaries)
 
