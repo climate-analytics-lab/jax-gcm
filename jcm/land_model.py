@@ -93,7 +93,6 @@ def couple_land_atm(
     stl_lm=None
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):
-        # stl_lm need to persist from time step to time step? what does this get from the model?
         stl_lm = run_land_model(physics_data.surface_flux.hfluxn, physics_data.land_model.stl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
         stl_am = stl_lm
     # Otherwise get the land surface from climatology
