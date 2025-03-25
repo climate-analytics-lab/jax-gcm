@@ -181,13 +181,21 @@ class SpeedyModel:
         else:
             self.initial_state = None
         
-        self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
-            coords=self.coords,
-            physics_specs=self.physics_specs,
-            surface_height=surface_height * units.m,
-            p0=p0,
-            p1=p1
-        )
+        if surface_height is None:
+            self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+                coords=self.coords,
+                physics_specs=self.physics_specs,
+                surface_height=surface_height * units.m,
+                p0=p0,
+                p1=p1
+            )
+        else:
+            self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+                coords=self.coords,
+                physics_specs=self.physics_specs,
+                p0=p0,
+                p1=p1
+            )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
