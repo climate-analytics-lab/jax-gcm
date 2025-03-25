@@ -78,7 +78,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     # Set time_step/heat_capacity and dissipation fields
     cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
 
-    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
+    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am,land_coupling_flag=True)
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(
