@@ -149,15 +149,11 @@ def default_boundaries(
     alb0 = jnp.zeros_like(orog)
     default_sst = _fixed_ssts(grid)
     tsea = jnp.stack([default_sst] * 365, axis=-1)
-    print(tsea.shape)
 
-    # No land_model_init, but should be fine because fmask = 0 and land model flag = 0
-
-    rhcapl = jnp.where(alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
-    
+    # No land_model_init - set land coupling flag to false   
     return BoundaryData.zeros(
         nodal_shape=orog.shape,
-        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog, rhcapl=rhcapl)
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog, land_coupling_flag=False)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
@@ -165,8 +161,7 @@ def initialize_boundaries(
     filename: str,
     grid: HorizontalGridTypes,
     parameters: Parameters=None,
-    truncation_number=None,
-    time_step=30*units.minute
+    truncation_number=None
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
@@ -196,10 +191,9 @@ def initialize_boundaries(
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
     tsea = jnp.asarray(ds["sst"])
-    rhcapl = jnp.where(alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
-        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog, rhcapl=rhcapl)
+        fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0, orog=orog)
     
     boundaries = land_model_init(filename, parameters, boundaries)
 
@@ -218,5 +212,8 @@ def update_boundaries_with_timestep(
     """
     parameters = parameters or Parameters.default()
     # Update the land heat capacity and dissipation time
-    rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
-    return boundaries.copy(rhcapl=rhcapl)
+    if boundaries.land_coupling_flag:
+        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
+        return boundaries.copy(rhcapl=rhcapl)
+    else:
+        return boundaries
