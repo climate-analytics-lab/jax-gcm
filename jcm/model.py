@@ -130,7 +130,7 @@ class SpeedyModel:
     def __init__(self, time_step=30, save_interval=10, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, initial_state: PhysicsState=None, coords: CoordinateSystem=None,
                  boundaries: BoundaryData=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+                 post_process=True, checkpoint_terms=True, surface_height=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -184,6 +184,7 @@ class SpeedyModel:
         self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
+            surface_height=surface_height * units.m,
             p0=p0,
             p1=p1
         )
