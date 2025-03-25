@@ -143,7 +143,8 @@ def default_boundaries(
     # land-sea mask
     fmask = jnp.zeros_like(orog)
     alb0 = jnp.zeros_like(orog)
-    tsea = _fixed_ssts(grid)
+    default_sst = _fixed_ssts(grid)
+    tsea = default_sst.repeat(365, axis=-1)
 
     # No land_model_init, but should be fine because fmask = 0 and land model flag = 0
 
