@@ -128,7 +128,6 @@ def default_boundaries(
     orography,
     parameters: Parameters=None,
     truncation_number=None,
-    time_step=30*units.minute
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
@@ -171,6 +170,7 @@ def initialize_boundaries(
     from jcm.land_model import land_model_init
     from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
+    from jcm.longwave_radiation import radset
 
     parameters = parameters or Parameters.default()
     
