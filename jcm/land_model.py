@@ -75,7 +75,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     dmask = jnp.ones_like(fmask_l)
     dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
-    # Set heat_capacity and dissipation fields
+    # Set heat_capacity and dissipation fields -- FIX ME this is for a whole day, it should be only for a time step
     cdland = (dmask*parameters.land_model.tdland)/(1.0+dmask*parameters.land_model.tdland)
 
     return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am,land_coupling_flag=False)
@@ -100,13 +100,15 @@ def couple_land_atm(
         stl_am = boundaries.stlcl_ob[:,:,day]
 
     # update land physics data
-    land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)
+    land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)  #FIX ME: this is called last and then physics_data is reinitialized
     physics_data = physics_data.copy(land_model=land_model_data)
     physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendency, physics_data
 
-#Integrates slab land-surface model for one day.
+#Integrates slab land-surface model for ONE DAY - FIX ME: we call this every time step, rhcapl is set appropraitely,
+# but cdland is not. Also do we want to do every time step or every day? (this checks the difference betwen stl_lm and stlcl_ob 
+# but stl_lm is updated every timestep and stlcl_ob is a boundary condition specified for each day).
 @jit
 def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
     # Land-surface (soil/ice-sheet) layer

@@ -53,7 +53,8 @@ def get_surface_fluxes(
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
     day = physics_data.date.model_day()
-    stl_am = physics_data.land_model.stl_am
+    # stl_am = physics_data.land_model.stl_am #if the land model is on, this value gets updated, otherwise it is the daily boundary condition
+    stl_am = boundaries.stlcl_ob[:,:,day]
     soilw_am = boundaries.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
 
