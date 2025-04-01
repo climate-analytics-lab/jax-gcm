@@ -132,6 +132,7 @@ def default_boundaries(
     """
     Initialize the boundary conditions
     """
+    from jcm.physical_constants import grav
     from jcm.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
 
@@ -139,7 +140,7 @@ def default_boundaries(
 
     # Read surface geopotential (i.e. orography)
     orog = grid.to_nodal(orography)
-    phi0 = orog
+    phi0 = grav * orog
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
     forog = set_orog_land_sfc_drag(phis0, parameters)
 
