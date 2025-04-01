@@ -139,7 +139,7 @@ def default_boundaries(
     parameters = parameters or Parameters.default()
 
     # Read surface geopotential (i.e. orography)
-    orog = grid.to_nodal(orography)
+    orog = orography
     phi0 = grav * orog
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
     forog = set_orog_land_sfc_drag(phis0, parameters)
