@@ -75,10 +75,10 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     dmask = jnp.ones_like(fmask_l)
     dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
-    # Set time_step/heat_capacity and dissipation fields
-    cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
+    # Set heat_capacity and dissipation fields
+    cdland = (dmask*parameters.land_model.tdland)/(1.0+dmask*parameters.land_model.tdland)
 
-    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am,land_coupling_flag=True)
+    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am,land_coupling_flag=False)
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(
