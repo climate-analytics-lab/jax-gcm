@@ -70,7 +70,7 @@ def forward_model_wrapper(theta, theta_keys, state = None, parameters = None, ar
     if state is None: 
         state = model.get_initial_state()
     final_state, predictions = model.unroll(state)
-    return final_state.temperature_variation.flatten()  # fix shape of this
+    return predictions["dynamics"].temperature_variation[-1].flatten()  # fix shape of this
 
 def make_ones_prediction_object(pred): 
         return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
