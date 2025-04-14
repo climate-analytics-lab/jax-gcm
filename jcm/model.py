@@ -9,7 +9,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
-from jcm.params import Parameters
+from jcm.params import Parameters, p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
@@ -172,14 +172,11 @@ class SpeedyModel:
         self.post_process_physics = post_process
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
-        self.p0 = 100e3 * units.pascal
-        self.p1 = 5e3 * units.pascal
-
         self.initial_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
-            p0=self.p0,
-            p1=self.p1
+            p0=p0 * units.pascal,
+            p1=.05 * p0 * units.pascal,
         )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
@@ -227,9 +224,6 @@ class SpeedyModel:
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        state.log_surface_pressure -= self.coords.horizontal.to_modal(
-            jnp.ones((1,) + self.coords.nodal_shape[1:]) * jnp.log((self.p0 / units.pascal).m)
-        )
         state.tracers = {
             'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
         }
@@ -292,7 +286,7 @@ class SpeedyModel:
         # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
         # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
         log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal) * 1e5
+        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
