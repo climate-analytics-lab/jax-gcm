@@ -228,7 +228,7 @@ class SpeedyModel:
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
         state.log_surface_pressure -= self.coords.horizontal.to_modal(
-            jnp.ones((1,) + self.coords.nodal_shape[1:]) * jnp.log(self.physics_specs.nondimensionalize(units.Quantity(self.p0)))
+            jnp.ones((1,) + self.coords.nodal_shape[1:]) * jnp.log((self.p0 / units.pascal).m)
         )
         state.tracers = {
             'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
