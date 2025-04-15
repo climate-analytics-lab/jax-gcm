@@ -9,7 +9,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
-from jcm.params import Parameters
+from jcm.params import Parameters, p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physics import PhysicsState
 
@@ -172,21 +172,13 @@ class SpeedyModel:
         self.parameters = parameters or Parameters.default()
         self.post_process_physics = post_process
 
-        # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
-        p0 = 1e5 * units.pascal
-        p1 = 5e3 * units.pascal
+        # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest
 
-        if initial_state is not None:
-            self.initial_state = initial_state
-        else:
-            self.initial_state = None
-        
-
-        self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+        self.initial_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
-            p0=p0,
-            p1=p1
+            p0=p0 * units.pascal,
+            p1=.05 * p0 * units.pascal,
         )
     
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
@@ -234,8 +226,7 @@ class SpeedyModel:
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:
-            state = self.default_state_fun(jax.random.PRNGKey(random_seed))
-            # state.log_surface_pressure = state.log_surface_pressure * 1e-3
+            state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
