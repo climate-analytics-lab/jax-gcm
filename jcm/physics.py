@@ -26,7 +26,7 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray
+    surface_pressure: jnp.ndarray # normalized surface pressure (normalized by p0)
 
     @classmethod
     def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
@@ -159,6 +159,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp) / p0
 
+    # convert temperature variation to total temperature using reference temp
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
