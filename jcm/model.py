@@ -173,8 +173,12 @@ class SpeedyModel:
         self.post_process_physics = post_process
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest
+        if initial_state is not None:
+            self.initial_state = initial_state
+        else:
+            self.initial_state = None
 
-        self.initial_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+        self.default_state_fun, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
             p0=p0 * units.pascal,
@@ -226,7 +230,7 @@ class SpeedyModel:
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:
-            state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
+            state = self.default_state_fun(jax.random.PRNGKey(random_seed))
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
