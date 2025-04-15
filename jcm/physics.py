@@ -98,6 +98,12 @@ class PhysicsTendency:
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
+    
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+
+    def any_true(self):
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
     
@@ -230,6 +236,7 @@ def get_physical_tendencies(
     for term in physics_terms:
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
+        print(physics_tendency.isnan().any_true())
 
     # the actual timestep size seems to be 1/3 of time_step
     # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
