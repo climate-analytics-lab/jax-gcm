@@ -112,8 +112,9 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
-    # convert log surface pressure to modal
-    modal_log_sp = dynamics.coords.horizontal.to_modal(jnp.log(physics_state.surface_pressure))
+    # convert normalized surface pressure to Pa, then take the log and convert to modal
+    log_surface_pressure = jnp.log(physics_state.surface_pressure * p0)
+    modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     return State(
         vorticity=modal_vorticity,
@@ -153,8 +154,10 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
 
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
-    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
-    sp = jnp.exp(log_sp)
+
+    # convert log surface pressure to nodal, then convert to regular surface pressure and normalize by reference p0
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
+    sp = jnp.exp(log_sp) / p0
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
