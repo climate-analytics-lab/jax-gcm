@@ -236,18 +236,18 @@ def get_physical_tendencies(
     for term in physics_terms:
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
-        print(physics_tendency.isnan().any_true())
 
     # the actual timestep size seems to be 1/3 of time_step
     # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
-    dt_seconds = 20 * time_step
+    dt_seconds = 60 * time_step
     physics_tendency = physics_tendency.copy(
         specific_humidity=jnp.where(
-            physics_state.specific_humidity + dt_seconds * physics_tendency.specific_humidity >= 0,
+            physics_state.specific_humidity + (dt_seconds * physics_tendency.specific_humidity) >= 0,
             physics_tendency.specific_humidity,
             - physics_state.specific_humidity / dt_seconds
         )
     )
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
+
     return dynamics_tendency

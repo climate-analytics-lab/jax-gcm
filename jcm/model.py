@@ -43,6 +43,9 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
         get_vertical_diffusion_tend,
         # couple_land_atm # eventually couple sea model and ice model here
     ]
+
+    # does sea-coupling-flag need to be on for ssts? or just for coupling to sea model?
+    # also doesn't something need to change between the first and second call to get surface fluxes?
     if sea_coupling_flag > 0:
         physics_terms.insert(-3, get_surface_fluxes)
 
