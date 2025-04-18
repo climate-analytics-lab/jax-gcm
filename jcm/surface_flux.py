@@ -58,7 +58,7 @@ def get_surface_fluxes(
     soilw_am = boundaries.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
 
-    psa = physics_data.convection.psa
+    psa = state.surface_pressure
     ua = state.u_wind
     va = state.v_wind
     ta = state.temperature
