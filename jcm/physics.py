@@ -17,6 +17,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
+from jcm.params import p0
 
 @tree_math.struct
 class PhysicsState:
@@ -127,7 +128,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
 
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
-    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
     sp = jnp.exp(log_sp)
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
