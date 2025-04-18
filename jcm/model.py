@@ -139,7 +139,7 @@ class SpeedyModel:
         
         Args:
             time_step: Model time step in minutes
-            save_interval: Save interval in minutes
+            save_interval: Save interval in days
             total_time: Total integration time in days
             start_date: Start date of the simulation
             layers: Number of vertical layers
@@ -155,7 +155,7 @@ class SpeedyModel:
 
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(1982, 1, 1))
-        self.save_interval = save_interval * units.minute
+        self.save_interval = save_interval * units.day
         self.total_time = total_time * units.day
         dt_si = time_step * units.minute
 
@@ -168,7 +168,7 @@ class SpeedyModel:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
         self.geometry = Geometry.from_coords(self.coords)
 
-        self.inner_steps = int(self.save_interval / dt_si)
+        self.inner_steps = int(jnp.ceil(save_interval / time_step))
         self.outer_steps = int(self.total_time / self.save_interval)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
