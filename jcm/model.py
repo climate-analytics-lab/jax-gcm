@@ -168,8 +168,10 @@ class SpeedyModel:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
         self.geometry = Geometry.from_coords(self.coords)
 
-        self.inner_steps = int(jnp.ceil(save_interval / time_step))
+        self.inner_steps = int(jnp.ceil(save_interval*1440.0 / time_step))
+        print(f"inner_steps: {self.inner_steps}")
         self.outer_steps = int(self.total_time / self.save_interval)
+        print(f"outer_steps: {self.outer_steps}")
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         self.parameters = parameters or Parameters.default()
