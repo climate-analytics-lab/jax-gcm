@@ -130,7 +130,7 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=30, save_interval=10, total_time=1200, start_date=None,
+    def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, initial_state: PhysicsState=None, coords: CoordinateSystem=None,
                  boundaries: BoundaryData=None, parameters: Parameters=None,
                  post_process=True, checkpoint_terms=True) -> None:
