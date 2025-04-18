@@ -40,7 +40,7 @@ def spec_hum_to_rel_hum(
     # compute thermodynamic variables: logic from physics.f90:110-114
     psa = state.surface_pressure
     se = cp * state.temperature + state.geopotential
-    convection_out = physics_data.convection.copy(psa=psa, se=se)
+    convection_out = physics_data.convection.copy(se=se)
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
