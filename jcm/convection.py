@@ -126,7 +126,7 @@ def get_convection_tendencies(
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
     _zeros_3d = lambda: jnp.zeros((kx,ix,il))
-    psa = conv.psa
+    psa = state.surface_pressure
     
     # 1. Initialization of output and workspace arrays
 
