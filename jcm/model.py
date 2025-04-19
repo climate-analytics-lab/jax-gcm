@@ -194,7 +194,7 @@ class SpeedyModel:
         
         self.primitive = primitive_equations.PrimitiveEquations(
             self.ref_temps,
-            truncated_orography, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
+            truncated_orography, 
             self.coords,
             self.physics_specs)
 
