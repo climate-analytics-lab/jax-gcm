@@ -39,8 +39,6 @@ def spec_hum_to_rel_hum(
 
     # compute thermodynamic variables: logic from physics.f90:110-114
     psa = state.surface_pressure
-    se = cp * state.temperature + state.geopotential
-    convection_out = physics_data.convection.copy(psa=psa, se=se)
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
@@ -48,7 +46,7 @@ def spec_hum_to_rel_hum(
     rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
-    physics_data = physics_data.copy(convection=convection_out, humidity=humidity_out)
+    physics_data = physics_data.copy(humidity=humidity_out)
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     
     return physics_tendencies, physics_data

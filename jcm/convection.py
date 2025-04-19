@@ -10,7 +10,7 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, grav
+from jcm.physical_constants import p0, alhc, grav, cp
 
 @jit
 def diagnose_convection(
@@ -120,8 +120,7 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    conv = physics_data.convection
-    se = conv.se
+    se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
