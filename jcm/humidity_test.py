@@ -115,8 +115,9 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue(((physics_data.humidity.rh >= 0) & (physics_data.humidity.rh <= 1)).all(), "Relative humidity should be between 0 and 1 at very high pressures")
 
         # Edge case: High Specific Humidity (near saturation)
+        pressure = self.pressure_standard
         qg = jnp.ones((kx,ix,il))*(physics_data.humidity.qsat[:, 0, 0][:, jnp.newaxis, jnp.newaxis] - 1e-6)
-        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg)
+        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg, surface_pressure=pressure)
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries, geometry=geometry)
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
