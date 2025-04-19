@@ -230,7 +230,7 @@ def get_convection_tendencies(
     ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
     qtend = dfqa.at[1:].set(dfqa[1:] * rps[jnp.newaxis] * geometry.grdsig[1:, jnp.newaxis, jnp.newaxis])
 
-    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
+    convection_out = physics_data.convection.copy(se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
     physics_tendencies = PhysicsTendency.zeros(
         shape=state.temperature.shape,
