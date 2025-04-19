@@ -17,7 +17,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.params import p0
+from jcm.physical_constants import p0
 
 @tree_math.struct
 class PhysicsState:
@@ -237,8 +237,7 @@ def get_physical_tendencies(
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
 
-    # the actual timestep size seems to be 1/3 of time_step
-    # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
+    # clamp specific humidity to be positive
     dt_seconds = 60 * time_step
     physics_tendency = physics_tendency.copy(
         specific_humidity=jnp.where(

@@ -9,9 +9,10 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
-from jcm.params import Parameters, p0
+from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physics import PhysicsState
+from jcm.physical_constants import p0
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -167,6 +168,7 @@ class SpeedyModel:
         else:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
         self.geometry = Geometry.from_coords(self.coords)
+        print(self.geometry.grdscp)
 
         self.inner_steps = int(jnp.ceil(save_interval*1440.0 / time_step))
         print(f"inner_steps: {self.inner_steps}")

@@ -39,16 +39,15 @@ def spec_hum_to_rel_hum(
 
     # compute thermodynamic variables: logic from physics.f90:110-114
     psa = state.surface_pressure
-    se = cp * state.temperature + state.geopotential
-    convection_out = physics_data.convection.copy(se=se)
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity) # force specific humidity to be positive 
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
     qsat = map_qsat(state.temperature, psa, geometry.fsg)
-    rh = state.specific_humidity / qsat
+    rh = qa / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
-    physics_data = physics_data.copy(convection=convection_out, humidity=humidity_out)
+    physics_data = physics_data.copy(humidity=humidity_out)
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     
     return physics_tendencies, physics_data

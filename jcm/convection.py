@@ -10,7 +10,7 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, grav
+from jcm.physical_constants import p0, alhc, grav, cp
 
 @jit
 def diagnose_convection(
@@ -120,9 +120,8 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    conv = physics_data.convection
-    se = conv.se
-    qa = state.specific_humidity
+    se = cp * state.temperature + state.geopotential
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
     _zeros_3d = lambda: jnp.zeros((kx,ix,il))
@@ -224,8 +223,6 @@ def get_convection_tendencies(
     dfqa = dfqa.at[k, i, j].set(fuq - fdq - precnv)
 
     # convection in Speedy generates net *flux* -- not tendencies, so we convert dfse and dfqa to tendencies here
-    # Another important note is that this goes from 2:kx in the fortran
-
     # Compute tendencies due to convection. Logic from physics.f90:127-130
     rps = 1/psa
     ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
@@ -238,5 +235,5 @@ def get_convection_tendencies(
         temperature=ttend,
         specific_humidity=qtend
     )
-    
+        
     return physics_tendencies, physics_data
