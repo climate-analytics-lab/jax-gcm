@@ -54,7 +54,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat, (1, ix, il))
         
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries, geometry)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast, qsat_broadcast, parameters, boundaries, geometry)
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
@@ -112,7 +112,7 @@ class TestConvectionUnit(unittest.TestCase):
 
         convection = ConvectionData.zeros((ix, il), kx, se=se)
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
-        state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa, surface_pressure=ps)
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=qa, surface_pressure=ps)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.zeros((ix,il))
 
@@ -151,7 +151,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         convection = ConvectionData.zeros((ix, il), kx, se=se_broadcast)
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast)
-        state = PhysicsState.zeros((ix, il, kx), specific_humidity=qa_broadcast, surface_pressure=psa)
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=qa_broadcast, surface_pressure=psa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, convection=convection)
 
         boundaries = BoundaryData.zeros((ix,il))
