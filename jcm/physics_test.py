@@ -5,7 +5,8 @@ from dinosaur.sigma_coordinates import centered_vertical_advection
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import Geometry
-
+import jax.numpy as jnp
+from jcm.physics import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestPhysicsUnit(unittest.TestCase):
     def test_speedy_model_HS94(self):
         from jcm.held_suarez_model import HeldSuarezModel
@@ -48,3 +49,41 @@ class TestPhysicsUnit(unittest.TestCase):
         dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
 
         self.assertIsNotNone(dynamics_tendency)
+
+    def test_initial_state_conversion(self):
+        from dinosaur.scales import SI_SCALE
+        from dinosaur import primitive_equations
+        from dinosaur import xarray_utils
+        from jcm.model import get_coords
+
+        PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+        kx, ix, il = 8, 96, 48
+        temp = 288 * jnp.ones((kx, ix, il))
+        u = jnp.ones((kx, ix, il)) * 0.5
+        v = jnp.ones((kx, ix, il)) * -0.5
+        q = jnp.ones((kx, ix, il)) * 0.5
+        phi = jnp.ones((kx, ix, il)) * 5000
+        sp = jnp.ones((kx, ix, il))
+
+        coords = get_coords(layers=8, horizontal_resolution=31)
+        _, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+            coords=coords,
+            physics_specs=PHYSICS_SPECS,
+            p0=1e5,
+            p1=5e3,
+        )
+        ref_temps = aux_features[xarray_utils.REF_TEMP_KEY]
+        truncated_orography = primitive_equations.truncated_modal_orography(aux_features[xarray_utils.OROGRAPHY], coords)
+
+        primitive = primitive_equations.PrimitiveEquations(
+            ref_temps,
+            truncated_orography,
+            coords,
+            PHYSICS_SPECS)
+
+        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp)
+
+        dynamics_state = physics_state_to_dynamics_state(state, primitive)
+        physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)
+
+        self.assertTrue(jnp.allclose(state.temperature, physics_state_recovered.temperature))
