@@ -32,7 +32,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -71,7 +71,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, jnp.newaxis, jnp.newaxis]
         phi0 = jnp.zeros(xy) 
         fmask_l = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones(xy) * 292 # this needs to overwrite what is in sea_model? 
+        tsea = jnp.ones((ix,il,365)) * 292 # this needs to overwrite what is in sea_model? 
         rsds = 400 * jnp.ones(xy)
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
@@ -112,7 +112,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -161,7 +161,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -212,7 +212,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         forog = set_orog_land_sfc_drag(phi0, parameters)
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -262,7 +262,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         forog = set_orog_land_sfc_drag(phi0, parameters)
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il,365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -312,7 +312,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         forog = set_orog_land_sfc_drag(phi0, parameters)
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
