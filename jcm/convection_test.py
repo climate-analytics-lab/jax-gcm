@@ -124,10 +124,6 @@ class TestConvectionUnit(unittest.TestCase):
         dfse_f90 = jnp.load(test_data_dir + '/dfse.npy')
         dfqa_f90 = jnp.load(test_data_dir + '/dfqa.npy')
 
-        print(physics_data.convection.iptop)
-        print('f90')
-        print(iptop_f90)
-
         self.assertTrue(jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4))
