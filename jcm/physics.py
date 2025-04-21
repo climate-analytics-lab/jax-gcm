@@ -17,7 +17,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.params import p0
+from jcm.physical_constants import p0
 
 @tree_math.struct
 class PhysicsState:
@@ -26,7 +26,7 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray
+    surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
 
     @classmethod
     def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
@@ -136,6 +136,31 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
 
     return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
 
+
+def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
+
+    # Calculate vorticity and divergence from u and v
+    modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
+
+    # convert specific humidity to modal (and nondimensionalize)
+    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram / units.second)
+    q_modal = dynamics.coords.horizontal.to_modal(q)
+
+    # convert temperature to a variation and then to modal
+    temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+    temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
+
+    # convert normalized surface pressure to Pa, then take the log and convert to modal
+    log_surface_pressure = jnp.log(physics_state.surface_pressure * p0)
+    modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
+
+    return State(
+        vorticity=modal_vorticity,
+        divergence=modal_divergence,
+        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
+        log_surface_pressure=modal_log_sp,
+        tracers={'specific_humidity': q_modal}
+        )
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """

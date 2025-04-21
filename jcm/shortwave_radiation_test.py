@@ -130,7 +130,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-        convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
@@ -301,7 +301,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-        convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
@@ -370,7 +370,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-        convection = ConvectionData.zeros(xy, kx, psa=psa, iptop=iptop, precnv=precnv, se=se)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
