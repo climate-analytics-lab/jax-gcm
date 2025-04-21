@@ -10,7 +10,7 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, grav
+from jcm.physical_constants import p0, alhc, grav, cp
 
 @jit
 def diagnose_convection(
@@ -120,13 +120,12 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    conv = physics_data.convection
-    se = conv.se
+    se = cp * state.temperature + state.geopotential 
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
     _zeros_3d = lambda: jnp.zeros((kx,ix,il))
-    psa = conv.psa
+    psa = state.surface_pressure
     
     # 1. Initialization of output and workspace arrays
 
@@ -231,7 +230,7 @@ def get_convection_tendencies(
     ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
     qtend = dfqa.at[1:].set(dfqa[1:] * rps[jnp.newaxis] * geometry.grdsig[1:, jnp.newaxis, jnp.newaxis])
 
-    convection_out = physics_data.convection.copy(psa=psa, se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
+    convection_out = physics_data.convection.copy(se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)
     physics_tendencies = PhysicsTendency.zeros(
         shape=state.temperature.shape,

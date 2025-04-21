@@ -6,8 +6,6 @@ import tree_math
 import jax.numpy as jnp
 from jax import tree_util
 
-p0 = 1e5 # Speedy reference pressure (Pa)
-
 @tree_math.struct
 class ConvectionParameters:
     psmin: jnp.ndarray # Minimum (normalised) surface pressure for the occurrence of convection

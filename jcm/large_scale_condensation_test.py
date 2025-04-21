@@ -27,9 +27,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         qsat = jnp.ones(zxy)
         itop = jnp.full((ix, il), kx - 1)
 
-        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
-        state = state = PhysicsState.zeros(zxy, specific_humidity=qa)
+        state = state = PhysicsState.zeros(zxy, specific_humidity=qa, surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
@@ -50,9 +50,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01])
         itop = jnp.ones((ix, il), dtype=int) * 4
 
-        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
-        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis])
+        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 

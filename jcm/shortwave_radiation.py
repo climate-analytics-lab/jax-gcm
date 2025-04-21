@@ -33,7 +33,7 @@ def get_shortwave_rad_fluxes(
     dhs = geometry.dhs
     fsg = geometry.fsg
 
-    psa = physics_data.convection.psa
+    psa = state.surface_pressure
     qa = state.specific_humidity
     icltop = physics_data.shortwave_rad.icltop
     cloudc = physics_data.shortwave_rad.cloudc
@@ -201,7 +201,7 @@ def get_shortwave_rad_fluxes(
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
-    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/physics_data.convection.psa[jnp.newaxis] # physics.f90:160-162
+    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.surface_pressure[jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
     return physics_tendencies, physics_data

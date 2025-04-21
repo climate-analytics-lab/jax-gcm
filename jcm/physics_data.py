@@ -201,16 +201,14 @@ class CondensationData:
 
 @tree_math.struct
 class ConvectionData:
-    psa: jnp.ndarray # normalized surface pressure
     se: jnp.ndarray # dry static energy
     iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+    def zeros(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
-            psa = psa if psa is not None else jnp.zeros(nodal_shape),
             se = se if se is not None else jnp.zeros((node_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
@@ -218,18 +216,16 @@ class ConvectionData:
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+    def ones(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
-            psa = psa if psa is not None else jnp.ones(nodal_shape),
             se = se if se is not None else jnp.ones((node_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
         )
     
-    def copy(self, psa=None, se=None, iptop=None, cbmf=None, precnv=None):
+    def copy(self, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
-            psa=psa if psa is not None else self.psa,
             se=se if se is not None else self.se,
             iptop= iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
