@@ -48,3 +48,16 @@ class TestPhysicsUnit(unittest.TestCase):
         dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
 
         self.assertIsNotNone(dynamics_tendency)
+
+    def test_verify_state(self):
+        from jcm.physics import verify_state, PhysicsState
+        import jax.numpy as jnp
+
+        kx, ix, il = 8, 96, 48
+        qa = jnp.ones((kx, il, ix)) * -1
+
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+
+        updated_state = verify_state(state)
+
+        self.assertTrue(jnp.all(updated_state.specific_humidity >= 0))
