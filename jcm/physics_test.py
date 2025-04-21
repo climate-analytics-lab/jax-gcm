@@ -61,3 +61,9 @@ class TestPhysicsUnit(unittest.TestCase):
         updated_state = verify_state(state)
 
         self.assertTrue(jnp.all(updated_state.specific_humidity >= 0))
+
+        qa = jnp.ones((kx, il, ix)) * -1e-5
+
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+
+        updated_state = verify_state(state)
