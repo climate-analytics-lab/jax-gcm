@@ -11,6 +11,7 @@ from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_w
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters, p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
+from jcm.physics import PhysicsState
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -128,7 +129,7 @@ class SpeedyModel:
 
     def __init__(self, time_step=10, save_interval=10, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
-                 boundaries: BoundaryData=None, parameters: Parameters=None,
+                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
                  post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -142,6 +143,7 @@ class SpeedyModel:
             horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
+            initial_state: Initial state of the model (PhysicsState object), optional
             parameters: Parameters object describing model parameters
             physics_specs: PrimitiveEquationsSpecs object describing the model physics
             post_process: Whether to post-process the model output
@@ -171,8 +173,13 @@ class SpeedyModel:
         self.parameters = parameters or Parameters.default()
         self.post_process_physics = post_process
 
+        if initial_state is not None:
+            self.initial_state = initial_state
+        else:
+            self.initial_state = None
+
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
-        self.initial_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
+        self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
             p0=p0 * units.pascal,
@@ -223,11 +230,19 @@ class SpeedyModel:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        state.tracers = {
-            'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
-        }
-        return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        from jcm.physics import physics_state_to_dynamics_state
+
+        #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
+        # optional initial state from the user is in physics form
+        if self.initial_state is not None:
+            state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        else:     
+            state = self.default_state_fn(jax.random.PRNGKey(random_seed))
+            state.tracers = {
+                'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            }
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state):
         from jcm.date import DateData
