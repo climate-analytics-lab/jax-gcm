@@ -186,19 +186,15 @@ class SpeedyModel:
         
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundaries is None:
-            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-            self.boundaries = default_boundaries(self.coords.horizontal, truncated_orography, self.parameters, time_step=dt_si)
+            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
         else:
             self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
-            truncated_orography = self.coords.horizontal.to_modal(
-                self.physics_specs.nondimensionalize(
-                    self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
-                )
-            )
+            truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
             self.ref_temps,
-            truncated_orography * 1e-3, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
+            truncated_orography, 
             self.coords,
             self.physics_specs)
 
