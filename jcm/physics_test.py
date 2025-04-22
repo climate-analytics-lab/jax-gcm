@@ -87,3 +87,23 @@ class TestPhysicsUnit(unittest.TestCase):
         physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)
 
         self.assertTrue(jnp.allclose(state.temperature, physics_state_recovered.temperature))
+
+
+    def test_verify_state(self):
+        from jcm.physics import verify_state, PhysicsState
+        import jax.numpy as jnp
+
+        kx, ix, il = 8, 96, 48
+        qa = jnp.ones((kx, il, ix)) * -1
+
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+
+        updated_state = verify_state(state)
+
+        self.assertTrue(jnp.all(updated_state.specific_humidity >= 0))
+
+        qa = jnp.ones((kx, il, ix)) * -1e-5
+
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+
+        updated_state = verify_state(state)

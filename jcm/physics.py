@@ -195,6 +195,25 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
                                       tracers={'specific_humidity': q_tend_modal})
     return dynamics_tendency
 
+def verify_state(state: PhysicsState) -> PhysicsState:
+    # set specific humidity to 0.0 if it became negative during the dynamics evaluation
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity) 
+    updated_state = state.copy(specific_humidity=qa)
+
+    return updated_state
+
+def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
+    # set specific humidity tendency such that the resulting specific humidity is non-negative
+    dt_seconds = 60 * time_step
+    updated_tendencies = tendencies.copy(
+        specific_humidity=jnp.where(
+            state.specific_humidity + dt_seconds * tendencies.specific_humidity >= 0,
+            tendencies.specific_humidity,
+            - state.specific_humidity / dt_seconds
+        )
+    )
+
+    return updated_tendencies
 
 def get_physical_tendencies(
     state: State,
@@ -217,7 +236,9 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
+
     physics_state = dynamics_state_to_physics_state(state, dynamics)
+    state = verify_state(physics_state)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
     # and implicitly passed to the next physics_term. tendencies are summed
@@ -227,16 +248,7 @@ def get_physical_tendencies(
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
 
-    # the actual timestep size seems to be 1/3 of time_step
-    # so I'm setting the tendency to -q/(60s/min * 1/3 * time_step) to clamp q > 0
-    dt_seconds = 20 * time_step
-    physics_tendency = physics_tendency.copy(
-        specific_humidity=jnp.where(
-            physics_state.specific_humidity + dt_seconds * physics_tendency.specific_humidity >= 0,
-            physics_tendency.specific_humidity,
-            - physics_state.specific_humidity / dt_seconds
-        )
-    )
+    physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
