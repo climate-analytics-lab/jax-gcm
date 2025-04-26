@@ -11,7 +11,7 @@ class TestHumidityUnit(unittest.TestCase):
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg, PhysicsTendency, \
         SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData, geometry
         from jcm.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
         from jcm.boundaries import BoundaryData
         from jcm.params import Parameters

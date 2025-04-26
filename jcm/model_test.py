@@ -6,20 +6,22 @@ import jax.tree_util as jtu
 class TestModelUnit(unittest.TestCase):
 
     def test_held_suarez_model(self):
-        from jcm.held_suarez_model import HeldSuarezModel
+        from jcm.held_suarez_physics import HeldSuarezPhysics
+        from jcm.model import SpeedyModel
         layers = 8
-        model = HeldSuarezModel(
+        model = SpeedyModel(
             time_step=180,
             save_interval=1,
             total_time=2,
-            layers=layers
+            layers=layers,
+            physics=HeldSuarezPhysics(),
         )
 
         state = model.get_initial_state()
         state.tracers = {'specific_humidity': 1e-4 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_x = 85
-        modal_y = 44
+        modal_x = 63
+        modal_y = 33
         modal_zxy = (layers, modal_x, modal_y)
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
 
@@ -34,11 +36,11 @@ class TestModelUnit(unittest.TestCase):
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
 
-        self.assertIsNotNone(predictions.divergence)
-        self.assertIsNotNone(predictions.vorticity)
-        self.assertIsNotNone(predictions.temperature_variation)
-        self.assertIsNotNone(predictions.log_surface_pressure)
-        self.assertIsNotNone(predictions.tracers['specific_humidity'])
+        self.assertIsNotNone(predictions['dynamics'].divergence)
+        self.assertIsNotNone(predictions['dynamics'].vorticity)
+        self.assertIsNotNone(predictions['dynamics'].temperature_variation)
+        self.assertIsNotNone(predictions['dynamics'].log_surface_pressure)
+        self.assertIsNotNone(predictions['dynamics'].tracers['specific_humidity'])
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
@@ -46,11 +48,11 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(final_state.log_surface_pressure.shape, (1, modal_x, modal_y))
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
 
-        self.assertTupleEqual(predictions.divergence.shape, output_tzxy)
-        self.assertTupleEqual(predictions.vorticity.shape, output_tzxy)
-        self.assertTupleEqual(predictions.temperature_variation.shape, output_tzxy)
-        self.assertTupleEqual(predictions.log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
-        self.assertTupleEqual(predictions.tracers['specific_humidity'].shape, output_tzxy)
+        self.assertTupleEqual(predictions['dynamics'].divergence.shape, output_tzxy)
+        self.assertTupleEqual(predictions['dynamics'].vorticity.shape, output_tzxy)
+        self.assertTupleEqual(predictions['dynamics'].temperature_variation.shape, output_tzxy)
+        self.assertTupleEqual(predictions['dynamics'].log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
+        self.assertTupleEqual(predictions['dynamics'].tracers['specific_humidity'].shape, output_tzxy)
         
     def test_speedy_model(self):
         from jcm.model import SpeedyModel

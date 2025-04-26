@@ -40,6 +40,8 @@ def _initialize_vertical(kx):
 
 @tree_math.struct
 class Geometry:
+    nodal_shape: tuple[int, int, int] # (kx, ix, il)e)
+
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
     coa: jnp.ndarray # cos of latitude
@@ -70,10 +72,11 @@ class Geometry:
         sia, coa = jnp.sin(radang), jnp.cos(radang)
         
         # Vertical functions of sigma
-        kx = len(coords.vertical.boundaries)-1
+        kx = coords.nodal_shape[0]
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
-        return Geometry(radang=radang, sia=sia, coa=coa,
+        return Geometry(nodal_shape=coords.nodal_shape,
+                        radang=radang, sia=sia, coa=coa,
                         hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                         grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
@@ -104,6 +107,7 @@ class Geometry:
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
-        return Geometry(radang=radang, sia=sia, coa=coa,
+        return Geometry(nodal_shape=nodal_shape,
+                        radang=radang, sia=sia, coa=coa,
                         hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                         grdsig=grdsig, grdscp=grdscp, wvi=wvi)

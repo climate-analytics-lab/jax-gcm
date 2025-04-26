@@ -6,15 +6,16 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import Geometry
 import jax.numpy as jnp
-from jcm.physics import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
+from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestPhysicsUnit(unittest.TestCase):
     def test_speedy_model_HS94(self):
-        from jcm.held_suarez_model import HeldSuarezModel
-        from jcm.held_suarez import HeldSuarezForcing
-        from jcm.physics import get_physical_tendencies
+        from jcm.model import SpeedyModel
+        from jcm.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics_interface import get_physical_tendencies
 
         time_step = 10
-        hs_model = HeldSuarezModel(time_step=time_step)
+        hs_model = SpeedyModel(time_step=time_step,
+                               physics=HeldSuarezPhysics())
     
         state = hs_model.get_initial_state()
         state.tracers = {
@@ -32,21 +33,23 @@ class TestPhysicsUnit(unittest.TestCase):
         # Instantiate the PrimitiveEquations object
         dynamics = PrimitiveEquations(
             reference_temperature=hs_model.ref_temps,
-            orography=hs_model.orography,
+            orography=hs_model.coords.horizontal.to_modal(hs_model.boundaries.orog),
             coords=hs_model.coords,
             physics_specs=hs_model.physics_specs,
             vertical_matmul_method=vertical_matmul_method,
             vertical_advection=vertical_advection,
             include_vertical_advection=include_vertical_advection)
 
-        hsf = HeldSuarezForcing(hs_model.coords, hs_model.physics_specs, hs_model.ref_temps)
-        parameters = Parameters.default()
-        boundaries = BoundaryData.zeros((1,1))
-        geometry = Geometry.from_grid_shape((1,1), 8)
-
-        physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
-
-        dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
+        dynamics_tendency = get_physical_tendencies(
+            state = state,
+            dynamics = dynamics,
+            time_step = time_step,
+            physics = HeldSuarezPhysics(hs_model.coords),
+            boundaries = None,
+            parameters = None,
+            geometry = None,
+            date = None
+        )
 
         self.assertIsNotNone(dynamics_tendency)
 
@@ -90,7 +93,7 @@ class TestPhysicsUnit(unittest.TestCase):
 
 
     def test_verify_state(self):
-        from jcm.physics import verify_state, PhysicsState
+        from jcm.physics_interface import verify_state, PhysicsState
         import jax.numpy as jnp
 
         kx, ix, il = 8, 96, 48

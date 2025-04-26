@@ -11,7 +11,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
                PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency, parameters, geometry
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()

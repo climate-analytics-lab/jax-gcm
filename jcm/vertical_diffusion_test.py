@@ -16,7 +16,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         geometry = Geometry.from_grid_shape((ix, il), kx)
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.vertical_diffusion import get_vertical_diffusion_tend
 
     def test_get_vertical_diffusion_tend(self):

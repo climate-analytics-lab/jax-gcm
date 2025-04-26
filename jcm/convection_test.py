@@ -19,7 +19,7 @@ class TestConvectionUnit(unittest.TestCase):
         grdscp = geometry.grdscp
         grdsig = geometry.grdsig
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.convection import diagnose_convection, get_convection_tendencies
         from jcm.physical_constants import rgas, cp
         from jcm.humidity import get_qsat

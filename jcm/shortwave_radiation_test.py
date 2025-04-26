@@ -101,7 +101,7 @@ class TestShortWaveRadiation(unittest.TestCase):
                PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
         from jcm.physical_constants import epssw, solc
         from jcm.params import Parameters

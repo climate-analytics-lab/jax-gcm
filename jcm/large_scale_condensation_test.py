@@ -11,7 +11,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
         global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()

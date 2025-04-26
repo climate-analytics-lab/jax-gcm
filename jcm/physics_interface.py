@@ -4,10 +4,8 @@ Physics module that interfaces between the dynamics and the physics of the model
 to the specific physics being used.
 """
 
-from collections import abc
 import jax.numpy as jnp
 import tree_math
-from typing import Callable
 from jcm.physics_data import PhysicsData
 from jcm.geometry import Geometry
 from jcm.params import Parameters
@@ -18,6 +16,7 @@ from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_st
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.physical_constants import p0
+from jcm.date import DateData
 
 @tree_math.struct
 class PhysicsState:
@@ -99,6 +98,23 @@ class PhysicsTendency:
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
 
+class Physics:
+    def compute_tendencies(self, state: PhysicsState, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> PhysicsTendency:
+        """
+        Compute the physical tendencies given the current state and data structs.
+
+        Args:
+            state: Current state variables
+            parameters: Model parameters
+            boundaries: Boundary data
+            geometry: Geometry data
+            date: Date data
+
+        Returns:
+            Physical tendencies in PhysicsTendency format
+        """
+        raise NotImplementedError("Physics compute_tendencies method not implemented.")
+
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
     Convert the state variables from the dynamics to the physics state variables.
@@ -160,7 +176,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
         temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
         log_surface_pressure=modal_log_sp,
         tracers={'specific_humidity': q_modal}
-        )
+    )
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """
@@ -219,34 +235,33 @@ def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
     time_step: int,
-    physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
+    physics: Physics,
     boundaries: BoundaryData,
     parameters: Parameters,
     geometry: Geometry,
-    data: PhysicsData = None
-    ) -> State:
+    date: DateData,
+) -> State:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
     Args:
         state: Dynamic (dinosaur) State variables
         dynamics: PrimitiveEquations object
-        physics_terms: List of physics functions that take a PhysicsState and return a PhysicsTendency
+        time_step: Time step in seconds
+        physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
+        boundaries: BoundaryData object
+        parameters: Parameters object
+        geometry: Geometry object
+        date: DateData object
 
     Returns:
-        Physical tendencies
+        Physical tendencies in dinosaur.primitive_equations.State format
     """
 
     physics_state = dynamics_state_to_physics_state(state, dynamics)
     state = verify_state(physics_state)
 
-    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
-    # and implicitly passed to the next physics_term. tendencies are summed
-    physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
-    
-    for term in physics_terms:
-        tend, data = term(physics_state, data, parameters, boundaries, geometry)
-        physics_tendency += tend
+    physics_tendency = physics.compute_tendencies(physics_state, parameters, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 

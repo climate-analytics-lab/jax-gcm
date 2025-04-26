@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
+from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, alhc, grav, cp
 

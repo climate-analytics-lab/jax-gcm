@@ -12,91 +12,11 @@ from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics import PhysicsState
+from jcm.physics_interface import PhysicsState, get_physical_tendencies
+from jcm.speedy_physics import SpeedyPhysics
+from jcm.date import DateData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
-
-def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
-    """
-    Returns a list of functions that compute physical tendencies for the model.
-    """
-    
-    from jcm.humidity import spec_hum_to_rel_hum
-    from jcm.convection import get_convection_tendencies
-    from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
-    from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-    from jcm.surface_flux import get_surface_fluxes
-    from jcm.vertical_diffusion import get_vertical_diffusion_tend
-    from jcm.land_model import couple_land_atm
-    from jcm.forcing import set_forcing
-
-    physics_terms = [
-        set_forcing,
-        spec_hum_to_rel_hum,
-        get_convection_tendencies,
-        get_large_scale_condensation_tendencies,
-        clouds,
-        get_shortwave_rad_fluxes,
-        get_downward_longwave_rad_fluxes,
-        get_surface_fluxes,
-        get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend,
-        couple_land_atm # eventually couple sea model and ice model here
-    ]
-    if sea_coupling_flag > 0:
-        physics_terms.insert(-3, get_surface_fluxes)
-
-    if not checkpoint_terms:
-        return physics_terms
-
-    static_argnums = {
-        set_forcing: (2,),
-        couple_land_atm: (3,),
-    }
-    
-    # Static argnum 4 is the Geometry object
-    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ()) + (4,)) for term in physics_terms]
-
-def convert_tendencies_to_equation(
-        dynamics: primitive_equations.PrimitiveEquations, 
-        time_step,
-        physics_terms,
-        reference_date,
-        boundaries: BoundaryData,
-        parameters: Parameters,
-        geometry: Geometry
-    ) -> ExplicitODE:
-
-    from jcm.physics_data import PhysicsData
-    from jcm.physics import get_physical_tendencies
-    from jcm.date import DateData
-
-    def physical_tendencies(state):
-        
-        date = DateData.set_date(
-            model_time = reference_date + Timedelta(
-                seconds=state.sim_time
-            )
-        )
-
-        data = PhysicsData.zeros(
-            dynamics.coords.nodal_shape[1:],
-            dynamics.coords.nodal_shape[0],
-            date=date
-        )
-
-        return get_physical_tendencies(
-            state=state,
-            dynamics=dynamics,
-            time_step=time_step,
-            physics_terms=physics_terms,
-            boundaries=boundaries,
-            parameters=parameters,
-            geometry=geometry,
-            data=data
-        )
-    return ExplicitODE.from_functions(physical_tendencies)
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -128,10 +48,22 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
-                 layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
-                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+    def __init__(
+        self,
+        layers=8,
+        horizontal_resolution=31,
+        time_step=30.0,
+        total_time=1200,
+        start_date=None,
+        save_interval=10.0,
+        coords: CoordinateSystem=None,
+        boundaries: BoundaryData=None,
+        initial_state: PhysicsState=None,
+        parameters: Parameters=None,
+        physics=None,
+        post_process=True,
+        checkpoint_terms=True,
+    ) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -172,7 +104,6 @@ class SpeedyModel:
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         self.parameters = parameters or Parameters.default()
-        self.post_process_physics = post_process
 
         if initial_state is not None:
             self.initial_state = initial_state
@@ -190,8 +121,9 @@ class SpeedyModel:
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
-        
+        self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
+        self.post_process_physics = post_process and isinstance(self.physics, SpeedyPhysics) # This is for populating PhysicsData to output, so only commpatible with SpeedyPhysics
+
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
@@ -205,19 +137,26 @@ class SpeedyModel:
             truncated_orography, 
             self.coords,
             self.physics_specs)
-
-        speedy_forcing = convert_tendencies_to_equation(self.primitive,
-                                                        time_step,
-                                                        self.physics_terms,
-                                                        self.start_date,
-                                                        self.boundaries,
-                                                        self.parameters,
-                                                        self.geometry)
+        
+        forcing = ExplicitODE.from_functions(lambda state:
+            get_physical_tendencies(
+                state=state,
+                dynamics=self.primitive,
+                time_step=time_step,
+                physics=self.physics,
+                boundaries=self.boundaries,
+                parameters=self.parameters,
+                geometry=self.geometry,
+                date = DateData.set_date(
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time)
+                )
+            )
+        )   
         
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             dinosaur.time_integration.exponential_step_filter(
@@ -227,7 +166,7 @@ class SpeedyModel:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        from jcm.physics import physics_state_to_dynamics_state
+        from jcm.physics_interface import physics_state_to_dynamics_state
 
         #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
@@ -244,7 +183,7 @@ class SpeedyModel:
     def post_process(self, state):
         from jcm.date import DateData
         from jcm.physics_data import PhysicsData
-        from jcm.physics import dynamics_state_to_physics_state
+        from jcm.physics_interface import dynamics_state_to_physics_state
 
         date = DateData.set_date(
             model_time = self.start_date + Timedelta(
@@ -260,7 +199,7 @@ class SpeedyModel:
 
         if self.post_process_physics:
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
-            for term in self.physics_terms:
+            for term in self.physics.terms:
                 _, data = term(physics_state, data, self.parameters, self.boundaries, self.geometry)
         else:
             pass # Return an empty physics data object

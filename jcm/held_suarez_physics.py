@@ -1,22 +1,19 @@
 from dinosaur.scales import units
 import jax.numpy as jnp
 from jcm.boundaries import BoundaryData
-from jcm.physics_data import PhysicsData
-from dinosaur.time_integration import ExplicitODE
 from dinosaur import coordinate_systems
 from dinosaur import primitive_equations
-from dinosaur import typing
 from jcm.geometry import Geometry
 from jcm.params import Parameters
-from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
+from jcm.model import get_coords, PHYSICS_SPECS
+from jcm.date import DateData
 
 Quantity = units.Quantity
 
-class HeldSuarezForcing:
+class HeldSuarezPhysics(Physics):
     def __init__(self,
-        coords: coordinate_systems.CoordinateSystem,
-        physics_specs: primitive_equations.PrimitiveEquationsSpecs,
-        reference_temperature: typing.Array,
+        coords: coordinate_systems.CoordinateSystem = get_coords(),
         p0: Quantity = 1e5 * units.pascal,
         sigma_b: Quantity = 0.7,
         kf: Quantity = 1 / (1 * units.day),
@@ -30,10 +27,7 @@ class HeldSuarezForcing:
         """Initialize Held-Suarez.
 
         Args:
-            coords: horizontal and vertical descritization.
-            physics_specs: object holding physical constants and definition of custom
-            units to use for initialization of the state.
-            reference_temperature: horizontal reference temperature at all altitudes.
+            coords: horizontal and vertical descritization
             p0: reference surface pressure.
             sigma_b: sigma level of effective planetary boundary layer.
             kf: coefficient of friction for Rayleigh drag.
@@ -45,17 +39,15 @@ class HeldSuarezForcing:
             dThz: vertical temperature variation of radiative equilibrium.
         """
         self.coords = coords
-        self.physics_specs = physics_specs
-        self.reference_temperature = reference_temperature
-        self.p0 = physics_specs.nondimensionalize(p0)
+        self.p0 = PHYSICS_SPECS.nondimensionalize(p0)
         self.sigma_b = sigma_b
-        self.kf = physics_specs.nondimensionalize(kf)
-        self.ka = physics_specs.nondimensionalize(ka)
-        self.ks = physics_specs.nondimensionalize(ks)
-        self.minT = physics_specs.nondimensionalize(minT)
-        self.maxT = physics_specs.nondimensionalize(maxT)
-        self.dTy = physics_specs.nondimensionalize(dTy)
-        self.dThz = physics_specs.nondimensionalize(dThz)
+        self.kf = PHYSICS_SPECS.nondimensionalize(kf)
+        self.ka = PHYSICS_SPECS.nondimensionalize(ka)
+        self.ks = PHYSICS_SPECS.nondimensionalize(ks)
+        self.minT = PHYSICS_SPECS.nondimensionalize(minT)
+        self.maxT = PHYSICS_SPECS.nondimensionalize(maxT)
+        self.dTy = PHYSICS_SPECS.nondimensionalize(dTy)
+        self.dThz = PHYSICS_SPECS.nondimensionalize(dThz)
         # Coordinates
         self.sigma = self.coords.vertical.centers
         _, sin_lat = self.coords.horizontal.nodal_mesh
@@ -65,7 +57,7 @@ class HeldSuarezForcing:
         p_over_p0 = (
             self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis] / self.p0
         )
-        temperature = p_over_p0**self.physics_specs.kappa * (
+        temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.maxT
             - self.dTy * jnp.sin(self.lat[jnp.newaxis]) ** 2
             - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat[jnp.newaxis]) ** 2
@@ -84,14 +76,27 @@ class HeldSuarezForcing:
             cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat[jnp.newaxis]) ** 4
     )
 
-    def held_suarez_forcings(
+    def compute_tendencies(
         self,
         state: PhysicsState,
-        physics_data: PhysicsData,
         parameters: Parameters,
         boundaries: BoundaryData,
-        geometry: Geometry
-    ) -> tuple[PhysicsTendency, PhysicsData]:
+        geometry: Geometry,
+        date: DateData,
+    ) -> PhysicsTendency:
+        """
+        Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
+
+        Args:
+            state: Current state variables
+            parameters: Model parameters (unused)
+            boundaries: Boundary data (unused)
+            geometry: Geometry data (unused)
+            date: Date data (unused)
+
+        Returns:
+            Physical tendencies in PhysicsTendency format
+        """
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
@@ -99,4 +104,4 @@ class HeldSuarezForcing:
         d_u_wind = -self.kv() * state.u_wind
         d_spec_humidity = jnp.zeros_like(state.temperature) # just keep the same specific humidity?
 
-        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity), physics_data
+        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity)

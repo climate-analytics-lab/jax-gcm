@@ -5,7 +5,7 @@ from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.physical_constants import sbc
-from jcm.physics import PhysicsState, PhysicsTendency
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
 
 nband = 4
