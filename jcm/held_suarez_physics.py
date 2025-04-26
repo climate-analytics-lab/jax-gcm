@@ -8,7 +8,7 @@ from jcm.params import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import get_coords, PHYSICS_SPECS
 from jcm.date import DateData
-from typing import Tuple, Any
+from typing import Tuple
 
 Quantity = units.Quantity
 

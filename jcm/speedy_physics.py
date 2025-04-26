@@ -1,6 +1,6 @@
 import jax
 from collections import abc
-from typing import Callable, Tuple, Any
+from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsData, PhysicsTendency, Physics
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
