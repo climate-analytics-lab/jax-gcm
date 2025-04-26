@@ -122,7 +122,7 @@ class Model:
         
         # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
-        self.post_process_physics = post_process and isinstance(self.physics, SpeedyPhysics) # This is for populating PhysicsData to output, so only commpatible with SpeedyPhysics
+        self.post_process_physics = post_process
 
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundaries is None:
@@ -199,8 +199,7 @@ class Model:
 
         if self.post_process_physics:
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
-            for term in self.physics.terms:
-                _, data = term(physics_state, data, self.parameters, self.boundaries, self.geometry)
+            _, data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
         else:
             pass # Return an empty physics data object
 
@@ -246,23 +245,27 @@ class Model:
             diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram
         ).m
 
-        # prepare physics predictions for xarray conversion:
+        # prepare physics predictions for xarray conversion
         # unpack into single dictionary, and unpack individual fields
-        # unpack PhysicsData struct
-        physics_state_preds = {
-            f"{module}.{field}": value # avoids name conflicts between fields of different modules
-            for module, module_dict in physics_predictions.asdict().items()
-            for field, value in module_dict.asdict().items()
-        }
-        # replace multi-channel fields with a field for each channel
-        _original_keys = list(physics_state_preds.keys())
-        for k in _original_keys:
-            v = physics_state_preds[k]
-            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
-                physics_state_preds.update(
-                    {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
-                )
-                del physics_state_preds[k]
+        
+        if not isinstance(self.physics, SpeedyPhysics):
+            physics_state_preds = {} # FIXME: physics objects could handle converting their own data to dict
+        else:
+            # unpack PhysicsData struct
+            physics_state_preds = {
+                f"{module}.{field}": value # avoids name conflicts between fields of different modules
+                for module, module_dict in physics_predictions.asdict().items()
+                for field, value in module_dict.asdict().items()
+            }
+            # replace multi-channel fields with a field for each channel
+            _original_keys = list(physics_state_preds.keys())
+            for k in _original_keys:
+                v = physics_state_preds[k]
+                if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
+                    physics_state_preds.update(
+                        {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
+                    )
+                    del physics_state_preds[k]
 
         # create xarray dataset
         nodal_predictions = {

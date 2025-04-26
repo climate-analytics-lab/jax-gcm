@@ -1,6 +1,6 @@
 import jax
 from collections import abc
-from typing import Callable
+from typing import Callable, Tuple, Any
 from jcm.physics_interface import PhysicsState, PhysicsData, PhysicsTendency, Physics
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
@@ -27,7 +27,7 @@ class SpeedyPhysics(Physics):
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
-    ) -> PhysicsTendency:
+    ) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
 
@@ -40,6 +40,7 @@ class SpeedyPhysics(Physics):
 
         Returns:
             Physical tendencies in PhysicsTendency format
+            Object containing physics data (PhysicsData format)
         """
         data = PhysicsData.zeros(
             geometry.nodal_shape[1:],
@@ -54,7 +55,7 @@ class SpeedyPhysics(Physics):
             tend, data = term(state, data, parameters, boundaries, geometry)
             physics_tendency += tend
         
-        return physics_tendency
+        return physics_tendency, data
     
     @classmethod
     def get_speedy_physics_terms(self, sea_coupling_flag=0, checkpoint_terms=True):

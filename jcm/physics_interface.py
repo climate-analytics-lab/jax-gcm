@@ -17,6 +17,7 @@ from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.physical_constants import p0
 from jcm.date import DateData
+from typing import Tuple, Any
 
 @tree_math.struct
 class PhysicsState:
@@ -99,7 +100,7 @@ class PhysicsTendency:
         )
 
 class Physics:
-    def compute_tendencies(self, state: PhysicsState, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> PhysicsTendency:
+    def compute_tendencies(self, state: PhysicsState, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
 
@@ -112,6 +113,7 @@ class Physics:
 
         Returns:
             Physical tendencies in PhysicsTendency format
+            Object containing physics data
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
 
@@ -261,7 +263,7 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
     state = verify_state(physics_state)
 
-    physics_tendency = physics.compute_tendencies(physics_state, parameters, boundaries, geometry, date)
+    physics_tendency, _ = physics.compute_tendencies(physics_state, parameters, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 

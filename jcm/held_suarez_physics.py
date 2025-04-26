@@ -8,6 +8,7 @@ from jcm.params import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import get_coords, PHYSICS_SPECS
 from jcm.date import DateData
+from typing import Tuple, Any
 
 Quantity = units.Quantity
 
@@ -83,7 +84,7 @@ class HeldSuarezPhysics(Physics):
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
-    ) -> PhysicsTendency:
+    ) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
 
@@ -96,6 +97,7 @@ class HeldSuarezPhysics(Physics):
 
         Returns:
             Physical tendencies in PhysicsTendency format
+            Object containing physics data (unused)
         """
         Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
@@ -104,4 +106,4 @@ class HeldSuarezPhysics(Physics):
         d_u_wind = -self.kv() * state.u_wind
         d_spec_humidity = jnp.zeros_like(state.temperature) # just keep the same specific humidity?
 
-        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity)
+        return PhysicsTendency(d_u_wind, d_v_wind, d_temperature, d_spec_humidity), None
