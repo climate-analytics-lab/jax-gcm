@@ -41,7 +41,7 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
     )
 
-class SpeedyModel:
+class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
 

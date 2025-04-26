@@ -9,12 +9,12 @@ import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestPhysicsUnit(unittest.TestCase):
     def test_speedy_model_HS94(self):
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
         from jcm.held_suarez_physics import HeldSuarezPhysics
         from jcm.physics_interface import get_physical_tendencies
 
         time_step = 10
-        hs_model = SpeedyModel(time_step=time_step,
+        hs_model = Model(time_step=time_step,
                                physics=HeldSuarezPhysics())
     
         state = hs_model.get_initial_state()

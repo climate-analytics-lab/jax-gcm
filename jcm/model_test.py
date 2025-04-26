@@ -7,9 +7,9 @@ class TestModelUnit(unittest.TestCase):
 
     def test_held_suarez_model(self):
         from jcm.held_suarez_physics import HeldSuarezPhysics
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
         layers = 8
-        model = SpeedyModel(
+        model = Model(
             time_step=180,
             save_interval=1,
             total_time=2,
@@ -55,11 +55,11 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(predictions['dynamics'].tracers['specific_humidity'].shape, output_tzxy)
         
     def test_speedy_model(self):
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
 
         layers = 8
         # optionally add a boundary conditions file
-        model = SpeedyModel(
+        model = Model(
             time_step=720,
             save_interval=1,
             total_time=2,
@@ -110,7 +110,7 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_gradients_isnan(self):
         import jax
         import jax.numpy as jnp
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
 
         def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
             return jtu.tree_map(lambda x: jnp.ones_like(x), state)
@@ -119,7 +119,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
+        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -139,7 +139,7 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
         import jax
         import jax.numpy as jnp
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
 
         def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
             return jtu.tree_map(lambda x: jnp.ones_like(x), state)
@@ -147,7 +147,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
+        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -165,10 +165,10 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         import jax.numpy as jnp
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
         
         def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+            model = Model(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
                 # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
                 parameters=params, post_process=True)
             return model
@@ -194,7 +194,7 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jcm.model import SpeedyModel
+        from jcm.model import Model
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -207,7 +207,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
         def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
+            model = Model(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
                 # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
                 parameters=params, post_process=True)
             return model

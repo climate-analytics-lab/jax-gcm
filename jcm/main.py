@@ -1,6 +1,6 @@
 import hydra
 from omegaconf import DictConfig
-from jcm.model import SpeedyModel
+from jcm.model import Model
 from dinosaur import primitive_equations_states
 from dataclasses import asdict
 from hydra.core.hydra_config import HydraConfig
@@ -11,7 +11,7 @@ def main(cfg: DictConfig):
     """
     Allows you to run Speedy Model with adjustable parameters
     """
-    model = SpeedyModel(
+    model = Model(
         time_step=cfg.model.time_step,
         save_interval=cfg.model.save_interval,
         total_time=cfg.model.total_time,
