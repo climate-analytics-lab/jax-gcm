@@ -27,7 +27,7 @@ class SpeedyPhysics(Physics):
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
-    ) -> Tuple[PhysicsTendency, Any]:
+    ) -> Tuple[PhysicsTendency, PhysicsData]:
         """
         Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
 

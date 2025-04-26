@@ -84,7 +84,7 @@ class HeldSuarezPhysics(Physics):
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
-    ) -> Tuple[PhysicsTendency, Any]:
+    ) -> Tuple[PhysicsTendency, None]:
         """
         Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
 
