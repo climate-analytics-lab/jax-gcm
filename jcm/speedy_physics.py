@@ -11,7 +11,7 @@ class SpeedyPhysics(Physics):
     parameters: Parameters
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, parameters: Parameters = Parameters.default(), sea_coupling_flag=0, checkpoint_terms=True):
+    def __init__(self, parameters: Parameters = Parameters.default(), sea_coupling_flag=0, checkpoint_terms=True) -> None:
         """
         Initialize the SpeedyPhysics class with the specified parameters.
         

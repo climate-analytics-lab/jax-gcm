@@ -181,9 +181,7 @@ class Model:
         from jcm.physics_interface import dynamics_state_to_physics_state
 
         date = DateData.set_date(
-            model_time = self.start_date + Timedelta(
-                seconds=state.sim_time
-                )
+            model_time = self.start_date + Timedelta(seconds=state.sim_time)
         )
 
         data = PhysicsData.zeros(
@@ -242,26 +240,7 @@ class Model:
 
         # prepare physics predictions for xarray conversion
         # unpack into single dictionary, and unpack individual fields
-
-        if not isinstance(self.physics, SpeedyPhysics):
-            physics_state_preds = {} # FIXME: physics objects could handle converting their own data to dict
-        else:
-            # unpack PhysicsData struct
-            physics_state_preds = {
-                f"{module}.{field}": value # avoids name conflicts between fields of different modules
-                for module, module_dict in physics_predictions.asdict().items()
-                for field, value in module_dict.asdict().items()
-            }
-            # replace multi-channel fields with a field for each channel
-            _original_keys = list(physics_state_preds.keys())
-            for k in _original_keys:
-                v = physics_state_preds[k]
-                if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
-                    physics_state_preds.update(
-                        {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
-                    )
-                    del physics_state_preds[k]
-
+        physics_state_preds = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
         # create xarray dataset
         nodal_predictions = {
             **diagnostic_state_preds.asdict(),

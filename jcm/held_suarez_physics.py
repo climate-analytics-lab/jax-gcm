@@ -24,7 +24,7 @@ class HeldSuarezPhysics(Physics):
         maxT: Quantity = 315 * units.degK,
         dTy: Quantity = 60 * units.degK,
         dThz: Quantity = 10 * units.degK,
-    ):
+    ) -> None:
         """Initialize Held-Suarez.
 
         Args:

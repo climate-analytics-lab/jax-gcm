@@ -17,7 +17,8 @@ from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.physical_constants import p0
 from jcm.date import DateData
-from typing import Tuple, Any
+from typing import Tuple, Dict, Any
+import warnings
 
 @tree_math.struct
 class PhysicsState:
@@ -115,6 +116,43 @@ class Physics:
             Object containing physics data
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
+
+    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
+        """
+        Flattens a physics data struct into a dictionary.
+
+        Args:
+            struct: The struct to flatten.
+            geometry: Geometry object.
+            sep: Separator to use for constructing hierarchical keys.
+
+        Returns:
+            A dictionary representation of the struct, without nesting.
+        """
+        if struct is None:
+            return {}
+        
+        def _to_dict_recursive(obj, parent_key=""):
+            items = {}
+            for key, val in obj.__dict__.items():
+                new_key = f"{parent_key}{sep}{key}" if parent_key else key
+                if hasattr(val, "__dict__") and val.__dict__:
+                    items.update(_to_dict_recursive(val, parent_key=new_key))
+                else:
+                    items[new_key] = val
+            return items
+        
+        items = _to_dict_recursive(struct)
+
+        # replace multi-channel fields with a field for each channel
+        _original_keys = list(items.keys())
+        for k in _original_keys:
+            s = items[k].shape
+            if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+                items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})
+                del items[k]
+
+        return items
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
