@@ -12,7 +12,7 @@ def main(cfg: DictConfig):
     Allows you to run Speedy Model with adjustable parameters
     """
     model = Model(
-        layers=cfg.model.layers
+        layers=cfg.model.layers,
         time_step=cfg.model.time_step,
         total_time=cfg.model.total_time,
         save_interval=cfg.model.save_interval,

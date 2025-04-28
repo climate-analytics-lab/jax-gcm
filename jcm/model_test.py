@@ -61,7 +61,7 @@ class TestModelUnit(unittest.TestCase):
         layers = 8
         # optionally add a boundary conditions file
         model = Model(
-            layers=layers
+            layers=layers,
             time_step=720,
             total_time=2,
             save_interval=1,
@@ -167,15 +167,13 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import Model
         
-        def create_model(params):
-            model = Model(
-                layers=8,
-                time_step=30,
-                total_time=(2/48.0),
-                save_interval=(1/48.0),
-                physics=SpeedyPhysics(parameters=params),
-            )
-            return model
+        create_model = lambda params: Model(
+            layers=8,
+            time_step=30,
+            total_time=(2/48.0),
+            save_interval=(1/48.0),
+            physics=SpeedyPhysics(parameters=params),
+        )
         
         def model_run_wrapper(params):
             model = create_model(params)
