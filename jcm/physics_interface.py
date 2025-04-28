@@ -101,6 +101,8 @@ class PhysicsTendency:
         )
 
 class Physics:
+    write_output: bool
+    
     def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.

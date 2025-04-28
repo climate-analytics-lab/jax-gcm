@@ -11,10 +11,10 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         layers = 8
         model = Model(
-            time_step=180,
-            save_interval=1,
-            total_time=2,
             layers=layers,
+            time_step=180,
+            total_time=2,
+            save_interval=1,
             physics=HeldSuarezPhysics(),
         )
 
@@ -61,10 +61,10 @@ class TestModelUnit(unittest.TestCase):
         layers = 8
         # optionally add a boundary conditions file
         model = Model(
-            time_step=720,
-            save_interval=1,
-            total_time=2,
             layers=layers
+            time_step=720,
+            total_time=2,
+            save_interval=1,
         )
     
         state = model.get_initial_state()
@@ -119,7 +119,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8)
+        model = Model(layers=8, time_step=30, total_time=(1/48.),  save_interval=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -147,7 +147,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
-        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8)
+        model = Model(layers=8, time_step=30, total_time=(1/24.), save_interval=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -169,12 +169,11 @@ class TestModelUnit(unittest.TestCase):
         
         def create_model(params):
             model = Model(
-                time_step=30,
-                save_interval=(1/48.0),
-                total_time=(2/48.0),
                 layers=8,
+                time_step=30,
+                total_time=(2/48.0),
+                save_interval=(1/48.0),
                 physics=SpeedyPhysics(parameters=params),
-                post_process=True
             )
             return model
         
@@ -211,13 +210,11 @@ class TestModelUnit(unittest.TestCase):
                     return jnp.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
-        def create_model(params):
-            model = Model(time_step=30,
-                          save_interval=(1/48.0),
-                          total_time=(2/48.0),
-                          layers=8,
-                          physics=SpeedyPhysics(parameters=params), post_process=True)
-            return model
+        create_model = lambda params: Model(layers=8,
+                                            time_step=30,
+                                            total_time=(2/48.0),
+                                            save_interval=(1/48.0),
+                                            physics=SpeedyPhysics(parameters=params))
         
         def model_run_wrapper(params):
             model = create_model(params)

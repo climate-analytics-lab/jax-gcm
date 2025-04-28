@@ -60,24 +60,21 @@ class Model:
         boundaries: BoundaryData=None,
         initial_state: PhysicsState=None,
         physics=None,
-        post_process=True,
     ) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
         Args:
-            time_step: Model time step in minutes
-            save_interval: Save interval in days
-            total_time: Total integration time in days
-            start_date: Start date of the simulation
             layers: Number of vertical layers
             horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
+            time_step: Model time step in minutes
+            total_time: Total integration time in days
+            start_date: Start date of the simulation
+            save_interval: Save interval in days
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
-            physics_specs: PrimitiveEquationsSpecs object describing the model physics
             physics: Physics object describing the model physics
-            post_process: Whether to post-process the model output
         """
         from datetime import datetime
 
@@ -117,7 +114,6 @@ class Model:
         
         # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics = physics or SpeedyPhysics()
-        self.post_process_physics = post_process
 
         # TODO: make the truncation number a parameter consistent with the grid shape
         params_for_boundaries = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
@@ -146,7 +142,7 @@ class Model:
                     model_time = self.start_date + Timedelta(seconds=state.sim_time)
                 )
             )
-        )   
+        )
         
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
@@ -180,22 +176,14 @@ class Model:
         from jcm.physics_data import PhysicsData
         from jcm.physics_interface import dynamics_state_to_physics_state
 
-        date = DateData.set_date(
-            model_time = self.start_date + Timedelta(seconds=state.sim_time)
-        )
-
-        data = PhysicsData.zeros(
-            self.coords.nodal_shape[1:],
-            self.coords.nodal_shape[0],
-            date=date
-        )
-
-        if self.post_process_physics:
+        data = None
+        if self.physics.write_output:
+            date = DateData.set_date(
+                model_time = self.start_date + Timedelta(seconds=state.sim_time)
+            )
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
             _, data = self.physics.compute_tendencies(physics_state, self.boundaries, self.geometry, date)
-        else:
-            pass # Return an empty physics data object
-
+    
         return {
             'dynamics': state,
             'physics': data,
