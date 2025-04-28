@@ -59,10 +59,8 @@ class Model:
         coords: CoordinateSystem=None,
         boundaries: BoundaryData=None,
         initial_state: PhysicsState=None,
-        parameters: Parameters=None,
         physics=None,
         post_process=True,
-        checkpoint_terms=True,
     ) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -77,10 +75,9 @@ class Model:
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
-            parameters: Parameters object describing model parameters
             physics_specs: PrimitiveEquationsSpecs object describing the model physics
+            physics: Physics object describing the model physics
             post_process: Whether to post-process the model output
-            checkpoint_terms: Whether to jax.checkpoint each physics term
         """
         from datetime import datetime
 
@@ -103,8 +100,6 @@ class Model:
         self.outer_steps = int(self.total_time / self.save_interval)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
-        self.parameters = parameters or Parameters.default()
-
         if initial_state is not None:
             self.initial_state = initial_state
         else:
@@ -121,15 +116,15 @@ class Model:
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
+        self.physics = physics or SpeedyPhysics()
         self.post_process_physics = post_process
 
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.physics.parameters)
         else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundaries, self.physics.parameters, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
@@ -145,7 +140,6 @@ class Model:
                 time_step=time_step,
                 physics=self.physics,
                 boundaries=self.boundaries,
-                parameters=self.parameters,
                 geometry=self.geometry,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time)
@@ -199,7 +193,7 @@ class Model:
 
         if self.post_process_physics:
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
-            _, data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
+            _, data = self.physics.compute_tendencies(physics_state, self.boundaries, self.geometry, date)
         else:
             pass # Return an empty physics data object
 
@@ -247,7 +241,7 @@ class Model:
 
         # prepare physics predictions for xarray conversion
         # unpack into single dictionary, and unpack individual fields
-        
+
         if not isinstance(self.physics, SpeedyPhysics):
             physics_state_preds = {} # FIXME: physics objects could handle converting their own data to dict
         else:

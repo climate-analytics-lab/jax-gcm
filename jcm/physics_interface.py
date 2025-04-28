@@ -100,13 +100,12 @@ class PhysicsTendency:
         )
 
 class Physics:
-    def compute_tendencies(self, state: PhysicsState, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
-            parameters: Model parameters
             boundaries: Boundary data
             geometry: Geometry data
             date: Date data
@@ -239,7 +238,6 @@ def get_physical_tendencies(
     time_step: int,
     physics: Physics,
     boundaries: BoundaryData,
-    parameters: Parameters,
     geometry: Geometry,
     date: DateData,
 ) -> State:
@@ -252,7 +250,6 @@ def get_physical_tendencies(
         time_step: Time step in seconds
         physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
         boundaries: BoundaryData object
-        parameters: Parameters object
         geometry: Geometry object
         date: DateData object
 
@@ -263,7 +260,7 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
     state = verify_state(physics_state)
 
-    physics_tendency, _ = physics.compute_tendencies(physics_state, parameters, boundaries, geometry, date)
+    physics_tendency, _ = physics.compute_tendencies(physics_state, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 

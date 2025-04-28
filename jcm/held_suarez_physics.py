@@ -80,7 +80,6 @@ class HeldSuarezPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        parameters: Parameters,
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
@@ -90,7 +89,6 @@ class HeldSuarezPhysics(Physics):
 
         Args:
             state: Current state variables
-            parameters: Model parameters (unused)
             boundaries: Boundary data (unused)
             geometry: Geometry data (unused)
             date: Date data (unused)

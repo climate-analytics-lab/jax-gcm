@@ -46,7 +46,6 @@ class TestPhysicsUnit(unittest.TestCase):
             time_step = time_step,
             physics = HeldSuarezPhysics(hs_model.coords),
             boundaries = None,
-            parameters = None,
             geometry = None,
             date = None
         )
