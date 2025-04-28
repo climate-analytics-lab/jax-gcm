@@ -15,7 +15,7 @@ class TestPhysicsUnit(unittest.TestCase):
 
         time_step = 10
         hs_model = Model(time_step=time_step,
-                               physics=HeldSuarezPhysics())
+                         physics=HeldSuarezPhysics())
     
         state = hs_model.get_initial_state()
         state.tracers = {

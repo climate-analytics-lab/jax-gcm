@@ -1,5 +1,6 @@
 import unittest
 from dinosaur import primitive_equations_states
+from jcm.speedy_physics import SpeedyPhysics
 from jcm.params import Parameters
 import jax.tree_util as jtu
 
@@ -63,8 +64,7 @@ class TestModelUnit(unittest.TestCase):
             time_step=720,
             save_interval=1,
             total_time=2,
-            layers=layers,
-            parameters=Parameters.default()
+            layers=layers
         )
     
         state = model.get_initial_state()
@@ -119,7 +119,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
+        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8)
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -147,7 +147,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
-        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
+        model = Model(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8)
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -168,9 +168,14 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         
         def create_model(params):
-            model = Model(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
-                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
-                parameters=params, post_process=True)
+            model = Model(
+                time_step=30,
+                save_interval=(1/48.0),
+                total_time=(2/48.0),
+                layers=8,
+                physics=SpeedyPhysics(parameters=params),
+                post_process=True
+            )
             return model
         
         def model_run_wrapper(params):
@@ -207,9 +212,11 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
         def create_model(params):
-            model = Model(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
-                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
-                parameters=params, post_process=True)
+            model = Model(time_step=30,
+                          save_interval=(1/48.0),
+                          total_time=(2/48.0),
+                          layers=8,
+                          physics=SpeedyPhysics(parameters=params), post_process=True)
             return model
         
         def model_run_wrapper(params):

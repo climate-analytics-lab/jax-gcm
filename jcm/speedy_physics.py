@@ -16,6 +16,7 @@ class SpeedyPhysics(Physics):
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
+            parameters (Parameters): Parameters for the physics model.
             sea_coupling_flag (int): Flag to indicate if sea coupling is enabled.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """

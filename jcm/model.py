@@ -120,11 +120,12 @@ class Model:
         self.post_process_physics = post_process
 
         # TODO: make the truncation number a parameter consistent with the grid shape
+        params_for_boundaries = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.physics.parameters)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
         else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, self.physics.parameters, dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundaries, params_for_boundaries, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
