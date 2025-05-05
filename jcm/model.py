@@ -237,8 +237,8 @@ class SpeedyModel:
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
-            state.log_surface_pressure *= 0.0 # this is the equivalent of p0 everywhere (log(1) = 0, normalized surface pressure of 1 means p = p0)
-            # state.log_surface_pressure = state.log_surface_pressure - jnp.log(p0) # convert to log normalized surface pressure
+            # state.log_surface_pressure *= 0.0 # this is the equivalent of p0 everywhere (log(1) = 0, normalized surface pressure of 1 means p = p0)
+            # need to add specific humidity as a tracer
             state.tracers = {
                 'specific_humidity': 0.0 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
