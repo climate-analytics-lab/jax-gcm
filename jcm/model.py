@@ -304,7 +304,7 @@ class SpeedyModel:
         # dimensionalize
         diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
         diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(
-            diagnostic_state_preds.tracers['specific_humidity'], units.kilogram / units.kilogram
+            diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram
         ).m
 
         # prepare physics predictions for xarray conversion:

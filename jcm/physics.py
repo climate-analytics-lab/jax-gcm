@@ -132,7 +132,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     sp = jnp.exp(log_sp)
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
-    q = dynamics.physics_specs.dimensionalize(q, units.kilogram / units.kilogram).m
+    q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
     return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
 
@@ -143,7 +143,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
 
     # convert specific humidity to modal (and nondimensionalize)
-    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.kilogram / units.kilogram / units.second)
+    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram / units.second)
     q_modal = dynamics.coords.horizontal.to_modal(q)
 
     # convert temperature to a variation and then to modal
@@ -178,7 +178,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     t_tend = physics_tendency.temperature
     q_tend = physics_tendency.specific_humidity
     
-    q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.kilogram / units.kilogram / units.second)
+    q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
     
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
