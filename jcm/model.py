@@ -236,12 +236,12 @@ class SpeedyModel:
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
-            state = self.default_state_fn(jax.random.PRNGKey(random_seed)) # this possibly needs to be normalized (should be log(normalized surface pressure))
-            state.log_surface_pressure *= 0.0
+            state = self.default_state_fn(jax.random.PRNGKey(random_seed))
+            state.log_surface_pressure *= 0.0 # this is the equivalent of p0 everywhere (log(1) = 0, normalized surface pressure of 1 means p = p0)
             # state.log_surface_pressure = state.log_surface_pressure - jnp.log(p0) # convert to log normalized surface pressure
-            # state.tracers = {
-            #     'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
-            # }
+            state.tracers = {
+                'specific_humidity': 0.0 * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            }
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state):
