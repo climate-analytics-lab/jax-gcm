@@ -235,7 +235,7 @@ class SpeedyModel:
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
-            state = self.default_state_fn(jax.random.PRNGKey(random_seed))
+            state = self.default_state_fn(jax.random.PRNGKey(random_seed)) # this possibly needs to be normalized (should be log(normalized surface pressure))
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
@@ -298,7 +298,7 @@ class SpeedyModel:
         # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
         # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
         log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)
+        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)*p0
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize

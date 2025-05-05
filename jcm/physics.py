@@ -128,7 +128,8 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     )
 
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
-    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+    # log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
@@ -151,7 +152,8 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
     # convert normalized surface pressure to Pa, then take the log and convert to modal
-    log_surface_pressure = jnp.log(physics_state.surface_pressure * p0)
+    # log_surface_pressure = jnp.log(physics_state.surface_pressure * p0)
+    log_surface_pressure = jnp.log(physics_state.surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     return State(
