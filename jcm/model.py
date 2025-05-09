@@ -95,10 +95,11 @@ def convert_tendencies_to_equation(
     from jcm.date import DateData
 
     def physical_tendencies(state):
-        
+        simulation_t = state.sim_time * units.second
+
         date = DateData.set_date(
             model_time = reference_date + Timedelta(seconds=state.sim_time),
-            model_step = int(state.sim_time.to(units.minute) / time_step)
+            model_step = (int(simulation_t.to(units.minute) / time_step))
         )
 
         data = PhysicsData.zeros(
