@@ -22,7 +22,7 @@ def set_physics_flags(state: PhysicsState,
     boundaries: BoundaryData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    from physical_constants import nstrad
+    from jcm.physical_constants import nstrad
     '''
         Sets flags associated used to indicate whether a tendency function should be run.
         All functions are run by default. 
