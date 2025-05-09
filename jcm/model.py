@@ -98,7 +98,7 @@ def convert_tendencies_to_equation(
 
         date = DateData.set_date(
             model_time = reference_date + Timedelta(seconds=state.sim_time),
-            model_step = (int((state.sim_time/60) / time_step))
+            model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
         )
 
         data = PhysicsData.zeros(
