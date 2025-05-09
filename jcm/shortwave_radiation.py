@@ -225,7 +225,7 @@ def shortwave_rad_fluxes(operand):
     ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.surface_pressure[jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
-    return state, physics_data, parameters, boundaries, geometry, physics_tendencies
+    return (state, physics_data, parameters, boundaries, geometry, physics_tendencies)
 
 
 @jit
@@ -419,7 +419,7 @@ def clouds(operand):
     # This function doesn't directly produce tendencies
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
 
-    return state, physics_data, parameters, boundaries, geometry, physics_tendencies
+    return (state, physics_data, parameters, boundaries, geometry, physics_tendencies)
 
 @jit
 def solar(tyear, csol=4.*solc, geometry: Geometry=None):
