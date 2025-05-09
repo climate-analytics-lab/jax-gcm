@@ -12,9 +12,30 @@ from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics import PhysicsState
+from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+def set_physics_flags(state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
+    from physical_constants import nstrad
+    '''
+        Sets flags associated used to indicate whether a tendency function should be run.
+        All functions are run by default. 
+        clouds, get_shortwave_rad_fluxes, conditionally run based on the flags. 
+        This could also apply to forcing and coupling (coupling 1/day)
+    '''
+    model_step = physics_data.date.model_step
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
+    physics_data = physics_data.copy(shortwave_rad=shortwave_data)
+
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    return physics_tendencies, physics_data
 
 def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     """
@@ -24,7 +45,7 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, get_clouds
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
@@ -32,11 +53,12 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     from jcm.forcing import set_forcing
 
     physics_terms = [
+        set_physics_flags,
         set_forcing,
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
-        clouds,
+        get_clouds,
         get_shortwave_rad_fluxes,
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
@@ -75,9 +97,8 @@ def convert_tendencies_to_equation(
     def physical_tendencies(state):
         
         date = DateData.set_date(
-            model_time = reference_date + Timedelta(
-                seconds=state.sim_time
-            )
+            model_time = reference_date + Timedelta(seconds=state.sim_time),
+            model_step = int(state.sim_time.to(units.minute) / time_step)
         )
 
         data = PhysicsData.zeros(

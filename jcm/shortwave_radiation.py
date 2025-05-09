@@ -9,6 +9,10 @@ from jcm.physical_constants import epssw, solc, epsilon
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 
+@jit 
+def pass_fxn(operand):
+    return operand
+
 @jit
 def get_shortwave_rad_fluxes(
     state: PhysicsState,
@@ -17,6 +21,21 @@ def get_shortwave_rad_fluxes(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
+
+    # if compute_shortwave is true, then compute shortwave radiation
+    # otherwise return the same physics_data and empty tendencies
+    tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
+    state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
+        physics_data.shortwave_rad.compute_shortwave, 
+        shortwave_rad_fluxes, 
+        pass_fxn, 
+        operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
+    )
+
+    return tendencies, physics_data
+
+@jit
+def shortwave_rad_fluxes(operand):
     """
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
@@ -28,6 +47,8 @@ def get_shortwave_rad_fluxes(
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     """
+
+    state, physics_data, parameters, boundaries, geometry, tendencies = operand
 
     kx, ix, il = state.temperature.shape
     dhs = geometry.dhs
@@ -204,7 +225,7 @@ def get_shortwave_rad_fluxes(
     ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.surface_pressure[jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
-    return physics_tendencies, physics_data
+    return state, physics_data, parameters, boundaries, geometry, physics_tendencies
 
 
 @jit
@@ -286,13 +307,28 @@ def get_zonal_average_fields(
     return physics_data
 
 @jit
-def clouds(
+def get_clouds(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
+
+    # if compute_shortwave is true, then clouds
+    # otherwise return the same physics_data and empty tendencies
+    tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
+    state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
+        physics_data.shortwave_rad.compute_shortwave, 
+        clouds, 
+        pass_fxn, 
+        operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
+    )
+
+    return tendencies, physics_data
+
+@jit
+def clouds(operand):
     """
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
@@ -310,6 +346,9 @@ def clouds(
         cloudc: Total cloud cover
         clstr: Stratiform cloud cover
     """
+
+    state, physics_data, parameters, boundaries, geometry, tendencies = operand
+
     # Compute gradient of static energy: logic from physics.f90:147
     se = physics_data.convection.se
     phig = state.geopotential
@@ -319,6 +358,7 @@ def clouds(
     conv = physics_data.convection
     condensation = physics_data.condensation
     kx = state.temperature.shape[0]
+    compute_shortwave = physics_data.shortwave_rad.compute_shortwave
 
     # Constants
     nl1  = kx-2
@@ -379,7 +419,7 @@ def clouds(
     # This function doesn't directly produce tendencies
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
 
-    return physics_tendencies, physics_data
+    return state, physics_data, parameters, boundaries, geometry, physics_tendencies
 
 @jit
 def solar(tyear, csol=4.*solc, geometry: Geometry=None):
