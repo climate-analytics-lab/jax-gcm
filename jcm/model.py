@@ -57,6 +57,7 @@ class Model:
         start_date=None,
         save_interval=10.0,
         coords: CoordinateSystem=None,
+        parameters: Parameters=None,
         boundaries: BoundaryData=None,
         initial_state: PhysicsState=None,
         physics=None,
@@ -72,6 +73,7 @@ class Model:
             start_date: Start date of the simulation
             save_interval: Save interval in days
             coords: CoordinateSystem object describing model grid
+            parameters: Parameters object describing model parameters
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
             physics: Physics object describing the model physics
@@ -116,12 +118,12 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        params_for_boundaries = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
+        self.parameters = parameters or Parameters.default()
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
         else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, params_for_boundaries, dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
@@ -136,6 +138,7 @@ class Model:
                 dynamics=self.primitive,
                 time_step=time_step,
                 physics=self.physics,
+                parameters=self.parameters,
                 boundaries=self.boundaries,
                 geometry=self.geometry,
                 date = DateData.set_date(
@@ -182,7 +185,7 @@ class Model:
                 model_time = self.start_date + Timedelta(seconds=state.sim_time)
             )
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
-            _, data = self.physics.compute_tendencies(physics_state, self.boundaries, self.geometry, date)
+            _, data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
     
         return {
             'dynamics': state,

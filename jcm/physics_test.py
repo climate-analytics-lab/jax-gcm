@@ -2,9 +2,6 @@ import unittest
 from dinosaur.primitive_equations import PrimitiveEquations
 from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
-from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.geometry import Geometry
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestPhysicsUnit(unittest.TestCase):
@@ -45,6 +42,7 @@ class TestPhysicsUnit(unittest.TestCase):
             dynamics = dynamics,
             time_step = time_step,
             physics = HeldSuarezPhysics(hs_model.coords),
+            parameters = None,
             boundaries = None,
             geometry = None,
             date = None

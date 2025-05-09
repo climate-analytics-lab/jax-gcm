@@ -9,21 +9,18 @@ from jcm.date import DateData
 
 class SpeedyPhysics(Physics):
     write_output: bool
-    parameters: Parameters
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, write_output: bool = True, parameters: Parameters = Parameters.default(), sea_coupling_flag=0, checkpoint_terms=True) -> None:
+    def __init__(self, write_output: bool = True, sea_coupling_flag=0, checkpoint_terms=True) -> None:
         """
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
             write_output (bool): Flag to indicate whether physics output should be written to predictions.
-            parameters (Parameters): Parameters for the physics model.
             sea_coupling_flag (int): Flag to indicate if sea coupling is enabled.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """
         self.write_output = write_output
-        self.parameters = parameters
 
         from jcm.humidity import spec_hum_to_rel_hum
         from jcm.convection import get_convection_tendencies
@@ -61,6 +58,7 @@ class SpeedyPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
+        parameters: Parameters,
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
@@ -70,6 +68,7 @@ class SpeedyPhysics(Physics):
 
         Args:
             state: Current state variables
+            parameters: Parameters object
             boundaries: Boundary data
             geometry: Geometry data
             date: Date data
@@ -88,7 +87,7 @@ class SpeedyPhysics(Physics):
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
         
         for term in self.terms:
-            tend, data = term(state, data, self.parameters, boundaries, geometry)
+            tend, data = term(state, data, parameters, boundaries, geometry)
             physics_tendency += tend
         
         return physics_tendency, data

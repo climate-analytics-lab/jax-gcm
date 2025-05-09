@@ -172,7 +172,7 @@ class TestModelUnit(unittest.TestCase):
             time_step=30,
             total_time=(2/48.0),
             save_interval=(1/48.0),
-            physics=SpeedyPhysics(parameters=params),
+            parameters=params,
         )
         
         def model_run_wrapper(params):
@@ -212,7 +212,7 @@ class TestModelUnit(unittest.TestCase):
                                             time_step=30,
                                             total_time=(2/48.0),
                                             save_interval=(1/48.0),
-                                            physics=SpeedyPhysics(parameters=params))
+                                            parameters=params)
         
         def model_run_wrapper(params):
             model = create_model(params)
