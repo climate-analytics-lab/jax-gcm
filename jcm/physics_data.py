@@ -62,7 +62,7 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
@@ -82,7 +82,7 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
             stratz = stratz if stratz is not None else jnp.ones(nodal_shape),
             gse = gse if gse is not None else jnp.ones(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.ones(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.ones(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
@@ -110,6 +110,7 @@ class SWRadiationData:
         )
     
     def isnan(self):
+        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
         self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
         return tree_util.tree_map(jnp.isnan, self)
     
