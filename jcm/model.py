@@ -238,7 +238,7 @@ class SpeedyModel:
         else:     
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
-            normalized_surface_pressure = jnp.exp(self.primitive.coords.horizontal.to_nodal(jnp.squeeze(state.log_surface_pressure)))/p0
+            normalized_surface_pressure = jnp.exp(self.primitive.coords.horizontal.to_nodal(state.log_surface_pressure))/p0
             state.log_surface_pressure = self.primitive.coords.horizontal.to_modal(jnp.log(normalized_surface_pressure))
 
             # need to add specific humidity as a tracer
