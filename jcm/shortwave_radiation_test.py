@@ -132,7 +132,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
-        sw_data = SWRadiationData.zeros(xy, kx)
+        sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -327,6 +327,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
+        physics_data.shortwave_rad.compute_shortwave = True
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
@@ -372,7 +373,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
-        sw_data = SWRadiationData.zeros(xy, kx)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
