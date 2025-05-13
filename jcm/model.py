@@ -227,7 +227,7 @@ class SpeedyModel:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        from jcm.physics import physics_state_to_dynamics_state, dynamics_state_to_physics_state
+        from jcm.physics import physics_state_to_dynamics_state
 
         #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
