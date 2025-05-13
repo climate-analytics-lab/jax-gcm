@@ -24,10 +24,9 @@ def set_physics_flags(state: PhysicsState,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     from jcm.physical_constants import nstrad
     '''
-        Sets flags associated used to indicate whether a tendency function should be run.
-        All functions are run by default. 
-        clouds, get_shortwave_rad_fluxes, conditionally run based on the flags. 
-        This could also apply to forcing and coupling (coupling 1/day)
+        Sets flags that indicate whether a tendency function should be run.
+        clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
+        This could also apply to forcing and coupling.
     '''
     model_step = physics_data.date.model_step
     compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
