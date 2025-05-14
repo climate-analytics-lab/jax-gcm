@@ -94,7 +94,16 @@ def convert_tendencies_to_equation(
     from jcm.date import DateData
 
     def physical_tendencies(state):
+        '''
+            Set model date and step, initializes an empty PhysicsData instance, and returns a 
+            function to get physical tendencies.
+            state - dynamics state from Dinosaur
+            state.sim_time - simulation time in seconds (Dinosaur object)
+            time_step - model time step in minutes 
+            reference_date - start date of the simulation
+        '''
 
+        # Set the model time (in datetime format) and model step (number of steps since start time)
         date = DateData.set_date(
             model_time = reference_date + Timedelta(seconds=state.sim_time),
             model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
