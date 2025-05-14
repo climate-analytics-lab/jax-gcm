@@ -8,10 +8,7 @@ from jcm.params import Parameters
 from jcm.physical_constants import epssw, solc, epsilon
 from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
-
-@jit 
-def pass_fxn(operand):
-    return operand
+from jcm.utils import pass_fn
 
 @jit
 def get_shortwave_rad_fluxes(
@@ -28,7 +25,7 @@ def get_shortwave_rad_fluxes(
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
         physics_data.shortwave_rad.compute_shortwave, 
         shortwave_rad_fluxes, 
-        pass_fxn, 
+        pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
@@ -321,7 +318,7 @@ def get_clouds(
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
         physics_data.shortwave_rad.compute_shortwave, 
         clouds, 
-        pass_fxn, 
+        pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
