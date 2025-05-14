@@ -95,7 +95,7 @@ def convert_tendencies_to_equation(
 
     def physical_tendencies(state):
         '''
-            Set model date and step, initializes an empty PhysicsData instance, and returns a 
+            Sets model date and step, initializes an empty PhysicsData instance, and returns a 
             function to get physical tendencies.
             state - dynamics state from Dinosaur
             state.sim_time - simulation time in seconds (Dinosaur object)
