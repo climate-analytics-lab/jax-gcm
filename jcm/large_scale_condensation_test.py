@@ -8,14 +8,14 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
     def setUp(self):
         global ix, il, kx
         ix, il, kx = 1, 1, 8
-        from jcm.model import initialize_modules
-        initialize_modules(kx=kx, il=il)
 
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, BoundaryData, get_large_scale_condensation_tendencies
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
         from jcm.params import Parameters
+        from jcm.geometry import Geometry
         parameters = Parameters.default()
+        geometry = Geometry.from_grid_shape((ix, il), kx)
         from jcm.boundaries import BoundaryData
         from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
 
@@ -27,13 +27,13 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         qsat = jnp.ones(zxy)
         itop = jnp.full((ix, il), kx - 1)
 
-        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
-        state = state = PhysicsState.zeros(zxy, specific_humidity=qa)
+        state = state = PhysicsState.zeros(zxy, specific_humidity=qa, surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries, geometry)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
@@ -50,13 +50,13 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01])
         itop = jnp.ones((ix, il), dtype=int) * 4
 
-        convection = ConvectionData.zeros(xy, kx, psa=psa,iptop=itop)
+        convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
-        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis])
+        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries, geometry)
         
         np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
@@ -74,11 +74,11 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, boundaries) 
+        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, boundaries, geometry) 
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx) 
         input = (tends, datas)
-        df_dstates, df_ddatas, df_dparams, df_dboundaries = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())

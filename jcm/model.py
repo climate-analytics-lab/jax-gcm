@@ -1,27 +1,25 @@
-import dinosaur.primitive_equations_states
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
+from numpy import timedelta64
 import dinosaur
-from dinosaur import scales
-from dinosaur.scales import units
+from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
-from dinosaur import primitive_equations
-from dinosaur import primitive_equations_states
+from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur.coordinate_systems import CoordinateSystem
+from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
+from jcm.geometry import sigma_layer_boundaries, Geometry
+from jcm.physical_constants import p0
+from jcm.physics import PhysicsState
 
-def initialize_modules(kx=8, il=64, coords=None):
-    from jcm.geometry import initialize_geometry
-    initialize_geometry(kx=kx, il=il, coords=coords)
-    from jcm.physics import initialize_physics
-    initialize_physics()
+PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
-def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, checkpoint_terms=True):
+def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
-    initialize_modules(kx = grid_shape[0], il = grid_shape[2], coords=coords)
     
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
@@ -57,9 +55,19 @@ def get_speedy_physics_terms(grid_shape, sea_coupling_flag=0, coords=None, check
         couple_land_atm: (3,),
     }
     
-    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ())) for term in physics_terms]
+    # Static argnum 4 is the Geometry object
+    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ()) + (4,)) for term in physics_terms]
 
-def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference_date, boundaries, parameters):
+def convert_tendencies_to_equation(
+        dynamics: primitive_equations.PrimitiveEquations, 
+        time_step,
+        physics_terms,
+        reference_date,
+        boundaries: BoundaryData,
+        parameters: Parameters,
+        geometry: Geometry
+    ) -> ExplicitODE:
+
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
     from jcm.date import DateData
@@ -78,8 +86,40 @@ def convert_tendencies_to_equation(dynamics, time_step, physics_terms, reference
             date=date
         )
 
-        return get_physical_tendencies(state=state, dynamics=dynamics, time_step=time_step, physics_terms=physics_terms, boundaries=boundaries, parameters=parameters, data=data)
+        return get_physical_tendencies(
+            state=state,
+            dynamics=dynamics,
+            time_step=time_step,
+            physics_terms=physics_terms,
+            boundaries=boundaries,
+            parameters=parameters,
+            geometry=geometry,
+            data=data
+        )
     return ExplicitODE.from_functions(physical_tendencies)
+
+def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (31, 42, 85, or 213).
+    """
+    resolution_map = {
+        31: dinosaur.spherical_harmonic.Grid.T31,
+        42: dinosaur.spherical_harmonic.Grid.T42,
+        85: dinosaur.spherical_harmonic.Grid.T85,
+        213: dinosaur.spherical_harmonic.Grid.T213,
+    }
+
+    if horizontal_resolution not in resolution_map:
+        raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
+
+    if layers not in sigma_layer_boundaries:
+        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+
+    # Define the coordinate system
+    return dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=resolution_map[horizontal_resolution](radius=PHYSICS_SPECS.radius), # truncation
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+    )
 
 class SpeedyModel:
     """
@@ -88,117 +128,94 @@ class SpeedyModel:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=10, save_interval=10, total_time=1200, layers=8, 
-                 start_date=None, boundary_file=None, horizontal_resolution=31, parameters=None,
+    def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
+                 layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
+                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
                  post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
-                
+        
         Args:
             time_step: Model time step in minutes
             save_interval: Save interval in days
             total_time: Total integration time in days
-            layers: Number of vertical layers
             start_date: Start date of the simulation
-            boundary_file: Path to the boundary conditions file including land-sea mask and albedo
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, 213)
-            parameters: Model parameters
+            layers: Number of vertical layers
+            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
+            coords: CoordinateSystem object describing model grid
+            boundaries: BoundaryData object describing surface boundary conditions
+            initial_state: Initial state of the model (PhysicsState object), optional
+            parameters: Parameters object describing model parameters
+            physics_specs: PrimitiveEquationsSpecs object describing the model physics
             post_process: Whether to post-process the model output
-
+            checkpoint_terms: Whether to jax.checkpoint each physics term
         """
         from datetime import datetime
-        from jcm.boundaries import initialize_boundaries, default_boundaries
+
+        # Integration settings
+        self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
+        self.save_interval = save_interval * units.day
+        self.total_time = total_time * units.day
+        dt_si = time_step * units.minute
+
+        self.physics_specs = PHYSICS_SPECS
+
+        if coords is not None:
+            self.coords = coords
+            horizontal_resolution = coords.horizontal.total_wavenumbers - 2
+        else:
+            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
+        self.geometry = Geometry.from_coords(self.coords)
+
+        self.inner_steps = int(self.save_interval.to(units.minute) / dt_si)
+        self.outer_steps = int(self.total_time / self.save_interval)
+        self.dt = self.physics_specs.nondimensionalize(dt_si)
 
         self.parameters = parameters or Parameters.default()
         self.post_process_physics = post_process
 
-        # Integration settings
-        self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
-        dt_si = time_step * units.minute
-        save_every = save_interval * units.day
-        total_time = total_time * units.day
-
-        self.physics_specs = dinosaur.primitive_equations.PrimitiveEquationsSpecs.from_si(scale = scales.SI_SCALE)
-
-        resolution_map = {
-            31: dinosaur.spherical_harmonic.Grid.T31,
-            42: dinosaur.spherical_harmonic.Grid.T42,
-            85: dinosaur.spherical_harmonic.Grid.T85,
-            213: dinosaur.spherical_harmonic.Grid.T213,
-        }
-
-        if horizontal_resolution not in resolution_map:
-            raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
-        
-        sigma_layer_boundaries = {
-            5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
-            7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]), # FIXME: the .02 breaks dinosaur
-            8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-        }
-
-        if layers not in sigma_layer_boundaries:
-            raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
-
-        # Define the coordinate system
-        self.coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=resolution_map[horizontal_resolution](radius=self.physics_specs.radius), # truncation 
-            vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
-        )
-
-        self.inner_steps = int(save_every / dt_si)
-        self.outer_steps = int(total_time / save_every)
-        self.dt = self.physics_specs.nondimensionalize(dt_si)
+        if initial_state is not None:
+            self.initial_state = initial_state
+        else:
+            self.initial_state = None
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
-        p0 = 100e3 * units.pascal
-        p1 = 5e3 * units.pascal
-
-        self.initial_state_fn, aux_features = dinosaur.primitive_equations_states.isothermal_rest_atmosphere(
+        self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
-            p0=p0,
-            p1=p1
+            p0=p0 * units.pascal,
+            p1=.05 * p0 * units.pascal,
         )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
-        orography = dinosaur.primitive_equations.truncated_modal_orography(
-            aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
-
-        # Governing equations
-        self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
-            self.ref_temps,
-            orography,
-            self.coords,
-            self.physics_specs)
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics_terms = get_speedy_physics_terms(self.coords.nodal_shape, coords=self.coords, checkpoint_terms=checkpoint_terms)
+        self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
         
         # TODO: make the truncation number a parameter consistent with the grid shape
-        if boundary_file is None:
-            self.boundaries = default_boundaries(self.primitive, orography, self.parameters) 
-        else:       
-            self.boundaries = initialize_boundaries(boundary_file, self.primitive, horizontal_resolution, self.parameters, dt_si)
-            new_orog_nodal = self.physics_specs.nondimensionalize(
-                self.boundaries.phis0 * units.meter ** 2 / units.second ** 2
-            )
-            new_orog_modal = self.primitive.coords.horizontal.to_modal(new_orog_nodal)
-            self.primitive = dinosaur.primitive_equations.PrimitiveEquationsWithTime(
-                self.ref_temps,
-                new_orog_modal * 1e-3, #FIXME: currently prevents blowup when using 'realistic' boundary conditions
-                self.coords,
-                self.physics_specs)
+        if boundaries is None:
+            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
+        else:
+            self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
+            truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
+        self.primitive = primitive_equations.PrimitiveEquations(
+            self.ref_temps,
+            truncated_orography, 
+            self.coords,
+            self.physics_specs)
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive,
                                                         time_step,
                                                         self.physics_terms,
                                                         self.start_date,
                                                         self.boundaries,
-                                                        self.parameters)
+                                                        self.parameters,
+                                                        self.geometry)
         
         # Define trajectory times, expects start_with_input=False
-        self.times = save_every * jnp.arange(1, self.outer_steps+1)
+        self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
@@ -209,14 +226,21 @@ class SpeedyModel:
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> dinosaur.primitive_equations.State:
-        state = self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        state.log_surface_pressure = state.log_surface_pressure * 1e-3
-        state.tracers = {
-            'specific_humidity': (1e-2 if humidity_perturbation else 0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
-        }
-        return dinosaur.primitive_equations.State(**state.asdict(), sim_time=sim_time)
-    
+    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
+        from jcm.physics import physics_state_to_dynamics_state
+
+        #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
+        # optional initial state from the user is in physics form
+        if self.initial_state is not None:
+            state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        else:     
+            state = self.default_state_fn(jax.random.PRNGKey(random_seed))
+            state.tracers = {
+                'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            }
+            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+
     def post_process(self, state):
         from jcm.date import DateData
         from jcm.physics_data import PhysicsData
@@ -237,7 +261,7 @@ class SpeedyModel:
         if self.post_process_physics:
             physics_state = dynamics_state_to_physics_state(state, self.primitive)
             for term in self.physics_terms:
-                _, data = term(physics_state, data, self.parameters, self.boundaries)
+                _, data = term(physics_state, data, self.parameters, self.boundaries, self.geometry)
         else:
             pass # Return an empty physics data object
 
@@ -245,8 +269,8 @@ class SpeedyModel:
             'dynamics': state,
             'physics': data,
         }
-    
-    def unroll(self, state: dinosaur.primitive_equations.State) -> tuple[dinosaur.primitive_equations.State, dinosaur.primitive_equations.State]:
+
+    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
@@ -255,14 +279,12 @@ class SpeedyModel:
             post_process_fn=self.post_process,
         ))
         return integrate_fn(state)
-    
+
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
         return data_to_xarray(data, coords=self.coords, times=self.times)
-    
-    def predictions_to_xarray(self, predictions):
-        from dinosaur.xarray_utils import data_to_xarray
 
+    def predictions_to_xarray(self, predictions):
         # extract dynamics predictions (State format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
@@ -276,12 +298,14 @@ class SpeedyModel:
         # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
         # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
         log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal) * 1e5
+        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)
         diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
 
         # dimensionalize
         diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
-        diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram).m
+        diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(
+            diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram
+        ).m
 
         # prepare physics predictions for xarray conversion:
         # unpack into single dictionary, and unpack individual fields
@@ -316,7 +340,10 @@ class SpeedyModel:
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
-        # convert integer time (in days) to datetime
-        pred_ds['time'] = (self.start_date.delta.days + pred_ds.time).astype('datetime64[D]')
+
+        # convert time in days to datetime
+        pred_ds['time'] = (
+            (self.start_date.delta.days + pred_ds.time - self.save_interval.m)*(timedelta64(1, 'D')/timedelta64(1, 'ns'))
+        ).astype('datetime64[ns]')
         
         return pred_ds
