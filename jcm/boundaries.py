@@ -50,7 +50,7 @@ class BoundaryData:
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
+            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
         )
 
@@ -75,7 +75,7 @@ class BoundaryData:
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
+            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
@@ -145,8 +145,8 @@ def default_boundaries(
     # land-sea mask
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
-    default_sst = _fixed_ssts(grid)
-    tsea = jnp.stack([default_sst] * 365, axis=-1)
+    tsea = _fixed_ssts(grid)
+    # tsea = jnp.stack([default_sst] * 365, axis=-1)
 
     # No land_model_init, but should be fine because fmask = 0    
     return BoundaryData.zeros(
@@ -188,7 +188,7 @@ def initialize_boundaries(
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
-    tsea = jnp.asarray(ds["sst"]) 
+    tsea = _fixed_ssts(grid) # jnp.asarray(ds["sst"]) 
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
         fmask=fmask, forog=forog, orog=orog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
