@@ -71,7 +71,7 @@ def get_surface_fluxes(
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
-    tsea = boundaries.tsea[:,:,day]
+    tsea = boundaries.tsea
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
