@@ -262,7 +262,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))   
         forog = set_orog_land_sfc_drag(phi0, parameters)
-        tsea = 290. * jnp.ones((ix, il,365)) #ssts
+        tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
