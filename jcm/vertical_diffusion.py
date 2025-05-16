@@ -43,7 +43,7 @@ def get_vertical_diffusion_tend(
 
     nl1 = kx - 1
     cshc = geometry.dhs[kx - 1] / 3600.0
-    cvdi = (geometry.hsg[nl1-1] - geometry.hsg[1]) / ((nl1 - 1) * 3600.0)
+    cvdi = (geometry.hsg[nl1] - geometry.hsg[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / parameters.vertical_diffusion.trshc
     fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
