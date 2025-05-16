@@ -37,7 +37,7 @@ class TestHumidityUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(((kx, ix, il))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,phi0=phi0,lfluxland=True)
