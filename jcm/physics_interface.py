@@ -6,7 +6,6 @@ to the specific physics being used.
 
 import jax.numpy as jnp
 import tree_math
-from jcm.physics_data import PhysicsData
 from jcm.geometry import Geometry
 from jcm.params import Parameters
 from dinosaur import scales
@@ -18,7 +17,6 @@ from jcm.boundaries import BoundaryData
 from jcm.physical_constants import p0
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
-import warnings
 
 @tree_math.struct
 class PhysicsState:

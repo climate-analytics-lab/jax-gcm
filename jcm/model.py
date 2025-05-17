@@ -12,7 +12,7 @@ from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics_interface import PhysicsState, get_physical_tendencies
+from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.speedy_physics import SpeedyPhysics
 from jcm.date import DateData
 
@@ -60,7 +60,7 @@ class Model:
         parameters: Parameters=None,
         boundaries: BoundaryData=None,
         initial_state: PhysicsState=None,
-        physics=None,
+        physics: Physics=None,
     ) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -176,7 +176,6 @@ class Model:
 
     def post_process(self, state):
         from jcm.date import DateData
-        from jcm.physics_data import PhysicsData
         from jcm.physics_interface import dynamics_state_to_physics_state
 
         data = None
