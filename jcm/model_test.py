@@ -163,18 +163,32 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         import jax.numpy as jnp
-        from jcm.model import SpeedyModel
+        from jcm.model import SpeedyModel, get_coords
+        from jcm.boundaries import initialize_boundaries
         
-        def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
-                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
-                parameters=params, post_process=True)
-            return model
+        from os import path
+        boundary_file = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim/boundaries_daily.nc'
+        
+        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+            boundary_file,
+            coords.horizontal
+        )
+
+        create_model = lambda params=Parameters.default(): SpeedyModel(
+            time_step=30,
+            save_interval=1/24.,
+            total_time=2./24.,
+            layers=8,
+            boundaries=default_boundaries(),
+            parameters=params,
+            post_process=True,
+            checkpoint_terms=True,
+        )
         
         def model_run_wrapper(params):
             model = create_model(params)
             state = model.get_initial_state()
-            final_state, predictions = model.unroll(state)
+            _, predictions = model.unroll(state)
             return predictions
         
         def make_ones_prediction_object(pred): 
@@ -192,7 +206,8 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jcm.model import SpeedyModel
+        from jcm.model import SpeedyModel, get_coords
+        from jcm.boundaries import initialize_boundaries
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -204,16 +219,29 @@ class TestModelUnit(unittest.TestCase):
                     return jnp.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
-        def create_model(params):
-            model = SpeedyModel(time_step=30, save_interval=(1/48.0), total_time=(2/48.0), layers=8,
-                # boundary_file='../jcm/data/bc/t30/clim/boundaries_daily.nc',
-                parameters=params, post_process=True)
-            return model
+        from os import path
+        boundary_file = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim/boundaries_daily.nc'
+        
+        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+            boundary_file,
+            coords.horizontal
+        )
+
+        create_model = lambda params=Parameters.default(): SpeedyModel(
+            time_step=30,
+            save_interval=1/24.,
+            total_time=2./24.,
+            layers=8,
+            boundaries=default_boundaries(),
+            parameters=params,
+            post_process=True,
+            checkpoint_terms=True,
+        )
         
         def model_run_wrapper(params):
             model = create_model(params)
             state = model.get_initial_state()
-            final_state, predictions = model.unroll(state)
+            _, predictions = model.unroll(state)
             return predictions
         
         # Calculate gradients using JVP
