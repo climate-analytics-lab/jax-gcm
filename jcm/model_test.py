@@ -165,12 +165,15 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel, get_coords
         from jcm.boundaries import initialize_boundaries
-        
+
         from os import path
-        boundary_file = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim/boundaries_daily.nc'
-        
+        boundaries_dir = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim'
+        if not path.exists(boundaries_dir + '/boundaries_daily.nc'):
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, boundaries_dir + '/interpolate.py'], check=True)
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
-            boundary_file,
+            boundaries_dir + '/boundaries_daily.nc',
             coords.horizontal
         )
 
@@ -220,10 +223,13 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
         from os import path
-        boundary_file = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim/boundaries_daily.nc'
-        
+        boundaries_dir = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim'
+        if not path.exists(boundaries_dir + '/boundaries_daily.nc'):
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, boundaries_dir + '/interpolate.py'], check=True)
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
-            boundary_file,
+            boundaries_dir + '/boundaries_daily.nc',
             coords.horizontal
         )
 
