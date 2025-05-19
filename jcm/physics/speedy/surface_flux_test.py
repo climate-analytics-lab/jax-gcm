@@ -17,7 +17,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)
         
-        from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
+        from jcm.physics.speedy.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 
     def test_grad_surface_flux(self):
         xy = (ix, il)

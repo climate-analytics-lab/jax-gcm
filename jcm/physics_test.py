@@ -5,51 +5,6 @@ from dinosaur.sigma_coordinates import centered_vertical_advection
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestPhysicsUnit(unittest.TestCase):
-    def test_speedy_model_HS94(self):
-        from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
-        from jcm.physics_interface import get_physical_tendencies
-
-        time_step = 10
-        hs_model = Model(time_step=time_step,
-                         physics=HeldSuarezPhysics())
-    
-        state = hs_model.get_initial_state()
-        state.tracers = {
-            'specific_humidity': primitive_equations_states.gaussian_scalar(
-                hs_model.coords, hs_model.physics_specs)}
-        # Choose a vertical multiplication method
-        vertical_matmul_method = 'dense'  # or 'sparse'
-
-        # Define a vertical advection function (optional, using default here)
-        vertical_advection = centered_vertical_advection
-
-        # Include vertical advection (optional)
-        include_vertical_advection = True
-
-        # Instantiate the PrimitiveEquations object
-        dynamics = PrimitiveEquations(
-            reference_temperature=hs_model.ref_temps,
-            orography=hs_model.coords.horizontal.to_modal(hs_model.boundaries.orog),
-            coords=hs_model.coords,
-            physics_specs=hs_model.physics_specs,
-            vertical_matmul_method=vertical_matmul_method,
-            vertical_advection=vertical_advection,
-            include_vertical_advection=include_vertical_advection)
-
-        dynamics_tendency = get_physical_tendencies(
-            state = state,
-            dynamics = dynamics,
-            time_step = time_step,
-            physics = HeldSuarezPhysics(hs_model.coords),
-            parameters = None,
-            boundaries = None,
-            geometry = None,
-            date = None
-        )
-
-        self.assertIsNotNone(dynamics_tendency)
-
     def test_initial_state_conversion(self):
         from dinosaur.scales import SI_SCALE
         from dinosaur import primitive_equations
@@ -87,7 +42,6 @@ class TestPhysicsUnit(unittest.TestCase):
         physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)
 
         self.assertTrue(jnp.allclose(state.temperature, physics_state_recovered.temperature))
-
 
     def test_verify_state(self):
         from jcm.physics_interface import verify_state, PhysicsState

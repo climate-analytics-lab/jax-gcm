@@ -127,10 +127,11 @@ class Model:
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
-            self.ref_temps,
-            truncated_orography, 
-            self.coords,
-            self.physics_specs)
+            reference_temperature=self.ref_temps,
+            orography=truncated_orography, 
+            coords=self.coords,
+            physics_specs=self.physics_specs,
+        )
         
         forcing = ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
