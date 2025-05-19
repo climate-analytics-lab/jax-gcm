@@ -7,7 +7,7 @@ from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state,
 class TestPhysicsUnit(unittest.TestCase):
     def test_speedy_model_HS94(self):
         from jcm.model import Model
-        from jcm.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.physics_interface import get_physical_tendencies
 
         time_step = 10

@@ -1,13 +1,13 @@
 import unittest
 from dinosaur import primitive_equations_states
-from jcm.speedy_physics import SpeedyPhysics
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.params import Parameters
 import jax.tree_util as jtu
 
 class TestModelUnit(unittest.TestCase):
 
     def test_held_suarez_model(self):
-        from jcm.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.model import Model
         layers = 8
         model = Model(

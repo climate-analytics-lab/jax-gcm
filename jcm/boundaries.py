@@ -132,7 +132,7 @@ def default_boundaries(
     """
     Initialize the boundary conditions
     """
-    from jcm.surface_flux import set_orog_land_sfc_drag
+    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
     from jcm.physical_constants import grav
 
@@ -165,8 +165,8 @@ def initialize_boundaries(
     """
     from jcm.physical_constants import grav
     from jcm.utils import spectral_truncation
-    from jcm.land_model import land_model_init
-    from jcm.surface_flux import set_orog_land_sfc_drag
+    from jcm.physics.speedy.land_model import land_model_init
+    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
 
     parameters = parameters or Parameters.default()

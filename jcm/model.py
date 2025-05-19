@@ -13,7 +13,7 @@ from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
-from jcm.speedy_physics import SpeedyPhysics
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.date import DateData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
