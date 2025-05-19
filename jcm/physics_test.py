@@ -65,7 +65,7 @@ class TestPhysicsUnit(unittest.TestCase):
         phi = jnp.ones((kx, ix, il)) * 5000
         sp = jnp.ones((kx, ix, il))
 
-        coords = get_coords(layers=8, horizontal_resolution=31)
+        coords = get_coords()
         _, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=coords,
             physics_specs=PHYSICS_SPECS,

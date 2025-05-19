@@ -119,7 +119,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = Model(layers=8, time_step=30, total_time=(1/48.),  save_interval=(1/48.))
+        model = Model(total_time=(1/48.),  save_interval=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -147,7 +147,7 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_prediction_object(pred): 
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
-        model = Model(layers=8, time_step=30, total_time=(1/24.), save_interval=(1/48.))
+        model = Model(total_time=(1/24.), save_interval=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
@@ -168,8 +168,6 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         
         create_model = lambda params: Model(
-            layers=8,
-            time_step=30,
             total_time=(2/48.0),
             save_interval=(1/48.0),
             parameters=params,
@@ -208,9 +206,7 @@ class TestModelUnit(unittest.TestCase):
                     return jnp.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
-        create_model = lambda params: Model(layers=8,
-                                            time_step=30,
-                                            total_time=(2/48.0),
+        create_model = lambda params: Model(total_time=(2/48.0),
                                             save_interval=(1/48.0),
                                             parameters=params)
         
