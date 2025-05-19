@@ -1,9 +1,10 @@
 import xarray as xr
 import pandas as pd
-from os import path
+from pathlib import Path
 
-wd = path.dirname(path.realpath(__file__))
-ds_monthly = xr.open_dataset(f"{wd}/boundaries.nc")
+cwd = Path(__file__).resolve().parent
+
+ds_monthly = xr.open_dataset(cwd / "boundaries.nc")
 
 time_vars = [var for var in ds_monthly.data_vars if 'time' in ds_monthly[var].dims]
 non_time_vars = [var for var in ds_monthly.data_vars if 'time' not in ds_monthly[var].dims]
@@ -22,4 +23,4 @@ def linear_interpolation():
     return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
 ds_daily = linear_interpolation()
-ds_daily.to_netcdf(f"{wd}/boundaries_daily.nc")
+ds_daily.to_netcdf(cwd / "boundaries_daily.nc")

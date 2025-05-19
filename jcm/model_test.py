@@ -166,14 +166,13 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import SpeedyModel, get_coords
         from jcm.boundaries import initialize_boundaries
 
-        from os import path
-        boundaries_dir = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim'
-        if not path.exists(boundaries_dir + '/boundaries_daily.nc'):
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, boundaries_dir + '/interpolate.py'], check=True)
+        from pathlib import Path
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+            import subprocess, sys
+            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
-            boundaries_dir + '/boundaries_daily.nc',
+            boundaries_dir / 'boundaries_daily.nc',
             coords.horizontal
         )
 
@@ -222,14 +221,13 @@ class TestModelUnit(unittest.TestCase):
                     return jnp.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
-        from os import path
-        boundaries_dir = path.dirname(path.realpath(__file__)) + '/data/bc/t30/clim'
-        if not path.exists(boundaries_dir + '/boundaries_daily.nc'):
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, boundaries_dir + '/interpolate.py'], check=True)
+        from pathlib import Path
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+            import subprocess, sys
+            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
-            boundaries_dir + '/boundaries_daily.nc',
+            boundaries_dir / 'boundaries_daily.nc',
             coords.horizontal
         )
 
