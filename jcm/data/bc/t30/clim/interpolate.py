@@ -17,10 +17,8 @@ extended_monthly_time_vars = xr.concat(previous_year_padding + [ds_monthly[time_
 extended_time = pd.date_range(start=f'1980-{13-pad_n:02}-01', end=f'1982-{pad_n:02}-01', freq='MS')
 extended_monthly_time_vars['time'] = extended_time
 
-def linear_interpolation():
-    daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
-    daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
-    return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
+daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
+daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
+ds_daily = xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
-ds_daily = linear_interpolation()
 ds_daily.to_netcdf(cwd / "boundaries_daily.nc")
