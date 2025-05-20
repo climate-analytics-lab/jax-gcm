@@ -86,9 +86,12 @@ class SpeedyPhysics(Physics):
         # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
+        print(f'u tend shape: {physics_tendency.u_wind.shape}')
         
-        for term in self.terms:
+        for i, term in enumerate(self.terms):
+            print(f'running term {i}')
             tend, data = term(state, data, parameters, boundaries, geometry)
+            print(f'computed u tend shape: {tend.u_wind.shape}')
             physics_tendency += tend
         
         return physics_tendency, data
