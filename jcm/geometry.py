@@ -107,7 +107,7 @@ class Geometry:
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
-        return Geometry(nodal_shape=nodal_shape,
+        return Geometry(nodal_shape=(node_levels,) + nodal_shape,
                         radang=radang, sia=sia, coa=coa,
                         hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                         grdsig=grdsig, grdscp=grdscp, wvi=wvi)

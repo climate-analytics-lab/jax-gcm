@@ -1,9 +1,5 @@
 import unittest
-from dinosaur.primitive_equations import PrimitiveEquations
-from dinosaur import primitive_equations_states
-from dinosaur.sigma_coordinates import centered_vertical_advection
 import jax.numpy as jnp
-from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
 class TestHeldSuarezUnit(unittest.TestCase):
     def test_held_suarez_forcing(self):
         from jcm.model import Model
