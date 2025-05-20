@@ -3,7 +3,7 @@ tree-math
 hydra-core
 
 # I/O requirements
-xarray[complete]
+xarray[io, parallel]
 
 # Testing requirements
 pytest-cov
