@@ -11,3 +11,7 @@ dask
 # Testing requirements
 pytest-cov
 
+#Sphinx
+sphinx
+furo
+
