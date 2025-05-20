@@ -226,11 +226,12 @@ class TestModelUnit(unittest.TestCase):
         physics_data = jvp_sum['physics']
 
         # Check dinosaur states
-        self.assertFalse(jnp.any(jnp.isnan(state.vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(state.divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(state.temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(state.log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(state.tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(state.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(state.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(state.surface_pressure)))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
