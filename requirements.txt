@@ -1,13 +1,14 @@
-jax
-tree-math
 dinosaur  
+tree-math
 hydra-core
 
 # I/O requirements
-xarray
-xarray_tensorstore
-dask
+xarray[io, parallel]
 
 # Testing requirements
 pytest-cov
+
+#Sphinx
+sphinx
+furo
 

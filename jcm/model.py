@@ -12,9 +12,29 @@ from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics import PhysicsState
+from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+def set_physics_flags(state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
+    from jcm.physical_constants import nstrad
+    '''
+        Sets flags that indicate whether a tendency function should be run.
+        clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
+        This could also apply to forcing and coupling.
+    '''
+    model_step = physics_data.date.model_step
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
+    physics_data = physics_data.copy(shortwave_rad=shortwave_data)
+
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    return physics_tendencies, physics_data
 
 def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     """
@@ -24,7 +44,7 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     from jcm.humidity import spec_hum_to_rel_hum
     from jcm.convection import get_convection_tendencies
     from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, get_clouds
     from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
@@ -32,11 +52,12 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     from jcm.forcing import set_forcing
 
     physics_terms = [
+        set_physics_flags,
         set_forcing,
         spec_hum_to_rel_hum,
         get_convection_tendencies,
         get_large_scale_condensation_tendencies,
-        clouds,
+        get_clouds,
         get_shortwave_rad_fluxes,
         get_downward_longwave_rad_fluxes,
         get_surface_fluxes,
@@ -73,11 +94,19 @@ def convert_tendencies_to_equation(
     from jcm.date import DateData
 
     def physical_tendencies(state):
-        
+        '''
+            Sets model date and step, initializes an empty PhysicsData instance, and returns a 
+            function to get physical tendencies.
+            state - dynamics state from Dinosaur
+            state.sim_time - simulation time in seconds (Dinosaur object)
+            time_step - model time step in minutes 
+            reference_date - start date of the simulation
+        '''
+
+        # Set the model time (in datetime format) and model step (number of steps since start time)
         date = DateData.set_date(
-            model_time = reference_date + Timedelta(
-                seconds=state.sim_time
-            )
+            model_time = reference_date + Timedelta(seconds=state.sim_time),
+            model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
         )
 
         data = PhysicsData.zeros(
@@ -253,28 +282,22 @@ class SpeedyModel:
         from jcm.physics_data import PhysicsData
         from jcm.physics import dynamics_state_to_physics_state
 
-        date = DateData.set_date(
-            model_time = self.start_date + Timedelta(
-                seconds=state.sim_time
-                )
-        )
-
-        data = PhysicsData.zeros(
-            self.coords.nodal_shape[1:],
-            self.coords.nodal_shape[0],
-            date=date
-        )
-
+        physics_state = dynamics_state_to_physics_state(state, self.primitive)
+        physics_data = None
+        
         if self.post_process_physics:
-            physics_state = dynamics_state_to_physics_state(state, self.primitive)
+            physics_data = PhysicsData.zeros(
+                self.coords.nodal_shape[1:],
+                self.coords.nodal_shape[0],
+                date=DateData.set_date(model_time = self.start_date + Timedelta(seconds=state.sim_time))
+            )
+
             for term in self.physics_terms:
-                _, data = term(physics_state, data, self.parameters, self.boundaries, self.geometry)
-        else:
-            pass # Return an empty physics data object
+                _, physics_data = term(physics_state, physics_data, self.parameters, self.boundaries, self.geometry)
 
         return {
-            'dynamics': state,
-            'physics': data,
+            'dynamics': physics_state,
+            'physics': physics_data
         }
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
@@ -292,58 +315,29 @@ class SpeedyModel:
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
     def predictions_to_xarray(self, predictions):
-        # extract dynamics predictions (State format)
+        # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
         physics_predictions = predictions['physics']
 
-        # prepare dynamics predictions for xarray conversion:
-        # convert from modal to nodal, and dimensionalize
-        u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal,
-                                                dynamics_predictions.vorticity,
-                                                dynamics_predictions.divergence)
-        # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
-        # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
-        log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)*p0
-        diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
+        physics_preds_dict = {}
+        if physics_predictions is not None:
+            physics_preds_dict = {
+                f"{module}.{field}": value # avoids name conflicts between fields of different modules
+                for module, module_dict in physics_predictions.asdict().items()
+                for field, value in module_dict.asdict().items()
+            }
+            # replace multi-channel fields with a field for each channel
+            _original_keys = list(physics_preds_dict.keys())
+            for k in _original_keys:
+                v = physics_preds_dict[k]
+                if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
+                    physics_preds_dict.update(
+                        {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
+                    )
+                    del physics_preds_dict[k]
 
-        # dimensionalize
-        diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
-        diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(
-            diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram
-        ).m
-
-        # prepare physics predictions for xarray conversion:
-        # unpack into single dictionary, and unpack individual fields
-        # unpack PhysicsData struct
-        physics_state_preds = {
-            f"{module}.{field}": value # avoids name conflicts between fields of different modules
-            for module, module_dict in physics_predictions.asdict().items()
-            for field, value in module_dict.asdict().items()
-        }
-        # replace multi-channel fields with a field for each channel
-        _original_keys = list(physics_state_preds.keys())
-        for k in _original_keys:
-            v = physics_state_preds[k]
-            if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
-                physics_state_preds.update(
-                    {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
-                )
-                del physics_state_preds[k]
-
-        # create xarray dataset
-        nodal_predictions = {
-            **diagnostic_state_preds.asdict(),
-            **physics_state_preds
-        }
-        broken_keys = ['cos_lat_u', 'cos_lat_grad_log_sp', 'cos_lat_grad_log_sp', ] # These are tuples which are not supported by xarray
-        broken_keys += ['sigma_dot_explicit', 'sigma_dot_full'] # These have one less time step for some reason...
-        pred_ds = self.data_to_xarray({k: v for k, v in nodal_predictions.items() if k not in broken_keys})
-        pred_ds = pred_ds.rename_vars({'temperature_variation': 'temperature'})
-        pred_ds['u'] = self.data_to_xarray({'u': u_nodal})['u']
-        pred_ds['v'] = self.data_to_xarray({'v': v_nodal})['v']
-        pred_ds['surface_pressure'] = self.data_to_xarray({'surface_pressure': surface_pressure_nodal})['surface_pressure']
+        pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))

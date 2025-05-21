@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+from jax import jit
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber
@@ -20,3 +21,7 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
     truncated_grid_field = grid.to_nodal(spectral_field)
 
     return truncated_grid_field
+
+@jit
+def pass_fn(operand):
+    return operand
