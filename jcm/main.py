@@ -21,7 +21,7 @@ def main(cfg: DictConfig):
     state = model.get_initial_state()
     
     final_state, predictions = model.unroll(state)
-    ds = model.data_to_xarray(asdict(predictions))
+    ds = model.predictions_to_xarray(predictions)
     hydra_cfg = HydraConfig.get()
     print(hydra_cfg.mode)
     base_dir = Path('outputs') / hydra_cfg.run.dir.split('outputs/')[-1]

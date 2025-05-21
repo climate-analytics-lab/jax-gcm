@@ -179,17 +179,16 @@ class Model:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state
 
-        data = None
+        physics_state = dynamics_state_to_physics_state(state, self.primitive)
+        physics_data = None
+        
         if self.physics.write_output:
-            date = DateData.set_date(
-                model_time = self.start_date + Timedelta(seconds=state.sim_time)
-            )
-            physics_state = dynamics_state_to_physics_state(state, self.primitive)
-            _, data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
-    
+            date = DateData.set_date(self.start_date + Timedelta(seconds=state.sim_time))
+            _, physics_data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
+
         return {
-            'dynamics': state,
-            'physics': data,
+            'dynamics': physics_state,
+            'physics': physics_data
         }
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
@@ -207,43 +206,16 @@ class Model:
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
     def predictions_to_xarray(self, predictions):
-        # extract dynamics predictions (State format)
+        # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions['dynamics']
         physics_predictions = predictions['physics']
 
-        # prepare dynamics predictions for xarray conversion:
-        # convert from modal to nodal, and dimensionalize
-        u_nodal, v_nodal = vor_div_to_uv_nodal(self.coords.horizontal,
-                                                dynamics_predictions.vorticity,
-                                                dynamics_predictions.divergence)
-        # TODO: compute w_nodal and add to dataset - vertical velocity function only accepts a State rather than predictions (set of States at multiple times) so this doesn't work
-        # w_nodal = -primitive_equations.compute_vertical_velocity(dynamics_predictions, self.coords)
-        log_surface_pressure_nodal = jnp.squeeze(self.coords.horizontal.to_nodal(dynamics_predictions.log_surface_pressure), axis=1)
-        surface_pressure_nodal = jnp.exp(log_surface_pressure_nodal)
-        diagnostic_state_preds = primitive_equations.compute_diagnostic_state(dynamics_predictions, self.coords)
-
-        # dimensionalize
-        diagnostic_state_preds.temperature_variation += self.ref_temps[:, jnp.newaxis, jnp.newaxis]
-        diagnostic_state_preds.tracers['specific_humidity'] = self.physics_specs.dimensionalize(
-            diagnostic_state_preds.tracers['specific_humidity'], units.gram / units.kilogram
-        ).m
-
         # prepare physics predictions for xarray conversion
-        # unpack into single dictionary, and unpack individual fields
-        physics_state_preds = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
-        # create xarray dataset
-        nodal_predictions = {
-            **diagnostic_state_preds.asdict(),
-            **physics_state_preds
-        }
-        broken_keys = ['cos_lat_u', 'cos_lat_grad_log_sp', 'cos_lat_grad_log_sp', ] # These are tuples which are not supported by xarray
-        broken_keys += ['sigma_dot_explicit', 'sigma_dot_full'] # These have one less time step for some reason...
-        pred_ds = self.data_to_xarray({k: v for k, v in nodal_predictions.items() if k not in broken_keys})
-        pred_ds = pred_ds.rename_vars({'temperature_variation': 'temperature'})
-        pred_ds['u'] = self.data_to_xarray({'u': u_nodal})['u']
-        pred_ds['v'] = self.data_to_xarray({'v': v_nodal})['v']
-        pred_ds['surface_pressure'] = self.data_to_xarray({'surface_pressure': surface_pressure_nodal})['surface_pressure']
+        # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
+        physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
+        
+        pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))

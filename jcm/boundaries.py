@@ -146,7 +146,7 @@ def default_boundaries(
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
     tsea = _fixed_ssts(grid)
-
+    
     # No land_model_init, but should be fine because fmask = 0    
     return BoundaryData.zeros(
         nodal_shape=orography.shape,

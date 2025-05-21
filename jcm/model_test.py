@@ -72,10 +72,8 @@ class TestModelUnit(unittest.TestCase):
         # Specify humidity perturbation in kg/kg
         state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_x = model.coords.modal_shape[1]
-        modal_y = model.coords.modal_shape[2]
-        modal_zxy = (layers, modal_x, modal_y)
-        output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
+        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
+        nodal_tzxy = (model.outer_steps,) + nodal_zxy
     
         final_state, predictions = model.unroll(state)
         dynamics_predictions = predictions['dynamics']
@@ -89,23 +87,25 @@ class TestModelUnit(unittest.TestCase):
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
 
-        self.assertIsNotNone(dynamics_predictions.divergence)
-        self.assertIsNotNone(dynamics_predictions.vorticity)
-        self.assertIsNotNone(dynamics_predictions.temperature_variation)
-        self.assertIsNotNone(dynamics_predictions.log_surface_pressure)
-        self.assertIsNotNone(dynamics_predictions.tracers['specific_humidity'])
+        self.assertIsNotNone(dynamics_predictions.u_wind)
+        self.assertIsNotNone(dynamics_predictions.v_wind)
+        self.assertIsNotNone(dynamics_predictions.temperature)
+        self.assertIsNotNone(dynamics_predictions.specific_humidity)
+        self.assertIsNotNone(dynamics_predictions.geopotential)
+        self.assertIsNotNone(dynamics_predictions.surface_pressure)
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
-        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1, modal_x, modal_y))
+        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
 
-        self.assertTupleEqual(dynamics_predictions.divergence.shape, output_tzxy)
-        self.assertTupleEqual(dynamics_predictions.vorticity.shape, output_tzxy)
-        self.assertTupleEqual(dynamics_predictions.temperature_variation.shape, output_tzxy)
-        self.assertTupleEqual(dynamics_predictions.log_surface_pressure.shape, (model.outer_steps, 1, modal_x, modal_y))
-        self.assertTupleEqual(dynamics_predictions.tracers['specific_humidity'].shape, output_tzxy)
+        self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.temperature.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
         
     def test_speedy_model_gradients_isnan(self):
         import jax
@@ -165,18 +165,32 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         import jax.numpy as jnp
-        from jcm.model import Model
+        from jcm.model import Model, get_coords
+        from jcm.boundaries import initialize_boundaries
         
-        create_model = lambda params: Model(
-            total_time=(2/48.0),
-            save_interval=(1/48.0),
+        from pathlib import Path
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        
+        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+            import subprocess, sys
+            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+        
+        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+            boundaries_dir / 'boundaries_daily.nc',
+            coords.horizontal
+        )
+
+        create_model = lambda params=Parameters.default(): Model(
+            total_time=2./24.,
+            save_interval=1/24.,
             parameters=params,
+            boundaries=default_boundaries(),
         )
         
         def model_run_wrapper(params):
             model = create_model(params)
             state = model.get_initial_state()
-            final_state, predictions = model.unroll(state)
+            _, predictions = model.unroll(state)
             return predictions
         
         def make_ones_prediction_object(pred): 
@@ -194,7 +208,8 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jcm.model import Model
+        from jcm.model import Model, get_coords
+        from jcm.boundaries import initialize_boundaries
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -206,14 +221,29 @@ class TestModelUnit(unittest.TestCase):
                     return jnp.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
         
-        create_model = lambda params: Model(total_time=(2/48.0),
-                                            save_interval=(1/48.0),
-                                            parameters=params)
+        from pathlib import Path
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        
+        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+            import subprocess, sys
+            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+        
+        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+            boundaries_dir / 'boundaries_daily.nc',
+            coords.horizontal
+        )
+
+        create_model = lambda params=Parameters.default(): Model(
+            total_time=2./24.,
+            save_interval=1/24.,
+            parameters=params,
+            boundaries=default_boundaries(),
+        )
         
         def model_run_wrapper(params):
             model = create_model(params)
             state = model.get_initial_state()
-            final_state, predictions = model.unroll(state)
+            _, predictions = model.unroll(state)
             return predictions
         
         # Calculate gradients using JVP
@@ -224,11 +254,12 @@ class TestModelUnit(unittest.TestCase):
         physics_data = jvp_sum['physics']
 
         # Check dinosaur states
-        self.assertFalse(jnp.any(jnp.isnan(state.vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(state.divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(state.temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(state.log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(state.tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(state.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(state.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(state.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(state.surface_pressure)))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
