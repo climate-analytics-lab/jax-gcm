@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 from jax import jit
 
@@ -9,11 +10,7 @@ from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
 from jcm.physics.speedy.humidity import get_qsat, rel_hum_to_spec_hum
-import jax
-
-@jit
-def pass_fn(operand):
-    return operand
+from jcm.utils import pass_fn
 
 @jit
 def get_surface_fluxes(

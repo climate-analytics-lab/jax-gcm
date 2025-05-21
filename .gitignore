@@ -165,3 +165,6 @@ notebooks/model_state.nc
 
 # NetCDF files
 *.nc
+
+docs/build
+docs/source/generated

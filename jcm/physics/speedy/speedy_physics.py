@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 from collections import abc
 from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -7,6 +8,27 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import Geometry
 from jcm.date import DateData
+
+def set_physics_flags(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    boundaries: BoundaryData=None,
+    geometry: Geometry=None
+) -> tuple[PhysicsTendency, PhysicsData]:
+    from jcm.physical_constants import nstrad
+    '''
+    Sets flags that indicate whether a tendency function should be run.
+    clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
+    This could also apply to forcing and coupling.
+    '''
+    model_step = physics_data.date.model_step
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
+    physics_data = physics_data.copy(shortwave_rad=shortwave_data)
+
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    return physics_tendencies, physics_data
 
 class SpeedyPhysics(Physics):
     write_output: bool
@@ -26,7 +48,7 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
         from jcm.physics.speedy.convection import get_convection_tendencies
         from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
-        from jcm.physics.speedy.shortwave_radiation import get_shortwave_rad_fluxes, clouds
+        from jcm.physics.speedy.shortwave_radiation import get_shortwave_rad_fluxes, get_clouds
         from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics.speedy.surface_flux import get_surface_fluxes
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
@@ -34,11 +56,12 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.forcing import set_forcing
 
         physics_terms = [
+            set_physics_flags,
             set_forcing,
             spec_hum_to_rel_hum,
             get_convection_tendencies,
             get_large_scale_condensation_tendencies,
-            clouds,
+            get_clouds,
             get_shortwave_rad_fluxes,
             get_downward_longwave_rad_fluxes,
             get_surface_fluxes,
@@ -86,12 +109,9 @@ class SpeedyPhysics(Physics):
         # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
-        print(f'u tend shape: {physics_tendency.u_wind.shape}')
         
         for i, term in enumerate(self.terms):
-            print(f'running term {i}')
             tend, data = term(state, data, parameters, boundaries, geometry)
-            print(f'computed u tend shape: {tend.u_wind.shape}')
             physics_tendency += tend
         
         return physics_tendency, data

@@ -143,7 +143,8 @@ class Model:
                 boundaries=self.boundaries,
                 geometry=self.geometry,
                 date = DateData.set_date(
-                    model_time = self.start_date + Timedelta(seconds=state.sim_time)
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
                 )
             )
         )

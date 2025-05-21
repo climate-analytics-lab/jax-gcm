@@ -8,3 +8,7 @@ xarray[io, parallel]
 # Testing requirements
 pytest-cov
 
+#Sphinx
+sphinx
+furo
+
