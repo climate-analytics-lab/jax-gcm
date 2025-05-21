@@ -110,7 +110,7 @@ class SpeedyPhysics(Physics):
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
         
-        for i, term in enumerate(self.terms):
+        for term in self.terms:
             tend, data = term(state, data, parameters, boundaries, geometry)
             physics_tendency += tend
         
