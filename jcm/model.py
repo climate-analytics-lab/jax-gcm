@@ -261,13 +261,20 @@ class SpeedyModel:
         #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
         if self.initial_state is not None:
+            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure 
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
+            # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
+            normalized_surface_pressure = jnp.exp(self.primitive.coords.horizontal.to_nodal(state.log_surface_pressure))/p0
+            state.log_surface_pressure = self.primitive.coords.horizontal.to_modal(jnp.log(normalized_surface_pressure))
+
+            # need to add specific humidity as a tracer
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
+
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state):
