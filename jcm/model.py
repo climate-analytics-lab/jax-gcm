@@ -1,4 +1,3 @@
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
 from numpy import timedelta64
@@ -8,13 +7,12 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
-from jcm.date import Timestamp, Timedelta
+from jcm.date import DateData, Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.date import DateData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
