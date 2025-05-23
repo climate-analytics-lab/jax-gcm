@@ -169,10 +169,12 @@ class Model:
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
             return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
-            # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
-            normalized_surface_pressure = jnp.exp(self.primitive.coords.horizontal.to_nodal(state.log_surface_pressure))/p0
-            state.log_surface_pressure = self.primitive.coords.horizontal.to_modal(jnp.log(normalized_surface_pressure))
+            # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
+            # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
+            state.log_surface_pressure = self.coords.horizontal.to_modal(
+                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+            )
 
             # need to add specific humidity as a tracer
             state.tracers = {
@@ -186,12 +188,14 @@ class Model:
         from jcm.physics_interface import dynamics_state_to_physics_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        physics_data = None
+        # convert back to SI to match convention for user-defined initial PhysicsStates
+        physics_state.surface_pressure = physics_state.surface_pressure * p0
         
+        physics_data = None
         if self.physics.write_output:
             date = DateData.set_date(self.start_date + Timedelta(seconds=state.sim_time))
             _, physics_data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
-
+        
         return {
             'dynamics': physics_state,
             'physics': physics_data
