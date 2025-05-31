@@ -285,8 +285,6 @@ class SpeedyModel:
         from jcm.physics import dynamics_state_to_physics_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        # convert back to SI to match convention for user-defined initial PhysicsStates
-        physics_state.surface_pressure = physics_state.surface_pressure * p0
         
         physics_data = None
         if self.post_process_physics:
@@ -299,6 +297,9 @@ class SpeedyModel:
             for term in self.physics_terms:
                 _, physics_data = term(physics_state, physics_data, self.parameters, self.boundaries, self.geometry)
 
+        # convert back to SI to match convention for user-defined initial PhysicsStates
+        physics_state.surface_pressure = physics_state.surface_pressure * p0
+        
         return {
             'dynamics': physics_state,
             'physics': physics_data
