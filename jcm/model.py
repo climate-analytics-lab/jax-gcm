@@ -188,13 +188,14 @@ class Model:
         from jcm.physics_interface import dynamics_state_to_physics_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        # convert back to SI to match convention for user-defined initial PhysicsStates
-        physics_state.surface_pressure = physics_state.surface_pressure * p0
         
         physics_data = None
         if self.physics.write_output:
             date = DateData.set_date(self.start_date + Timedelta(seconds=state.sim_time))
             _, physics_data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
+        
+        # convert back to SI to match convention for user-defined initial PhysicsStates
+        physics_state.surface_pressure = physics_state.surface_pressure * p0
         
         return {
             'dynamics': physics_state,
