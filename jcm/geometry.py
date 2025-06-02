@@ -40,7 +40,7 @@ def _initialize_vertical(kx):
 
 @tree_math.struct
 class Geometry:
-    nodal_shape: tuple[int, int, int] # (kx, ix, il)e)
+    nodal_shape: tuple[int, int, int] # (kx, ix, il)
 
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
