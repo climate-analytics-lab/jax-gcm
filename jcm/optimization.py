@@ -70,7 +70,9 @@ def forward_model_wrapper(theta, theta_keys, state = None, parameters = None, ar
     if state is None: 
         state = model.get_initial_state()
     final_state, predictions = model.unroll(state)
-    return predictions["dynamics"].temperature_variation[-1].flatten()  # fix shape of this
+    xr_predictions = model.predictions_to_xarray(predictions)
+    means = {var: xr_predictions[var].mean().values for var in xr_predictions.data_vars}
+    return jnp.array(list(means.values())) # returns the mean of all physics_data variables and dynamic variables over space and time
 
 def make_ones_prediction_object(pred): 
         return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
