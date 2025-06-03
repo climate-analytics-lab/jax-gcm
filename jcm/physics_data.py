@@ -48,9 +48,10 @@ class SWRadiationData:
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
+    compute_shortwave: jnp.bool
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.zeros(nodal_shape),
             fsol = fsol if fsol is not None else jnp.zeros(nodal_shape),
@@ -61,15 +62,16 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
-            dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape)
+            dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else False
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
         return SWRadiationData(
             qcloud = qcloud if qcloud is not None else jnp.ones(nodal_shape),
             fsol = fsol if fsol is not None else jnp.ones(nodal_shape),
@@ -80,14 +82,15 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
             stratz = stratz if stratz is not None else jnp.ones(nodal_shape),
             gse = gse if gse is not None else jnp.ones(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.ones(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.ones(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
-            dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape)
+            dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else True
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -102,10 +105,13 @@ class SWRadiationData:
             cloudc=cloudc if cloudc is not None else self.cloudc,
             cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
             ftop=ftop if ftop is not None else self.ftop,
-            dfabs=dfabs if dfabs is not None else self.dfabs
+            dfabs=dfabs if dfabs is not None else self.dfabs,
+            compute_shortwave=compute_shortwave if compute_shortwave is not None else self.compute_shortwave
         )
     
     def isnan(self):
+        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
+        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct

@@ -9,11 +9,8 @@ from jcm.physics import PhysicsTendency, PhysicsState
 from jcm.physics_data import PhysicsData
 from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
 from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.utils import pass_fn
 import jax
-
-@jit
-def pass_fn(operand):
-    return operand
 
 @jit
 def get_surface_fluxes(
@@ -71,7 +68,7 @@ def get_surface_fluxes(
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.phi0 # surface geopotentail
-    tsea = boundaries.tsea[:,:,day]
+    tsea = boundaries.tsea
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l

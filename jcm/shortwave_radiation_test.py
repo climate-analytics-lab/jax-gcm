@@ -98,11 +98,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
+               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
         from jcm.boundaries import BoundaryData
         from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.shortwave_radiation import clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
+        from jcm.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
         from jcm.physical_constants import epssw, solc
         from jcm.params import Parameters
         from jcm.geometry import Geometry
@@ -132,7 +132,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
-        sw_data = SWRadiationData.zeros(xy, kx)
+        sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -141,7 +141,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
-        _, physics_data = clouds(state, physics_data, parameters, boundaries, geometry)
+        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
         
@@ -327,6 +327,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
+        physics_data.shortwave_rad.compute_shortwave = True
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
@@ -372,7 +373,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
-        sw_data = SWRadiationData.zeros(xy, kx)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
         #equivalent of tyear = 0.6
         date_data = DateData.zeros()
@@ -382,7 +383,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask=fmask)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(clouds, state, physics_data, parameters, boundaries, geometry) 
+        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry) 
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
