@@ -1,5 +1,3 @@
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
-import dinosaur.time_integration
 import jax
 import jax.numpy as jnp
 from numpy import timedelta64
