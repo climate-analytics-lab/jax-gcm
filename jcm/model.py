@@ -1,8 +1,11 @@
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
+import dinosaur.time_integration
 import jax
 import jax.numpy as jnp
 from numpy import timedelta64
 import dinosaur
+from typing import Callable, Any
+from dinosaur import typing
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
@@ -15,6 +18,43 @@ from jcm.physical_constants import p0
 from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+def trajectory_from_step(
+    step_fn: typing.TimeStepFn,
+    outer_steps: int,
+    inner_steps: int,
+    *,
+    start_with_input: bool = False,
+    post_process_fn: typing.PostProcessFn = lambda x: x,
+) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
+    """Returns a function that accumulates repeated applications of `step_fn`.
+
+    Compute a trajectory by repeatedly calling `step_fn()`
+    `outer_steps * inner_steps` times.
+
+    Args:
+        step_fn: function that takes a state and returns state after one time step.
+        outer_steps: number of steps to save in the generated trajectory.
+        inner_steps: number of repeated calls to step_fn() between saved steps.
+        start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
+        post_process_fn: function to apply to trajectory outputs.
+
+    Returns:
+        A function that takes an initial state and returns a tuple consisting of:
+        (1) the final frame of the trajectory.
+        (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
+    """
+    def inner_step(carry, _):
+        x, x_sum = carry
+        x_next = step_fn(x)
+        return (x_next, x_sum + x_next), None
+
+    def outer_step(carry, _):
+        zeros = jax.tree_util.tree_map(lambda a: jnp.zeros_like(a), carry)
+        (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
+        return x_final, post_process_fn(x_sum / inner_steps)
+
+    return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
 
 def set_physics_flags(state: PhysicsState,
     physics_data: PhysicsData,
@@ -159,7 +199,7 @@ class SpeedyModel:
 
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
-                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
+                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None, output_averages=True,
                  post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -254,6 +294,7 @@ class SpeedyModel:
             ),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
+        self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics import physics_state_to_dynamics_state
@@ -306,7 +347,7 @@ class SpeedyModel:
         }
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+        integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
