@@ -264,6 +264,29 @@ class LandModelParameters:
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
+
+
+@tree_math.struct
+class SlaboceanModelParameters:
+
+    tau       : jnp.ndarray # relaxation time of SST (unit: day)
+    h_lolat   : jnp.ndarray # mixed layer thickness of low  latitude (unit: meter)
+    h_hilat   : jnp.ndarray # mixed layer thickness of high latitude (unit: meter)
+
+    @classmethod
+    def default(self):
+        return LandModelParameters(
+            tau = jnp.array(60.0),
+            h_lolat = jnp.array(40.0),
+            h_hilat = jnp.array(120.0),
+        )
+
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+
+
+
+
 @tree_math.struct
 class Parameters:
     convection: ConvectionParameters
@@ -273,6 +296,7 @@ class Parameters:
     surface_flux: SurfaceFluxParameters
     vertical_diffusion: VerticalDiffusionParameters
     land_model: LandModelParameters
+    slabocean_model: SlaboceanModelParameters
     forcing: ForcingParameters
 
     @classmethod
@@ -285,6 +309,7 @@ class Parameters:
             surface_flux = SurfaceFluxParameters.default(),
             vertical_diffusion = VerticalDiffusionParameters.default(),
             land_model = LandModelParameters.default(),
+            slabocean_model = SlaboceanModelParameters.default(),
             forcing = ForcingParameters.default()
         )
 
@@ -297,6 +322,7 @@ class Parameters:
             surface_flux = self.surface_flux.isnan(),
             vertical_diffusion = self.vertical_diffusion.isnan(),
             land_model = self.land_model.isnan(),
+            slabocean_model = self.slabocean_model.isnan(),
             forcing = self.forcing.isnan()
         )
 
