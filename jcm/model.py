@@ -1,11 +1,13 @@
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
+import tree_math
 from numpy import timedelta64
 import dinosaur
-from typing import Callable, Any
+from typing import Callable, Any, Sequence, Union
 from dinosaur import typing
 from dinosaur.scales import SI_SCALE, units
-from dinosaur.time_integration import ExplicitODE
+from dinosaur.time_integration import ExplicitODE, ImplicitExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
@@ -16,6 +18,11 @@ from jcm.physical_constants import p0
 from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+@tree_math.struct
+class ModelOutput:
+    dynamics: primitive_equations.State
+    physics: PhysicsData
 
 def trajectory_from_step(
     step_fn: typing.TimeStepFn,
@@ -45,12 +52,12 @@ def trajectory_from_step(
     def inner_step(carry, _):
         x, x_sum = carry
         x_next = step_fn(x)
-        return (x_next, x_sum + x_next), None
+        return (x_next, x_sum + post_process_fn(x_next)), None
 
     def outer_step(carry, _):
-        zeros = jax.tree_util.tree_map(lambda a: jnp.zeros_like(a), carry)
+        zeros = tree_map(lambda a: jnp.zeros_like(a), post_process_fn(carry))
         (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
-        return x_final, post_process_fn(x_sum / inner_steps)
+        return x_final, x_sum / inner_steps
 
     return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
 
@@ -339,10 +346,7 @@ class SpeedyModel:
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return {
-            'dynamics': physics_state,
-            'physics': physics_data
-        }
+        return ModelOutput(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
         integrate_fn = jax.jit(self.trajectory_fn(
@@ -359,16 +363,12 @@ class SpeedyModel:
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
     def predictions_to_xarray(self, predictions):
-        # extract dynamics predictions (PhysicsState format)
-        # and physics predictions (PhysicsData format) from postprocessed output
-        dynamics_predictions = predictions['dynamics']
-        physics_predictions = predictions['physics']
-
+        # process output PhysicsData
         physics_preds_dict = {}
-        if physics_predictions is not None:
+        if predictions.physics is not None:
             physics_preds_dict = {
                 f"{module}.{field}": value # avoids name conflicts between fields of different modules
-                for module, module_dict in physics_predictions.asdict().items()
+                for module, module_dict in predictions.physics.asdict().items()
                 for field, value in module_dict.asdict().items()
             }
             # replace multi-channel fields with a field for each channel
@@ -381,7 +381,8 @@ class SpeedyModel:
                     )
                     del physics_preds_dict[k]
 
-        pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
+        # combine output State and processed PhysicsData
+        pred_ds = self.data_to_xarray(predictions.dynamics.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
