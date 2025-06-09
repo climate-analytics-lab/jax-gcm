@@ -3,6 +3,12 @@
 This README is to help with slab ocean model development.
 This branch translates the slab ocean model in SpeedyPy into JAX-gcm.
 
+
+## Needed package
+
+- pip: `pip install jax dinosaur`.
+
+
 ## TODO
 
 - Figure out how to test the code.
