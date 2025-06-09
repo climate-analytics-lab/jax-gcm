@@ -92,8 +92,9 @@ class SlaboceanModel:
         else:
             self.initial_state = None
 
+        self.boundaries = boundaries
 
-    def slabocean_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
+    def init(self, surface_filename):
         """
             surface_filename: filename storing boundary data
             parameters: initialized model parameters
@@ -104,6 +105,9 @@ class SlaboceanModel:
         # =========================================================================
         # Initialize land-surface boundary conditions
         # =========================================================================
+
+        boundaries = self.boundaries
+        parameters = self.parameters
 
         # Fractional and binary land masks
         fmask_l = boundaries.fmask
@@ -198,7 +202,7 @@ class SlaboceanModel:
 
     #Integrates slab land-surface model for one day.
     @jit
-    def run_slabocean_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
+    def run(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
         # Land-surface (soil/ice-sheet) layer
         # Anomaly w.r.t. final-time climatological temperature
         tanom = stl_lm - stlcl_ob

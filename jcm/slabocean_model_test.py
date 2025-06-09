@@ -293,8 +293,6 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         """
 
-
-
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
 
         if not (boundaries_dir / 'boundaries_daily.nc').exists():
@@ -306,18 +304,18 @@ class TestModelUnit(unittest.TestCase):
             coords.horizontal,
         )
 
-        print("Here")
-        self.assertTrue(True)
-
-        create_model = lambda params=Parameters.default(): som.SlaboceanModel(
-            boundaries=default_boundaries(),
-            parameters=params,
-        )
- 
+        boundaries = default_boundaries()
         params = Parameters.default()
-        model = create_model(params)
+        model = som.SlaboceanModel(
+            boundaries = boundaries,
+            parameters = params,
+        )
+
         self.assertTrue(model is not None)
 
+        model.init(
+            surface_filename = boundaries_dir / "sst.nc",
+        )
  
         """
         create_model = lambda params=Parameters.default(): SpeedyModel(

@@ -168,3 +168,5 @@ notebooks/model_state.nc
 
 docs/build
 docs/source/generated
+
+*.swp
