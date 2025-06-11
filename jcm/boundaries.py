@@ -27,13 +27,15 @@ class BoundaryData:
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
+    
+    sst_clim: jnp.ndarray # climatology for sea surface temperature (sst)
 
 
     @classmethod
     def zeros(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-              fmask_s=None,lfluxland=None, land_coupling_flag=None):
+              fmask_s=None,lfluxland=None, land_coupling_flag=None, sst_clim=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -52,13 +54,14 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
+            sst_clim=sst_clim if sst_clim is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
     def ones(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-             fmask_s=None,lfluxland=None, land_coupling_flag=None):
+             fmask_s=None,lfluxland=None, land_coupling_flag=None, sst_clim=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
@@ -77,12 +80,13 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
+            sst_clim=sst_clim if sst_clim is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
     def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
              snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
-             land_coupling_flag=None):
+             land_coupling_flag=None, sst_clim=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             forog=forog if forog is not None else self.forog,
@@ -100,7 +104,8 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
-            fmask_s=fmask_s if fmask_s is not None else self.fmask_s
+            fmask_s=fmask_s if fmask_s is not None else self.fmask_s,
+            sst_clim=sst_clim if sst_clim is not None else self.sst_clim,
         )
 
     def isnan(self):

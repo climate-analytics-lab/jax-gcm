@@ -14,6 +14,25 @@ from dinosaur import primitive_equations, primitive_equations_states
 
 import pandas as pd
 
+def jit2(func):
+    """ This is the decorator to apply jit on member functions that take the first argument as calling object itself. """
+#    @wraps(func)
+#    @partial(jax.jit, static_argnums=(0,), func)
+    def wrapped_func(self, *args, **kwargs):
+        return func(self, *args, **kwargs)
+    return wrapped_func
+
+
+#
+# Questions:
+# 1. Mask conditions
+# 2. For the `run` function, because of JAX, I need
+#    to write out arguments explicitly instead of 
+#    calling model.run(). So, there needs a class function
+#    that has all the differentiable parameters needed.
+
+
+
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -42,10 +61,20 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
 
 class SlaboceanModel:
 
-    def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
-                 horizontal_resolution=31, coords: CoordinateSystem=None,
-                 boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+    def __init__(
+        self,
+        time_step=30.0,
+        save_interval=10.0,
+        total_time=1200,
+        start_date=None,
+        horizontal_resolution=31,
+        coords: CoordinateSystem=None,
+        boundaries: BoundaryData=None,
+        initial_state: PhysicsState=None,
+        parameters: Parameters=None,
+        post_process=True, 
+        checkpoint_terms=True,
+    ) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -94,7 +123,7 @@ class SlaboceanModel:
 
         self.boundaries = boundaries
 
-    def init(self, surface_filename):
+    def init(self):
         """
             surface_filename: filename storing boundary data
             parameters: initialized model parameters
@@ -108,19 +137,24 @@ class SlaboceanModel:
 
         boundaries = self.boundaries
         parameters = self.parameters
+        som_params = parameters.slabocean_model
 
-        # Fractional and binary land masks
+        # Fractional and binary ocean masks
         fmask_l = boundaries.fmask
-        bmask_l = jnp.where(fmask_l >= parameters.slabocean_model.thrsh, 1.0, 0.0)
+        bmask_l = jnp.where(fmask_l >= 0.0, 1.0, 0.0)
 
         # Update fmask_l based on the conditions
-        fmask_l = jnp.where(fmask_l >= parameters.slabocean_model.thrsh,
-                            jnp.where(boundaries.fmask > (1.0 - parameters.slabocean_model.thrsh), 1.0, fmask_l), 0.0)
+        #fmask_l = jnp.where(bmask_l == 1.0,
+        #                    jnp.where(boundaries.fmask > (1.0 - parameters.slabocean_model.thrsh), 1.0, fmask_l), 0.0)
 
-        # Land-surface temperature
-        sst_ob = jnp.asarray(xr.open_dataset(surface_filename)["sst"])
-        ice_ob = jnp.asarray(xr.open_dataset(surface_filename)["ice"])
-       
+        # State
+        sst_clim = jnp.asarray(boundaries.sst_clim)
+        si_clim  = jnp.asarray(boundaries.sice_am)
+
+        print("d_omax = ", som_params.d_omax)
+        d_o      = jnp.asarray(boundaries.sst_clim) * 0 + som_params.d_omax # this way we also copy nan together 
+        
+         
         """ 
         stlcl_ob = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((stlcl_ob < 0.0) | (stlcl_ob > 400.0)), 273.0, stlcl_ob)
 
@@ -165,13 +199,13 @@ class SlaboceanModel:
 
         # 2. Compute constant fields
         # Set domain mask (blank out sea points)
-        dmask = jnp.ones_like(fmask_l)
-        dmask = jnp.where(fmask_l < parameters.slabocean_model.flandmin, 0, dmask)
+        #dmask = jnp.ones_like(fmask_l)
+        #dmask = jnp.where(bmask_l < parameters.slabocean_model.flandmin, 0, dmask)
 
         # Set time_step/heat_capacity and dissipation fields
-        cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
+        #cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
 
-        return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
+        return boundaries.copy()
 
     # Exchanges fluxes between land and atmosphere.
     def couple_land_atm(
@@ -200,9 +234,17 @@ class SlaboceanModel:
 
         return physics_tendency, physics_data
 
+
+    def run(self):
+        
+        slabocean_model.runExplicit(self.xxx)
+        
+
     #Integrates slab land-surface model for one day.
-    @jit
-    def run(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
+    @classmethod
+    def runExplicit(sst_a, d_o, c_o):
+        #hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
+        
         # Land-surface (soil/ice-sheet) layer
         # Anomaly w.r.t. final-time climatological temperature
         tanom = stl_lm - stlcl_ob

@@ -295,12 +295,14 @@ class TestModelUnit(unittest.TestCase):
 
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
 
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+        # Generate daily values from monthly climatology
+        daily_boundary_condition_file = boundaries_dir / 'boundaries_daily.nc'
+        if not daily_boundary_condition_file.exists():
             import subprocess, sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
 
         default_boundaries = lambda coords=som.get_coords(): initialize_boundaries(
-            boundaries_dir / 'boundaries_daily.nc',
+            daily_boundary_condition_file,
             coords.horizontal,
         )
 
@@ -313,9 +315,7 @@ class TestModelUnit(unittest.TestCase):
 
         self.assertTrue(model is not None)
 
-        model.init(
-            surface_filename = boundaries_dir / "sst.nc",
-        )
+        model.init()
  
         """
         create_model = lambda params=Parameters.default(): SpeedyModel(
