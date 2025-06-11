@@ -185,7 +185,8 @@ class SpeedyModel:
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         self.save_interval = save_interval * units.day
         self.total_time = total_time * units.day
-        dt_si = time_step * units.minute
+        self.time_step = time_step
+        dt_si = self.time_step * units.minute
 
         self.physics_specs = PHYSICS_SPECS
 
@@ -291,7 +292,10 @@ class SpeedyModel:
             physics_data = PhysicsData.zeros(
                 self.coords.nodal_shape[1:],
                 self.coords.nodal_shape[0],
-                date=DateData.set_date(model_time = self.start_date + Timedelta(seconds=state.sim_time))
+                date=DateData.set_date(
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                    model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)    
+                )
             )
 
             for term in self.physics_terms:
