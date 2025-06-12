@@ -3,6 +3,8 @@ from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
+from jcm import physical_constants
+
 import jax.numpy as jnp
 from jax import jit
 
@@ -178,53 +180,46 @@ class SlaboceanModel:
         geometry: Geometry=None
     ) -> tuple[PhysicsTendency, PhysicsData]:
         
+        
         day = physics_data.date.model_day()
         
-        stl_lm=None
+        sst_anom = None
 
         # Run the ocn model if the flags is switched on
-        if (boundaries.ocn_coupling_flag):
+        if boundaries.ocn_coupling_flag:
             
-            sst_anom = runExplicit(
-                physics_data.surface_flux.hfluxn, # net downward heat flux
+            sst_anom, si_anom = SlaboceanModel.run(
                 physics_data.slabocean_model.sst_anom,
                 physics_data.slabocean_model.si_anom,
+                physics_data.surface_flux.hfluxn, # net downward heat flux
                 boundaries.ocn_d0,
+                parameters.slabocean_model.dt,
+                parameters.slabocean_model.tau0,
             )
-
-            stl_am = stl_lm
-       
-
-         # Otherwise get the land surface from climatology
+            
+        # Otherwise get the land surface from climatology
         else:
-            stl_am = boundaries.stlcl_ob[:,:,day]
+            sst_anom = boundaries.sst_clim[:, :, day]
 
         # update land physics data
-        slabocean_model_data = physics_data.slabocean_model.copy(stl_am=stl_am, stl_lm=stl_lm)
+        slabocean_model_data = physics_data.slabocean_model.copy(sst_anom=sst_anom, si_anom=si_anom)
         physics_data = physics_data.copy(slabocean_model=slabocean_model_data)
         physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
-
+        
         return physics_tendency, physics_data
-
-
-    def run(self):
         
-        slabocean_model.runExplicit(self.xxx)
         
-
     #Integrates slab land-surface model for one day.
     @jit2
     @classmethod
-    def runExplicit(cls, sst_a, d_o, c_o):
+    def run(cls, sst_anom, si_anom, hfluxn, d_o, dt, tau0):
         
-        # Anomaly w.r.t. final-time climatological temperature
-        tanom = stl_lm - stlcl_ob
-
+        factor = 1.0 + dt / tau0 
         # Time evolution of temperature anomaly
-        tanom = cdland*(tanom + rhcapl*hfluxn[:,:,0])
+        sst_anom = sst_anom / factor + dt / ( factor * physical_constants.cp_ocn * d_0 ) * hfluxn[:, :, 0]
 
-        # Full surface temperature at final time
-        stl_lm = tanom + stlcl_ob
+        return sst_anom, si_anom
 
-        return stl_lm
+
+
 
