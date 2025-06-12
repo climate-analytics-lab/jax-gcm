@@ -3,6 +3,8 @@ import tree_math
 from jcm.date import DateData
 from jax import tree_util
 
+from jcm.slabocean_model_physics_data import SlaboceanModelData
+
 ablco2_ref = 6.0
 
 @tree_math.struct
@@ -385,9 +387,11 @@ class PhysicsData:
     surface_flux: SurfaceFluxData
     date: DateData
     land_model: LandModelData
+    slabocean_model : SlaboceanModelData
+
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def zeros(self, nodal_shape, node_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, slabocean_model=None):
         return PhysicsData(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
@@ -398,10 +402,11 @@ class PhysicsData:
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.zeros(),
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
+            slabocean_model = slabocean_model if slabocean_model is not None else SlaboceanModelData.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def ones(self, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, slabocean_model=None):
         return PhysicsData(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
@@ -411,9 +416,11 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
             date = date if date is not None else DateData.ones(),
-            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
+            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
+            slabocean_model = slabocean_model if slabocean_model is not None else SlaboceanModelData.ones(nodal_shape),
+        )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, slabocean_model=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -423,7 +430,8 @@ class PhysicsData:
             condensation=condensation if condensation is not None else self.condensation,
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             date=date if date is not None else self.date,
-            land_model=land_model if land_model is not None else self.land_model
+            land_model=land_model if land_model is not None else self.land_model,
+            slabocean_model=slabocean_model if slabocean_model is not None else self.slabocean_model,
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
@@ -439,7 +447,8 @@ class PhysicsData:
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
             date=0,
-            land_model=self.land_model.isnan()
+            land_model=self.land_model.isnan(),
+            slabocean_model=self.slabocean_model.isnan(),
         )
     
     def any_true(self):

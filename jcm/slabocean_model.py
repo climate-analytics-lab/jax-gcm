@@ -12,12 +12,14 @@ from dinosaur.scales import SI_SCALE, units
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur import primitive_equations, primitive_equations_states
 
+import functools
 import pandas as pd
 
 def jit2(func):
     """ This is the decorator to apply jit on member functions that take the first argument as calling object itself. """
-#    @wraps(func)
-#    @partial(jax.jit, static_argnums=(0,), func)
+
+    @functools.wraps(func)
+    @functools.partial(jit, static_argnums=(0,))
     def wrapped_func(self, *args, **kwargs):
         return func(self, *args, **kwargs)
     return wrapped_func
@@ -30,9 +32,6 @@ def jit2(func):
 #    to write out arguments explicitly instead of 
 #    calling model.run(). So, there needs a class function
 #    that has all the differentiable parameters needed.
-
-
-
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -155,44 +154,6 @@ class SlaboceanModel:
         d_o      = jnp.asarray(boundaries.sst_clim) * 0 + som_params.d_omax # this way we also copy nan together 
         
          
-        """ 
-        stlcl_ob = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((stlcl_ob < 0.0) | (stlcl_ob > 400.0)), 273.0, stlcl_ob)
-
-        # Snow depth
-        snowd_am = jnp.asarray(xr.open_dataset(surface_filename)["snowd"])
-        # simple sanity check - same method ras above for stl12
-        snowd_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((snowd_am < 0.0) | (snowd_am > 20000.0)), 0.0, snowd_am)
-        # Read soil moisture and compute soil water availability using vegetation fraction
-        # Read vegetation fraction
-        veg_high = jnp.asarray(xr.open_dataset(surface_filename)["vegh"])
-        veg_low  = jnp.asarray(xr.open_dataset(surface_filename)["vegl"])
-
-        # Combine high and low vegetation fractions
-        veg = jnp.maximum(0.0, veg_high + 0.8*veg_low)
-
-        # Read soil moisture
-        sdep1 = 70.0
-        idep2 = 3
-        # sdep2 = idep2*sdep1
-
-        swwil2 = idep2*parameters.slabocean_model.swwil
-        rsw    = 1.0/(parameters.slabocean_model.swcap + idep2*(parameters.slabocean_model.swcap - parameters.slabocean_model.swwil))
-
-        # Combine soil water content from two top layers
-        swl1 = jnp.asarray(xr.open_dataset(surface_filename)["swl1"])
-        swl2 = jnp.asarray(xr.open_dataset(surface_filename)["swl2"])
-        
-        swroot = idep2 * swl2
-        # Compute the intermediate max term
-        max_term = jnp.maximum(0.0, swroot - swwil2)
-        # Compute the soil water content
-
-        soilw_am = jnp.minimum(1.0, rsw * (swl1 + veg[:,:,jnp.newaxis] * max_term))
-
-        # simple sanity check - same method ras above for stl12
-        soilw_am = jnp.where((bmask_l[:,:,jnp.newaxis] > 0.0) & ((soilw_am < 0.0) | (soilw_am > 10.0)), 0.0, soilw_am)
-        """
-
         # =========================================================================
         # Set heat capacities and dissipation times for soil and ice-sheet layers
         # =========================================================================
@@ -208,7 +169,7 @@ class SlaboceanModel:
         return boundaries.copy()
 
     # Exchanges fluxes between land and atmosphere.
-    def couple_land_atm(
+    def couple_ocn_atm(
         state: PhysicsState,
         physics_data: PhysicsData,
         parameters: Parameters,
@@ -241,11 +202,10 @@ class SlaboceanModel:
         
 
     #Integrates slab land-surface model for one day.
+    @jit2
     @classmethod
-    def runExplicit(sst_a, d_o, c_o):
-        #hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
+    def runExplicit(cls, sst_a, d_o, c_o):
         
-        # Land-surface (soil/ice-sheet) layer
         # Anomaly w.r.t. final-time climatological temperature
         tanom = stl_lm - stlcl_ob
 
