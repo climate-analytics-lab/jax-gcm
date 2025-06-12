@@ -168,23 +168,34 @@ class SlaboceanModel:
 
         return boundaries.copy()
 
-    # Exchanges fluxes between land and atmosphere.
+    # Exchanges fluxes between ocean and atmosphere.
     def couple_ocn_atm(
+        self,
         state: PhysicsState,
         physics_data: PhysicsData,
         parameters: Parameters,
         boundaries: BoundaryData=None,
         geometry: Geometry=None
     ) -> tuple[PhysicsTendency, PhysicsData]:
-
+        
         day = physics_data.date.model_day()
+        
         stl_lm=None
-        # Run the land model if the land model flags is switched on
-        if (boundaries.land_coupling_flag):
-            # stl_lm need to persist from time step to time step? what does this get from the model?
-            stl_lm = run_slabocean_model(physics_data.surface_flux.hfluxn, physics_data.stlcl_lm, boundaries.stlcl_ob[:,:,day], boundaries.cdland, boundaries.rhcapl)
+
+        # Run the ocn model if the flags is switched on
+        if (boundaries.ocn_coupling_flag):
+            
+            sst_anom = runExplicit(
+                physics_data.surface_flux.hfluxn, # net downward heat flux
+                physics_data.slabocean_model.sst_anom,
+                physics_data.slabocean_model.si_anom,
+                boundaries.ocn_d0,
+            )
+
             stl_am = stl_lm
-        # Otherwise get the land surface from climatology
+       
+
+         # Otherwise get the land surface from climatology
         else:
             stl_am = boundaries.stlcl_ob[:,:,day]
 
