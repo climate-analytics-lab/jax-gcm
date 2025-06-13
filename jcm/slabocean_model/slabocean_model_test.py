@@ -1,8 +1,11 @@
 import unittest
 from dinosaur import primitive_equations_states
-from jcm.params import Parameters
-import jax.tree_util as jtu
 
+import jax.tree_util as jtu
+import pandas as pd
+
+from jcm.params import Parameters
+from jcm.physics_data import PhysicsData
 
 
 class TestModelUnit(unittest.TestCase):
@@ -301,24 +304,48 @@ class TestModelUnit(unittest.TestCase):
             import subprocess, sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
 
-        default_boundaries = lambda coords=som.get_coords(): initialize_boundaries(
+
+        coords = som.get_coords()
+        
+        hori_shape  = coords.horizontal.nodal_shape
+        vert_layers = coords.vertical.layers
+
+ 
+        boundaries = initialize_boundaries(
             daily_boundary_condition_file,
             coords.horizontal,
         )
-
-        boundaries = default_boundaries()
+        boundaries.ocn_coupling_flag = True
+        
         params = Parameters.default()
+        physics_data = PhysicsData.zeros(hori_shape, vert_layers)
+        
         model = som.SlaboceanModel(
+            time_step = 600.0,                # 10 min
+            save_interval = 86400.0,          # 1 day
+            total_time = 86400.0 * 10,        # 10 days
+            start_date = pd.Timestamp("2000-01-01"),
+            horizontal_resolution = 31,
+            coords = coords,
             boundaries = boundaries,
             parameters = params,
+            physics_data = physics_data,
         )
 
         self.assertTrue(model is not None)
 
-        model.init()
+
+        print(model.state.sst_anom.shape)
+
+        print("before sst_anom = ", model.state.sst_anom) 
+        hfluxn = model.physics_data.surface_flux.hfluxn
+        model.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
+        model.couple_ocn_atm()
+        print("after sst_anom = ", model.state.sst_anom)
         
         model.couple_ocn_atm()
- 
+        print("after sst_anom = ", model.state.sst_anom) 
+
         """
         create_model = lambda params=Parameters.default(): SpeedyModel(
             time_step=30,

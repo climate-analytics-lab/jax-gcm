@@ -1,28 +1,33 @@
+
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.physics import PhysicsState, PhysicsTendency
+
+from jcm.slabocean_model.slabocean_model_physics import PhysicsState
+
 from jcm.physics_data import PhysicsData
 from jcm import physical_constants
 
 import jax.numpy as jnp
 from jax import jit
 
+from jax.tree_util import Partial
 
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur import primitive_equations, primitive_equations_states
 
-import functools
+#import tree_util.Partial as Partial
+#import functools
 import pandas as pd
 import xarray as xr
+from datetime import datetime
 
 def jit2(func):
     """ This is the decorator to apply jit on member functions that take the first argument as calling object itself. """
-
-    @functools.wraps(func)
-    @functools.partial(jit, static_argnums=(0,))
+    #@functools.wraps(func)
+    @jax.tree_util.Partial(jit, static_argnums=0)
     def wrapped_func(self, *args, **kwargs):
         return func(self, *args, **kwargs)
     return wrapped_func
@@ -65,18 +70,20 @@ class SlaboceanModel:
 
     def __init__(
         self,
-        time_step=30.0,
-        save_interval=10.0,
-        total_time=1200,
-        start_date=None,
-        horizontal_resolution=31,
-        coords: CoordinateSystem=None,
-        boundaries: BoundaryData=None,
+        time_step,
+        save_interval,
+        total_time,
+        start_date,
+        horizontal_resolution,
+        coords: CoordinateSystem,
+        boundaries: BoundaryData,
+        parameters: Parameters,
+        physics_data: PhysicsData,
         initial_state: PhysicsState=None,
-        parameters: Parameters=None,
         post_process=True, 
         checkpoint_terms=True,
     ) -> None:
+        
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -94,52 +101,43 @@ class SlaboceanModel:
             post_process: Whether to post-process the model output
             checkpoint_terms: Whether to jax.checkpoint each physics term
         """
-        from datetime import datetime
-
+        
         # Integration settings
         self.start_date = start_date or pd.Timestamp("2000-01-01")
-        self.save_interval = save_interval * units.day
-        self.total_time = total_time * units.day
-        dt_si = time_step * units.minute
+        self.save_interval = save_interval
+        self.total_time = total_time
 
         self.physics_specs = PHYSICS_SPECS
 
-        if coords is not None:
-            self.coords = coords
-            horizontal_resolution = coords.horizontal.total_wavenumbers - 2
-        else:
-            self.coords = get_coords(layers=8, horizontal_resolution=horizontal_resolution)
+        self.coords = coords
+        horizontal_resolution = coords.horizontal.total_wavenumbers - 2
         self.geometry = Geometry.from_coords(self.coords)
-
-        self.inner_steps = int(self.save_interval.to(units.minute) / dt_si)
-        self.outer_steps = int(self.total_time / self.save_interval)
-        self.dt = self.physics_specs.nondimensionalize(dt_si)
-
-        self.parameters = parameters or Parameters.default()
+        
+        parameters.slabocean_model.dt = jnp.array(time_step)
+        self.parameters = parameters
+        
+        
         self.post_process_physics = post_process
-
+        self.boundaries = boundaries
+        self.physics_data = physics_data
         if initial_state is not None:
             self.initial_state = initial_state
         else:
-            self.initial_state = None
+            self.initState()
+        
 
-        self.boundaries = boundaries
 
-    def init(self):
-        """
-            surface_filename: filename storing boundary data
-            parameters: initialized model parameters
-            boundaries: partially initialized boundary data
-            time_step: time step - model timestep in minutes <= ??? implementation
-        """
+    def initState(self):
 
         # =========================================================================
         # Initialize land-surface boundary conditions
         # =========================================================================
+        print("Initialize state...")
 
         boundaries = self.boundaries
         parameters = self.parameters
         som_params = parameters.slabocean_model
+        geometry = self.geometry
 
         # Fractional and binary ocean masks
         fmask_l = boundaries.fmask
@@ -150,13 +148,10 @@ class SlaboceanModel:
         #                    jnp.where(boundaries.fmask > (1.0 - parameters.slabocean_model.thrsh), 1.0, fmask_l), 0.0)
 
         # State
-        sst_clim = jnp.asarray(boundaries.sst_clim)
-        si_clim  = jnp.asarray(boundaries.sice_am)
+        self.state = PhysicsState.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
 
-        print("d_omax = ", som_params.d_omax)
-        d_o      = jnp.asarray(boundaries.sst_clim) * 0 + som_params.d_omax # this way we also copy nan together 
-        
-         
+        self.state.d_o = self.state.d_o.at[:].set(10.0)
+
         # =========================================================================
         # Set heat capacities and dissipation times for soil and ice-sheet layers
         # =========================================================================
@@ -168,58 +163,69 @@ class SlaboceanModel:
 
         # Set time_step/heat_capacity and dissipation fields
         #cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
-
-        return boundaries.copy()
-
+        
+        return self
+    
     # Exchanges fluxes between ocean and atmosphere.
     def couple_ocn_atm(
         self,
-        state: PhysicsState,
-        physics_data: PhysicsData,
-        parameters: Parameters,
-        boundaries: BoundaryData=None,
-        geometry: Geometry=None
-    ) -> tuple[PhysicsTendency, PhysicsData]:
+#        state: PhysicsState,
+#        physics_data: PhysicsData,
+#        parameters: Parameters,
+#        boundaries: BoundaryData=None,
+#        geometry: Geometry=None
+    ) -> tuple[PhysicsState, PhysicsData]:
         
+        state = self.state
+        physics_data = self.physics_data
+        parameters = self.parameters
+        boundaries = self.boundaries
         
         day = physics_data.date.model_day()
-        
         sst_anom = None
-
+        
         # Run the ocn model if the flags is switched on
         if boundaries.ocn_coupling_flag:
-            
-            sst_anom, si_anom = SlaboceanModel.run(
-                physics_data.slabocean_model.sst_anom,
-                physics_data.slabocean_model.si_anom,
+           
+            print("Run!") 
+            #state.sst_anom = state.sst_anom.at[:].set(1)
+
+
+            #print(hash(state.sst_anom))
+            #print(state.sst_anom)
+            sst_anom, si_anom = run(
+                state.sst_anom,
+                state.si_anom,
+                state.d_o,
                 physics_data.surface_flux.hfluxn, # net downward heat flux
-                boundaries.ocn_d0,
                 parameters.slabocean_model.dt,
                 parameters.slabocean_model.tau0,
             )
             
-        # Otherwise get the land surface from climatology
+        # Otherwise get from climatology
         else:
             sst_anom = boundaries.sst_clim[:, :, day]
 
-        # update land physics data
-        slabocean_model_data = physics_data.slabocean_model.copy(sst_anom=sst_anom, si_anom=si_anom)
-        physics_data = physics_data.copy(slabocean_model=slabocean_model_data)
-        physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
+        # update physics data
+        #slabocean_model_data = physics_data.slabocean_model.copy(sst_anom=sst_anom, si_anom=si_anom)
+        physics_data = physics_data.copy(slabocean_model=physics_data)
+        self.state = state.copy(sst_anom=sst_anom, si_anom=si_anom)
+        #physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
         
-        return physics_tendency, physics_data
+        #return physics_tendency, physics_data
+        return physics_data
         
         
-    #Integrates slab land-surface model for one day.
-    @jit2
-    @classmethod
-    def run(cls, sst_anom, si_anom, hfluxn, d_o, dt, tau0):
-        
-        factor = 1.0 + dt / tau0 
-        # Time evolution of temperature anomaly
-        sst_anom = sst_anom / factor + dt / ( factor * physical_constants.cp_ocn * d_0 ) * hfluxn[:, :, 0]
+#Integrates slab land-surface model for one day.
+@jit
+def run(sst_anom, si_anom, d_o, hfluxn, dt, tau0):
+#def run(cls, sst_anom, si_anom, d_o, hfluxn, dt, tau0):
+    
+    factor = 1.0 + dt / tau0 
+    # Time evolution of temperature anomaly
+    sst_anom = sst_anom / factor + dt / ( factor * physical_constants.cp_ocn * d_o ) * hfluxn[:, :, 0]
 
-        return sst_anom, si_anom
+    return sst_anom, si_anom
 
 
 
