@@ -3,7 +3,7 @@ import tree_math
 from jcm.date import DateData
 from jax import tree_util
 
-from jcm.slabocean_model_physics_data import SlaboceanModelData
+from jcm.slabocean_model.slabocean_model_physics_data import SlaboceanModelData
 
 ablco2_ref = 6.0
 

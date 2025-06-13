@@ -277,7 +277,7 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        import jcm.slabocean_model as som
+        import jcm.slabocean_model.slabocean_model as som
         from jcm.boundaries import initialize_boundaries
         from pathlib import Path
         
@@ -293,7 +293,7 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: make_tangent(x), params)
         """
 
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        boundaries_dir = Path(__file__).resolve().parent / ".." / 'data/bc/t30/clim'
 
         # Generate daily values from monthly climatology
         daily_boundary_condition_file = boundaries_dir / 'boundaries_daily.nc'
@@ -316,6 +316,8 @@ class TestModelUnit(unittest.TestCase):
         self.assertTrue(model is not None)
 
         model.init()
+        
+        model.couple_ocn_atm()
  
         """
         create_model = lambda params=Parameters.default(): SpeedyModel(

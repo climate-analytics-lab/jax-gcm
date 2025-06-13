@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-import jcm.slabocean_model_tools as tools
+import jcm.slabocean_model.slabocean_model_tools as tools
 
 @tree_math.struct
 class SlaboceanModelData:

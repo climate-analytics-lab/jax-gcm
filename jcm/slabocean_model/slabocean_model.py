@@ -132,43 +132,43 @@ class SlaboceanModel:
             boundaries: partially initialized boundary data
             time_step: time step - model timestep in minutes <= ??? implementation
         """
-        
+
         # =========================================================================
         # Initialize land-surface boundary conditions
         # =========================================================================
-        
+
         boundaries = self.boundaries
         parameters = self.parameters
         som_params = parameters.slabocean_model
-        
+
         # Fractional and binary ocean masks
         fmask_l = boundaries.fmask
         bmask_l = jnp.where(fmask_l >= 0.0, 1.0, 0.0)
-        
+
         # Update fmask_l based on the conditions
         #fmask_l = jnp.where(bmask_l == 1.0,
         #                    jnp.where(boundaries.fmask > (1.0 - parameters.slabocean_model.thrsh), 1.0, fmask_l), 0.0)
-        
+
         # State
         sst_clim = jnp.asarray(boundaries.sst_clim)
         si_clim  = jnp.asarray(boundaries.sice_am)
-        
+
         print("d_omax = ", som_params.d_omax)
         d_o      = jnp.asarray(boundaries.sst_clim) * 0 + som_params.d_omax # this way we also copy nan together 
         
-        
+         
         # =========================================================================
         # Set heat capacities and dissipation times for soil and ice-sheet layers
         # =========================================================================
-        
+
         # 2. Compute constant fields
         # Set domain mask (blank out sea points)
         #dmask = jnp.ones_like(fmask_l)
         #dmask = jnp.where(bmask_l < parameters.slabocean_model.flandmin, 0, dmask)
-        
+
         # Set time_step/heat_capacity and dissipation fields
         #cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
-        
+
         return boundaries.copy()
 
     # Exchanges fluxes between ocean and atmosphere.

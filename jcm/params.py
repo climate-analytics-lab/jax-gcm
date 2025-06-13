@@ -6,7 +6,7 @@ import tree_math
 import jax.numpy as jnp
 from jax import tree_util
 
-from jcm.slabocean_model_parameters import SlaboceanModelParameters
+from jcm.slabocean_model.slabocean_model_parameters import SlaboceanModelParameters
 
 
 @tree_math.struct
