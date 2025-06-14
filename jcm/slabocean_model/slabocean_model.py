@@ -33,14 +33,6 @@ def jit2(func):
     return wrapped_func
 
 
-#
-# Questions:
-# 1. Mask conditions
-# 2. For the `run` function, because of JAX, I need
-#    to write out arguments explicitly instead of 
-#    calling model.run(). So, there needs a class function
-#    that has all the differentiable parameters needed.
-
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
@@ -67,6 +59,34 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     )
 
 class SlaboceanModel:
+
+    @classmethod 
+    def initBoundaries(
+        cls,
+        filename,
+        parameters: Parameters,
+        boundaries: BoundaryData,
+    ):
+        """
+            filename: filename storing boundary data
+            parameters: initialized model parameters
+            boundaries: partially initialized boundary data
+        """
+        
+        # =========================================================================
+        # Initialize ocean surface boundary conditions
+        # =========================================================================
+       
+        print("Reading file containing boundary information: ", filename)
+
+        with xr.open_dataset(filename) as ds_bc:
+            sst_clim = jnp.asarray(ds_bc["sst"])
+            sic_clim = jnp.asarray(ds_bc["icec"])
+        
+        return boundaries.copy(
+            sst_clim = sst_clim,
+            sic_clim = sic_clim,
+        )
 
     def __init__(
         self,
@@ -173,33 +193,6 @@ class SlaboceanModel:
         
         return self
 
-    @classmethod 
-    def initBoundaries(
-        cls,
-        filename,
-        parameters: Parameters,
-        boundaries: BoundaryData,
-    ):
-        """
-            filename: filename storing boundary data
-            parameters: initialized model parameters
-            boundaries: partially initialized boundary data
-        """
-        
-        # =========================================================================
-        # Initialize ocean surface boundary conditions
-        # =========================================================================
-       
-        print("Reading file containing boundary information: ", filename)
-
-        with xr.open_dataset(filename) as ds_bc:
-            sst_clim = jnp.asarray(ds_bc["sst"])
-            sic_clim = jnp.asarray(ds_bc["icec"])
-        
-        return boundaries.copy(
-            sst_clim = sst_clim,
-            sic_clim = sic_clim,
-        )
 
     # Exchanges fluxes between ocean and atmosphere.
     def couple_ocn_atm(
@@ -256,7 +249,7 @@ class SlaboceanModel:
         
         
 #Integrates slab land-surface model for one day.
-#@jit
+@jit
 def run(
     sst,
     sic,
@@ -274,14 +267,7 @@ def run(
     sic_anom = sic - sic_clim_0
  
     factor = 1.0 + dt / tau0 
-   
-    #print("sst_anom = ", sst_anom)
-    #print("dt = ", dt)
-    #print("tau0 = ", tau0)
-    #print("factor = ", factor) 
-    # Time evolution of temperature anomaly
     sst_anom = sst_anom / factor +  dt * hfluxn[:, :, 0] / ( factor * physical_constants.cp_sw * physical_constants.rho_sw * d_o )
-    
     
     new_sst = sst_anom + sst_clim_1
     new_sic = sic_anom + sic_clim_1
