@@ -333,24 +333,18 @@ class TestModelUnit(unittest.TestCase):
         )
 
         self.assertTrue(model is not None)
-
-
-        print(model.state.sst_anom.shape)
-
-        print("before sst_anom = ", model.state.sst_anom) 
+        
         hfluxn = model.physics_data.surface_flux.hfluxn
         model.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
         model.couple_ocn_atm()
-        print("after sst_anom = ", model.state.sst_anom)
         
-        model.couple_ocn_atm()
-        print("after sst_anom = ", model.state.sst_anom) 
        
         import xarray as xr
         ds = xr.Dataset(
             data_vars = dict(
-                sst_anom = ( ["lat", "lon"], model.state.sst_anom ),
-                si_anom  = ( ["lat", "lon"], model.state.si_anom  ),
+                sst =  ( ["lat", "lon"], model.state.sst ),
+                sic  = ( ["lat", "lon"], model.state.sic ),
+                d_o  = ( ["lat", "lon"], model.state.d_o ),
             ),
         )
 

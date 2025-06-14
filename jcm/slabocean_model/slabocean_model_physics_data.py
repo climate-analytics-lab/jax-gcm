@@ -7,16 +7,16 @@ import jcm.slabocean_model.slabocean_model_tools as tools
 class SlaboceanModelData:
     
     sst_anom : jnp.ndarray
-    si_anom  : jnp.ndarray
+    sic_anom  : jnp.ndarray
    
 
     @classmethod
-    def __consts(cls, nodal_shape, const, sst_anom = None, si_anom = None):
+    def __consts(cls, nodal_shape, const, sst_anom = None, sic_anom = None):
         
         
         return SlaboceanModelData(
             sst_anom = sst_anom if sst_anom is not None else jnp.full((nodal_shape), const),
-            si_anom  = si_anom  if si_anom  is not None else jnp.full((nodal_shape), const),
+            sic_anom  = sic_anom  if sic_anom  is not None else jnp.full((nodal_shape), const),
         )
     
      
@@ -31,7 +31,7 @@ class SlaboceanModelData:
     def copy(self, **kwargs):
         return SlaboceanModelData(
             sst_anom = tools.getDefault(kwargs, "sst_anom", self.sst_anom),
-            si_anom  = tools.getDefault(kwargs, "si_anom", self.si_anom),
+            sic_anom  = tools.getDefault(kwargs, "sic_anom", self.sic_anom),
         )
 
     def isnan(self):

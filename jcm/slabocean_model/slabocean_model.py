@@ -143,13 +143,20 @@ class SlaboceanModel:
         fmask_l = boundaries.fmask
         bmask_o = jnp.where(fmask_l == 0.0, 1.0, 0.0)
 
-        # State
+        # Create state
         self.state = PhysicsState.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
-        self.state.d_o = self.state.d_o.at[:].set(10.0)
 
+        # Define initial sst
+        self.state.sst = jnp.array(boundaries.sst_clim[:, :, 0])
+        self.state.sic = jnp.array(boundaries.sic_clim[:, :, 0])
+        
+        d_o = jnp.zeros_like(self.state.sst) + som_params.d_omax + (som_params.d_omin - som_params.d_omax) * (geometry.coa**3.0)[jnp.newaxis, :]
+        #self.state.d_o = self.state.d_o.at[:].set(10.0)
+        print("Shape of d_o: ", d_o.shape)
         self.state = self.state.copy(
-            sst_anom = self.state.sst_anom.at[bmask_o == 0.0].set(jnp.nan),
-            si_anom  = self.state.si_anom.at[bmask_o == 0.0].set(jnp.nan),
+            sst = self.state.sst.at[bmask_o == 0.0].set(jnp.nan),
+            sic = self.state.sic.at[bmask_o == 0.0].set(jnp.nan),
+            d_o = d_o.at[bmask_o == 0.0].set(jnp.nan),
         )
 
         # =========================================================================
@@ -165,7 +172,35 @@ class SlaboceanModel:
         #cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
         
         return self
-    
+
+    @classmethod 
+    def initBoundaries(
+        cls,
+        filename,
+        parameters: Parameters,
+        boundaries: BoundaryData,
+    ):
+        """
+            filename: filename storing boundary data
+            parameters: initialized model parameters
+            boundaries: partially initialized boundary data
+        """
+        
+        # =========================================================================
+        # Initialize ocean surface boundary conditions
+        # =========================================================================
+       
+        print("Reading file containing boundary information: ", filename)
+
+        with xr.open_dataset(filename) as ds_bc:
+            sst_clim = jnp.asarray(ds_bc["sst"])
+            sic_clim = jnp.asarray(ds_bc["icec"])
+        
+        return boundaries.copy(
+            sst_clim = sst_clim,
+            sic_clim = sic_clim,
+        )
+
     # Exchanges fluxes between ocean and atmosphere.
     def couple_ocn_atm(
         self,
@@ -182,34 +217,38 @@ class SlaboceanModel:
         boundaries = self.boundaries
         
         day = physics_data.date.model_day()
-        sst_anom = None
-        
         # Run the ocn model if the flags is switched on
         if boundaries.ocn_coupling_flag:
-           
+            
             print("Run!") 
-            #state.sst_anom = state.sst_anom.at[:].set(1)
+            #state.sst = state.sst.at[:].set(1)
 
-
-            #print(hash(state.sst_anom))
-            #print(state.sst_anom)
-            sst_anom, si_anom = run(
-                state.sst_anom,
-                state.si_anom,
+            print(parameters.slabocean_model)
+            #print(hash(state.sst))
+            #print(state.sst)
+            sst, sic = run(
+                state.sst,
+                state.sic,
                 state.d_o,
                 physics_data.surface_flux.hfluxn, # net downward heat flux
                 parameters.slabocean_model.dt,
                 parameters.slabocean_model.tau0,
+                boundaries.sst_clim[:, :, day],
+                boundaries.sst_clim[:, :, day+1],
+                boundaries.sic_clim[:, :, day],
+                boundaries.sic_clim[:, :, day+1],
             )
-            
+        
+         
         # Otherwise get from climatology
         else:
-            sst_anom = boundaries.sst_clim[:, :, day]
-
+            sst = boundaries.sst_clim[:, :, day+1]
+            sic = boundaries.sst_clim[:, :, day+1]
+            
         # update physics data
-        #slabocean_model_data = physics_data.slabocean_model.copy(sst_anom=sst_anom, si_anom=si_anom)
+        #slabocean_model_data = physics_data.slabocean_model.copy(sst=sst, si=si)
         physics_data = physics_data.copy(slabocean_model=physics_data)
-        self.state = state.copy(sst_anom=sst_anom, si_anom=si_anom)
+        self.state = state.copy(sst=sst, sic=sic)
         #physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
         
         #return physics_tendency, physics_data
@@ -217,15 +256,37 @@ class SlaboceanModel:
         
         
 #Integrates slab land-surface model for one day.
-@jit
-def run(sst_anom, si_anom, d_o, hfluxn, dt, tau0):
-#def run(cls, sst_anom, si_anom, d_o, hfluxn, dt, tau0):
+#@jit
+def run(
+    sst,
+    sic,
+    d_o,
+    hfluxn,
+    dt,
+    tau0,
+    sst_clim_0,
+    sst_clim_1,
+    sic_clim_0,
+    sic_clim_1,
+):
     
+    sst_anom = sst - sst_clim_0
+    sic_anom = sic - sic_clim_0
+ 
     factor = 1.0 + dt / tau0 
+   
+    #print("sst_anom = ", sst_anom)
+    #print("dt = ", dt)
+    #print("tau0 = ", tau0)
+    #print("factor = ", factor) 
     # Time evolution of temperature anomaly
-    sst_anom = sst_anom / factor + dt / ( factor * physical_constants.cp_ocn * d_o ) * hfluxn[:, :, 0]
-
-    return sst_anom, si_anom
+    sst_anom = sst_anom / factor +  dt * hfluxn[:, :, 0] / ( factor * physical_constants.cp_sw * physical_constants.rho_sw * d_o )
+    
+    
+    new_sst = sst_anom + sst_clim_1
+    new_sic = sic_anom + sic_clim_1
+    
+    return new_sst, new_sic
 
 
 

@@ -20,43 +20,43 @@ from jcm.physical_constants import p0
 @tree_math.struct
 class PhysicsState:
 
-    sst_anom: jnp.ndarray
-    si_anom:  jnp.ndarray
+    sst: jnp.ndarray
+    sic:  jnp.ndarray
     d_o:      jnp.ndarray
     
     @classmethod
     def zeros(self, shape,
-        sst_anom = None,
-        si_anom  = None,
+        sst = None,
+        sic  = None,
         d_o      = None,
     ):
         return PhysicsState(
-            sst_anom if sst_anom is not None else jnp.zeros(shape),
-            si_anom if si_anom is not None else jnp.zeros(shape),
+            sst if sst is not None else jnp.zeros(shape),
+            sic if sic is not None else jnp.zeros(shape),
             d_o if d_o is not None else jnp.zeros(shape),
         )
 
     @classmethod
     def ones(self, shape,
-        sst_anom = None,
-        si_anom  = None,
+        sst = None,
+        sic  = None,
         d_o = None,
     ):
         
         return PhysicsState(
-            sst_anom if sst_anom is not None else jnp.ones(shape),
-            si_anom if si_anom is not None else jnp.ones(shape),
+            sst if sst is not None else jnp.ones(shape),
+            sic if sic is not None else jnp.ones(shape),
             d_o if d_o is not None else jnp.ones(shape),
         )
 
     def copy(self,
-        sst_anom = None,
-        si_anom  = None,
+        sst = None,
+        sic  = None,
         d_o = None,
     ):
         return PhysicsState(
-            sst_anom if sst_anom is not None else self.sst_anom,
-            si_anom if si_anom is not None else self.si_anom,
+            sst if sst is not None else self.sst,
+            sic if sic is not None else self.sic,
             d_o if d_o is not None else self.d_o,
         )
 

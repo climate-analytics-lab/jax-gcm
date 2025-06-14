@@ -40,4 +40,5 @@ nstrad = 3 # number of timesteps between shortwave evaluations
 
 frz_fw = 273.15         # freezing point of freshwater at 1 atm (unit: Kelvin)
 frz_sw = frz_fw - 1.8   # freezing point of seawater at 1 atm (unit: Kelvin)
-cp_ocn = 3996.0 # ocean heat capacity of constant pressure (unit: J / kg)
+cp_sw  = 3996.0 # ocean heat capacity of constant pressure (unit: J / kg)
+rho_sw = 1029.0 # ocean density (unit: kg / m^3)
