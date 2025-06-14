@@ -141,16 +141,16 @@ class SlaboceanModel:
 
         # Fractional and binary ocean masks
         fmask_l = boundaries.fmask
-        bmask_l = jnp.where(fmask_l >= 0.0, 1.0, 0.0)
-
-        # Update fmask_l based on the conditions
-        #fmask_l = jnp.where(bmask_l == 1.0,
-        #                    jnp.where(boundaries.fmask > (1.0 - parameters.slabocean_model.thrsh), 1.0, fmask_l), 0.0)
+        bmask_o = jnp.where(fmask_l == 0.0, 1.0, 0.0)
 
         # State
         self.state = PhysicsState.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
-
         self.state.d_o = self.state.d_o.at[:].set(10.0)
+
+        self.state = self.state.copy(
+            sst_anom = self.state.sst_anom.at[bmask_o == 0.0].set(jnp.nan),
+            si_anom  = self.state.si_anom.at[bmask_o == 0.0].set(jnp.nan),
+        )
 
         # =========================================================================
         # Set heat capacities and dissipation times for soil and ice-sheet layers

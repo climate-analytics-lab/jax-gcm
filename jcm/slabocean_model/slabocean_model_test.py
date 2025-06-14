@@ -345,7 +345,17 @@ class TestModelUnit(unittest.TestCase):
         
         model.couple_ocn_atm()
         print("after sst_anom = ", model.state.sst_anom) 
+       
+        import xarray as xr
+        ds = xr.Dataset(
+            data_vars = dict(
+                sst_anom = ( ["lat", "lon"], model.state.sst_anom ),
+                si_anom  = ( ["lat", "lon"], model.state.si_anom  ),
+            ),
+        )
 
+        ds.to_netcdf("test.nc")
+        
         """
         create_model = lambda params=Parameters.default(): SpeedyModel(
             time_step=30,
