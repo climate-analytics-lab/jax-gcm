@@ -14,10 +14,11 @@ This branch translates the slab ocean model in SpeedyPy into JAX-gcm.
 - [v] Figure out how to test the code.
 - [v] Create slab ocean model parameter class.
 - Translates component
-    1. init
-    2. coupled atm ocn
-    3. run
-- PhysicalState 
+    1. [v] init
+    2. [v] coupled atm ocn
+    3. [v] run
+- Write a recorder that manages data output.
+- Discuss and figure out the role of different initialization functions. Currently, I think the initialization is too coupled.
 
 
 
