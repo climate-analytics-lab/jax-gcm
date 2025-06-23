@@ -5,6 +5,7 @@ to the specific physics being used.
 """
 
 from collections import abc
+import jax
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
@@ -17,7 +18,36 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.physical_constants import p0
+import dataclasses
+
+@tree_math.struct
+class SpeedyState:
+   state: State
+   data: PhysicsData
+
+@dataclasses.dataclass
+class SpeedyPrimitiveEquations(PrimitiveEquations):
+    @jax.named_call
+    def explicit_terms(self, state: SpeedyState) -> SpeedyState:
+        return SpeedyState(
+           state=super().explicit_terms(state.state),
+           data=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.data)
+        )
+
+    @jax.named_call
+    def implicit_terms(self, state: SpeedyState) -> SpeedyState:
+        return SpeedyState(
+           state=super().implicit_terms(state.state),
+           data=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.data)
+        )
+    
+    @jax.named_call
+    def implicit_inverse(self, state: State, step_size: float) -> State:
+        # TODO: double check if this is correct
+        return SpeedyState(
+           state=super().implicit_inverse(state.state, step_size),
+           data=state.data
+        )
 
 @tree_math.struct
 class PhysicsState:
@@ -160,7 +190,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
         temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
         log_surface_pressure=modal_log_sp,
         tracers={'specific_humidity': q_modal}
-        )
+    )
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """
@@ -187,12 +217,14 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = State(vor_tend_modal,
-                                      div_tend_modal,
-                                      t_tend_modal,
-                                      log_sp_tend_modal,
-                                      sim_time=0.,
-                                      tracers={'specific_humidity': q_tend_modal})
+    dynamics_tendency = State(
+        vor_tend_modal,
+        div_tend_modal,
+        t_tend_modal,
+        log_sp_tend_modal,
+        sim_time=0.,
+        tracers={'specific_humidity': q_tend_modal}
+    )
     return dynamics_tendency
 
 def verify_state(state: PhysicsState) -> PhysicsState:
@@ -216,7 +248,7 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     return updated_tendencies
 
 def get_physical_tendencies(
-    state: State,
+    state: SpeedyState,
     dynamics: PrimitiveEquations,
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
@@ -224,7 +256,7 @@ def get_physical_tendencies(
     parameters: Parameters,
     geometry: Geometry,
     data: PhysicsData = None
-    ) -> State:
+) -> SpeedyState:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
@@ -236,19 +268,24 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
+    dinosaur_state, previous_data = state.state, state.data
+    # print(previous_data)
 
-    physics_state = dynamics_state_to_physics_state(state, dynamics)
+    physics_state = dynamics_state_to_physics_state(dinosaur_state, dynamics)
     state = verify_state(physics_state)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
     # and implicitly passed to the next physics_term. tendencies are summed
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
-    
     for term in physics_terms:
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
-
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
-
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    return dynamics_tendency
+
+    output_tendency = SpeedyState(
+        state=dynamics_tendency,
+        data=(data - previous_data) / (time_step * 60.) # FIXME: see if we can do this another way
+    )
+    
+    return output_tendency

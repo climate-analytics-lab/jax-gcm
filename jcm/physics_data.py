@@ -43,12 +43,12 @@ class SWRadiationData:
     zenit: jnp.ndarray # The Zenit angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
-    icltop: jnp.ndarray # Cloud top level
+    icltop: jnp.ndarray # Cloud top level FIXME: should be integer
     cloudc: jnp.ndarray # Total cloud cover
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
-    compute_shortwave: jnp.bool
+    compute_shortwave: jnp.ndarray # FIXME: should be bool
 
     @classmethod
     def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
@@ -62,12 +62,12 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape,dtype=int),
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
-            compute_shortwave = compute_shortwave if compute_shortwave is not None else False
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else jnp.array(0.)
         )
     
     @classmethod
@@ -82,12 +82,12 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
             stratz = stratz if stratz is not None else jnp.ones(nodal_shape),
             gse = gse if gse is not None else jnp.ones(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.ones(nodal_shape,dtype=int),
+            icltop = icltop if icltop is not None else jnp.ones(nodal_shape),
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
-            compute_shortwave = compute_shortwave if compute_shortwave is not None else True
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else jnp.array(1.)
         )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
@@ -208,7 +208,7 @@ class CondensationData:
 @tree_math.struct
 class ConvectionData:
     se: jnp.ndarray # dry static energy
-    iptop: jnp.ndarray # Top of convection (layer index)
+    iptop: jnp.ndarray # Top of convection (layer index) FIXME: should be integer
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
 
@@ -216,7 +216,7 @@ class ConvectionData:
     def zeros(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             se = se if se is not None else jnp.zeros((node_levels,)+nodal_shape),
-            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
+            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape)),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
             precnv = precnv if precnv is not None else jnp.zeros(nodal_shape),
         )
@@ -225,7 +225,7 @@ class ConvectionData:
     def ones(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             se = se if se is not None else jnp.ones((node_levels,)+nodal_shape),
-            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
+            iptop = iptop if iptop is not None else jnp.ones((nodal_shape)),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
         )

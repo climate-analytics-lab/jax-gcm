@@ -49,7 +49,7 @@ def get_surface_fluxes(
         - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
-    day = physics_data.date.model_day()
+    day = jnp.round(physics_data.date.model_day()).astype(jnp.int32)
     stl_am = physics_data.land_model.stl_am
     soilw_am = boundaries.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape

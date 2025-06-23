@@ -1,20 +1,62 @@
-from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
+import tree_math
+from typing import Callable, Any, Sequence, Union
 from numpy import timedelta64
 import dinosaur
-from dinosaur.scales import SI_SCALE, units
-from dinosaur.time_integration import ExplicitODE
+from dinosaur import typing
 from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur.scales import SI_SCALE, units
+from dinosaur.time_integration import ExplicitODE, ImplicitExplicitODE
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
-from jcm.date import Timestamp, Timedelta
+from jcm.date import Timestamp, Timedelta, DateData
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
+from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData, SpeedyPrimitiveEquations
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+@tree_math.struct
+class ModelOutput:
+    dynamics: PhysicsState
+    physics: PhysicsData
+
+def trajectory_from_step(
+    step_fn: typing.TimeStepFn,
+    outer_steps: int,
+    inner_steps: int,
+    *,
+    start_with_input: bool = False,
+    post_process_fn: typing.PostProcessFn = lambda x: x,
+) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
+    """Returns a function that accumulates repeated applications of `step_fn`.
+    Compute a trajectory by repeatedly calling `step_fn()`
+    `outer_steps * inner_steps` times.
+    Args:
+        step_fn: function that takes a state and returns state after one time step.
+        outer_steps: number of steps to save in the generated trajectory.
+        inner_steps: number of repeated calls to step_fn() between saved steps.
+        start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
+        post_process_fn: function to apply to trajectory outputs.
+    Returns:
+        A function that takes an initial state and returns a tuple consisting of:
+        (1) the final frame of the trajectory.
+        (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
+    """
+    def inner_step(carry, _):
+        x, x_sum = carry
+        x_next = step_fn(x)
+        return (x_next, x_sum + x_next), None
+
+    def outer_step(carry, _):
+        zeros = tree_map(lambda a: jnp.zeros_like(a), carry)
+        (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
+        return x_final, post_process_fn(x_sum / inner_steps)
+
+    return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
 
 def set_physics_flags(state: PhysicsState,
     physics_data: PhysicsData,
@@ -28,8 +70,8 @@ def set_physics_flags(state: PhysicsState,
         clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
         This could also apply to forcing and coupling.
     '''
-    model_step = physics_data.date.model_step
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    model_step = jnp.round(physics_data.date.model_step).astype(jnp.int32) # FIXME: somehow the conversion to int produces unrealistic climatology, despite being required for shortwave to run
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1).astype(jnp.float32)
     shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
     physics_data = physics_data.copy(shortwave_rad=shortwave_data)
 
@@ -91,7 +133,6 @@ def convert_tendencies_to_equation(
 
     from jcm.physics_data import PhysicsData
     from jcm.physics import get_physical_tendencies
-    from jcm.date import DateData
 
     def physical_tendencies(state):
         '''
@@ -105,8 +146,8 @@ def convert_tendencies_to_equation(
 
         # Set the model time (in datetime format) and model step (number of steps since start time)
         date = DateData.set_date(
-            model_time = reference_date + Timedelta(seconds=state.sim_time),
-            model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
+            model_time = reference_date + Timedelta(seconds=state.state.sim_time),
+            model_step = ((state.state.sim_time/60) / time_step).astype(jnp.float32) #FIXME
         )
 
         data = PhysicsData.zeros(
@@ -129,15 +170,13 @@ def convert_tendencies_to_equation(
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (31, 42, 85, or 213).
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
+    valid_resolutions = [21, 31, 42, 85, 106, 119, 170, 213, 340, 425]
     resolution_map = {
-        31: dinosaur.spherical_harmonic.Grid.T31,
-        42: dinosaur.spherical_harmonic.Grid.T42,
-        85: dinosaur.spherical_harmonic.Grid.T85,
-        213: dinosaur.spherical_harmonic.Grid.T213,
+        k: getattr(dinosaur.spherical_harmonic.Grid, f'T{k}') for k in valid_resolutions
     }
-
+    
     if horizontal_resolution not in resolution_map:
         raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
 
@@ -160,7 +199,7 @@ class SpeedyModel:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200, start_date=None,
                  layers=8, horizontal_resolution=31, coords: CoordinateSystem=None,
                  boundaries: BoundaryData=None, initial_state: PhysicsState=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+                 post_process=True, checkpoint_terms=True, output_averages=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -230,11 +269,12 @@ class SpeedyModel:
             self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
-        self.primitive = primitive_equations.PrimitiveEquations(
+        self.primitive = SpeedyPrimitiveEquations(
             self.ref_temps,
             truncated_orography, 
             self.coords,
-            self.physics_specs)
+            self.physics_specs
+        )
 
         speedy_forcing = convert_tendencies_to_equation(self.primitive,
                                                         time_step,
@@ -249,22 +289,22 @@ class SpeedyModel:
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
-        filters = [
-            dinosaur.time_integration.exponential_step_filter(
-                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
-            ),
-        ]
+        filters = [] # FIXME
+        #     dinosaur.time_integration.exponential_step_filter(
+        #         self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
+        #     ),
+        # ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
+        self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        from jcm.physics import physics_state_to_dynamics_state
+        from jcm.physics import physics_state_to_dynamics_state, SpeedyState
 
         #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
         if self.initial_state is not None:
             self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure 
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
-            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
         else:     
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
@@ -278,39 +318,32 @@ class SpeedyModel:
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
 
-            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        initial_state = primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        initial_physics_data = PhysicsData.zeros(
+            self.coords.nodal_shape[1:],
+            self.coords.nodal_shape[0],
+            date=DateData.set_date(model_time=self.start_date) # TODO: add sim_time here
+        )
+
+        return SpeedyState(
+            state=initial_state,
+            data=initial_physics_data,
+        )
 
     def post_process(self, state):
-        from jcm.date import DateData
-        from jcm.physics_data import PhysicsData
         from jcm.physics import dynamics_state_to_physics_state
 
-        physics_state = dynamics_state_to_physics_state(state, self.primitive)
-        
-        physics_data = None
-        if self.post_process_physics:
-            physics_data = PhysicsData.zeros(
-                self.coords.nodal_shape[1:],
-                self.coords.nodal_shape[0],
-                date=DateData.set_date(
-                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)    
-                )
-            )
-
-            for term in self.physics_terms:
-                _, physics_data = term(physics_state, physics_data, self.parameters, self.boundaries, self.geometry)
-
+        physics_state = dynamics_state_to_physics_state(state.state, self.primitive)
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return {
-            'dynamics': physics_state,
-            'physics': physics_data
-        }
+        return ModelOutput(
+            dynamics=physics_state,
+            physics=state.data if self.post_process_physics else None
+        )
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+        integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
@@ -324,16 +357,12 @@ class SpeedyModel:
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
     def predictions_to_xarray(self, predictions):
-        # extract dynamics predictions (PhysicsState format)
-        # and physics predictions (PhysicsData format) from postprocessed output
-        dynamics_predictions = predictions['dynamics']
-        physics_predictions = predictions['physics']
-
+        # process output PhysicsData
         physics_preds_dict = {}
-        if physics_predictions is not None:
+        if predictions.physics is not None:
             physics_preds_dict = {
                 f"{module}.{field}": value # avoids name conflicts between fields of different modules
-                for module, module_dict in physics_predictions.asdict().items()
+                for module, module_dict in predictions.physics.asdict().items()
                 for field, value in module_dict.asdict().items()
             }
             # replace multi-channel fields with a field for each channel
@@ -346,7 +375,9 @@ class SpeedyModel:
                     )
                     del physics_preds_dict[k]
 
-        pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
+        # combine output State and processed PhysicsData
+
+        pred_ds = self.data_to_xarray(predictions.dynamics.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))

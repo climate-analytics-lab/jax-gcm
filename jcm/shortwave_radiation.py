@@ -23,7 +23,7 @@ def get_shortwave_rad_fluxes(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
+        physics_data.shortwave_rad.compute_shortwave > .5, 
         shortwave_rad_fluxes, 
         pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
@@ -53,7 +53,7 @@ def shortwave_rad_fluxes(operand):
 
     psa = state.surface_pressure
     qa = state.specific_humidity
-    icltop = physics_data.shortwave_rad.icltop
+    icltop = jnp.round(physics_data.shortwave_rad.icltop).astype(jnp.int32)
     cloudc = physics_data.shortwave_rad.cloudc
     clstr = physics_data.shortwave_rad.cloudstr
 
@@ -316,7 +316,7 @@ def get_clouds(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
+        physics_data.shortwave_rad.compute_shortwave > .5, 
         clouds, 
         pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
@@ -353,6 +353,7 @@ def clouds(operand):
 
     humidity = physics_data.humidity
     conv = physics_data.convection
+    iptop = jnp.round(conv.iptop).astype(jnp.int32)
     condensation = physics_data.condensation
     kx = state.temperature.shape[0]
     compute_shortwave = physics_data.shortwave_rad.compute_shortwave
@@ -392,7 +393,7 @@ def clouds(operand):
     pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
     cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
-    icltop = jnp.minimum(conv.iptop, icltop)
+    icltop = jnp.minimum(iptop, icltop)
 
     # 2.  Equivalent specific humidity of clouds
     qcloud = state.specific_humidity[nl1]
@@ -410,6 +411,8 @@ def clouds(operand):
     clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
     clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
 
+    # convert icltop to jnp float32
+    icltop = jnp.asarray(icltop, dtype=jnp.float32)
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
 

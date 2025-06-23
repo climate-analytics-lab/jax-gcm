@@ -55,14 +55,10 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model(self):
         from jcm.model import SpeedyModel
 
-        layers = 8
         # optionally add a boundary conditions file
         model = SpeedyModel(
-            time_step=720,
             save_interval=1,
             total_time=2,
-            layers=layers,
-            parameters=Parameters.default()
         )
     
         state = model.get_initial_state()
@@ -72,9 +68,10 @@ class TestModelUnit(unittest.TestCase):
 
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (model.outer_steps,) + nodal_zxy
-    
+
         final_state, predictions = model.unroll(state)
-        dynamics_predictions = predictions['dynamics']
+        final_state = final_state.state
+        dynamics_predictions = predictions.dynamics
 
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(dynamics_predictions)
@@ -117,21 +114,21 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
         
         #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
+        model = SpeedyModel(save_interval=(1/48.), total_time=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
         
-        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
+        input = (jtu.tree_map(lambda x: jnp.ones_like(x), primals[0]), jtu.tree_map(lambda x: jnp.ones_like(x), primals[1]))
 
-        df_dstate = f_vjp(input) 
+        df_dstate = f_vjp(input)
         
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
@@ -139,25 +136,20 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
 
-        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), state)
-        
-        def make_ones_prediction_object(pred): 
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
+        model = SpeedyModel(save_interval=(1/48.), total_time=(1/24.))
         state = model.get_initial_state()
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(model.unroll, state) 
-        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
+        input = (jtu.tree_map(lambda x: jnp.ones_like(x), primals[0]), 
+                 jtu.tree_map(lambda x: jnp.ones_like(x), primals[1]))
         df_dstate = f_vjp(input) 
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
     def test_speedy_model_param_gradients_isnan_vjp(self):
@@ -177,14 +169,10 @@ class TestModelUnit(unittest.TestCase):
         )
 
         create_model = lambda params=Parameters.default(): SpeedyModel(
-            time_step=30,
             save_interval=1/24.,
             total_time=2./24.,
-            layers=8,
             boundaries=default_boundaries(),
             parameters=params,
-            post_process=True,
-            checkpoint_terms=True,
         )
         
         def model_run_wrapper(params):
@@ -193,13 +181,10 @@ class TestModelUnit(unittest.TestCase):
             _, predictions = model.unroll(state)
             return predictions
         
-        def make_ones_prediction_object(pred): 
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
         # Calculate gradients using VJP
         params = Parameters.default()
         primal, f_vjp = jax.vjp(model_run_wrapper, params)
-        df_dparams = f_vjp(make_ones_prediction_object(primal))
+        df_dparams = f_vjp(jtu.tree_map(lambda x: jnp.zeros_like(x), primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     
@@ -232,14 +217,10 @@ class TestModelUnit(unittest.TestCase):
         )
 
         create_model = lambda params=Parameters.default(): SpeedyModel(
-            time_step=30,
             save_interval=1/24.,
             total_time=2./24.,
-            layers=8,
             boundaries=default_boundaries(),
             parameters=params,
-            post_process=True,
-            checkpoint_terms=True,
         )
         
         def model_run_wrapper(params):
@@ -252,8 +233,8 @@ class TestModelUnit(unittest.TestCase):
         params = Parameters.default()
         tangent = make_ones_parameters_object(params)
         y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
-        state = jvp_sum['dynamics']
-        physics_data = jvp_sum['physics']
+        state = jvp_sum.dynamics
+        physics_data = jvp_sum.physics
 
         # Check dinosaur states
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
