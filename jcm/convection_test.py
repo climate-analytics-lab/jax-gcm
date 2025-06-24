@@ -124,7 +124,7 @@ class TestConvectionUnit(unittest.TestCase):
         dfse_f90 = jnp.load(test_data_dir + '/dfse.npy')
         dfqa_f90 = jnp.load(test_data_dir + '/dfqa.npy')
 
-        self.assertTrue(jnp.allclose(jnp.round(physics_data.convection.iptop).astype(jnp.int32), iptop_f90, atol=1e-4))
+        self.assertTrue(jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4))
 
@@ -158,7 +158,7 @@ class TestConvectionUnit(unittest.TestCase):
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
 
-        self.assertTrue(jnp.allclose(jnp.round(physics_data.convection.iptop).astype(jnp.int32), jnp.ones((ix, il))*9))
+        self.assertTrue(jnp.allclose(physics_data.convection.iptop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, jnp.zeros((ix, il))))
         self.assertTrue(jnp.allclose(physics_tendencies.temperature, jnp.zeros((kx, ix, il))))

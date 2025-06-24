@@ -89,7 +89,7 @@ def couple_land_atm(
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
 
-    day = jnp.round(physics_data.date.model_day()).astype(jnp.int32)
+    day = physics_data.date.model_day()
     stl_lm=None
     # Run the land model if the land model flags is switched on
     if (boundaries.land_coupling_flag):

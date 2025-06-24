@@ -18,7 +18,7 @@ def set_forcing(
     # 2. daily-mean radiative forcing
     physics_data = get_zonal_average_fields(state, physics_data, boundaries=boundaries, geometry=geometry)
     tyear = physics_data.date.tyear
-    day = jnp.round(physics_data.date.model_day()).astype(jnp.int32)
+    day = physics_data.date.model_day()
     model_year = physics_data.date.model_year
 
     # total surface albedo

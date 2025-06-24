@@ -36,7 +36,7 @@ def get_vertical_diffusion_tend(
     phi = state.geopotential
 
     kx, ix, il = state.temperature.shape
-    icnv = kx - jnp.round(physics_data.convection.iptop).astype(jnp.int32) - 1 # this comes from physics.f90:132
+    icnv = kx - physics_data.convection.iptop - 1 # this comes from physics.f90:132
 
     ttenvd = jnp.zeros((kx,ix,il))
     qtenvd = jnp.zeros((kx,ix,il))

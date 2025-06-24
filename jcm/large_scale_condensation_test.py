@@ -27,7 +27,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         qsat = jnp.ones(zxy)
         itop = jnp.full((ix, il), kx - 1)
 
-        convection = ConvectionData.zeros(xy, kx, iptop=jnp.round(itop).astype(jnp.int32))
+        convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = state = PhysicsState.zeros(zxy, specific_humidity=qa, surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
@@ -63,7 +63,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         np.testing.assert_allclose(physics_tendencies.specific_humidity, jnp.asarray([ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
         self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
-        self.assertEqual(jnp.round(physics_data.convection.iptop).astype(jnp.int32), jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
+        self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
 
     def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):    
         """Test that we can calculate gradients of large-scale condensation without getting NaN values"""
