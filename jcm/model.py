@@ -49,12 +49,12 @@ def trajectory_from_step(
     def inner_step(carry, _):
         x, x_sum = carry
         x_next = step_fn(x)
-        return (x_next, x_sum + x_next), None
+        return (x_next, x_sum + post_process_fn(x_next)), None
 
     def outer_step(carry, _):
-        zeros = tree_map(lambda a: jnp.zeros_like(a), carry)
+        zeros = tree_map(lambda a: jnp.zeros_like(a), post_process_fn(carry))
         (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
-        return x_final, post_process_fn(x_sum / inner_steps)
+        return x_final, x_sum / inner_steps
 
     return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
 
@@ -200,7 +200,7 @@ class SpeedyModel:
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
                  initial_state: PhysicsState=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True, output_averages=True) -> None:
+                 post_process=True, checkpoint_terms=True, output_averages=False) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -334,15 +334,31 @@ class SpeedyModel:
         )
 
     def post_process(self, state):
+        from jcm.date import DateData
+        from jcm.physics_data import PhysicsData
         from jcm.physics import dynamics_state_to_physics_state
 
         physics_state = dynamics_state_to_physics_state(state.state, self.primitive)
+
+        physics_data = None
+        if self.post_process_physics:
+            physics_data = PhysicsData.zeros(
+                self.coords.nodal_shape[1:],
+                self.coords.nodal_shape[0],
+                date=DateData.set_date(
+                    model_time=self.start_date + Timedelta(seconds=state.state.sim_time),
+                    model_step=((state.state.sim_time/60) / self.time_step).astype(int)
+                )
+            )
+            for term in self.physics_terms:
+                _, physics_data = term(physics_state, physics_data, self.parameters, self.boundaries, self.geometry)
+        
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
-        
+
         return ModelOutput(
             dynamics=physics_state,
-            physics=state.data if self.post_process_physics else None
+            physics=physics_data if self.post_process_physics else state.data
         )
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
