@@ -135,12 +135,12 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape, dtype=int),
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
-            compute_shortwave = compute_shortwave if compute_shortwave is not None else jnp.array(False)
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else False
         )
     
     @classmethod
@@ -155,12 +155,12 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
             stratz = stratz if stratz is not None else jnp.ones(nodal_shape),
             gse = gse if gse is not None else jnp.ones(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.ones(nodal_shape, dtype=int),
+            icltop = icltop if icltop is not None else jnp.ones(nodal_shape,dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
-            compute_shortwave = compute_shortwave if compute_shortwave is not None else jnp.array(True)
+            compute_shortwave = compute_shortwave if compute_shortwave is not None else True
         )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
@@ -325,7 +325,7 @@ class ConvectionData:
     def zeros(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             se = se if se is not None else jnp.zeros((node_levels,)+nodal_shape),
-            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape)),
+            iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
             precnv = precnv if precnv is not None else jnp.zeros(nodal_shape),
         )
@@ -334,7 +334,7 @@ class ConvectionData:
     def ones(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionData(
             se = se if se is not None else jnp.ones((node_levels,)+nodal_shape),
-            iptop = iptop if iptop is not None else jnp.ones((nodal_shape)),
+            iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
         )
