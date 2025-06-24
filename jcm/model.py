@@ -70,8 +70,8 @@ def set_physics_flags(state: PhysicsState,
         clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
         This could also apply to forcing and coupling.
     '''
-    model_step = physics_data.date.model_step # FIXME: somehow the conversion to int produces unrealistic climatology, despite being required for shortwave to run
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    model_step = physics_data.date.model_step
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1) # FIXME: either this is not being computed correctly or shortwave radiation is not being computed correctly?
     shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
     physics_data = physics_data.copy(shortwave_rad=shortwave_data)
 

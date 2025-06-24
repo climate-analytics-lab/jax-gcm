@@ -43,7 +43,7 @@ class SpeedyPrimitiveEquations(PrimitiveEquations):
     
     @jax.named_call
     def implicit_inverse(self, state: State, step_size: float) -> State:
-        # TODO: double check if this is correct
+        # FIXME: double check if this is correct
         return SpeedyState(
            state=super().implicit_inverse(state.state, step_size),
            data=state.data
@@ -268,10 +268,9 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-    dinosaur_state, previous_data = state.state, state.data
-    # print(previous_data)
+    dynamics_state, previous_data = state.state, state.data
 
-    physics_state = dynamics_state_to_physics_state(dinosaur_state, dynamics)
+    physics_state = dynamics_state_to_physics_state(dynamics_state, dynamics)
     state = verify_state(physics_state)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step

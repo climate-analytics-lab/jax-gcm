@@ -116,12 +116,12 @@ class SWRadiationData:
     zenit: jnp.ndarray # The Zenit angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
-    icltop: jnp.ndarray # Cloud top level FIXME: should be integer
+    icltop: jnp.ndarray # Cloud top level
     cloudc: jnp.ndarray # Total cloud cover
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
-    compute_shortwave: jnp.ndarray # FIXME: should be bool
+    compute_shortwave: jnp.ndarray
 
     @classmethod
     def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
@@ -135,7 +135,7 @@ class SWRadiationData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
-            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape, dtype=int), # FIXME: should be integer
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape, dtype=int),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
@@ -317,7 +317,7 @@ class ConvectionOutputData:
 @tree_math.struct
 class ConvectionData:
     se: jnp.ndarray # dry static energy
-    iptop: jnp.ndarray # Top of convection (layer index) FIXME: should be integer
+    iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
 
