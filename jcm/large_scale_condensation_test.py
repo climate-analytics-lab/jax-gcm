@@ -48,7 +48,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         0.16069981,  0.        ,  0.        ])
         qsat = jnp.asarray([1.64229703e-01, 1.69719307e-02, 1.45193088e-01, 1.98833509e+00,
        4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01])
-        itop = jnp.ones((ix, il)) * 4
+        itop = jnp.ones((ix, il), dtype=int) * 4
 
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])

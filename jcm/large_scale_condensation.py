@@ -37,7 +37,6 @@ def get_large_scale_condensation_tendencies(
     # 1. Initialization
     humidity = physics_data.humidity
     conv = physics_data.convection
-    iptop = conv.iptop
     
     # Initialize outputs
     dtlsc = jnp.zeros_like(state.specific_humidity)
@@ -72,7 +71,7 @@ def get_large_scale_condensation_tendencies(
     dtlsc = dtlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2[jnp.newaxis]), 0.))
 
     # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
-    iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, iptop)
+    iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)
 
     # Large-scale precipitation
     pfact = geometry.dhs * prg

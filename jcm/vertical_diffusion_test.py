@@ -25,7 +25,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         qa = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[:, jnp.newaxis, jnp.newaxis]
         qsat = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[:, jnp.newaxis, jnp.newaxis]
         phi = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(150000,0,kx)[:, jnp.newaxis, jnp.newaxis]
-        iptop = jnp.ones((ix,il))*1
+        iptop = jnp.ones((ix,il), dtype=int)*1
         
         zxy = (kx, ix, il)
         xy = (ix, il)

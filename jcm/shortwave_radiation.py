@@ -23,7 +23,7 @@ def get_shortwave_rad_fluxes(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave > .5, 
+        physics_data.shortwave_rad.compute_shortwave, 
         shortwave_rad_fluxes, 
         pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
@@ -316,7 +316,7 @@ def get_clouds(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave > .5, 
+        physics_data.shortwave_rad.compute_shortwave, 
         clouds, 
         pass_fn, 
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
@@ -353,10 +353,8 @@ def clouds(operand):
 
     humidity = physics_data.humidity
     conv = physics_data.convection
-    iptop = conv.iptop
     condensation = physics_data.condensation
     kx = state.temperature.shape[0]
-    compute_shortwave = physics_data.shortwave_rad.compute_shortwave
 
     # Constants
     nl1  = kx-2
@@ -393,7 +391,7 @@ def clouds(operand):
     pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
     cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
-    icltop = jnp.minimum(iptop, icltop)
+    icltop = jnp.minimum(conv.iptop, icltop)
 
     # 2.  Equivalent specific humidity of clouds
     qcloud = state.specific_humidity[nl1]
