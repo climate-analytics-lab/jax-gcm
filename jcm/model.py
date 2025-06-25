@@ -1,4 +1,3 @@
-import dinosaur.time_integration
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
@@ -142,7 +141,7 @@ def convert_tendencies_to_equation(
             function to get physical tendencies.
             state - dynamics state from Dinosaur
             state.sim_time - simulation time in seconds (Dinosaur object)
-            time_step - model time step in minutes 
+            time_step - model time step in minutes
             reference_date - start date of the simulation
         '''
         date = DateData.set_date(
@@ -270,12 +269,12 @@ class SpeedyModel:
         
         self.primitive = SpeedyPrimitiveEquations(
             self.ref_temps,
-            truncated_orography, 
+            truncated_orography,
             self.coords,
             self.physics_specs
         )
 
-        speedy_forcing_eqn = convert_tendencies_to_equation(self.primitive,
+        physics_forcing_eqn = convert_tendencies_to_equation(self.primitive,
                                                         time_step,
                                                         self.physics_terms,
                                                         self.start_date,
@@ -286,7 +285,7 @@ class SpeedyModel:
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, speedy_forcing_eqn])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = lambda model_state: ( # this lambda pattern allows for the imex_rk_sil3 function to be called only once
             lambda incremented_state: typing.ModelState(
                 state = incremented_state.state,
@@ -311,7 +310,7 @@ class SpeedyModel:
         # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
         if self.initial_state is not None:
-            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure 
+            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
@@ -351,8 +350,8 @@ class SpeedyModel:
                 self.coords.nodal_shape[1:],
                 self.coords.nodal_shape[0],
                 date=DateData.set_date(
-                    model_time=self.start_date + Timedelta(seconds=state.state.sim_time),
-                    model_step=((state.state.sim_time/60) / self.time_step).astype(jnp.int32)
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                    model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
                 )
             )
             for term in self.physics_terms:

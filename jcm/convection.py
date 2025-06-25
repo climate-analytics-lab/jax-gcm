@@ -120,7 +120,7 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    se = cp * state.temperature + state.geopotential 
+    se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
@@ -131,7 +131,7 @@ def get_convection_tendencies(
 
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
-    #keep indexing consistent with original Speedy
+    # keep indexing consistent with original Speedy
     nl1 = kx - 1
     nlp = kx + 1
 
@@ -190,7 +190,7 @@ def get_convection_tendencies(
         for base_flux, tracer in ((fmass, 1), (fus, se), (fuq, qa))
     )
 
-    #Downward fluxes
+    # Downward fluxes
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
     # Calculate flux convergence

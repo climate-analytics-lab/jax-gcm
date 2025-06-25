@@ -108,20 +108,16 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
 
-        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), state)
+        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
 
-        def make_ones_prediction_object(pred):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
-        #create model that goes through one timestep
+        # Create model that goes through one timestep
         model = SpeedyModel(save_interval=(1/48.), total_time=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state) 
+        primals, f_vjp = jax.vjp(model.unroll, state)
         
-        input = (jtu.tree_map(lambda x: jnp.ones_like(x), primals[0]), jtu.tree_map(lambda x: jnp.ones_like(x), primals[1]))
+        input = (ones_like(primals[0]), ones_like(primals[1]))
 
         df_dstate = f_vjp(input)
         
@@ -137,14 +133,15 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
 
+        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
+
         model = SpeedyModel(save_interval=(1/48.), total_time=(1/24.))
         state = model.get_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state) 
-        input = (jtu.tree_map(lambda x: jnp.ones_like(x), primals[0]), 
-                 jtu.tree_map(lambda x: jnp.ones_like(x), primals[1]))
-        df_dstate = f_vjp(input) 
+        primals, f_vjp = jax.vjp(model.unroll, state)
+        input = (ones_like(primals[0]), ones_like(primals[1]))
+        df_dstate = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].state.divergence)))
@@ -182,10 +179,12 @@ class TestModelUnit(unittest.TestCase):
             _, predictions = model.unroll(state)
             return predictions
         
+        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
+        
         # Calculate gradients using VJP
         params = Parameters.default()
         primal, f_vjp = jax.vjp(model_run_wrapper, params)
-        df_dparams = f_vjp(jtu.tree_map(lambda x: jnp.zeros_like(x), primal))
+        df_dparams = f_vjp(ones_like(primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     

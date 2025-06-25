@@ -117,14 +117,14 @@ class SWRadiationData:
     rsns: jnp.ndarray # Net downward flux of short-wave radiation at the surface
     ozone: jnp.ndarray # Ozone concentration in lower stratosphere
     ozupp: jnp.ndarray# Ozone depth in upper stratosphere
-    zenit: jnp.ndarray # The Zenit angle
+    zenit: jnp.ndarray # The zenith angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
     icltop: jnp.ndarray # Cloud top level
     cloudc: jnp.ndarray # Total cloud cover
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
-    dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
+    dfabs: jnp.ndarray # Flux of short-wave radiation absorbed in each atmospheric layer
     compute_shortwave: jnp.bool
 
     @classmethod

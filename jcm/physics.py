@@ -183,7 +183,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     return State(
         vorticity=modal_vorticity,
         divergence=modal_divergence,
-        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
+        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ?
         log_surface_pressure=modal_log_sp,
         tracers={'specific_humidity': q_modal}
     )
@@ -225,7 +225,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 
 def verify_state(state: PhysicsState) -> PhysicsState:
     # set specific humidity to 0.0 if it became negative during the dynamics evaluation
-    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity) 
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     updated_state = state.copy(specific_humidity=qa)
 
     return updated_state
@@ -264,16 +264,17 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-    unclamped_physics_state = dynamics_state_to_physics_state(state.state, dynamics)
-    physics_state = verify_state(unclamped_physics_state)
+    physics_state = dynamics_state_to_physics_state(state.state, dynamics)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
     # and implicitly passed to the next physics_term. tendencies are summed
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
+    
+    clamped_physics_state = verify_state(physics_state)
     for term in physics_terms:
-        tend, data = term(physics_state, data, parameters, boundaries, geometry)
+        tend, data = term(clamped_physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
-    physics_tendency = verify_tendencies(unclamped_physics_state, physics_tendency, time_step)
+    physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 
     output_data = data.to_output() if data is not None else jtu.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)

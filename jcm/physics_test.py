@@ -44,7 +44,7 @@ class TestPhysicsUnit(unittest.TestCase):
         boundaries = BoundaryData.zeros((1,1))
         geometry = Geometry.from_grid_shape((1,1), 8)
 
-        physics_terms = [ hsf.held_suarez_forcings ] #abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
+        physics_terms = [ hsf.held_suarez_forcings ] # abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
 
         dynamics_tendency = get_physical_tendencies(state, dynamics, time_step, physics_terms, boundaries, parameters, geometry)
 

@@ -38,9 +38,9 @@ class TestLongwave(unittest.TestCase):
         geometry = Geometry.from_grid_shape((ix, il), kx)
         from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
-    def test_downward_longwave_rad_fluxes(self):        
+    def test_downward_longwave_rad_fluxes(self):
 
-        #FIXME: This array doesn't need to be this big once we fix the interfaces
+        # FIXME: This array doesn't need to be this big once we fix the interfaces
         # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
         xy = (ix, il)
@@ -61,7 +61,7 @@ class TestLongwave(unittest.TestCase):
                     [186.728719, 187.700953, 188.676876, 189.656632, 190.640263],
                     [186.738793, 187.711066, 188.687129, 189.666908, 190.650495]]
         
-        # print(dfabs[0, 0, :])   
+        # print(dfabs[0, 0, :])
         f90_dfabs = [ -3.799531,
                      -20.11071 ,
                      -17.83563 ,
@@ -138,7 +138,7 @@ class TestLongwave(unittest.TestCase):
         self.assertTrue(jnp.allclose(dfabs[:, 0, 0], dfabs_f90, atol=1e-5))
         self.assertTrue(jnp.allclose(flux[0, 0, :], flux_f90, atol=1e-5))
 
-    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -146,9 +146,9 @@ class TestLongwave(unittest.TestCase):
         state = PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
@@ -158,7 +158,7 @@ class TestLongwave(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
        
 
-    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -167,9 +167,9 @@ class TestLongwave(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
