@@ -17,7 +17,7 @@ from dinosaur.typing import ModelState
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
-from jax import tree_util
+from jax import tree_util as jtu
 from jcm.boundaries import BoundaryData
 import dataclasses
 
@@ -27,14 +27,14 @@ class SpeedyPrimitiveEquations(PrimitiveEquations):
     def explicit_terms(self, state: ModelState) -> ModelState:
         return ModelState(
            state=super().explicit_terms(state.state),
-           diagnostics=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
+           diagnostics=jtu.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
         )
 
     @jax.named_call
     def implicit_terms(self, state: ModelState) -> ModelState:
         return ModelState(
            state=super().implicit_terms(state.state),
-           diagnostics=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
+           diagnostics=jtu.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
         )
     
     @jax.named_call
@@ -87,10 +87,10 @@ class PhysicsState:
         )
 
     def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
+        return jtu.tree_map(jnp.isnan, self)
 
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+        return jtu.tree_reduce(lambda x, y: x or y, jtu.tree_map(lambda x: jnp.any(x), self))
 
 @tree_math.struct
 class PhysicsTendency:
@@ -276,7 +276,7 @@ def get_physical_tendencies(
     physics_tendency = verify_tendencies(unclamped_physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 
-    output_data = data.to_output()
+    output_data = data.to_output() if data is not None else jtu.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
 
     output_tendency = ModelState(
         state = dynamics_tendency,

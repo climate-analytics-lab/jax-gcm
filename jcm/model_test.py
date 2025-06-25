@@ -24,6 +24,7 @@ class TestModelUnit(unittest.TestCase):
         output_tzxy = (model.outer_steps, layers, modal_x, modal_y)
 
         final_state, predictions = model.unroll(state)
+        final_state, predictions = final_state.state, predictions.state
 
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(predictions)

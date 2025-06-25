@@ -3,13 +3,16 @@ import dinosaur
 from dinosaur.scales import units, SI_SCALE
 import jax
 import jax.numpy as jnp
-from jcm.physics import get_physical_tendencies
+from jcm.physics import get_physical_tendencies, SpeedyPrimitiveEquations
+from jcm.physics_data import PhysicsData
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur import typing
 from jcm.held_suarez import HeldSuarezForcing
 from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import Geometry
+from jcm.physical_constants import p0
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -78,7 +81,7 @@ class HeldSuarezModel:
             aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords)
 
         # Governing equations
-        primitive = primitive_equations.PrimitiveEquations(
+        primitive = SpeedyPrimitiveEquations(
             self.ref_temps,
             self.orography,
             self.coords,
@@ -89,25 +92,40 @@ class HeldSuarezModel:
 
         physics_terms = [ hsf.held_suarez_forcings ]
 
-        speedy_forcing = convert_tendencies_to_equation(primitive, time_step, physics_terms)
+        hsf_forcing_eqn = convert_tendencies_to_equation(primitive, time_step, physics_terms)
 
-        self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, speedy_forcing])
+        self.primitive_with_hs = dinosaur.time_integration.compose_equations([primitive, hsf_forcing_eqn])
 
         # Define trajectory times, expects start_with_input=False
         self.times = save_every * jnp.arange(1, self.outer_steps+1)
 
-        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)
+        step_fn = lambda model_state: ( # this lambda pattern allows for the imex_rk_sil3 function to be called only once
+            lambda incremented_state: typing.ModelState(
+                state = incremented_state.state,
+                diagnostics = incremented_state.diagnostics - model_state.diagnostics, # we subtract off the previous diagnostics as soon as we are dealing with actual values rather than tendencies
+            )
+        )(dinosaur.time_integration.imex_rk_sil3(self.primitive_with_hs, self.dt)(model_state))
         filters = [
-            dinosaur.time_integration.exponential_step_filter(
-                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),
+            lambda u, u_next: typing.ModelState(
+                state=dinosaur.time_integration.exponential_step_filter(
+                    self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
+                )(u.state, u_next.state),
+                diagnostics=u_next.diagnostics
+            ),
         ]
-
-        self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
-        
-    def get_initial_state(self, random_seed=0, sim_time=0.0) -> primitive_equations.State:
+        self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)        
+    def get_initial_state(self, random_seed=0, sim_time=0.0) -> typing.ModelState:
         state =  self.initial_state_fn(jax.random.PRNGKey(random_seed))
-        return primitive_equations.State(**state.asdict(), sim_time=sim_time)
-
+        state.log_surface_pressure = self.coords.horizontal.to_modal(
+            self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+        )
+        state.tracers = {
+            'specific_humidity': 0. * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+        }
+        return typing.ModelState(
+            state=primitive_equations.State(**state.asdict(), sim_time=sim_time),
+            diagnostics=PhysicsData.zeros(self.coords.nodal_shape[1:],self.coords.nodal_shape[0]).to_output()
+        )
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
