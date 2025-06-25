@@ -6,7 +6,7 @@ import jax
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
     ta = jnp.zeros((kx, ix, il))
-    fsfcd = jnp.zeros((ix, il))
+    rlds = jnp.zeros((ix, il))
     st4a = jnp.zeros((kx, ix, il, 2))     # Blackbody emission from full and half atmospheric levels
     flux = jnp.zeros((ix, il, 4))         # Radiative flux in different spectral bands
 
@@ -20,7 +20,7 @@ def initialize_arrays(ix, il, kx):
 
     ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((0, 2, 1))
     
-    return ta, fsfcd, st4a, flux
+    return ta, rlds, st4a, flux
 
 class TestLongwave(unittest.TestCase):
     
@@ -40,11 +40,11 @@ class TestLongwave(unittest.TestCase):
 
     def test_downward_longwave_rad_fluxes(self):        
 
-        #FIXME: This array doens't need to be this big once we fix the interfaces
-        # -> We only test teh first 5x5 elements
+        #FIXME: This array doesn't need to be this big once we fix the interfaces
+        # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
         xy = (ix, il)
-        ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
+        ta, rlds, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
         boundaries = BoundaryData.ones(xy)
@@ -54,7 +54,7 @@ class TestLongwave(unittest.TestCase):
         _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
 
         # fortran values
-        # print(fsfcd[:5, :5])
+        # print(rlds[:5, :5])
         f90_rlds = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
                     [186.708473, 187.680627, 188.656572, 189.636231, 190.6197  ],
                     [186.718628, 187.69074 , 188.666658, 189.646441, 190.630014],
@@ -105,8 +105,8 @@ class TestLongwave(unittest.TestCase):
     def test_upward_longwave_rad_fluxes(self):
         ta = jnp.ones((kx, ix, il)) * 300
         ts = jnp.ones((ix, il)) * 300
-        fsfcd = jnp.ones((ix, il))
-        fsfcu = jnp.ones((ix, il))
+        rlds = jnp.ones((ix, il))
+        rlus = jnp.ones((ix, il))
         dfabs = jnp.ones((kx, ix, il))
         st4a = jnp.ones((kx, ix, il, 2))
         flux = jnp.ones((ix, il, 4))
@@ -117,7 +117,7 @@ class TestLongwave(unittest.TestCase):
         input_physics_data = PhysicsData.zeros((ix, il), kx).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
-            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(fsfcu), rlds=fsfcd, tsfc=ts),
+            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
         )
 
         # skip testing ttend since we have access to dfabs

@@ -13,6 +13,7 @@ from jcm.physics_data import PhysicsData, PhysicsOutputData, SWRadiationOutputDa
 from jcm.geometry import Geometry
 from jcm.params import Parameters
 from dinosaur import scales
+from dinosaur.typing import ModelState
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
@@ -20,33 +21,28 @@ from jax import tree_util
 from jcm.boundaries import BoundaryData
 import dataclasses
 
-@tree_math.struct
-class SpeedyState:
-   state: State
-   data: PhysicsOutputData
-
 @dataclasses.dataclass
 class SpeedyPrimitiveEquations(PrimitiveEquations):
     @jax.named_call
-    def explicit_terms(self, state: SpeedyState) -> SpeedyState:
-        return SpeedyState(
+    def explicit_terms(self, state: ModelState) -> ModelState:
+        return ModelState(
            state=super().explicit_terms(state.state),
-           data=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.data)
+           diagnostics=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
         )
 
     @jax.named_call
-    def implicit_terms(self, state: SpeedyState) -> SpeedyState:
-        return SpeedyState(
+    def implicit_terms(self, state: ModelState) -> ModelState:
+        return ModelState(
            state=super().implicit_terms(state.state),
-           data=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.data)
+           diagnostics=tree_util.tree_map(lambda x: jnp.zeros_like(x), state.diagnostics)
         )
     
     @jax.named_call
     def implicit_inverse(self, state: State, step_size: float) -> State:
         # FIXME: double check if this is correct
-        return SpeedyState(
+        return ModelState(
            state=super().implicit_inverse(state.state, step_size),
-           data=state.data
+           diagnostics=state.diagnostics
         )
 
 @tree_math.struct
@@ -248,7 +244,7 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     return updated_tendencies
 
 def get_physical_tendencies(
-    state: SpeedyState,
+    state: ModelState,
     dynamics: PrimitiveEquations,
     time_step: int,
     physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
@@ -256,7 +252,7 @@ def get_physical_tendencies(
     parameters: Parameters,
     geometry: Geometry,
     data: PhysicsData = None
-) -> SpeedyState:
+) -> ModelState:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
 
@@ -268,10 +264,8 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-    dynamics_state, previous_data = state.state, state.data
-
-    physics_state = dynamics_state_to_physics_state(dynamics_state, dynamics)
-    state = verify_state(physics_state)
+    unclamped_physics_state = dynamics_state_to_physics_state(state.state, dynamics)
+    physics_state = verify_state(unclamped_physics_state)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
     # and implicitly passed to the next physics_term. tendencies are summed
@@ -279,7 +273,7 @@ def get_physical_tendencies(
     for term in physics_terms:
         tend, data = term(physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
-    physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
+    physics_tendency = verify_tendencies(unclamped_physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 
     output_data = PhysicsOutputData(
@@ -311,9 +305,9 @@ def get_physical_tendencies(
         land_model=data.land_model,
     )
 
-    output_tendency = SpeedyState(
-        state=dynamics_tendency,
-        data=(output_data - previous_data) / (time_step * 60.) # FIXME: see if we can do this another way
+    output_tendency = ModelState(
+        state = dynamics_tendency,
+        diagnostics = output_data / (time_step * 60.) # FIXME: can we return the output_data directly rather than as a tendency that gets accumulated over the substeps of the rk timestep?
     )
     
     return output_tendency
