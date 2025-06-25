@@ -120,7 +120,7 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    se = cp * state.temperature + state.geopotential 
+    se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape

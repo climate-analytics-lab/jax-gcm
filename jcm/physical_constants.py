@@ -35,4 +35,4 @@ tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
 # to prevent blowup of gradients
 epsilon = 1e-9
 
-nstrad = 3 # number of timesteps between shortwave evaluations  
+nstrad = 3 # number of timesteps between shortwave evaluations

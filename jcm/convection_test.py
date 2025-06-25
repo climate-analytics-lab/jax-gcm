@@ -63,13 +63,13 @@ class TestConvectionUnit(unittest.TestCase):
         xy = (ix, il)
         zxy = (kx, ix, il)
         
-        physics_data = PhysicsData.ones(xy, kx)  
+        physics_data = PhysicsData.ones(xy, kx)
         
         state = PhysicsState.ones(zxy)
 
         boundaries = BoundaryData.ones(xy)
         
-        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry) 
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry)
         
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy, kx)
@@ -169,7 +169,7 @@ class TestConvectionUnit(unittest.TestCase):
         zxy = (kx, ix, il)
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
 
-        #se = cp * ta + phi, need to set ta and phi so that get convection tendencies will compute this se 
+        #se = cp * ta + phi, need to set ta and phi so that get convection tendencies will compute this se
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.]) / cp
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])

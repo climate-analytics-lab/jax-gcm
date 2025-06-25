@@ -157,7 +157,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     return State(
         vorticity=modal_vorticity,
         divergence=modal_divergence,
-        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
+        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ?
         log_surface_pressure=modal_log_sp,
         tracers={'specific_humidity': q_modal}
     )
@@ -199,7 +199,7 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 
 def verify_state(state: PhysicsState) -> PhysicsState:
     # set specific humidity to 0.0 if it became negative during the dynamics evaluation
-    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity) 
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     updated_state = state.copy(specific_humidity=qa)
 
     return updated_state

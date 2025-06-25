@@ -98,7 +98,7 @@ def convert_tendencies_to_equation(
             function to get physical tendencies.
             state - dynamics state from Dinosaur
             state.sim_time - simulation time in seconds (Dinosaur object)
-            time_step - model time step in minutes 
+            time_step - model time step in minutes
             reference_date - start date of the simulation
         '''
 
@@ -228,7 +228,7 @@ class SpeedyModel:
         
         self.primitive = primitive_equations.PrimitiveEquations(
             self.ref_temps,
-            truncated_orography, 
+            truncated_orography,
             self.coords,
             self.physics_specs)
 
@@ -258,9 +258,9 @@ class SpeedyModel:
         # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
         if self.initial_state is not None:
-            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure 
+            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
-        else:     
+        else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error

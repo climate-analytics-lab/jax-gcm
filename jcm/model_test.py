@@ -113,7 +113,7 @@ class TestModelUnit(unittest.TestCase):
         state = model.get_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state) 
+        primals, f_vjp = jax.vjp(model.unroll, state)
         
         input = (ones_like(primals[0]), ones_like(primals[1]))
 

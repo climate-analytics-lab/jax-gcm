@@ -23,9 +23,9 @@ def get_shortwave_rad_fluxes(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
-        shortwave_rad_fluxes, 
-        pass_fn, 
+        physics_data.shortwave_rad.compute_shortwave,
+        shortwave_rad_fluxes,
+        pass_fn,
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
@@ -315,9 +315,9 @@ def get_clouds(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
-        clouds, 
-        pass_fn, 
+        physics_data.shortwave_rad.compute_shortwave,
+        clouds,
+        pass_fn,
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
