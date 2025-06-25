@@ -365,7 +365,7 @@ class SpeedyModel:
             physics=physics_data if self.post_process_physics else state.diagnostics
         )
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
+    def unroll(self, state: typing.ModelState) -> tuple[typing.ModelState, typing.ModelState]:
         integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,

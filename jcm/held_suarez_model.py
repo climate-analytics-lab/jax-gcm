@@ -120,13 +120,15 @@ class HeldSuarezModel:
             self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
         )
         state.tracers = {
-            'specific_humidity': 0. * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
+            'specific_humidity': jnp.zeros(self.coords.modal_shape)
         }
+        initial_state = primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        placeholder_data = PhysicsData.zeros(self.coords.nodal_shape[1:],self.coords.nodal_shape[0])
         return typing.ModelState(
-            state=primitive_equations.State(**state.asdict(), sim_time=sim_time),
-            diagnostics=PhysicsData.zeros(self.coords.nodal_shape[1:],self.coords.nodal_shape[0]).to_output()
+            state=initial_state,
+            diagnostics=placeholder_data.to_output()
         )
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
+    def unroll(self, state: typing.ModelState) -> tuple[typing.ModelState, typing.ModelState]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             self.step_fn,
             outer_steps=self.outer_steps,
