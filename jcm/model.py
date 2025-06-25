@@ -71,7 +71,7 @@ def set_physics_flags(state: PhysicsState,
         This could also apply to forcing and coupling.
     '''
     model_step = physics_data.date.model_step
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 1) # FIXME: either this is not being computed correctly or shortwave radiation is not being computed correctly?
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
     shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
     physics_data = physics_data.copy(shortwave_rad=shortwave_data)
 
@@ -300,6 +300,7 @@ class SpeedyModel:
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
         self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
+        # FIXME: enabling averaging causes model blowup when used with realistic boundary conditions
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics import physics_state_to_dynamics_state
