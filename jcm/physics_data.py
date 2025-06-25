@@ -424,8 +424,8 @@ class SurfaceFluxData:
             shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
             evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
             rlus = rlus if rlus is not None else jnp.ones((nodal_shape)+(3,)),
-            rlds = rlds if rlds is not None else jnp.ones((nodal_shape)), # FIXME these shapes
-            rlns = rlns if rlns is not None else jnp.ones((nodal_shape)),
+            rlds = rlds if rlds is not None else jnp.ones(nodal_shape),
+            rlns = rlns if rlns is not None else jnp.ones(nodal_shape),
             hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
             tsfc = tsfc if tsfc is not None else jnp.ones(nodal_shape),
             tskin = tskin if tskin is not None else jnp.ones(nodal_shape),
