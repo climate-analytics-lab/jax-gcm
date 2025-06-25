@@ -3,13 +3,13 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import tree_math
-from typing import Callable, Any, Sequence, Union
+from typing import Callable, Any
 from numpy import timedelta64
 import dinosaur
 from dinosaur import typing
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.scales import SI_SCALE, units
-from dinosaur.time_integration import ExplicitODE, ImplicitExplicitODE
+from dinosaur.time_integration import ExplicitODE
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import Timestamp, Timedelta, DateData
@@ -146,7 +146,7 @@ def convert_tendencies_to_equation(
         '''
         date = DateData.set_date(
             model_time = reference_date + Timedelta(seconds=state.state.sim_time),
-            model_step = ((state.state.sim_time/60) / time_step).astype(int)
+            model_step = ((state.state.sim_time/60) / time_step).astype(jnp.int32)
         )
 
         data = PhysicsData.zeros(
@@ -326,14 +326,14 @@ class SpeedyModel:
             }
 
         initial_state = primitive_equations.State(**state.asdict(), sim_time=sim_time)
-        initial_physics_data = PhysicsOutputData.zeros(
+        initial_physics_data = PhysicsData.zeros(
             self.coords.nodal_shape[1:],
             self.coords.nodal_shape[0],
         )
 
         return typing.ModelState(
             state=initial_state,
-            diagnostics=initial_physics_data,
+            diagnostics=initial_physics_data.to_output(),
         )
 
     def post_process(self, state):
@@ -351,7 +351,7 @@ class SpeedyModel:
                 self.coords.nodal_shape[0],
                 date=DateData.set_date(
                     model_time=self.start_date + Timedelta(seconds=state.state.sim_time),
-                    model_step=((state.state.sim_time/60) / self.time_step).astype(int)
+                    model_step=((state.state.sim_time/60) / self.time_step).astype(jnp.int32)
                 )
             )
             for term in self.physics_terms:

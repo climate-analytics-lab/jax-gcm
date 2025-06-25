@@ -44,13 +44,14 @@ class SWRadiationOutputData:
     zenit: jnp.ndarray # The Zenit angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
+    icltop: jnp.ndarray # Cloud top level
     cloudc: jnp.ndarray # Total cloud cover
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
     
     @classmethod
-    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def zeros(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationOutputData(
             qcloud = qcloud if qcloud is not None else jnp.zeros(nodal_shape),
             fsol = fsol if fsol is not None else jnp.zeros(nodal_shape),
@@ -61,6 +62,7 @@ class SWRadiationOutputData:
             zenit = zenit if zenit is not None else jnp.zeros(nodal_shape),
             stratz = stratz if stratz is not None else jnp.zeros(nodal_shape),
             gse = gse if gse is not None else jnp.zeros(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.zeros(nodal_shape),
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
@@ -68,7 +70,7 @@ class SWRadiationOutputData:
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def ones(self, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationOutputData(
             qcloud = qcloud if qcloud is not None else jnp.ones(nodal_shape),
             fsol = fsol if fsol is not None else jnp.ones(nodal_shape),
@@ -79,13 +81,14 @@ class SWRadiationOutputData:
             zenit = zenit if zenit is not None else jnp.ones(nodal_shape),
             stratz = stratz if stratz is not None else jnp.ones(nodal_shape),
             gse = gse if gse is not None else jnp.ones(nodal_shape),
+            icltop = icltop if icltop is not None else jnp.ones(nodal_shape),
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
             dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None):
         return SWRadiationOutputData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -96,6 +99,7 @@ class SWRadiationOutputData:
             zenit=zenit if zenit is not None else self.zenit,
             stratz=stratz if stratz is not None else self.stratz,
             gse=gse if gse is not None else self.gse,
+            icltop=icltop if icltop is not None else self.icltop,
             cloudc=cloudc if cloudc is not None else self.cloudc,
             cloudstr=cloudstr if cloudstr is not None else self.cloudstr,
             ftop=ftop if ftop is not None else self.ftop,
@@ -182,9 +186,28 @@ class SWRadiationData:
             compute_shortwave=compute_shortwave if compute_shortwave is not None else self.compute_shortwave
         )
     
+    def to_output(self):
+        return SWRadiationOutputData(
+            qcloud=self.qcloud,
+            fsol=self.fsol,
+            rsds=self.rsds,
+            rsns=self.rsns,
+            ozone=self.ozone,
+            ozupp=self.ozupp,
+            zenit=self.zenit,
+            stratz=self.stratz,
+            gse=self.gse,
+            icltop=self.icltop.astype(jnp.float_),
+            cloudc=self.cloudc,
+            cloudstr=self.cloudstr,
+            ftop=self.ftop,
+            dfabs=self.dfabs,
+            # compute_shortwave=self.compute_shortwave.astype(jnp.float_)
+        )
+    
     def isnan(self):
-        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
-        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
+        self.icltop = jnp.zeros_like(self.icltop, dtype=jnp.float_)
+        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=jnp.float_)
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -192,7 +215,7 @@ class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
-    ablco2: jnp.float32 # CO2 absorptivity
+    ablco2: jnp.float_ # CO2 absorptivity
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
     alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
     albsfc: jnp.ndarray # Combined surface albedo (land + sea)
@@ -246,6 +269,7 @@ class ModRadConData:
     
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
+
 @tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
@@ -277,32 +301,36 @@ class CondensationData:
     
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
-    
+
 @tree_math.struct
 class ConvectionOutputData:
     se: jnp.ndarray # dry static energy
+    iptop: jnp.ndarray # Top of convection (layer index)
     cbmf: jnp.ndarray # Cloud-base mass flux
     precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
 
     @classmethod
-    def zeros(self, nodal_shape, node_levels, se=None, cbmf=None, precnv=None):
+    def zeros(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionOutputData(
             se = se if se is not None else jnp.zeros((node_levels,)+nodal_shape),
+            iptop = iptop if iptop is not None else jnp.zeros(nodal_shape),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
             precnv = precnv if precnv is not None else jnp.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(self, nodal_shape, node_levels, se=None, cbmf=None, precnv=None):
+    def ones(self, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionOutputData(
             se = se if se is not None else jnp.ones((node_levels,)+nodal_shape),
+            iptop = iptop if iptop is not None else jnp.ones(nodal_shape),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
         )
     
-    def copy(self, se=None, cbmf=None, precnv=None):
+    def copy(self, se=None, iptop=None, cbmf=None, precnv=None):
         return ConvectionOutputData(
             se=se if se is not None else self.se,
+            iptop= iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
             precnv=precnv if precnv is not None else self.precnv
         )
@@ -312,7 +340,6 @@ class ConvectionOutputData:
     # or intended to be used.
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
-
 
 @tree_math.struct
 class ConvectionData:
@@ -347,11 +374,19 @@ class ConvectionData:
             precnv=precnv if precnv is not None else self.precnv
         )
     
+    def to_output(self):
+        return ConvectionOutputData(
+            se=self.se,
+            iptop=self.iptop.astype(jnp.float_),
+            cbmf=self.cbmf,
+            precnv=self.precnv
+        )
+    
     # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to
     # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
     # or intended to be used.
     def isnan(self):
-        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
+        self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float_)
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
@@ -533,6 +568,18 @@ class PhysicsData:
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             date=date if date is not None else self.date,
             land_model=land_model if land_model is not None else self.land_model
+        )
+    
+    def to_output(self):
+        return PhysicsOutputData(
+            shortwave_rad=self.shortwave_rad.to_output(),
+            longwave_rad=self.longwave_rad.copy(),
+            convection=self.convection.to_output(),
+            mod_radcon=self.mod_radcon.copy(),
+            humidity=self.humidity.copy(),
+            condensation=self.condensation.copy(),
+            surface_flux=self.surface_flux.copy(),
+            land_model=self.land_model.copy()
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 

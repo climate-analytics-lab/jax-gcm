@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import tree_math
 from typing import Callable
-from jcm.physics_data import PhysicsData, PhysicsOutputData, SWRadiationOutputData, ConvectionOutputData
+from jcm.physics_data import PhysicsData
 from jcm.geometry import Geometry
 from jcm.params import Parameters
 from dinosaur import scales
@@ -276,34 +276,7 @@ def get_physical_tendencies(
     physics_tendency = verify_tendencies(unclamped_physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 
-    output_data = PhysicsOutputData(
-        shortwave_rad=SWRadiationOutputData(
-            qcloud=data.shortwave_rad.qcloud,
-            fsol=data.shortwave_rad.fsol,
-            rsds=data.shortwave_rad.rsds,
-            rsns=data.shortwave_rad.rsns,
-            ozone=data.shortwave_rad.ozone,
-            ozupp=data.shortwave_rad.ozupp,
-            zenit=data.shortwave_rad.zenit,
-            stratz=data.shortwave_rad.stratz,
-            gse=data.shortwave_rad.gse,
-            cloudc=data.shortwave_rad.cloudc,
-            cloudstr=data.shortwave_rad.cloudstr,
-            ftop=data.shortwave_rad.ftop,
-            dfabs=data.shortwave_rad.dfabs,
-        ),
-        longwave_rad=data.longwave_rad,
-        convection=ConvectionOutputData(
-            se=data.convection.se,
-            cbmf=data.convection.cbmf,
-            precnv=data.convection.precnv,
-        ),
-        mod_radcon=data.mod_radcon,
-        humidity=data.humidity,
-        condensation=data.condensation,
-        surface_flux=data.surface_flux,
-        land_model=data.land_model,
-    )
+    output_data = data.to_output()
 
     output_tendency = ModelState(
         state = dynamics_tendency,
