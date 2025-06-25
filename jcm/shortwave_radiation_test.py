@@ -134,7 +134,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
@@ -305,7 +304,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
@@ -375,7 +373,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 

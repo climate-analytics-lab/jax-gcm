@@ -206,7 +206,7 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(physics_data.convection.cbmf[0,0], test_cbmf, places=4)
         self.assertAlmostEqual(physics_data.convection.precnv[0,0], test_precnv, places=4)
 
-        #check a few values of the fluxes
+        # Check a few values of the fluxes
         self.assertAlmostEqual(physics_tendencies.temperature[4,0,0], test_ttend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[5,0,0], test_ttend[5], places=2)

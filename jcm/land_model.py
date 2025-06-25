@@ -107,7 +107,7 @@ def couple_land_atm(
 
     return physics_tendency, physics_data
 
-#Integrates slab land-surface model for one day.
+# Integrates slab land-surface model for one day.
 @jit
 def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
     # Land-surface (soil/ice-sheet) layer
