@@ -303,14 +303,14 @@ class TestModelUnit(unittest.TestCase):
         if not daily_boundary_condition_file.exists():
             import subprocess, sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        
+
+
         coords = som.get_coords()
         
         hori_shape  = coords.horizontal.nodal_shape
         vert_layers = coords.vertical.layers
-        
-        
+
+ 
         boundaries = initialize_boundaries(
             daily_boundary_condition_file,
             coords.horizontal,
@@ -320,7 +320,7 @@ class TestModelUnit(unittest.TestCase):
         params = Parameters.default()
         physics_data = PhysicsData.zeros(hori_shape, vert_layers)
         
-        ev = som.Env(
+        model = som.SlaboceanModel(
             time_step = 600.0,                # 10 min
             save_interval = 86400.0,          # 1 day
             total_time = 86400.0 * 10,        # 10 days
@@ -331,22 +331,20 @@ class TestModelUnit(unittest.TestCase):
             parameters = params,
             physics_data = physics_data,
         )
-        
-        model = som.Model(ev=ev)
-        
+
         self.assertTrue(model is not None)
         
-        hfluxn = ev.physics_data.surface_flux.hfluxn
-        ev.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
+        hfluxn = model.physics_data.surface_flux.hfluxn
+        model.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
         model.couple_ocn_atm()
         
-        st = model.st 
+       
         import xarray as xr
         ds = xr.Dataset(
             data_vars = dict(
-                sst =  ( ["lat", "lon"], st.sst ),
-                sic  = ( ["lat", "lon"], st.sic ),
-                d_o  = ( ["lat", "lon"], st.d_o ),
+                sst =  ( ["lat", "lon"], model.state.sst ),
+                sic  = ( ["lat", "lon"], model.state.sic ),
+                d_o  = ( ["lat", "lon"], model.state.d_o ),
             ),
         )
 

@@ -197,7 +197,8 @@ def initialize_boundaries(
     from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
     
-    from jcm.slabocean_model.slabocean_model import SlaboceanModel
+    #from jcm.slabocean_model.slabocean_model import SlaboceanModel
+    import jcm.slabocean_model.slabocean_model as som
 
     parameters = parameters or Parameters.default()
     
@@ -225,7 +226,7 @@ def initialize_boundaries(
     boundaries = land_model_init(filename, parameters, boundaries)
 
     # call ocean model init
-    boundaries = SlaboceanModel.initBoundaries(filename=filename, parameters=parameters, boundaries=boundaries)
+    boundaries = som.initBoundaries(filename=filename, parameters=parameters, boundaries=boundaries)
     
     # call ice model init
 

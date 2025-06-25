@@ -3,8 +3,7 @@ from jcm.boundaries import BoundaryData
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 
-#from jcm.slabocean_model.slabocean_model_physics import PhysicsState
-import tree_math
+from jcm.slabocean_model.slabocean_model_physics import PhysicsState
 
 from jcm.physics_data import PhysicsData
 from jcm import physical_constants
@@ -60,36 +59,51 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     )
 
 
-
-def initBoundaries(
-    filename,
-    parameters: Parameters,
-    boundaries: BoundaryData,
-):
-    """
-        filename: filename storing boundary data
-        parameters: initialized model parameters
-        boundaries: partially initialized boundary data
-    """
-    
-    # =========================================================================
-    # Initialize ocean surface boundary conditions
-    # =========================================================================
-   
-    print("Reading file containing boundary information: ", filename)
-
-    with xr.open_dataset(filename) as ds_bc:
-        sst_clim = jnp.asarray(ds_bc["sst"])
-        sic_clim = jnp.asarray(ds_bc["icec"])
-    
-    return boundaries.copy(
-        sst_clim = sst_clim,
-        sic_clim = sic_clim,
-    )
-
-
 class Env:
-    
+
+
+
+class Core:
+
+
+
+class State:
+
+
+
+
+
+
+class SlaboceanModel:
+
+    @classmethod 
+    def initBoundaries(
+        cls,
+        filename,
+        parameters: Parameters,
+        boundaries: BoundaryData,
+    ):
+        """
+            filename: filename storing boundary data
+            parameters: initialized model parameters
+            boundaries: partially initialized boundary data
+        """
+        
+        # =========================================================================
+        # Initialize ocean surface boundary conditions
+        # =========================================================================
+       
+        print("Reading file containing boundary information: ", filename)
+
+        with xr.open_dataset(filename) as ds_bc:
+            sst_clim = jnp.asarray(ds_bc["sst"])
+            sic_clim = jnp.asarray(ds_bc["icec"])
+        
+        return boundaries.copy(
+            sst_clim = sst_clim,
+            sic_clim = sic_clim,
+        )
+
     def __init__(
         self,
         time_step,
@@ -101,10 +115,11 @@ class Env:
         boundaries: BoundaryData,
         parameters: Parameters,
         physics_data: PhysicsData,
+        initial_state: PhysicsState=None,
         post_process=True, 
         checkpoint_terms=True,
     ) -> None:
- 
+        
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -116,6 +131,7 @@ class Env:
             horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
+            initial_state: Initial state of the model (PhysicsState object), optional
             parameters: Parameters object describing model parameters
             physics_specs: PrimitiveEquationsSpecs object describing the model physics
             post_process: Whether to post-process the model output
@@ -140,97 +156,42 @@ class Env:
         self.post_process_physics = post_process
         self.boundaries = boundaries
         self.physics_data = physics_data
-
-
-
-@tree_math.struct
-class State:
-
-    sst: jnp.ndarray
-    sic: jnp.ndarray
-    d_o: jnp.ndarray
-    
-    @classmethod
-    def zeros(
-        self,
-        shape,
-        sst = None,
-        sic  = None,
-        d_o      = None,
-    ):
-        return State(
-            sst if sst is not None else jnp.zeros(shape),
-            sic if sic is not None else jnp.zeros(shape),
-            d_o if d_o is not None else jnp.zeros(shape),
-        )
-
-    @classmethod
-    def ones(
-        self,
-        shape,
-        sst = None,
-        sic  = None,
-        d_o = None,
-    ):
+        if initial_state is not None:
+            self.initial_state = initial_state
+        else:
+            self.initState()
         
-        return State(
-            sst if sst is not None else jnp.ones(shape),
-            sic if sic is not None else jnp.ones(shape),
-            d_o if d_o is not None else jnp.ones(shape),
-        )
-
-    def copy(
-        self,
-        sst = None,
-        sic  = None,
-        d_o = None,
-    ):
-        return State(
-            sst if sst is not None else self.sst,
-            sic if sic is not None else self.sic,
-            d_o if d_o is not None else self.d_o,
-        )
-
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
-
-    def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
 
-    @classmethod
-    def createStateWithEnv(
-        cls,
-        ev: Env,
-    ):
-        
+    def initState(self):
+
         # =========================================================================
         # Initialize land-surface boundary conditions
         # =========================================================================
         print("Initialize state...")
-        
-        boundaries = ev.boundaries
-        parameters = ev.parameters
+
+        boundaries = self.boundaries
+        parameters = self.parameters
         som_params = parameters.slabocean_model
-        geometry = ev.geometry
-        
+        geometry = self.geometry
+
         # Fractional and binary ocean masks
         fmask_l = boundaries.fmask
         bmask_o = jnp.where(fmask_l == 0.0, 1.0, 0.0)
-        
+
         # Create state
-        st = State.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
+        self.state = PhysicsState.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
 
         # Define initial sst
-        st.sst = jnp.array(boundaries.sst_clim[:, :, 0])
-        st.sic = jnp.array(boundaries.sic_clim[:, :, 0])
+        self.state.sst = jnp.array(boundaries.sst_clim[:, :, 0])
+        self.state.sic = jnp.array(boundaries.sic_clim[:, :, 0])
         
-        d_o = jnp.zeros_like(st.sst) + som_params.d_omax + (som_params.d_omin - som_params.d_omax) * (geometry.coa**3.0)[jnp.newaxis, :]
-        #self.st.d_o = self.st.d_o.at[:].set(10.0)
+        d_o = jnp.zeros_like(self.state.sst) + som_params.d_omax + (som_params.d_omin - som_params.d_omax) * (geometry.coa**3.0)[jnp.newaxis, :]
+        #self.state.d_o = self.state.d_o.at[:].set(10.0)
         print("Shape of d_o: ", d_o.shape)
-        st = st.copy(
-            sst = st.sst.at[bmask_o == 0.0].set(jnp.nan),
-            sic = st.sic.at[bmask_o == 0.0].set(jnp.nan),
+        self.state = self.state.copy(
+            sst = self.state.sst.at[bmask_o == 0.0].set(jnp.nan),
+            sic = self.state.sic.at[bmask_o == 0.0].set(jnp.nan),
             d_o = d_o.at[bmask_o == 0.0].set(jnp.nan),
         )
 
@@ -246,72 +207,38 @@ class State:
         # Set time_step/heat_capacity and dissipation fields
         #cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
         
-        return st
+        return self
 
-
-class Core:
-    
-    def __init__(
-        self,
-        ev: Env,
-    ) -> None:
-        
-        pass
-
-
-
-class Model:
-
-    ev : Env
-    st : State
-    co : Core
-
-    def __init__(
-        self,
-        ev,
-        init_co = False,
-    ) -> None:
-
-        self.ev = ev
-        if init_co:
-            self.initCore()
-
-        self.st = State.createStateWithEnv(ev)
-    
-    def initCore(self):
-        self.co = Core(self.ev)
 
     # Exchanges fluxes between ocean and atmosphere.
     def couple_ocn_atm(
         self,
-#        st: State,
+#        state: PhysicsState,
 #        physics_data: PhysicsData,
 #        parameters: Parameters,
 #        boundaries: BoundaryData=None,
 #        geometry: Geometry=None
-    ) -> tuple[State, PhysicsData]:
+    ) -> tuple[PhysicsState, PhysicsData]:
         
-        ev = self.ev
-        st = self.st
-        
-        physics_data = ev.physics_data
-        parameters   = ev.parameters
-        boundaries   = ev.boundaries
+        state = self.state
+        physics_data = self.physics_data
+        parameters = self.parameters
+        boundaries = self.boundaries
         
         day = physics_data.date.model_day()
         # Run the ocn model if the flags is switched on
         if boundaries.ocn_coupling_flag:
             
             print("Run!") 
-            #st.sst = st.sst.at[:].set(1)
+            #state.sst = state.sst.at[:].set(1)
 
             print(parameters.slabocean_model)
-            #print(hash(st.sst))
-            #print(st.sst)
+            #print(hash(state.sst))
+            #print(state.sst)
             sst, sic = run(
-                st.sst,
-                st.sic,
-                st.d_o,
+                state.sst,
+                state.sic,
+                state.d_o,
                 physics_data.surface_flux.hfluxn, # net downward heat flux
                 parameters.slabocean_model.dt,
                 parameters.slabocean_model.tau0,
@@ -330,8 +257,8 @@ class Model:
         # update physics data
         #slabocean_model_data = physics_data.slabocean_model.copy(sst=sst, si=si)
         physics_data = physics_data.copy(slabocean_model=physics_data)
-        self.st = st.copy(sst=sst, sic=sic)
-        #physics_tendency = PhysicsTendency.zeros(st.temperature.shape)
+        self.state = state.copy(sst=sst, sic=sic)
+        #physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
         
         #return physics_tendency, physics_data
         return physics_data
