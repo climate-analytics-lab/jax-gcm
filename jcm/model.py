@@ -16,7 +16,8 @@ from jcm.date import Timestamp, Timedelta, DateData
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physical_constants import p0
-from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData, PhysicsOutputData, SpeedyPrimitiveEquations
+from jcm.physics import PhysicsState, PhysicsTendency, SpeedyPrimitiveEquations
+from jcm.physics_data import PhysicsData, PhysicsOutputData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
