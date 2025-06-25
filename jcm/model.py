@@ -350,8 +350,8 @@ class SpeedyModel:
                 self.coords.nodal_shape[1:],
                 self.coords.nodal_shape[0],
                 date=DateData.set_date(
-                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
+                    model_time = self.start_date + Timedelta(seconds=state.state.sim_time),
+                    model_step = ((state.state.sim_time/60) / self.time_step).astype(jnp.int32)
                 )
             )
             for term in self.physics_terms:
