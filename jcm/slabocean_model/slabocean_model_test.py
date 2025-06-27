@@ -10,13 +10,13 @@ from jcm.physics_data import PhysicsData
 
 class TestModelUnit(unittest.TestCase):
 
-
     def test_model_init(self):
         
         import jax
         import jax.numpy as jnp
         import numpy as np
-        import jcm.slabocean_model.slabocean_model as som
+        import jcm.slabocean_model as som
+
         from jcm.boundaries import initialize_boundaries
         from pathlib import Path
         
@@ -40,8 +40,7 @@ class TestModelUnit(unittest.TestCase):
             import subprocess, sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
-        
-        coords = som.get_coords()
+        coords = som.misc.get_coords()
         
         hori_shape  = coords.horizontal.nodal_shape
         vert_layers = coords.vertical.layers
@@ -55,7 +54,7 @@ class TestModelUnit(unittest.TestCase):
         
         params = Parameters.default()
         physics_data = PhysicsData.zeros(hori_shape, vert_layers)
-        
+       
         ev = som.Env(
             time_step = 600.0,                # 10 min
             save_interval = 86400.0,          # 1 day
