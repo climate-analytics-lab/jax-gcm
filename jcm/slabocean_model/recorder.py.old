@@ -1,18 +1,41 @@
 import xarray as xr
 import numpy as np
+import jax.numpy as jnp
 
 
+class NonStatObj: 
 
-mutable struct NonStatObj 
-
-    varname  :: AbstractString
-    varref   :: AbstractArray{Float64}
-    var      :: AbstractArray{Float64}
+    varname  : str
+    varref   : np.ndarray | jnp.ndarray
+    var      : np.ndarray
     
-    dimnames :: Tuple
-    missing_idx  :: Any
+    dimnames     : tuple | list
+    missing_idx  : object
 
-    function NonStatObj(varname, varref, dimnames; missing_idx = nothing)
+    def __init__(self, varname, varref, dimnames, missing_idx = None):
+        if length(size(varref)) != length(dimnames)
+            ErrorException(format("Variable `{:s}` is {:d} dimensional while only {:d} dimension names are given.", varname, length(size(varref)), length(dimnames))) |> throw
+        end
+
+        var = varref * 0.0
+
+        return new(varname, varref, var, dimnames, missing_idx)
+    end
+
+end
+
+
+
+class NonStatObj: 
+
+    varname  : str
+    varref   : np.ndarray | jnp.ndarray
+    var      : np.ndarray
+    
+    dimnames     : tuple | list
+    missing_idx  : object
+
+    def __init__(self, varname, varref, dimnames, missing_idx = None):
         if length(size(varref)) != length(dimnames)
             ErrorException(format("Variable `{:s}` is {:d} dimensional while only {:d} dimension names are given.", varname, length(size(varref)), length(dimnames))) |> throw
         end

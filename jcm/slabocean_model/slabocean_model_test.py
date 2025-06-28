@@ -68,23 +68,34 @@ class TestModelUnit(unittest.TestCase):
         )
         
         model = som.Model(ev=ev)
-        
         self.assertTrue(model is not None)
         
-        hfluxn = ev.physics_data.surface_flux.hfluxn
-        ev.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
-        model.couple_ocn_atm()
         
-        st = model.st 
-        import xarray as xr
-        ds = xr.Dataset(
-            data_vars = dict(
-                sst =  ( ["lat", "lon"], st.sst ),
-                sic  = ( ["lat", "lon"], st.sic ),
-                d_o  = ( ["lat", "lon"], st.d_o ),
-            ),
+        hours_per_day = 24
+        steps_per_hour = 6
+
+        recorder = som.Recorder(
+            count_per_avg = steps_per_hour,
+            model = model,
         )
 
-        ds.to_netcdf("test.nc")
-        
+         
+        for day in range(2):
+            
+            for h in range(hours_per_day):
+
+                for step in range(steps_per_hour):
+
+                    hfluxn = ev.physics_data.surface_flux.hfluxn
+                    ev.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
+                    model.couple_ocn_atm()
+                    
+                    print("Mean of sst = ", np.nanmean(model.st.sst))
+
+                    recorder.record()
+
+
+            recorder.output("SOM_STATE_day{day:02d}.nc".format(
+                day = day,
+            ))
 
