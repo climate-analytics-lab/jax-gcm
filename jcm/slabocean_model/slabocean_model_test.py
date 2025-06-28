@@ -71,9 +71,14 @@ class TestModelUnit(unittest.TestCase):
         self.assertTrue(model is not None)
        
         # ==== stepping the model ==== 
+
+        # Uncomment this line to set initial SST ad-hoc
+        #model.st.sst = model.st.sst.at[:].set(100.0)
+
         recorder = som.Recorder(
             count_per_avg = steps_per_hour,
             model = model,
+            output_style = "netcdf",
         )
 
         output_dir = Path("output")

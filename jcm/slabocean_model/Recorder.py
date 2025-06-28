@@ -11,12 +11,17 @@ class Recorder:
         count_per_avg : int, 
         model         : som.Model,
         varnames      : list | tuple = ["sst", "sic", "d_o"],
+        output_style: str = "netcdf",
     ) -> None:
 
 
         self.count_per_avg = count_per_avg
         self.model = model
         self.varnames = varnames
+        self.output_style = output_style
+
+        if output_style not in ["netcdf", "zarr"]:
+            raise Exception("Error: Unknown output_style %s " % (output_style,))
 
         self.clear()
 
@@ -93,7 +98,11 @@ class Recorder:
         )
 
         print("Output file: ", str(filepath))
-        ds.to_netcdf(filepath, unlimited_dims = "time")
+        print("Output style:: ", self.output_style)
+        if self.output_style == "netcdf":
+            ds.to_netcdf(filepath, unlimited_dims = "time")
+        elif self.output_style == "zarr":
+            ds.to_zarr(filepath, mode="w")
 
         self.clear()
 
