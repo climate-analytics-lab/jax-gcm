@@ -94,4 +94,6 @@ class Recorder:
 
         ds.to_netcdf(filepath, unlimited_dims = "time")
 
+        self.clear()
+
         return self

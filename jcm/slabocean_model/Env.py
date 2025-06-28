@@ -36,10 +36,10 @@ class Env:
         total_time,
         start_date,
         horizontal_resolution,
-        coords: CoordinateSystem,
         boundaries: BoundaryData,
-        parameters: Parameters,
         physics_data: PhysicsData,
+        parameters: Parameters,
+        coords: CoordinateSystem,
         post_process=True, 
         checkpoint_terms=True,
     ) -> None:
@@ -77,7 +77,9 @@ class Env:
         
         
         self.post_process_physics = post_process
+
         self.boundaries = boundaries
         self.physics_data = physics_data
+
 
 

@@ -103,7 +103,7 @@ class State:
         st = State.zeros(boundaries.sst_clim.shape[0:2]) # This is pretty ad-hoc. Need better solution
 
         # Define initial sst
-        st.sst = jnp.array(boundaries.sst_clim[:, :, 0])
+        st.sst = jnp.array(boundaries.sst_clim[:, :, 0] + 5)
         st.sic = jnp.array(boundaries.sic_clim[:, :, 0])
         
         d_o = jnp.zeros_like(st.sst) + som_params.d_omax + (som_params.d_omin - som_params.d_omax) * (geometry.coa**3.0)[jnp.newaxis, :]

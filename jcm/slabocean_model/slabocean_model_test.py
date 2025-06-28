@@ -19,19 +19,9 @@ class TestModelUnit(unittest.TestCase):
 
         from jcm.boundaries import initialize_boundaries
         from pathlib import Path
-        
-        """
-        def make_ones_parameters_object(params):
-            def make_tangent(x):
-                if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return np.ones((), dtype=jax.dtypes.float0)
-                elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return np.ones((), dtype=jax.dtypes.float0)
-                else:
-                    return jnp.ones_like(x)
-            return jtu.tree_map(lambda x: make_tangent(x), params)
-        """
-
+       
+        # ==== Making / Interpolating Boundary Condition from a reference file ====
+ 
         boundaries_dir = Path(__file__).resolve().parent / ".." / 'data/bc/t30/clim'
 
         # Generate daily values from monthly climatology
@@ -40,6 +30,8 @@ class TestModelUnit(unittest.TestCase):
             import subprocess, sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
+        # ==== creating model ==== 
+       
         coords = som.misc.get_coords()
         
         hori_shape  = coords.horizontal.nodal_shape
@@ -51,14 +43,22 @@ class TestModelUnit(unittest.TestCase):
             coords.horizontal,
         )
         boundaries.ocn_coupling_flag = True
-        
-        params = Parameters.default()
-        physics_data = PhysicsData.zeros(hori_shape, vert_layers)
        
+        # Default parameter. See slabocean_model_parameters.py for default values. 
+        params = Parameters.default()
+        
+        physics_data = PhysicsData.zeros(hori_shape, vert_layers)
+ 
+
+        simulation_days = 20 
+        hours_per_day   = 24
+        steps_per_hour  = 6
+        time_step = 600.0
+
         ev = som.Env(
-            time_step = 600.0,                # 10 min
-            save_interval = 86400.0,          # 1 day
-            total_time = 86400.0 * 10,        # 10 days
+            time_step = time_step,
+            save_interval = 86400.0,                       # 1 day   : No effect currently
+            total_time = 86400.0 * simulation_days,        # 10 days : No effect currently
             start_date = pd.Timestamp("2000-01-01"),
             horizontal_resolution = 31,
             coords = coords,
@@ -69,33 +69,29 @@ class TestModelUnit(unittest.TestCase):
         
         model = som.Model(ev=ev)
         self.assertTrue(model is not None)
-        
-        
-        hours_per_day = 24
-        steps_per_hour = 6
-
+       
+        # ==== stepping the model ==== 
         recorder = som.Recorder(
             count_per_avg = steps_per_hour,
             model = model,
         )
 
-         
-        for day in range(2):
-            
+        output_dir = Path("output")
+        output_dir.mkdir(parents=True, exist_ok=True) 
+        for day in range(simulation_days):
             for h in range(hours_per_day):
-
                 for step in range(steps_per_hour):
 
+                    # Here is an ad-hoc way to set heat flux. Positive downward.
                     hfluxn = ev.physics_data.surface_flux.hfluxn
-                    ev.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
+                    #ev.physics_data.surface_flux.hfluxn = hfluxn.at[:].set(1000.0)
                     model.couple_ocn_atm()
-                    
-                    print("Mean of sst = ", np.nanmean(model.st.sst))
-
+                   
+                    # Reocrd the state 
                     recorder.record()
 
 
-            recorder.output("SOM_STATE_day{day:02d}.nc".format(
+            recorder.output( output_dir / ("SOM_STATE_day{day:02d}.nc".format(
                 day = day,
-            ))
+            )))
 
