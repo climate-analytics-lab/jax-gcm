@@ -92,6 +92,7 @@ class Recorder:
             data_vars = data_vars
         )
 
+        print("Output file: ", str(filepath))
         ds.to_netcdf(filepath, unlimited_dims = "time")
 
         self.clear()

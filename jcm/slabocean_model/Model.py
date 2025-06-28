@@ -73,7 +73,7 @@ class Model:
         # Run the ocn model if the flags is switched on
         if boundaries.ocn_coupling_flag:
             
-            print("[day=%f] Run!" % (day,)) 
+            #print("[day=%f] Run!" % (day,)) 
             #st.sst = st.sst.at[:].set(1)
 
             sst, sic, d_o = run(

@@ -59,7 +59,7 @@ class TestModelUnit(unittest.TestCase):
             time_step = time_step,
             save_interval = 86400.0,                       # 1 day   : No effect currently
             total_time = 86400.0 * simulation_days,        # 10 days : No effect currently
-            start_date = pd.Timestamp("2000-01-01"),
+            start_date = pd.Timestamp("2000-01-01"),       # No effect
             horizontal_resolution = 31,
             coords = coords,
             boundaries = boundaries,
