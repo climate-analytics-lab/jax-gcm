@@ -70,9 +70,15 @@ def forward_model_wrapper(theta, theta_keys, state = None, parameters = None, ar
     if state is None: 
         state = model.get_initial_state()
     final_state, predictions = model.unroll(state)
-    xr_predictions = model.predictions_to_xarray(predictions)
-    means = {var: xr_predictions[var].mean().values for var in xr_predictions.data_vars}
-    return jnp.array(list(means.values())) # returns the mean of all physics_data variables and dynamic variables over space and time
+    # # Old method using xarray (doesn't work with JAX)
+    # xr_predictions = model.predictions_to_xarray(predictions)
+    # means = {var: xr_predictions[var].mean().values for var in xr_predictions.data_vars}
+    # return jnp.array(list(means.values())) # returns the mean of all physics_data variables and dynamic variables over space and time
+    leaves_d = jax.tree_util.tree_leaves(predictions['dynamics'])
+    sums_d = jnp.array([jnp.mean(leaf) for leaf in leaves_d])
+    leaves_p = jax.tree_util.tree_leaves(predictions['physics'])
+    sums_p = jnp.array([jnp.mean(leaf) for leaf in leaves_p])
+    return jnp.concatenate((sums_d, sums_p))
 
 def make_ones_prediction_object(pred): 
         return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
