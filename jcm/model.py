@@ -130,19 +130,15 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
-    valid_resolutions = [21, 31, 42, 85, 106, 119, 170, 213, 340, 425]
-    resolution_map = {
-        k: getattr(dinosaur.spherical_harmonic.Grid, f'T{k}') for k in valid_resolutions
-    }
-
-    if horizontal_resolution not in resolution_map:
-        raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
-
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
     if layers not in sigma_layer_boundaries:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
 
     return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=resolution_map[horizontal_resolution](radius=PHYSICS_SPECS.radius), # truncation
+        horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
     )
 
