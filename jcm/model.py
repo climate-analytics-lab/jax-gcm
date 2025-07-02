@@ -5,7 +5,7 @@ import tree_math
 from typing import Callable, Any
 from numpy import timedelta64
 import dinosaur
-from dinosaur import typing
+from dinosaur.typing import TimeStepFn, PostProcessFn, PyTreeState, ModelState
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
@@ -26,13 +26,13 @@ class ModelOutput:
     physics: PhysicsOutputData
 
 def trajectory_from_step(
-    step_fn: typing.TimeStepFn,
+    step_fn: TimeStepFn,
     outer_steps: int,
     inner_steps: int,
     *,
     start_with_input: bool = False,
-    post_process_fn: typing.PostProcessFn = lambda x: x,
-) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
+    post_process_fn: PostProcessFn = lambda x: x,
+) -> Callable[[PyTreeState], tuple[PyTreeState, Any]]:
     """Returns a function that accumulates repeated applications of `step_fn`.
     Compute a trajectory by repeatedly calling `step_fn()`
     `outer_steps * inner_steps` times.
@@ -287,13 +287,13 @@ class SpeedyModel:
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = lambda model_state: ( # this lambda pattern allows for the imex_rk_sil3 function to be called only once
-            lambda incremented_state: typing.ModelState(
+            lambda incremented_state: ModelState(
                 state = incremented_state.state,
                 diagnostics = incremented_state.diagnostics - model_state.diagnostics, # we subtract off the previous diagnostics as soon as we are dealing with actual values rather than tendencies
             )
         )(dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)(model_state))
         filters = [
-            lambda u, u_next: typing.ModelState(
+            lambda u, u_next: ModelState(
                 state=dinosaur.time_integration.exponential_step_filter(
                     self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
                 )(u.state, u_next.state),
@@ -304,7 +304,7 @@ class SpeedyModel:
         self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
         # FIXME: enabling averaging causes model blowup when used with realistic boundary conditions (cause not tracked yet)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> typing.ModelState:
+    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> ModelState:
         from jcm.physics import physics_state_to_dynamics_state
 
         # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
@@ -331,7 +331,7 @@ class SpeedyModel:
             self.coords.nodal_shape[0],
         )
 
-        return typing.ModelState(
+        return ModelState(
             state=initial_state,
             diagnostics=initial_physics_data.to_output(),
         )
@@ -365,7 +365,7 @@ class SpeedyModel:
             physics=physics_data if self.post_process_physics else state.diagnostics
         )
 
-    def unroll(self, state: typing.ModelState) -> tuple[typing.ModelState, typing.ModelState]:
+    def unroll(self, state: ModelState) -> tuple[ModelState, ModelState]:
         integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
