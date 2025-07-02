@@ -107,8 +107,7 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
-
-        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
+        from jcm.utils import ones_like
 
         # Create model that goes through one timestep
         model = SpeedyModel(save_interval=(1/48.), total_time=(1/48.))
@@ -132,8 +131,7 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
-
-        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
+        from jcm.utils import ones_like
 
         model = SpeedyModel(save_interval=(1/48.), total_time=(1/24.))
         state = model.get_initial_state()
@@ -155,6 +153,7 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel, get_coords
         from jcm.boundaries import initialize_boundaries
+        from jcm.utils import ones_like
 
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
@@ -178,9 +177,7 @@ class TestModelUnit(unittest.TestCase):
             state = model.get_initial_state()
             _, predictions = model.unroll(state)
             return predictions
-        
-        ones_like = lambda x: jtu.tree_map(lambda y: jnp.ones_like(y), x)
-        
+                
         # Calculate gradients using VJP
         params = Parameters.default()
         primal, f_vjp = jax.vjp(model_run_wrapper, params)

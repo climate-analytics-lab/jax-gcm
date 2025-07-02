@@ -41,7 +41,7 @@ class SWRadiationOutputData:
     rsns: jnp.ndarray # Net downward flux of short-wave radiation at the surface
     ozone: jnp.ndarray # Ozone concentration in lower stratosphere
     ozupp: jnp.ndarray# Ozone depth in upper stratosphere
-    zenit: jnp.ndarray # The Zenit angle
+    zenit: jnp.ndarray # The zenith angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
     icltop: jnp.ndarray # Cloud top level
