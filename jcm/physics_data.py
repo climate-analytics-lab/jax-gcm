@@ -32,6 +32,7 @@ class LWRadiationData:
     
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
+
 @tree_math.struct
 class SWRadiationData:
     qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
@@ -40,14 +41,14 @@ class SWRadiationData:
     rsns: jnp.ndarray # Net downward flux of short-wave radiation at the surface
     ozone: jnp.ndarray # Ozone concentration in lower stratosphere
     ozupp: jnp.ndarray# Ozone depth in upper stratosphere
-    zenit: jnp.ndarray # The Zenit angle
+    zenit: jnp.ndarray # The zenith angle
     stratz: jnp.ndarray # Polar night cooling in the stratosphere
     gse: jnp.ndarray # Vertical gradient of dry static energy
     icltop: jnp.ndarray # Cloud top level
     cloudc: jnp.ndarray # Total cloud cover
     cloudstr: jnp.ndarray # Stratiform cloud cover
     ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
-    dfabs: jnp.ndarray #Flux of short-wave radiation absorbed in each atmospheric layer
+    dfabs: jnp.ndarray # Flux of short-wave radiation absorbed in each atmospheric layer
     compute_shortwave: jnp.bool
 
     @classmethod
@@ -110,8 +111,8 @@ class SWRadiationData:
         )
     
     def isnan(self):
-        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
-        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
+        self.icltop = jnp.zeros_like(self.icltop, dtype=jnp.float_)
+        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=jnp.float_)
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -119,7 +120,7 @@ class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
-    ablco2: jnp.float32 # CO2 absorptivity
+    ablco2: jnp.float_ # CO2 absorptivity
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
     alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
     albsfc: jnp.ndarray # Combined surface albedo (land + sea)
@@ -173,6 +174,7 @@ class ModRadConData:
     
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
+
 @tree_math.struct
 class CondensationData:
     precls: jnp.ndarray # Precipitation due to large-scale condensation
@@ -242,7 +244,7 @@ class ConvectionData:
     # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
     # or intended to be used.
     def isnan(self):
-        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
+        self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float_)
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
@@ -297,8 +299,8 @@ class SurfaceFluxData:
             shf = shf if shf is not None else jnp.zeros((nodal_shape)+(3,)),
             evap = evap if evap is not None else jnp.zeros((nodal_shape)+(3,)),
             rlus = rlus if rlus is not None else jnp.zeros((nodal_shape)+(3,)),
-            rlds = rlds if rlds is not None else jnp.zeros((nodal_shape)),
-            rlns = rlns if rlns is not None else jnp.zeros((nodal_shape)),
+            rlds = rlds if rlds is not None else jnp.zeros(nodal_shape),
+            rlns = rlns if rlns is not None else jnp.zeros(nodal_shape),
             hfluxn = hfluxn if hfluxn is not None else jnp.zeros((nodal_shape)+(2,)),
             tsfc = tsfc if tsfc is not None else jnp.zeros(nodal_shape),
             tskin = tskin if tskin is not None else jnp.zeros(nodal_shape),
@@ -315,8 +317,8 @@ class SurfaceFluxData:
             shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
             evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
             rlus = rlus if rlus is not None else jnp.ones((nodal_shape)+(3,)),
-            rlds = rlds if rlds is not None else jnp.ones((nodal_shape)), # FIXME these shapes
-            rlns = rlns if rlns is not None else jnp.ones((nodal_shape)),
+            rlds = rlds if rlds is not None else jnp.ones(nodal_shape),
+            rlns = rlns if rlns is not None else jnp.ones(nodal_shape),
             hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
             tsfc = tsfc if tsfc is not None else jnp.ones(nodal_shape),
             tskin = tskin if tskin is not None else jnp.ones(nodal_shape),

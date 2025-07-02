@@ -14,7 +14,7 @@ class TestDateUnit(unittest.TestCase):
         self.assertAlmostEqual(fraction_of_year_elapsed(Timestamp.from_datetime(datetime(2000, 12, 31))), 365/366, places=2)
         self.assertAlmostEqual(fraction_of_year_elapsed(Timestamp.from_datetime(datetime(2000, 2, 29))), (31+28)/366, places=2)
 
-        # Test non-leap year    
+        # Test non-leap year
         self.assertAlmostEqual(fraction_of_year_elapsed(Timestamp.from_datetime(datetime(2001, 1, 1))), 0.0, places=2)
         self.assertAlmostEqual(fraction_of_year_elapsed(Timestamp.from_datetime(datetime(2001, 7, 2, 12))), 0.5, places=2)
         self.assertAlmostEqual(fraction_of_year_elapsed(Timestamp.from_datetime(datetime(2001, 12, 31))), 364/365, places=2)

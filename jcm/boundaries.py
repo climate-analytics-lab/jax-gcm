@@ -147,7 +147,7 @@ def default_boundaries(
     alb0 = jnp.zeros_like(orography)
     tsea = _fixed_ssts(grid)
     
-    # No land_model_init, but should be fine because fmask = 0    
+    # No land_model_init, but should be fine because fmask = 0
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
         orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
@@ -187,7 +187,7 @@ def initialize_boundaries(
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
 
-    tsea = _fixed_ssts(grid) 
+    tsea = _fixed_ssts(grid)
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
         fmask=fmask, forog=forog, orog=orog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)

@@ -55,14 +55,10 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model(self):
         from jcm.model import SpeedyModel
 
-        layers = 8
         # optionally add a boundary conditions file
         model = SpeedyModel(
-            time_step=720,
             save_interval=1,
             total_time=2,
-            layers=layers,
-            parameters=Parameters.default()
         )
     
         state = model.get_initial_state()
@@ -109,23 +105,18 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
+        from jcm.utils import ones_like
 
-        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), state)
-
-        def make_ones_prediction_object(pred):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
-        #create model that goes through one timestep
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/48.), layers=8, parameters=Parameters.default()) # takes 40 seconds on laptop gpu
+        # Create model that goes through one timestep
+        model = SpeedyModel(save_interval=(1/48.), total_time=(1/48.))
         state = model.get_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state) 
+        primals, f_vjp = jax.vjp(model.unroll, state)
         
-        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
+        input = (ones_like(primals[0]), ones_like(primals[1]))
 
-        df_dstate = f_vjp(input) 
+        df_dstate = f_vjp(input)
         
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
@@ -138,20 +129,15 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         from jcm.model import SpeedyModel
+        from jcm.utils import ones_like
 
-        def make_ones_dinosaur_State_object(state, choose_sim_time = jnp.float32(1.0)):
-            return jtu.tree_map(lambda x: jnp.ones_like(x), state)
-        
-        def make_ones_prediction_object(pred): 
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
-        model = SpeedyModel(time_step=30, save_interval=(1/48.), total_time=(1/24.), layers=8, parameters=Parameters.default())
+        model = SpeedyModel(save_interval=(1/48.), total_time=(1/24.))
         state = model.get_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state) 
-        input = (make_ones_dinosaur_State_object(primals[0]), make_ones_prediction_object(primals[1]))
-        df_dstate = f_vjp(input) 
+        primals, f_vjp = jax.vjp(model.unroll, state)
+        input = (ones_like(primals[0]), ones_like(primals[1]))
+        df_dstate = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
@@ -165,6 +151,7 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         from jcm.model import SpeedyModel, get_coords
         from jcm.boundaries import initialize_boundaries
+        from jcm.utils import ones_like
 
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
@@ -177,14 +164,10 @@ class TestModelUnit(unittest.TestCase):
         )
 
         create_model = lambda params=Parameters.default(): SpeedyModel(
-            time_step=30,
             save_interval=1/24.,
             total_time=2./24.,
-            layers=8,
             boundaries=default_boundaries(),
             parameters=params,
-            post_process=True,
-            checkpoint_terms=True,
         )
         
         def model_run_wrapper(params):
@@ -192,14 +175,11 @@ class TestModelUnit(unittest.TestCase):
             state = model.get_initial_state()
             _, predictions = model.unroll(state)
             return predictions
-        
-        def make_ones_prediction_object(pred): 
-            return jtu.tree_map(lambda x: jnp.ones_like(x), pred)
-        
+                
         # Calculate gradients using VJP
         params = Parameters.default()
         primal, f_vjp = jax.vjp(model_run_wrapper, params)
-        df_dparams = f_vjp(make_ones_prediction_object(primal))
+        df_dparams = f_vjp(ones_like(primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     
@@ -232,14 +212,10 @@ class TestModelUnit(unittest.TestCase):
         )
 
         create_model = lambda params=Parameters.default(): SpeedyModel(
-            time_step=30,
             save_interval=1/24.,
             total_time=2./24.,
-            layers=8,
             boundaries=default_boundaries(),
             parameters=params,
-            post_process=True,
-            checkpoint_terms=True,
         )
         
         def model_run_wrapper(params):

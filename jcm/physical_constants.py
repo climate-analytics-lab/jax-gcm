@@ -17,7 +17,7 @@ alhc = 2501.0 # Latent heat of condensation, in J/g for consistency with specifi
 alhs = 2801.0 # Latent heat of sublimation
 sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
-epssw = 0.020 #Fraction of incoming solar radiation absorbed by ozone
+epssw = 0.020 # Fraction of incoming solar radiation absorbed by ozone
 
 gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
 hscale = 7.5       # Reference scale height for pressure (in km)
@@ -35,4 +35,4 @@ tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
 # to prevent blowup of gradients
 epsilon = 1e-9
 
-nstrad = 3 # number of timesteps between shortwave evaluations  
+nstrad = 3 # number of timesteps between shortwave evaluations

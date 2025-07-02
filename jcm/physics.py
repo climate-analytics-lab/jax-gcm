@@ -157,10 +157,10 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     return State(
         vorticity=modal_vorticity,
         divergence=modal_divergence,
-        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ? 
+        temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ?
         log_surface_pressure=modal_log_sp,
         tracers={'specific_humidity': q_modal}
-        )
+    )
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
     """
@@ -187,17 +187,19 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
-    dynamics_tendency = State(vor_tend_modal,
-                                      div_tend_modal,
-                                      t_tend_modal,
-                                      log_sp_tend_modal,
-                                      sim_time=0.,
-                                      tracers={'specific_humidity': q_tend_modal})
+    dynamics_tendency = State(
+        vor_tend_modal,
+        div_tend_modal,
+        t_tend_modal,
+        log_sp_tend_modal,
+        sim_time=0.,
+        tracers={'specific_humidity': q_tend_modal}
+    )
     return dynamics_tendency
 
 def verify_state(state: PhysicsState) -> PhysicsState:
     # set specific humidity to 0.0 if it became negative during the dynamics evaluation
-    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity) 
+    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     updated_state = state.copy(specific_humidity=qa)
 
     return updated_state
@@ -236,16 +238,15 @@ def get_physical_tendencies(
     Returns:
         Physical tendencies
     """
-
     physics_state = dynamics_state_to_physics_state(state, dynamics)
-    state = verify_state(physics_state)
 
     # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
     # and implicitly passed to the next physics_term. tendencies are summed
     physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
     
+    clamped_physics_state = verify_state(physics_state)
     for term in physics_terms:
-        tend, data = term(physics_state, data, parameters, boundaries, geometry)
+        tend, data = term(clamped_physics_state, data, parameters, boundaries, geometry)
         physics_tendency += tend
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
