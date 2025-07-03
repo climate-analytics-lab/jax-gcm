@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  jax-dev:
+    privileged: true
+    image: us-central2-docker.pkg.dev/fluid-script-453604-u5/jax-gcm/scripps-tpu:latest
+    container_name: jax-gcm-dev
+    volumes:
+      - .:/app  # Current directory to /app in container
+    working_dir: /app
+    stdin_open: true  # Keep STDIN open (-i flag)
+    tty: true        # Allocate pseudo-TTY (-t flag)
+    command: bash
+    environment:
+      - PYTHONPATH=/app
+    ports:
+      - "8888:8888"  # Jupyter notebook port
+      - "8889:8889"  # Backup port
+
+  jupyter:
+    privileged: true
+    image: us-central2-docker.pkg.dev/fluid-script-453604-u5/jax-gcm/scripps-tpu:latest
+    container_name: jax-gcm-jupyter
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "8888:8888"
+    environment:
+      - PYTHONPATH=/app
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
