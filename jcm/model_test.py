@@ -147,7 +147,6 @@ class TestModelUnit(unittest.TestCase):
 
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
-        import jax.numpy as jnp
         from jcm.model import Model, get_coords
         from jcm.boundaries import initialize_boundaries
         from jcm.utils import ones_like
