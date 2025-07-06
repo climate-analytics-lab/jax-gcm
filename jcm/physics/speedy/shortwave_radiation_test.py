@@ -110,7 +110,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         boundaries = BoundaryData.zeros((ix, il))
         geometry = Geometry.from_grid_shape((ix, il), kx)
 
-    def test_shortwave_radiation(self):   
+    def test_shortwave_radiation(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -134,7 +134,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
@@ -261,7 +260,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
-    def test_random_input_consistency(self):     
+    def test_random_input_consistency(self):
         from datetime import datetime
         from jcm.date import Timestamp
         xy = (ix, il)
@@ -279,7 +278,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
         self.assertTrue(jnp.all(physics_data.shortwave_rad.zenit >= 0))
         
-    def test_get_zonal_average_fields_gradients_isnan(self):    
+    def test_get_zonal_average_fields_gradients_isnan(self):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
 
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
@@ -305,7 +304,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
@@ -314,13 +312,13 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries, geometry)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         df_dstates, df_ddatas, _, _ = f_vjp(datas)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
 
-    def test_get_shortwave_rad_fluxes_gradients_isnan_ones(self): 
+    def test_get_shortwave_rad_fluxes_gradients_isnan_ones(self):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -330,7 +328,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data.shortwave_rad.compute_shortwave = True
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
@@ -341,7 +339,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
 
-    def test_solar_gradients_isnan(self): 
+    def test_solar_gradients_isnan(self):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
         primals, f_vjp = jax.vjp(solar, 0.2, 4.*solc, geometry)
         input = jnp.ones_like(primals)
@@ -349,9 +347,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
 
-    def test_clouds_gradients_isnan_with_realistic_values(self):   
-        from datetime import datetime
-        from jcm.date import Timestamp, Timedelta     
+    def test_clouds_gradients_isnan_with_realistic_values(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -375,7 +371,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
-        #equivalent of tyear = 0.6
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
@@ -383,7 +378,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask=fmask)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry) 
+        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)

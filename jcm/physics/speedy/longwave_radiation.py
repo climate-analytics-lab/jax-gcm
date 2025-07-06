@@ -131,7 +131,7 @@ def get_upward_longwave_rad_fluxes(
         ta: Absolute temperature
         ts: Surface temperature - surface_fluxes.tsfc
         rlds: Downward flux of long-wave radiation at the surface
-        fsfcu: Surface blackbody emission - taken from rlus from surface fluxes
+        rlus: Surface blackbody emission - taken from rlus from surface fluxes
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
     
@@ -151,17 +151,17 @@ def get_upward_longwave_rad_fluxes(
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    fsfcu = physics_data.surface_flux.rlus[:,:,2] # FIXME
+    rlus = physics_data.surface_flux.rlus[:,:,2] # FIXME
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
     epslw = parameters.mod_radcon.epslw
-    fsfc = fsfcu - rlds
+    fsfc = rlus - rlds
     
-    flux = radset(ts, epslw) * fsfcu[:,:,jnp.newaxis] + refsfc * flux
+    flux = radset(ts, epslw) * rlus[:,:,jnp.newaxis] + refsfc * flux
 
     # Troposphere
     # correction for 'black' band
-    dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * fsfcu)
+    dfabs = dfabs.at[-1].add(parameters.mod_radcon.epslw * rlus)
 
     emis = 1. - tau2
     brad = radset(ta, epslw) * (st4a[:,:,:,0,jnp.newaxis] - emis*st4a[:,:,:,1,jnp.newaxis])

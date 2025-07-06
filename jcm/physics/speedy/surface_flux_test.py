@@ -67,15 +67,15 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         va = jnp.ones(zxy)
         ta = jnp.ones(zxy) * 290
         qa = jnp.ones(zxy)
-        rh = jnp.ones(zxy) * 0.5   
+        rh = jnp.ones(zxy) * 0.5
         phi = jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, jnp.newaxis, jnp.newaxis]
-        phi0 = jnp.zeros(xy) 
+        phi0 = jnp.zeros(xy)
         fmask_l = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones((ix,il)) * 292 # this needs to overwrite what is in sea_model? 
+        tsea = jnp.ones((ix,il)) * 292 # this needs to overwrite what is in sea_model?
         rsds = 400 * jnp.ones(xy)
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -116,7 +116,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
@@ -165,7 +165,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))    
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         forog = set_orog_land_sfc_drag(phi0, parameters)
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
@@ -216,7 +216,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
@@ -260,7 +260,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         forog = set_orog_land_sfc_drag(phi0, parameters)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
@@ -310,7 +310,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))   
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
         forog = set_orog_land_sfc_drag(phi0, parameters)
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave

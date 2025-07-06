@@ -18,24 +18,17 @@ PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_S
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (31, 42, 85, or 213).
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
-    resolution_map = {
-        31: dinosaur.spherical_harmonic.Grid.T31,
-        42: dinosaur.spherical_harmonic.Grid.T42,
-        85: dinosaur.spherical_harmonic.Grid.T85,
-        213: dinosaur.spherical_harmonic.Grid.T213,
-    }
-
-    if horizontal_resolution not in resolution_map:
-        raise ValueError(f"Invalid resolution: {horizontal_resolution}. Must be one of: {list(resolution_map.keys())}")
-
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
     if layers not in sigma_layer_boundaries:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
 
-    # Define the coordinate system
     return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=resolution_map[horizontal_resolution](radius=PHYSICS_SPECS.radius), # truncation
+        horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
     )
 
@@ -46,20 +39,11 @@ class Model:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(
-        self,
-        layers=8,
-        horizontal_resolution=31,
-        time_step=30.0,
-        total_time=1200,
-        start_date=None,
-        save_interval=10.0,
-        coords: CoordinateSystem=None,
-        parameters: Parameters=None,
-        boundaries: BoundaryData=None,
-        initial_state: PhysicsState=None,
-        physics: Physics=None,
-    ) -> None:
+    def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
+                 start_date=None, layers=8, horizontal_resolution=31,
+                 coords: CoordinateSystem=None, boundaries: BoundaryData=None,
+                 initial_state: PhysicsState=None, parameters: Parameters=None, physics: Physics=None,
+                 post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -82,7 +66,8 @@ class Model:
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         self.save_interval = save_interval * units.day
         self.total_time = total_time * units.day
-        dt_si = time_step * units.minute
+        self.time_step = time_step
+        dt_si = self.time_step * units.minute
 
         self.physics_specs = PHYSICS_SPECS
 
@@ -113,7 +98,7 @@ class Model:
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics = physics or SpeedyPhysics()
+        self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
 
         # TODO: make the truncation number a parameter consistent with the grid shape
         self.parameters = parameters or Parameters.default()
@@ -131,7 +116,7 @@ class Model:
             physics_specs=self.physics_specs,
         )
         
-        forcing = ExplicitODE.from_functions(lambda state:
+        physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
                 dynamics=self.primitive,
@@ -146,11 +131,11 @@ class Model:
                 )
             )
         )
-        
+
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, forcing])
+        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             dinosaur.time_integration.exponential_step_filter(
@@ -162,13 +147,12 @@ class Model:
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
 
-        #Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
+        # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
         if self.initial_state is not None:
-            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure 
+            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
-            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
-        else:     
+        else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
@@ -180,19 +164,22 @@ class Model:
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
-
-            return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+        return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state):
         from jcm.date import DateData
-        from jcm.physics_interface import dynamics_state_to_physics_state
+        from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         
         physics_data = None
         if self.physics.write_output:
-            date = DateData.set_date(self.start_date + Timedelta(seconds=state.sim_time))
-            _, physics_data = self.physics.compute_tendencies(physics_state, self.parameters, self.boundaries, self.geometry, date)
+            date=DateData.set_date(
+                model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
+            )
+            clamped_physics_state = verify_state(physics_state)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.parameters, self.boundaries, self.geometry, date)
         
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
