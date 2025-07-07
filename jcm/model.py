@@ -42,20 +42,18 @@ class Model:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, physics: Physics=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
         Args:
-            layers: Number of vertical layers
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             time_step: Model time step in minutes
+            save_interval: Save interval in days
             total_time: Total integration time in days
             start_date: Start date of the simulation
-            save_interval: Save interval in days
+            layers: Number of vertical layers
+            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             coords: CoordinateSystem object describing model grid
-            parameters: Parameters object describing model parameters
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
             physics: Physics object describing the model physics
@@ -98,15 +96,15 @@ class Model:
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
         # this implicitly calls initialize_modules, must be before we set boundaries
-        self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
+        self.physics = physics or SpeedyPhysics()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.parameters = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
+        params_for_boundaries = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
         else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundaries, params_for_boundaries, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
@@ -122,7 +120,6 @@ class Model:
                 dynamics=self.primitive,
                 time_step=time_step,
                 physics=self.physics,
-                parameters=self.parameters,
                 boundaries=self.boundaries,
                 geometry=self.geometry,
                 date = DateData.set_date(
@@ -179,7 +176,7 @@ class Model:
                 model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
             )
             clamped_physics_state = verify_state(physics_state)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.parameters, self.boundaries, self.geometry, date)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
         
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0

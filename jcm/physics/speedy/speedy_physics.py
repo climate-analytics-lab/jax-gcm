@@ -35,7 +35,9 @@ class SpeedyPhysics(Physics):
     write_output: bool
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, write_output: bool = True, parameters: Parameters = Parameters.default(), sea_coupling_flag=0, checkpoint_terms=True) -> None:
+    def __init__(self, write_output: bool=True,
+                 parameters: Parameters=Parameters.default(),
+                 sea_coupling_flag=0, checkpoint_terms=True) -> None:
         """
         Initialize the SpeedyPhysics class with the specified parameters.
         
@@ -85,7 +87,6 @@ class SpeedyPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        parameters: Parameters,
         boundaries: BoundaryData,
         geometry: Geometry,
         date: DateData,
@@ -114,7 +115,7 @@ class SpeedyPhysics(Physics):
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
         
         for term in self.terms:
-            tend, data = term(state, data, parameters, boundaries, geometry)
+            tend, data = term(state, data, self.parameters, boundaries, geometry)
             physics_tendency += tend
         
         return physics_tendency, data

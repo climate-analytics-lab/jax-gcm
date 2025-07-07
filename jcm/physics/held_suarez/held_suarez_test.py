@@ -14,7 +14,6 @@ class TestHeldSuarezUnit(unittest.TestCase):
             dynamics = model.primitive,
             time_step = time_step,
             physics = HeldSuarezPhysics(model.coords),
-            parameters = None,
             boundaries = None,
             geometry = None,
             date = None

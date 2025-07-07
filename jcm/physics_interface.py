@@ -101,13 +101,12 @@ class PhysicsTendency:
 class Physics:
     write_output: bool
     
-    def compute_tendencies(self, state: PhysicsState, parameters: Parameters, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
-            parameters: Parameters object
             boundaries: Boundary data
             geometry: Geometry data
             date: Date data
@@ -278,7 +277,6 @@ def get_physical_tendencies(
     dynamics: PrimitiveEquations,
     time_step: int,
     physics: Physics,
-    parameters: Parameters,
     boundaries: BoundaryData,
     geometry: Geometry,
     date: DateData,
@@ -301,7 +299,7 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, _ = physics.compute_tendencies(clamped_physics_state, parameters, boundaries, geometry, date)
+    physics_tendency, _ = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)

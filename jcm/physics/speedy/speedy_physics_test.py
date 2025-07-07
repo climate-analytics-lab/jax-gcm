@@ -14,7 +14,6 @@ class TestSpeedyPhysicsUnit(unittest.TestCase):
         grid_shape = (8,1,2)
         tendencies, data = SpeedyPhysics().compute_tendencies(
             state=PhysicsState.zeros(grid_shape),
-            parameters=Parameters.default(),
             boundaries=BoundaryData.ones(grid_shape[1:]),
             geometry=Geometry.from_grid_shape(grid_shape[1:], grid_shape[0]),
             date=DateData.zeros()
