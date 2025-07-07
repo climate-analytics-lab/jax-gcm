@@ -95,7 +95,6 @@ class Model:
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
-        # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics = physics or SpeedyPhysics()
 
         # TODO: make the truncation number a parameter consistent with the grid shape

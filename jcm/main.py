@@ -15,7 +15,7 @@ def main(cfg: DictConfig):
         time_step=cfg.model.time_step,
         save_interval=cfg.model.save_interval,
         total_time=cfg.model.total_time,
-        layers=cfg.model.layers,
+        layers=cfg.model.layers
     )
     
     state = model.get_initial_state()
