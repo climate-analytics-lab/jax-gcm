@@ -42,7 +42,7 @@ class Model:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, parameters: Parameters=None, physics: Physics=None,
+                 initial_state: PhysicsState=None, physics: Physics=None,
                  post_process=True, checkpoint_terms=True) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -101,7 +101,7 @@ class Model:
         self.physics = physics or SpeedyPhysics(checkpoint_terms=checkpoint_terms)
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.parameters = parameters or Parameters.default()
+        self.parameters = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
             self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)

@@ -31,19 +31,22 @@ def set_physics_flags(
     return physics_tendencies, physics_data
 
 class SpeedyPhysics(Physics):
+    parameters: Parameters
     write_output: bool
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, write_output: bool = True, sea_coupling_flag=0, checkpoint_terms=True) -> None:
+    def __init__(self, write_output: bool = True, parameters: Parameters = Parameters.default(), sea_coupling_flag=0, checkpoint_terms=True) -> None:
         """
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
             write_output (bool): Flag to indicate whether physics output should be written to predictions.
+            parameters (Parameters): Parameters for the physics model.
             sea_coupling_flag (int): Flag to indicate if sea coupling is enabled.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """
         self.write_output = write_output
+        self.parameters = parameters
 
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
         from jcm.physics.speedy.convection import get_convection_tendencies

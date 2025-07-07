@@ -1,10 +1,12 @@
 import unittest
-from dinosaur import primitive_equations_states
-from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.params import Parameters
 import jax.tree_util as jtu
 
 class TestModelUnit(unittest.TestCase):
+    def setUp(self):
+        global SpeedyPhysics, Parameters, primitive_equations_states
+        from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+        from jcm.params import Parameters
+        from dinosaur import primitive_equations_states
 
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
@@ -167,7 +169,7 @@ class TestModelUnit(unittest.TestCase):
             save_interval=1/24.,
             total_time=2./24.,
             boundaries=default_boundaries(),
-            parameters=params,
+            physics=SpeedyPhysics(parameters=params),
         )
         
         def model_run_wrapper(params):
@@ -217,7 +219,7 @@ class TestModelUnit(unittest.TestCase):
             save_interval=1/24.,
             total_time=2./24.,
             boundaries=default_boundaries(),
-            parameters=params,
+            physics=SpeedyPhysics(parameters=params),
         )
         
         def model_run_wrapper(params):
