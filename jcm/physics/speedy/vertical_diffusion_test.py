@@ -11,7 +11,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
             parameters, geometry, BoundaryData
         from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         geometry = Geometry.from_grid_shape((ix, il), kx)
         parameters = Parameters.default()

@@ -4,7 +4,7 @@ from jcm.boundaries import BoundaryData
 from dinosaur import coordinate_systems
 from dinosaur import primitive_equations
 from jcm.geometry import Geometry
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import get_coords, PHYSICS_SPECS
 from jcm.date import DateData

@@ -4,7 +4,7 @@ For storing all variables related to the model's grid space.
 """
 import jax.numpy as jnp
 import tree_math
-import jcm.physical_constants as pc
+import jcm.physics.speedy.physical_constants as pc
 from dinosaur.coordinate_systems import CoordinateSystem
 
 sigma_layer_boundaries = {

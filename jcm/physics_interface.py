@@ -7,14 +7,14 @@ to the specific physics being used.
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.physical_constants import p0
+from jcm.physics.speedy.physical_constants import p0
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
 

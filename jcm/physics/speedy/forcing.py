@@ -1,5 +1,5 @@
 from jcm.geometry import Geometry
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
 from jcm.boundaries import BoundaryData
 from jcm.physics_interface import PhysicsState, PhysicsTendency

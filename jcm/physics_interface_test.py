@@ -4,7 +4,7 @@ from dinosaur import primitive_equations_states
 from dinosaur.sigma_coordinates import centered_vertical_advection
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
-class TestPhysicsUnit(unittest.TestCase):
+class TestPhysicsInterfaceUnit(unittest.TestCase):
     def test_initial_state_conversion(self):
         from dinosaur.scales import SI_SCALE
         from dinosaur import primitive_equations

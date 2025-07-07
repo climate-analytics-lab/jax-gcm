@@ -9,7 +9,7 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 

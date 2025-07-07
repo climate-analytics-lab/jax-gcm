@@ -10,7 +10,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
         from jcm.boundaries import BoundaryData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
@@ -21,7 +21,7 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.convection import diagnose_convection, get_convection_tendencies
-        from jcm.physical_constants import rgas, cp
+        from jcm.physics.speedy.physical_constants import rgas, cp
         from jcm.physics.speedy.humidity import get_qsat
 
     def test_diagnose_convection_varying(self):

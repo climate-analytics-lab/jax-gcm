@@ -30,7 +30,7 @@ class TestLongwave(unittest.TestCase):
 
         global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, geometry, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics.speedy.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
         from jcm.geometry import Geometry

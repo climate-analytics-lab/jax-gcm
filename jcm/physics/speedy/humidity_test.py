@@ -14,7 +14,7 @@ class TestHumidityUnit(unittest.TestCase):
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
         from jcm.boundaries import BoundaryData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         parameters = Parameters.default()
         from jcm.geometry import Geometry
         geometry = Geometry.from_grid_shape((ix, il), kx)

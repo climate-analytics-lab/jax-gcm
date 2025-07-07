@@ -5,10 +5,10 @@ from jax import jit
 # importing custom functions from library
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
+from jcm.physics.speedy.physical_constants import p0, rgas, cp, alhc, sbc, grav
 from jcm.physics.speedy.humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.utils import pass_fn
 

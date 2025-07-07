@@ -103,8 +103,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
-        from jcm.physical_constants import epssw, solc
-        from jcm.params import Parameters
+        from jcm.physics.speedy.physical_constants import epssw, solc
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))

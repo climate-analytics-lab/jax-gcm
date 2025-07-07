@@ -6,7 +6,7 @@ class TestModelUnit(unittest.TestCase):
     def setUp(self):
         global SpeedyPhysics, Parameters
         from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
 
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics

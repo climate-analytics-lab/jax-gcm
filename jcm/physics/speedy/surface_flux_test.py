@@ -12,7 +12,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         from jcm.boundaries import BoundaryData
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)

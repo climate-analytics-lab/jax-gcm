@@ -5,7 +5,7 @@ from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.geometry import Geometry
 from jcm.date import DateData
 
@@ -16,7 +16,7 @@ def set_physics_flags(
     boundaries: BoundaryData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    from jcm.physical_constants import nstrad
+    from jcm.physics.speedy.physical_constants import nstrad
     '''
     Sets flags that indicate whether a tendency function should be run.
     clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 

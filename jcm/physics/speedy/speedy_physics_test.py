@@ -6,7 +6,7 @@ class TestSpeedyPhysicsUnit(unittest.TestCase):
         from jcm.physics_interface import PhysicsState
         from jcm.physics.speedy.speedy_physics import SpeedyPhysics
         from jcm.boundaries import BoundaryData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         from jcm.date import DateData
 

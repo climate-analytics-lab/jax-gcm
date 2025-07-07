@@ -4,8 +4,8 @@ from jax import lax
 import jax
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physical_constants import epssw, solc, epsilon
+from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.utils import pass_fn

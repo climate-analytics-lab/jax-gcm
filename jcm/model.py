@@ -8,9 +8,9 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.physical_constants import p0
+from jcm.physics.speedy.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 
@@ -98,7 +98,9 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        params_for_boundaries = Parameters.default() if not hasattr(self.physics, 'parameters') else self.physics.parameters
+        params_for_boundaries = (self.physics.parameters 
+                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
+                                 else Parameters.default())
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
             self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
