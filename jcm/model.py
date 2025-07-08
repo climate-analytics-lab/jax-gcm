@@ -28,7 +28,7 @@ def set_physics_flags(state: PhysicsState,
         This could also apply to forcing and coupling.
     '''
     model_step = physics_data.date.model_step
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 0)
     shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
     physics_data = physics_data.copy(shortwave_rad=shortwave_data)
 
