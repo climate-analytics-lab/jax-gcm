@@ -89,8 +89,8 @@ def compute_lapse_rate(temperature: jnp.ndarray,
     dT = temperature[..., 1:] - temperature[..., :-1]
     dz = height[..., 1:] - height[..., :-1]
     
-    # Avoid division by zero
-    dz = jnp.where(dz == 0, 1e-10, dz)
+    # Avoid division by zero and ensure reasonable minimum height difference
+    dz = jnp.where(jnp.abs(dz) < 1.0, jnp.sign(dz) * 1.0, dz)
     
     lapse_rate = dT / dz
     
@@ -145,15 +145,20 @@ def find_tropopause_level(temperature: jnp.ndarray,
             current_height = height_col[k]
             top_height = current_height + DELTAZ
             
-            # Find levels within 2km above current level (for height levels)
-            above_mask = (height_col >= current_height) & (height_col <= top_height)
+            # Find levels within 2km above current level
+            # We need to be careful about indexing: lapse_rate[i] represents the lapse rate
+            # between height[i] and height[i+1], so we need to map height indices to lapse indices
+            above_mask_height = (height_col >= current_height) & (height_col <= top_height)
             
-            # For lapse rate averaging, we only consider the first nlev_lapse heights
-            # since lapse rate array has nlev_lapse elements
-            above_mask_for_lapse = above_mask[:nlev_lapse]
+            # For lapse rate averaging, we need to convert height mask to lapse mask
+            # Lapse rate [i] corresponds to the layer between height[i] and height[i+1]
+            # So if height level i is in the range, then lapse rate i-1 and i might be relevant
+            above_mask_for_lapse = above_mask_height[1:]  # Skip first height level since no lapse rate before it
             
             # Get valid lapse rate values within the 2km window
-            valid_lapse_values = jnp.where(above_mask_for_lapse, lapse_col, 0.0)
+            # Create zeros array with proper shape for broadcasting
+            zeros_array = jnp.zeros_like(lapse_col)
+            valid_lapse_values = jnp.where(above_mask_for_lapse, lapse_col, zeros_array)
             num_valid = jnp.sum(above_mask_for_lapse.astype(jnp.float32))
             
             # Compute average, handling division by zero
@@ -163,8 +168,19 @@ def find_tropopause_level(temperature: jnp.ndarray,
                 GWMO - 1.0  # Value that will fail the test
             )
             
-            # Both criteria must be satisfied
-            both_ok = lapse_ok & (avg_lapse >= GWMO) & (num_valid > 0)
+            # Additional check: require some temperature variation to avoid 
+            # false positives in isothermal atmospheres
+            # Check temperature range over 2km span
+            temp_range_2km = jnp.max(jnp.where(above_mask_height, temp_col, temp_col[k])) - \
+                           jnp.min(jnp.where(above_mask_height, temp_col, temp_col[k]))
+            has_temp_variation = temp_range_2km > 1.0  # At least 1K variation over 2km
+            
+            # Check if we're at a reasonable tropopause height (> 5km typically for flexibility)
+            reasonable_height = current_height > 5000.0
+            
+            # All criteria must be satisfied for a valid tropopause
+            # Include temperature variation to avoid false positives in isothermal atmospheres
+            both_ok = lapse_ok & (avg_lapse >= GWMO) & (num_valid > 0) & reasonable_height & has_temp_variation
             
             return both_ok, pres_col[k]
         
@@ -189,12 +205,28 @@ def find_tropopause_level(temperature: jnp.ndarray,
         return final_pressure
     
     # Apply to each column in batch
-    def process_batch(args):
-        temp_batch, pres_batch, height_batch, lapse_batch = args
-        return jax.vmap(find_tropopause_column)(temp_batch, pres_batch, height_batch, lapse_batch)
-    
-    # Process the batch
-    result = process_batch((search_temp, search_pressure, search_height, lapse_rate))
+    if len(batch_shape) == 0:
+        # Single column case
+        result = find_tropopause_column(search_temp, search_pressure, search_height, lapse_rate)
+    else:
+        # Multi-column case: flatten batch dimensions for processing
+        flat_batch_size = 1
+        for dim in batch_shape:
+            flat_batch_size *= dim
+        
+        # Reshape to (flat_batch_size, nlev)
+        search_temp_flat = search_temp.reshape(flat_batch_size, nlev_search)
+        search_pressure_flat = search_pressure.reshape(flat_batch_size, nlev_search)
+        search_height_flat = search_height.reshape(flat_batch_size, nlev_search)
+        lapse_rate_flat = lapse_rate.reshape(flat_batch_size, nlev_lapse)
+        
+        # Process each column
+        result_flat = jax.vmap(find_tropopause_column)(
+            search_temp_flat, search_pressure_flat, search_height_flat, lapse_rate_flat
+        )
+        
+        # Reshape back to batch shape
+        result = result_flat.reshape(batch_shape)
     
     return result
 
