@@ -185,7 +185,7 @@ class IconPhysics(Physics):
         
         return terms
     
-    def __call__(self, 
+    def compute_tendencies(self, 
                  state: PhysicsState,
                  physics_data: IconPhysicsData,
                  boundaries: Optional[BoundaryData] = None,
