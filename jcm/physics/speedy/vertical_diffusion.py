@@ -2,10 +2,10 @@ import jax.numpy as jnp
 from jax import jit
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physical_constants import cp, alhc
-from jcm.physics import PhysicsState, PhysicsTendency
-from jcm.physics_data import PhysicsData
+from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physical_constants import cp, alhc
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics.speedy.physics_data import PhysicsData
 
 @jit
 def get_vertical_diffusion_tend(

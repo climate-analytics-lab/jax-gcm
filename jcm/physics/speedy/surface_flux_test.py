@@ -10,14 +10,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData, \
                PhysicsState, get_surface_fluxes, set_orog_land_sfc_drag, PhysicsTendency, parameters, geometry
         from jcm.boundaries import BoundaryData
-        from jcm.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.params import Parameters
+        from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)
         
-        from jcm.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
+        from jcm.physics.speedy.surface_flux import get_surface_fluxes, set_orog_land_sfc_drag
 
     def test_grad_surface_flux(self):
         xy = (ix, il)

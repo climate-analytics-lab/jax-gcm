@@ -7,10 +7,10 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, grav, cp
+from jcm.physics.speedy.params import Parameters
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physical_constants import p0, alhc, grav, cp
 
 @jit
 def diagnose_convection(
