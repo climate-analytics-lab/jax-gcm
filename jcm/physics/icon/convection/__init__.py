@@ -6,4 +6,22 @@ including deep and shallow convection, convective adjustment, and
 associated cloud and precipitation processes.
 """
 
-__all__ = []
+from .tiedtke_nordeng import (
+    tiedtke_nordeng_convection, 
+    tiedtke_nordeng_convection_with_tracers,
+    ConvectionConfig, 
+    ConvectionState, 
+    ConvectionTendencies
+)
+from .tracer_transport import TracerIndices, TracerTransport, initialize_tracers
+
+__all__ = [
+    "tiedtke_nordeng_convection",
+    "tiedtke_nordeng_convection_with_tracers",
+    "ConvectionConfig",
+    "ConvectionState", 
+    "ConvectionTendencies",
+    "TracerIndices",
+    "TracerTransport",
+    "initialize_tracers"
+]
