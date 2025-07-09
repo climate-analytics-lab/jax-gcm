@@ -108,9 +108,9 @@ def find_lfs(
     
     # Scan from cloud top down to find LFS
     def check_lfs(k):
-        # Skip if outside cloud
-        if k < ktop or k > kbase:
-            return False, 0.0
+        # Check if outside cloud bounds - handled by calling function now
+        # if k < ktop or k > kbase:
+        #     return False, 0.0
             
         # Calculate wet-bulb values for environment
         twb, qwb = wetbulb_temperature(temperature[k], humidity[k], pressure[k])
@@ -140,16 +140,31 @@ def find_lfs(
         
         return is_lfs, buoyancy
     
-    # Find first level that satisfies LFS criteria
-    lfs_found = False
-    lfs_level = ktop
+    # Find first level that satisfies LFS criteria using JAX-compatible operations
+    # Check all possible levels and find the first one that satisfies LFS
+    nlev = len(temperature)
     
-    for k in range(ktop, kbase + 1):
-        is_lfs, buoy = check_lfs(k)
-        if is_lfs and not lfs_found:
-            lfs_level = k
-            lfs_found = True
-            break
+    # Create a function to check LFS at each level
+    def check_all_levels(k):
+        # Only check if k is in valid range
+        in_range = (k >= ktop) & (k <= kbase)
+        is_lfs, buoy = lax.cond(
+            in_range,
+            lambda: check_lfs(k),
+            lambda: (False, 0.0)
+        )
+        return is_lfs
+    
+    # Check all levels from top to base
+    all_levels = jnp.arange(nlev)
+    lfs_conditions = jax.vmap(check_all_levels)(all_levels)
+    
+    # Find first level where LFS is satisfied
+    lfs_found = jnp.any(lfs_conditions)
+    
+    # Get the first level index where condition is met
+    first_lfs_idx = jnp.argmax(lfs_conditions)  # argmax returns first True
+    lfs_level = jnp.where(lfs_found, first_lfs_idx, ktop)
     
     return lfs_level, lfs_found
 
@@ -168,30 +183,34 @@ def downdraft_step(
     Returns:
         Tuple of (updated_carry, output_state)
     """
-    k, env_temp, env_q, pressure, dz, rho, precip, config = level_inputs
+    k, env_temp, env_q, pressure, dz, rho, precip, entrscv, cmfcmin, cevapcu = level_inputs
     
     # Skip if downdraft not active or above LFS
     skip = jnp.logical_or(~carry.active, k < carry.lfs)
     
     def compute_downdraft():
         # Entrainment rate for downdrafts
-        entr = config.entrscv * 0.5  # Reduced entrainment for downdrafts
+        entr = entrscv * 0.5  # Reduced entrainment for downdrafts
+        
+        # Safe array indexing - use current level if at top
+        prev_level = jnp.maximum(k - 1, 0)
         
         # Mass flux change due to entrainment (no detrainment in downdraft)
-        dmf_entr = entr * jnp.abs(carry.mfd[k-1]) * dz
+        prev_mfd = carry.mfd[prev_level]
+        dmf_entr = entr * jnp.abs(prev_mfd) * dz
         
         # Update mass flux (more negative)
-        mfd_new = carry.mfd[k-1] - dmf_entr
+        mfd_new = prev_mfd - dmf_entr
         
         # Mix in environmental air
         if_mfd = 1.0 / jnp.maximum(jnp.abs(mfd_new), 1e-10)
         
         # Temperature after mixing
-        temp_mix = carry.td[k-1] * jnp.abs(carry.mfd[k-1]) + env_temp * dmf_entr
+        temp_mix = carry.td[prev_level] * jnp.abs(prev_mfd) + env_temp * dmf_entr
         temp_mix = temp_mix * if_mfd
         
         # Humidity after mixing  
-        q_mix = carry.qd[k-1] * jnp.abs(carry.mfd[k-1]) + env_q * dmf_entr
+        q_mix = carry.qd[prev_level] * jnp.abs(prev_mfd) + env_q * dmf_entr
         q_mix = q_mix * if_mfd
         
         # Evaporative cooling from precipitation
@@ -201,7 +220,7 @@ def downdraft_step(
         
         # Actual evaporation limited by available precipitation
         evap_rate = jnp.minimum(
-            config.cevapcu * evap_potential * jnp.abs(mfd_new),
+            cevapcu * evap_potential * jnp.abs(mfd_new),
             precip
         )
         
@@ -230,7 +249,7 @@ def downdraft_step(
             td=carry.td.at[k].set(td_new),
             qd=carry.qd.at[k].set(qd_new),
             mfd=carry.mfd.at[k].set(mfd_new),
-            active=jnp.abs(mfd_new) > config.cmfcmin
+            active=jnp.abs(mfd_new) > cmfcmin
         )
         
         return new_state
@@ -285,24 +304,35 @@ def calculate_downdraft(
     qd_init = humidity.copy()
     mfd_init = jnp.zeros(nlev)
     
-    # If LFS found, initialize downdraft there
-    if has_lfs:
+    # Initialize downdraft conditionally using JAX-compatible operations
+    def initialize_downdraft():
         # Mix cloud and environmental air at LFS
         twb, qwb = wetbulb_temperature(
             temperature[lfs], humidity[lfs], pressure[lfs]
         )
-        td_init = td_init.at[lfs].set(0.5 * (updraft_state.tu[lfs] + twb))
-        qd_init = qd_init.at[lfs].set(0.5 * (updraft_state.qu[lfs] + qwb))
+        td_new = td_init.at[lfs].set(0.5 * (updraft_state.tu[lfs] + twb))
+        qd_new = qd_init.at[lfs].set(0.5 * (updraft_state.qu[lfs] + qwb))
         
         # Initial downdraft mass flux (fraction of updraft mass flux)
-        mfd_init = mfd_init.at[lfs].set(
+        mfd_new = mfd_init.at[lfs].set(
             -config.cmfctop * updraft_state.mfu[kbase]
         )
+        return td_new, qd_new, mfd_new
+    
+    def no_downdraft():
+        return td_init, qd_init, mfd_init
+    
+    # Apply Pattern 2: Conditional Computation
+    td_final, qd_final, mfd_final = lax.cond(
+        has_lfs,
+        initialize_downdraft,
+        no_downdraft
+    )
     
     initial_state = DowndraftState(
-        td=td_init,
-        qd=qd_init,
-        mfd=mfd_init,
+        td=td_final,
+        qd=qd_final,
+        mfd=mfd_final,
         lfs=lfs,
         active=has_lfs
     )
@@ -311,11 +341,14 @@ def calculate_downdraft(
     dz = jnp.diff(height)
     dz = jnp.concatenate([dz, jnp.array([dz[-1]])])
     
-    # Prepare inputs for scan
+    # Prepare inputs for scan (extract config parameters to avoid passing object)
     k_levels = jnp.arange(nlev)
     level_inputs = (
         k_levels, temperature, humidity, pressure, 
-        dz, rho, jnp.full(nlev, precip_rate), config
+        dz, rho, jnp.full(nlev, precip_rate), 
+        jnp.full(nlev, config.entrscv),
+        jnp.full(nlev, config.cmfcmin),
+        jnp.full(nlev, config.cevapcu)
     )
     
     # Use scan to compute downdraft from LFS downward

@@ -81,10 +81,12 @@ def calculate_entrainment_detrainment(
     # Applied in upper part of cloud
     detr_org = 0.0
     
+    # Calculate cloud depth for organized detrainment
+    cloud_depth = jnp.maximum(kbase - ktop, 1)
+    
     # For deep convection (ktype=1), add organized detrainment near cloud top
     def organized_detrainment():
         # Calculate relative position in cloud
-        cloud_depth = jnp.maximum(kbase - ktop, 1)
         relative_height = (k - ktop) / cloud_depth
         
         # Smooth profile using hyperbolic tangent
@@ -184,29 +186,32 @@ def updraft_step(
     skip = k > kbase
     
     def compute_updraft():
+        # Safe array indexing - handle potential out-of-bounds access
+        next_level = jnp.minimum(k + 1, len(carry.mfu) - 1)
+        
         # Get entrainment and detrainment rates
         entr, detr = calculate_entrainment_detrainment(
-            k, kbase, ktop, ktype, carry.mfu[k+1], 
-            carry.buoy[k+1], dz, rho, config
+            k, kbase, ktop, ktype, carry.mfu[next_level], 
+            carry.buoy[next_level], dz, rho, config
         )
         
         # Mass flux change due to entrainment/detrainment
-        dmf_entr = entr * carry.mfu[k+1] * dz
-        dmf_detr = detr * carry.mfu[k+1] * dz
+        dmf_entr = entr * carry.mfu[next_level] * dz
+        dmf_detr = detr * carry.mfu[next_level] * dz
         
         # Update mass flux
-        mfu_new = carry.mfu[k+1] + dmf_entr - dmf_detr
+        mfu_new = carry.mfu[next_level] + dmf_entr - dmf_detr
         mfu_new = jnp.maximum(mfu_new, 0.0)  # No negative mass flux
         
         # Mix in environmental air
         if_mfu = 1.0 / jnp.maximum(mfu_new, 1e-10)
         
         # Total water and energy after mixing
-        total_water = (carry.qu[k+1] + carry.lu[k+1]) * carry.mfu[k+1] + env_q * dmf_entr
+        total_water = (carry.qu[next_level] + carry.lu[next_level]) * carry.mfu[next_level] + env_q * dmf_entr
         total_water = total_water * if_mfu
         
         # Temperature after mixing (dry static energy conservation)
-        temp_mix = carry.tu[k+1] * carry.mfu[k+1] + env_temp * dmf_entr
+        temp_mix = carry.tu[next_level] * carry.mfu[next_level] + env_temp * dmf_entr
         temp_mix = temp_mix * if_mfu
         
         # Saturation adjustment
@@ -314,25 +319,40 @@ def calculate_updraft(
         skip = k > kbase
         
         def compute_updraft():
-            # Simplified entrainment/detrainment calculation for scan
+            # Entrainment/detrainment calculation with proper physics
             entr = jnp.where(ktype == 1, entrpen, 
                             jnp.where(ktype == 2, entrscv, entrmid))
-            detr = entr  # Simplified
+            detr = entr  # Simplified - could be enhanced with organized detrainment
+            
+            # Safe array indexing - clamp k+1 to valid range
+            next_level = jnp.minimum(k + 1, nlev - 1)
             
             # Mass flux change
-            dmf_entr = entr * carry.mfu[k+1] * dz
-            dmf_detr = detr * carry.mfu[k+1] * dz
+            dmf_entr = entr * carry.mfu[next_level] * dz
+            dmf_detr = detr * carry.mfu[next_level] * dz
             
             # Update mass flux
-            mfu_new = jnp.maximum(carry.mfu[k+1] + dmf_entr - dmf_detr, 0.0)
+            mfu_new = jnp.maximum(carry.mfu[next_level] + dmf_entr - dmf_detr, 0.0)
             
-            # Simple mixing (placeholder for full calculation)
-            tu_new = env_temp  # Simplified
-            qu_new = env_q     # Simplified
-            lu_new = 0.0       # Simplified
+            # Proper mixing with entrainment
+            # Avoid division by zero
+            if_mfu = 1.0 / jnp.maximum(mfu_new, 1e-10)
             
-            # Simple buoyancy
-            buoy_new = 0.0     # Simplified
+            # Total water and energy after mixing
+            total_water = (carry.qu[next_level] + carry.lu[next_level]) * carry.mfu[next_level] + env_q * dmf_entr
+            total_water = total_water * if_mfu
+            
+            # Temperature after mixing (dry static energy conservation)
+            temp_mix = carry.tu[next_level] * carry.mfu[next_level] + env_temp * dmf_entr
+            temp_mix = temp_mix * if_mfu
+            
+            # Saturation adjustment
+            tu_new, qu_new, lu_new = saturation_adjustment(temp_mix, total_water, pressure)
+            
+            # Calculate buoyancy
+            virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
+            virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
+            buoy_new = grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
             
             # Update state
             new_state = carry._replace(
