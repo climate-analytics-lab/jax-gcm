@@ -315,8 +315,23 @@ def calculate_updraft(
     def updraft_step_with_config(carry, inputs):
         k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, entrpen, entrscv, entrmid = inputs
         
-        # Skip if below cloud base
-        skip = k > kbase
+        # Skip if outside cloud layer or at cloud base (boundary condition)
+        # Cloud base is the boundary condition, so we don't compute it
+        # We only compute levels between cloud base and cloud top (exclusive of base)
+        
+        # For standard ordering (pressure decreasing): ktop < kbase, compute ktop to kbase-1
+        # For reverse ordering: ktop > kbase, compute kbase+1 to ktop
+        in_cloud_interior = jnp.logical_and(
+            jnp.minimum(ktop, kbase) < k,
+            k < jnp.maximum(ktop, kbase)
+        )
+        
+        # Also include cloud top in the calculation
+        at_cloud_top = (k == ktop)
+        
+        # Process cloud interior and cloud top, but not cloud base
+        should_compute = jnp.logical_or(in_cloud_interior, at_cloud_top)
+        skip = jnp.logical_not(should_compute)
         
         def compute_updraft():
             # Entrainment/detrainment calculation with proper physics

@@ -69,7 +69,7 @@ def wetbulb_temperature(
         return twb, qwb
     
     def already_saturated():
-        return temperature, humidity
+        return jnp.float32(temperature), jnp.float32(humidity)
     
     return lax.cond(is_saturated, already_saturated, calculate_wetbulb)
 

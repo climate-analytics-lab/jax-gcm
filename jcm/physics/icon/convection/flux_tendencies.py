@@ -49,16 +49,17 @@ def calculate_precipitation_rate(
     # Precipitation conversion efficiency
     precip_eff = config.cprcon
     
-    # Calculate precipitation production at each level
-    precip_prod = jnp.zeros(nlev)
+    # Calculate precipitation production at each level using JAX-compatible operations
+    k_levels = jnp.arange(nlev)
     
-    for k in range(nlev):
-        if k <= kbase:
-            # Liquid water flux
-            lw_flux = updraft_state.mfu[k] * updraft_state.lu[k]
-            
-            # Convert fraction to precipitation
-            precip_prod = precip_prod.at[k].set(precip_eff * lw_flux)
+    # Mask for levels at or below cloud base
+    cloud_mask = k_levels >= kbase  # Note: k >= kbase means level at or below cloud base
+    
+    # Liquid water flux for all levels
+    lw_flux = updraft_state.mfu * updraft_state.lu
+    
+    # Convert fraction to precipitation (only below cloud base)
+    precip_prod = jnp.where(cloud_mask, precip_eff * lw_flux, 0.0)
     
     # Surface precipitation is integral of production
     precip_rate = jnp.sum(precip_prod)
@@ -150,8 +151,11 @@ def calculate_tendencies(
     dudt = jnp.zeros(nlev)
     dvdt = jnp.zeros(nlev)
     
-    # Calculate mass flux divergence at each level
-    for k in range(nlev-1):
+    # Calculate mass flux divergence at each level using JAX-compatible operations
+    k_indices = jnp.arange(nlev - 1)
+    
+    # Vectorized calculations for all levels at once
+    def calculate_level_tendencies(k):
         # Layer thickness (pressure)
         dp = pressure[k+1] - pressure[k]
         
@@ -172,7 +176,7 @@ def calculate_tendencies(
         lh_source = alhc * (updraft_state.lu[k] * updraft_state.mfu[k] -
                            updraft_state.lu[k+1] * updraft_state.mfu[k+1])
         
-        dtedt = dtedt.at[k].set((t_flux + lh_source/cp) * factor)
+        dtedt_k = (t_flux + lh_source/cp) * factor
         
         # Moisture tendency
         q_flux = (updraft_state.qu[k] * updraft_state.mfu[k] -
@@ -180,16 +184,32 @@ def calculate_tendencies(
                   downdraft_state.qd[k] * downdraft_state.mfd[k] -
                   downdraft_state.qd[k+1] * downdraft_state.mfd[k+1])
         
-        dqdt = dqdt.at[k].set(q_flux * factor)
+        dqdt_k = q_flux * factor
         
-        # Momentum tendencies (if enabled)
-        if config.cmfctop > 0:
-            # Simple momentum transport
-            u_flux = (u_wind[kbase] - u_wind[k]) * mf_div
-            v_flux = (v_wind[kbase] - v_wind[k]) * mf_div
-            
-            dudt = dudt.at[k].set(u_flux * factor * 0.5)  # Reduced effect
-            dvdt = dvdt.at[k].set(v_flux * factor * 0.5)
+        # Momentum tendencies (conditional on config)
+        dudt_k = lax.cond(
+            config.cmfctop > 0,
+            lambda: (u_wind[kbase] - u_wind[k]) * mf_div * factor * 0.5,
+            lambda: 0.0
+        )
+        
+        dvdt_k = lax.cond(
+            config.cmfctop > 0,
+            lambda: (v_wind[kbase] - v_wind[k]) * mf_div * factor * 0.5,
+            lambda: 0.0
+        )
+        
+        return dtedt_k, dqdt_k, dudt_k, dvdt_k
+    
+    # Apply to all levels using vmap
+    level_tendencies = jax.vmap(calculate_level_tendencies)(k_indices)
+    dtedt_levels, dqdt_levels, dudt_levels, dvdt_levels = level_tendencies
+    
+    # Update arrays with computed tendencies
+    dtedt = dtedt.at[:nlev-1].set(dtedt_levels)
+    dqdt = dqdt.at[:nlev-1].set(dqdt_levels)  
+    dudt = dudt.at[:nlev-1].set(dudt_levels)
+    dvdt = dvdt.at[:nlev-1].set(dvdt_levels)
     
     # Calculate precipitation rate
     precip_rate = calculate_precipitation_rate(
@@ -254,11 +274,18 @@ def mass_flux_closure(
     # Shallow convection: moisture convergence closure
     def shallow_closure():
         # Balance low-level moisture convergence
-        # Simplified - full version considers PBL depth
+        # For shallow convection, also use CAPE but with different scaling
+        # If no moisture convergence, use CAPE-based trigger for shallow convection
+        cape_flux = cape / (grav * config.tau * 10.0)  # Weaker than deep convection
+        moisture_flux = moisture_conv * 0.1  # Efficiency factor
+        
+        # Use the larger of the two triggers
+        base_flux = jnp.maximum(cape_flux, moisture_flux)
+        
         return jnp.clip(
-            moisture_conv * 0.1,  # Efficiency factor
-            config.cmfcmin, 
-            config.cmfcmax * 0.3  # Lower limit for shallow
+            base_flux,
+            config.cmfcmin * 10.0,  # Minimum for shallow convection
+            config.cmfcmax * 0.3    # Lower limit for shallow
         )
     
     # Mid-level convection: hybrid closure
@@ -266,8 +293,11 @@ def mass_flux_closure(
         # Combination of CAPE and moisture
         return 0.5 * (deep_closure() + shallow_closure())
     
-    # Select closure based on convection type
+    # Select closure based on convection type using clipped index
+    # Ensure index is in valid range [0, 2] for switch
+    switch_index = jnp.clip(ktype - 1, 0, 2)
+    
     return lax.switch(
-        ktype - 1,
+        switch_index,
         [deep_closure, shallow_closure, mid_closure],
     )

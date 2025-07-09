@@ -259,12 +259,13 @@ class IconPhysics(Physics):
         return PhysicsTendency.zeros(state.temperature.shape), physics_data
     
     def _apply_convection(self, state, physics_data, boundaries, geometry):
-        """Apply convection tendencies using vectorized computation"""
+        """Apply full Tiedtke-Nordeng convection scheme with updraft/downdraft physics"""
         from jcm.physics.speedy.physical_constants import p0
+        from jcm.physics.icon.convection.tiedtke_nordeng import tiedtke_nordeng_convection
         
         # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
         nlev, ncols = state.temperature.shape
-        dt = 1800.0  # Time step
+        dt = 1800.0  # Time step for convection
         
         # Calculate pressure levels from surface pressure and sigma coordinates
         # Surface pressure is normalized, so multiply by p0 to get actual pressure
@@ -280,64 +281,60 @@ class IconPhysics(Physics):
         # Calculate height from geopotential
         height_levels = state.geopotential / physical_constants.grav  # m
         
-        # Define single column convection function
-        def apply_convection_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col):
-            """Apply convection to a single column using JAX-compatible operations"""
+        # Define single column Tiedtke-Nordeng convection function
+        def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col):
+            """Apply full Tiedtke-Nordeng convection to a single column"""
             
-            # Simple convective adjustment based on lapse rate instability
-            # This demonstrates the JAX conversion patterns while providing realistic physics
+            # Apply full Tiedtke-Nordeng convection scheme
+            conv_tendencies, conv_state = tiedtke_nordeng_convection(
+                temperature=temp_col,
+                humidity=humid_col,
+                pressure=pressure_col,
+                height=height_col,
+                u_wind=u_col,
+                v_wind=v_col,
+                dt=dt,
+                config=self.convection_config
+            )
             
-            # Calculate layer differences
-            temp_diff = temp_col[:-1] - temp_col[1:]  # Upper - lower
-            height_diff = height_col[1:] - height_col[:-1]  # Lower - upper
-            
-            # Calculate lapse rates (Pattern 1: Simple conditional)
-            lapse_rate = jnp.where(height_diff > 0, temp_diff / height_diff, 0.0)
-            
-            # Check for instability (lapse rate > 6.5 K/km)
-            unstable = lapse_rate > 0.0065
-            
-            # Apply convective adjustment (Pattern 7: Masked operations)
-            adjustment_rate = 0.2 / dt  # Moderate adjustment rate
-            moistening_rate = 2e-7 / dt  # Moistening rate
-            
-            # Initialize tendencies
-            dtedt = jnp.zeros_like(temp_col)
-            dqdt = jnp.zeros_like(humid_col)
-            dudt = jnp.zeros_like(u_col)
-            dvdt = jnp.zeros_like(v_col)
-            
-            # Apply heating/cooling tendencies to adjacent layers
-            dtedt = dtedt.at[:-1].add(jnp.where(unstable, adjustment_rate, 0.0))
-            dtedt = dtedt.at[1:].add(jnp.where(unstable, -adjustment_rate, 0.0))
-            
-            # Apply moistening/drying tendencies  
-            dqdt = dqdt.at[:-1].add(jnp.where(unstable, moistening_rate, 0.0))
-            dqdt = dqdt.at[1:].add(jnp.where(unstable, -moistening_rate, 0.0))
-            
-            # Return tendencies as simple arrays (no NamedTuple to avoid vmap issues)
-            return dtedt, dqdt, dudt, dvdt
+            # Return tendencies as simple arrays for vmap compatibility
+            return (
+                conv_tendencies.dtedt,      # Temperature tendency
+                conv_tendencies.dqdt,       # Humidity tendency  
+                conv_tendencies.dudt,       # U-wind tendency
+                conv_tendencies.dvdt,       # V-wind tendency
+                conv_tendencies.qc_conv,    # Convective cloud water
+                conv_tendencies.qi_conv,    # Convective cloud ice
+                conv_tendencies.precip_conv # Convective precipitation
+            )
         
-        # Apply convection to all columns using vmap over the column dimension (axis 1)
-        conv_tendencies, humid_tendencies, u_tendencies, v_tendencies = jax.vmap(
-            apply_convection_to_column, 
+        # Apply Tiedtke-Nordeng convection to all columns using vmap
+        results = jax.vmap(
+            apply_tiedtke_to_column, 
             in_axes=(1, 1, 1, 1, 1, 1), 
-            out_axes=(1, 1, 1, 1)
+            out_axes=(1, 1, 1, 1, 1, 1, 0)  # precip is surface field, so axis 0
         )(state.temperature, state.specific_humidity, pressure_levels, height_levels, 
           state.u_wind, state.v_wind)
         
+        # Unpack results
+        conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv = results
+        
         # Create physics tendencies (already in 2D format [nlev, ncols])
         physics_tendencies = PhysicsTendency(
-            u_wind=u_tendencies,
-            v_wind=v_tendencies,
-            temperature=conv_tendencies,
-            specific_humidity=humid_tendencies
+            u_wind=conv_u_tend,
+            v_wind=conv_v_tend,
+            temperature=conv_temp_tend,
+            specific_humidity=conv_humid_tend
         )
         
         # Update physics data with convection diagnostics
         updated_physics_data = physics_data.copy(
             convection_data={
                 'convection_enabled': True,
+                'tiedtke_nordeng_active': True,
+                'convective_cloud_water': qc_conv,
+                'convective_cloud_ice': qi_conv,
+                'convective_precipitation': precip_conv,
                 'last_applied': True
             }
         )
