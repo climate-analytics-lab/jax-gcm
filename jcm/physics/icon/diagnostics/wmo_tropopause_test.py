@@ -113,8 +113,10 @@ def test_find_tropopause_level():
     # Compute height
     height = compute_geopotential_height(pressure, temperature, surface_pressure)
     
-    # Find tropopause
-    tropopause_pressure = find_tropopause_level(temperature, pressure, height)
+    # Find tropopause with appropriate search range for 40-level atmosphere
+    # Search from level 5 to 35 to avoid surface and very high levels
+    tropopause_pressure = find_tropopause_level(temperature, pressure, height, 
+                                               ncctop=5, nccbot=35)
     
     # Should find a reasonable tropopause pressure
     assert tropopause_pressure.shape == (1,)

@@ -40,12 +40,29 @@ def compute_geopotential_height(pressure: jnp.ndarray,
     g = physical_constants.grav
     R = physical_constants.rgas
     
-    # Compute layer thickness using hypsometric equation
-    # dz = (R * T / g) * ln(p_lower / p_upper)
+    # Ensure surface_pressure has compatible shape for concatenation
+    batch_shape = pressure.shape[:-1]
     
-    # For simplicity, assume pressure decreases with height
-    # and use midpoint temperatures for layer calculations
-    pressure_lower = jnp.concatenate([surface_pressure[..., None], pressure[..., :-1]], axis=-1)
+    # Handle the case where pressure is 1D (no batch dimensions)
+    if len(batch_shape) == 0:
+        # For 1D pressure, surface_pressure should be scalar or length-1 array
+        surface_pressure_expanded = jnp.squeeze(surface_pressure)
+        surface_pressure_with_level = surface_pressure_expanded[None]  # Add level dimension
+    else:
+        # For batched pressure, broadcast surface_pressure to batch shape
+        # Handle case where surface_pressure might already have extra dimensions
+        if surface_pressure.ndim > len(batch_shape):
+            # Surface pressure has extra dimensions, squeeze them
+            surface_pressure_squeezed = jnp.squeeze(surface_pressure, axis=-1)
+        else:
+            surface_pressure_squeezed = surface_pressure
+            
+        surface_pressure_expanded = jnp.broadcast_to(surface_pressure_squeezed, batch_shape)
+        surface_pressure_with_level = surface_pressure_expanded[..., None]
+    
+    # For pressure interfaces, use surface pressure as bottom level
+    # and each model level as upper boundary
+    pressure_lower = jnp.concatenate([surface_pressure_with_level, pressure[..., :-1]], axis=-1)
     pressure_upper = pressure
     
     # Use temperature at the current level for the layer below
@@ -108,60 +125,78 @@ def find_tropopause_level(temperature: jnp.ndarray,
     # Find levels where lapse rate is >= GWMO (-2 K/km)
     stable_mask = lapse_rate >= GWMO
     
-    # For each column, find the lowest level meeting the criteria
     nlev_search = search_temp.shape[-1]
+    nlev_lapse = lapse_rate.shape[-1]
+    batch_shape = temperature.shape[:-1]
     
     def find_tropopause_column(temp_col, pres_col, height_col, lapse_col):
-        """Find tropopause for a single column"""
+        """Find tropopause for a single column using JAX-compatible operations"""
         
-        # Start from the bottom and work up
-        for k in range(nlev_search - 2, -1, -1):  # Skip last level (no lapse rate)
-            if lapse_col[k] >= GWMO:
-                # Check if this level satisfies the 2km averaging criterion
-                current_height = height_col[k]
-                top_height = current_height + DELTAZ
-                
-                # Find levels within 2km above
-                above_mask = (height_col >= current_height) & (height_col <= top_height)
-                
-                if jnp.any(above_mask):
-                    # Compute average lapse rate over 2km
-                    above_indices = jnp.where(above_mask, jnp.arange(nlev_search), -1)
-                    valid_indices = above_indices[above_indices >= 0]
-                    
-                    if len(valid_indices) > 1:
-                        # Take indices that have lapse rate data
-                        valid_lapse_indices = valid_indices[valid_indices < len(lapse_col)]
-                        
-                        if len(valid_lapse_indices) > 0:
-                            avg_lapse = jnp.mean(lapse_col[valid_lapse_indices])
-                            
-                            # Check if average lapse rate also satisfies criterion
-                            if avg_lapse >= GWMO:
-                                return pres_col[k]
+        # Start from bottom (surface) and work up to find the LOWEST level
+        # that meets the criteria (this is the key to WMO definition)
+        level_indices = jnp.arange(nlev_lapse)
         
-        # No tropopause found, return default
-        return P_DEFAULT
+        def check_level(k):
+            """Check if level k satisfies tropopause criteria"""
+            # Check basic lapse rate criterion
+            lapse_ok = lapse_col[k] >= GWMO
+            
+            # Check 2km averaging criterion
+            current_height = height_col[k]
+            top_height = current_height + DELTAZ
+            
+            # Find levels within 2km above current level (for height levels)
+            above_mask = (height_col >= current_height) & (height_col <= top_height)
+            
+            # For lapse rate averaging, we only consider the first nlev_lapse heights
+            # since lapse rate array has nlev_lapse elements
+            above_mask_for_lapse = above_mask[:nlev_lapse]
+            
+            # Get valid lapse rate values within the 2km window
+            valid_lapse_values = jnp.where(above_mask_for_lapse, lapse_col, 0.0)
+            num_valid = jnp.sum(above_mask_for_lapse.astype(jnp.float32))
+            
+            # Compute average, handling division by zero
+            avg_lapse = jnp.where(
+                num_valid > 0,
+                jnp.sum(valid_lapse_values) / jnp.maximum(num_valid, 1e-10),
+                GWMO - 1.0  # Value that will fail the test
+            )
+            
+            # Both criteria must be satisfied
+            both_ok = lapse_ok & (avg_lapse >= GWMO) & (num_valid > 0)
+            
+            return both_ok, pres_col[k]
+        
+        # Check all levels using jax.lax.scan
+        def scan_levels(carry, k):
+            found, tropopause_p = carry
+            level_ok, level_pressure = check_level(k)
+            
+            # Update result if we haven't found a tropopause yet and this level satisfies criteria
+            new_found = found | level_ok
+            new_pressure = jnp.where(found, tropopause_p, 
+                                   jnp.where(level_ok, level_pressure, tropopause_p))
+            
+            return (new_found, new_pressure), None
+        
+        # Initialize: no tropopause found, default pressure
+        initial_state = (False, P_DEFAULT)
+        
+        # Scan through levels from bottom to top
+        (found, final_pressure), _ = jax.lax.scan(scan_levels, initial_state, level_indices)
+        
+        return final_pressure
     
-    # Vectorized version using lax.map for each column
-    def process_column(args):
-        temp_col, pres_col, height_col, lapse_col = args
-        return find_tropopause_column(temp_col, pres_col, height_col, lapse_col)
+    # Apply to each column in batch
+    def process_batch(args):
+        temp_batch, pres_batch, height_batch, lapse_batch = args
+        return jax.vmap(find_tropopause_column)(temp_batch, pres_batch, height_batch, lapse_batch)
     
-    # Prepare arguments for mapping
-    batch_shape = temperature.shape[:-1]
-    flat_temp = search_temp.reshape(-1, nlev_search)
-    flat_pres = search_pressure.reshape(-1, nlev_search)
-    flat_height = search_height.reshape(-1, nlev_search)
-    flat_lapse = lapse_rate.reshape(-1, nlev_search - 1)
+    # Process the batch
+    result = process_batch((search_temp, search_pressure, search_height, lapse_rate))
     
-    # Apply to each column
-    result = jax.vmap(process_column)((flat_temp, flat_pres, flat_height, flat_lapse))
-    
-    # Reshape back to original batch shape
-    tropopause_pressure = result.reshape(batch_shape)
-    
-    return tropopause_pressure
+    return result
 
 def wmo_tropopause(temperature: jnp.ndarray,
                   pressure: jnp.ndarray,
