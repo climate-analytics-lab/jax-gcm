@@ -97,7 +97,7 @@ def test_icon_physics_call():
     )
     
     # Test physics call
-    tendencies, updated_data = physics(state, physics_data)
+    tendencies, updated_data = physics.compute_tendencies(state, physics_data)
     
     # Check outputs
     assert tendencies.temperature.shape == dummy_shape
