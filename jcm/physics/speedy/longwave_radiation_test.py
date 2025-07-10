@@ -29,14 +29,14 @@ class TestLongwave(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, geometry, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-        from jcm.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
-        from jcm.params import Parameters
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):
 

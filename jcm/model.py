@@ -7,124 +7,14 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
-from jcm.date import Timestamp, Timedelta
-from jcm.params import Parameters
+from jcm.date import DateData, Timestamp, Timedelta
+from jcm.physics.speedy.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.physical_constants import p0
-from jcm.physics import PhysicsState, PhysicsTendency, PhysicsData
+from jcm.physics.speedy.physical_constants import p0
+from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
-
-def set_physics_flags(state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    boundaries: BoundaryData=None,
-    geometry: Geometry=None
-) -> tuple[PhysicsTendency, PhysicsData]:
-    from jcm.physical_constants import nstrad
-    '''
-        Sets flags that indicate whether a tendency function should be run.
-        clouds, get_shortwave_rad_fluxes are the only functions that currently depend on this. 
-        This could also apply to forcing and coupling.
-    '''
-    model_step = physics_data.date.model_step
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 1)
-    shortwave_data = physics_data.shortwave_rad.copy(compute_shortwave=compute_shortwave)
-    physics_data = physics_data.copy(shortwave_rad=shortwave_data)
-
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
-    return physics_tendencies, physics_data
-
-def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
-    """
-    Returns a list of functions that compute physical tendencies for the model.
-    """
-    
-    from jcm.humidity import spec_hum_to_rel_hum
-    from jcm.convection import get_convection_tendencies
-    from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
-    from jcm.shortwave_radiation import get_shortwave_rad_fluxes, get_clouds
-    from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-    from jcm.surface_flux import get_surface_fluxes
-    from jcm.vertical_diffusion import get_vertical_diffusion_tend
-    from jcm.land_model import couple_land_atm
-    from jcm.forcing import set_forcing
-
-    physics_terms = [
-        set_physics_flags,
-        set_forcing,
-        spec_hum_to_rel_hum,
-        get_convection_tendencies,
-        get_large_scale_condensation_tendencies,
-        get_clouds,
-        get_shortwave_rad_fluxes,
-        get_downward_longwave_rad_fluxes,
-        get_surface_fluxes,
-        get_upward_longwave_rad_fluxes,
-        get_vertical_diffusion_tend,
-        couple_land_atm # eventually couple sea model and ice model here
-    ]
-    if sea_coupling_flag > 0:
-        physics_terms.insert(-3, get_surface_fluxes)
-
-    if not checkpoint_terms:
-        return physics_terms
-
-    static_argnums = {
-        set_forcing: (2,),
-        couple_land_atm: (3,),
-    }
-    
-    # Static argnum 4 is the Geometry object
-    return [jax.checkpoint(term, static_argnums=static_argnums.get(term, ()) + (4,)) for term in physics_terms]
-
-def convert_tendencies_to_equation(
-        dynamics: primitive_equations.PrimitiveEquations, 
-        time_step,
-        physics_terms,
-        reference_date,
-        boundaries: BoundaryData,
-        parameters: Parameters,
-        geometry: Geometry
-    ) -> ExplicitODE:
-
-    from jcm.physics_data import PhysicsData
-    from jcm.physics import get_physical_tendencies
-    from jcm.date import DateData
-
-    def physical_tendencies(state):
-        '''
-            Sets model date and step, initializes an empty PhysicsData instance, and returns a 
-            function to get physical tendencies.
-            state - dynamics state from Dinosaur
-            state.sim_time - simulation time in seconds (Dinosaur object)
-            time_step - model time step in minutes
-            reference_date - start date of the simulation
-        '''
-
-        # Set the model time (in datetime format) and model step (number of steps since start time)
-        date = DateData.set_date(
-            model_time = reference_date + Timedelta(seconds=state.sim_time),
-            model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
-        )
-
-        data = PhysicsData.zeros(
-            dynamics.coords.nodal_shape[1:],
-            dynamics.coords.nodal_shape[0],
-            date=date
-        )
-
-        return get_physical_tendencies(
-            state=state,
-            dynamics=dynamics,
-            time_step=time_step,
-            physics_terms=physics_terms,
-            boundaries=boundaries,
-            parameters=parameters,
-            geometry=geometry,
-            data=data
-        )
-    return ExplicitODE.from_functions(physical_tendencies)
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -142,7 +32,7 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
     )
 
-class SpeedyModel:
+class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
 
@@ -152,8 +42,7 @@ class SpeedyModel:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, parameters: Parameters=None,
-                 post_process=True, checkpoint_terms=True) -> None:
+                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -167,10 +56,7 @@ class SpeedyModel:
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
-            parameters: Parameters object describing model parameters
-            physics_specs: PrimitiveEquationsSpecs object describing the model physics
-            post_process: Whether to post-process the model output
-            checkpoint_terms: Whether to jax.checkpoint each physics term
+            physics: Physics object describing the model physics
         """
         from datetime import datetime
 
@@ -194,9 +80,6 @@ class SpeedyModel:
         self.outer_steps = int(self.total_time / self.save_interval)
         self.dt = self.physics_specs.nondimensionalize(dt_si)
 
-        self.parameters = parameters or Parameters.default()
-        self.post_process_physics = post_process
-
         if initial_state is not None:
             self.initial_state = initial_state
         else:
@@ -212,30 +95,41 @@ class SpeedyModel:
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
         
-        self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
-        
+        self.physics = physics or SpeedyPhysics()
+
         # TODO: make the truncation number a parameter consistent with the grid shape
+        params_for_boundaries = (self.physics.parameters 
+                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
+                                 else Parameters.default())
         if boundaries is None:
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
+            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
         else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
+            self.boundaries = update_boundaries_with_timestep(boundaries, params_for_boundaries, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
-            self.ref_temps,
-            truncated_orography,
-            self.coords,
-            self.physics_specs)
-
-        physics_forcing_eqn = convert_tendencies_to_equation(self.primitive,
-                                                        time_step,
-                                                        self.physics_terms,
-                                                        self.start_date,
-                                                        self.boundaries,
-                                                        self.parameters,
-                                                        self.geometry)
+            reference_temperature=self.ref_temps,
+            orography=truncated_orography, 
+            coords=self.coords,
+            physics_specs=self.physics_specs,
+        )
         
+        physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
+            get_physical_tendencies(
+                state=state,
+                dynamics=self.primitive,
+                time_step=time_step,
+                physics=self.physics,
+                boundaries=self.boundaries,
+                geometry=self.geometry,
+                date = DateData.set_date(
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
+                )
+            )
+        )
+
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
@@ -249,7 +143,7 @@ class SpeedyModel:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        from jcm.physics import physics_state_to_dynamics_state
+        from jcm.physics_interface import physics_state_to_dynamics_state
 
         # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
         # optional initial state from the user is in physics form
@@ -272,25 +166,19 @@ class SpeedyModel:
 
     def post_process(self, state):
         from jcm.date import DateData
-        from jcm.physics_data import PhysicsData
-        from jcm.physics import dynamics_state_to_physics_state, verify_state
+        from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         
         physics_data = None
-        if self.post_process_physics:
-            clamped_physics_state = verify_state(physics_state)
-            physics_data = PhysicsData.zeros(
-                self.coords.nodal_shape[1:],
-                self.coords.nodal_shape[0],
-                date=DateData.set_date(
-                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
-                )
+        if self.physics.write_output:
+            date=DateData.set_date(
+                model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
             )
-            for term in self.physics_terms:
-                _, physics_data = term(clamped_physics_state, physics_data, self.parameters, self.boundaries, self.geometry)
-
+            clamped_physics_state = verify_state(physics_state)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
+        
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
@@ -319,24 +207,10 @@ class SpeedyModel:
         dynamics_predictions = predictions['dynamics']
         physics_predictions = predictions['physics']
 
-        physics_preds_dict = {}
-        if physics_predictions is not None:
-            physics_preds_dict = {
-                f"{module}.{field}": value # avoids name conflicts between fields of different modules
-                for module, module_dict in physics_predictions.asdict().items()
-                for field, value in module_dict.asdict().items()
-            }
-            # replace multi-channel fields with a field for each channel
-            _original_keys = list(physics_preds_dict.keys())
-            for k in _original_keys:
-                v = physics_preds_dict[k]
-                if len(v.shape) == 5 or (len(v.shape) == 4 and v.shape[1] != self.coords.nodal_shape[0]):
-                    physics_preds_dict.update(
-                        {f"{k}.{i}": v[..., i] for i in range(v.shape[-1])}
-                    )
-                    del physics_preds_dict[k]
-
-        # combine output State and processed PhysicsData
+        # prepare physics predictions for xarray conversion
+        # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
+        physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
+        
         pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
