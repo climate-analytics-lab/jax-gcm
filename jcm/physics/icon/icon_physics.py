@@ -22,11 +22,11 @@ from jcm.physics.icon.constants import physical_constants
 # Import physics modules (will be implemented progressively)
 # from jcm.physics.icon.radiation import radiation_heating
 from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionTendencies
-from jcm.physics.icon.clouds import shallow_cloud_scheme
+from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
 # from jcm.physics.icon.vertical_diffusion import vertical_diffusion
 # from jcm.physics.icon.surface import surface_fluxes
-# from jcm.physics.icon.gravity_waves import gravity_wave_drag
+from jcm.physics.icon.gravity_waves import gravity_wave_drag
 # from jcm.physics.icon.chemistry import chemistry_tendencies
 
 @tree_math.struct
@@ -38,6 +38,8 @@ class IconPhysicsData:
     convection_data: dict
     cloud_data: dict
     surface_data: dict
+    gravity_wave_data: dict
+    microphysics_data: dict
     
     @classmethod
     def zeros(cls, 
@@ -45,13 +47,17 @@ class IconPhysicsData:
               radiation_data: Optional[dict] = None,
               convection_data: Optional[dict] = None,
               cloud_data: Optional[dict] = None,
-              surface_data: Optional[dict] = None):
+              surface_data: Optional[dict] = None,
+              gravity_wave_data: Optional[dict] = None,
+              microphysics_data: Optional[dict] = None):
         return cls(
             date=date,
             radiation_data=radiation_data or {},
             convection_data=convection_data or {},
             cloud_data=cloud_data or {},
-            surface_data=surface_data or {}
+            surface_data=surface_data or {},
+            gravity_wave_data=gravity_wave_data or {},
+            microphysics_data=microphysics_data or {}
         )
     
     def copy(self, **kwargs):
@@ -62,6 +68,8 @@ class IconPhysicsData:
             'convection_data': self.convection_data,
             'cloud_data': self.cloud_data,
             'surface_data': self.surface_data,
+            'gravity_wave_data': self.gravity_wave_data,
+            'microphysics_data': self.microphysics_data,
         }
         new_data.update(kwargs)
         return IconPhysicsData(**new_data)
@@ -141,7 +149,12 @@ class IconPhysics(Physics):
         # Add physics terms based on configuration
         # These will be implemented progressively
 
-        return [self._apply_convection, self._apply_clouds]
+        return [
+            self._apply_convection, 
+            self._apply_clouds,
+            self._apply_microphysics,
+            self._apply_gravity_waves
+        ]
     
     def compute_tendencies(self, 
                  state: PhysicsState,
@@ -207,10 +220,15 @@ class IconPhysics(Physics):
             )
             
             # Reshape tendencies back to 3D and accumulate
-            # Also reshape tracer tendencies
+            # Also reshape tracer tendencies, ensuring all tracers are present
             reshaped_tracers = {}
-            for name, tracer_tend in term_tendency.tracers.items():
-                reshaped_tracers[name] = tracer_tend.reshape(nlev, nlat, nlon)
+            # First, initialize with zeros for all tracers in the state
+            for name in state.tracers.keys():
+                if name in term_tendency.tracers:
+                    reshaped_tracers[name] = term_tendency.tracers[name].reshape(nlev, nlat, nlon)
+                else:
+                    # If this physics term doesn't have a tendency for this tracer, use zeros
+                    reshaped_tracers[name] = jnp.zeros((nlev, nlat, nlon))
                 
             reshaped_tendency = PhysicsTendency(
                 u_wind=term_tendency.u_wind.reshape(nlev, nlat, nlon),
@@ -451,6 +469,124 @@ class IconPhysics(Physics):
         
         return physics_tendencies, updated_physics_data
     
+    def _apply_microphysics(self, state, physics_data, boundaries, geometry):
+        """Apply cloud microphysics scheme"""
+        from jcm.physics.speedy.physical_constants import p0
+        
+        # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
+        nlev, ncols = state.temperature.shape
+        dt = 1800.0  # Time step for microphysics
+        
+        # Calculate pressure levels
+        surface_pressure = state.surface_pressure * p0  # Pa
+        sigma_levels = geometry.fsg
+        pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
+        
+        # Get hydrometeors from tracers
+        cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+        cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+        rain_water = state.tracers.get('qr', jnp.zeros_like(state.temperature))
+        snow = state.tracers.get('qs', jnp.zeros_like(state.temperature))
+        
+        # Get cloud fraction from cloud scheme output
+        cloud_fraction = physics_data.cloud_data.get('cloud_fraction', jnp.ones_like(state.temperature) * 0.1)
+        
+        # Air density
+        air_density = pressure_levels / (287.0 * state.temperature)
+        
+        # Layer thickness (approximate from pressure)
+        dz = jnp.zeros_like(pressure_levels)
+        # Use hydrostatic approximation: dz = -dp/(rho*g)
+        dz = dz.at[1:].set(
+            -(pressure_levels[1:] - pressure_levels[:-1]) / (air_density[1:] * 9.81)
+        )
+        dz = dz.at[0].set(dz[1])  # Set top layer same as layer below
+        
+        # Droplet number concentration (simple profile)
+        droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
+        
+        # Get microphysics configuration
+        micro_config = self.parameters.microphysics
+        
+        # Define single column microphysics function
+        def apply_microphysics_to_column(temp_col, humid_col, pressure_col, 
+                                       qc_col, qi_col, qr_col, qs_col,
+                                       cf_col, rho_col, dz_col, nc_col):
+            """Apply microphysics to a single column"""
+            
+            micro_tendencies, micro_state = cloud_microphysics(
+                temperature=temp_col,
+                specific_humidity=humid_col,
+                pressure=pressure_col,
+                cloud_water=qc_col,
+                cloud_ice=qi_col,
+                rain_water=qr_col,
+                snow=qs_col,
+                cloud_fraction=cf_col,
+                air_density=rho_col,
+                layer_thickness=dz_col,
+                droplet_number=nc_col,
+                dt=dt,
+                config=micro_config
+            )
+            
+            return (
+                micro_tendencies.dtedt,
+                micro_tendencies.dqdt,
+                micro_tendencies.dqcdt,
+                micro_tendencies.dqidt,
+                micro_tendencies.dqrdt,
+                micro_tendencies.dqsdt,
+                micro_state.precip_rain,
+                micro_state.precip_snow
+            )
+        
+        # Apply microphysics using vmap
+        results = jax.vmap(
+            apply_microphysics_to_column,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+            out_axes=(1, 1, 1, 1, 1, 1, 0, 0)
+        )(state.temperature, state.specific_humidity, pressure_levels,
+          cloud_water, cloud_ice, rain_water, snow,
+          cloud_fraction, air_density, dz, droplet_number)
+        
+        # Unpack results
+        micro_temp_tend, micro_humid_tend, micro_qc_tend, micro_qi_tend, \
+        micro_qr_tend, micro_qs_tend, rain_flux, snow_flux = results
+        
+        # Build tracer tendencies
+        tracer_tend_dict = {}
+        if 'qc' in state.tracers:
+            tracer_tend_dict['qc'] = micro_qc_tend
+        if 'qi' in state.tracers:
+            tracer_tend_dict['qi'] = micro_qi_tend
+        if 'qr' in state.tracers:
+            tracer_tend_dict['qr'] = micro_qr_tend
+        if 'qs' in state.tracers:
+            tracer_tend_dict['qs'] = micro_qs_tend
+        
+        # Create physics tendencies
+        physics_tendencies = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=micro_temp_tend,
+            specific_humidity=micro_humid_tend,
+            tracers=tracer_tend_dict
+        )
+        
+        # Update physics data
+        microphysics_data = {
+            'microphysics_enabled': True,
+            'rain_flux': rain_flux,
+            'snow_flux': snow_flux,
+            'total_precipitation': rain_flux + snow_flux,
+            'last_applied': True
+        }
+        
+        updated_physics_data = physics_data.copy(microphysics_data=microphysics_data)
+        
+        return physics_tendencies, updated_physics_data
+    
     def _apply_vertical_diffusion(self, state, physics_data, boundaries, geometry, dt):
         """Apply vertical diffusion"""
         # Placeholder - will implement vertical_diffusion function
@@ -461,10 +597,82 @@ class IconPhysics(Physics):
         # Placeholder - will implement surface_fluxes function
         return PhysicsTendency.zeros(state.temperature.shape), physics_data
     
-    def _apply_gravity_waves(self, state, physics_data, boundaries, geometry, dt):
+    def _apply_gravity_waves(self, state, physics_data, boundaries, geometry):
         """Apply gravity wave drag"""
-        # Placeholder - will implement gravity_wave_drag function
-        return PhysicsTendency.zeros(state.temperature.shape), physics_data
+        from jcm.physics.speedy.physical_constants import p0
+        
+        # Note: state is already in 2D format [nlev, ncols]
+        nlev, ncols = state.temperature.shape
+        dt = 1800.0  # Time step
+        
+        # Need orography standard deviation - use a placeholder for now
+        # In a real implementation, this would come from boundary data
+        h_std = jnp.ones(ncols) * 200.0  # 200m standard deviation
+        
+        # Calculate pressure and height
+        surface_pressure = state.surface_pressure * p0
+        sigma_levels = geometry.fsg
+        pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
+        
+        # Approximate height from geopotential
+        height_levels = state.geopotential / 9.81
+        
+        # Get GWD configuration
+        gwd_config = self.parameters.gravity_waves if hasattr(self.parameters, 'gravity_waves') else None
+        
+        # Define single column GWD function
+        def apply_gwd_to_column(u_col, v_col, temp_col, pressure_col, height_col, h_std_scalar):
+            """Apply gravity wave drag to single column"""
+            
+            gwd_tendencies, gwd_state = gravity_wave_drag(
+                u_wind=u_col,
+                v_wind=v_col,
+                temperature=temp_col,
+                pressure=pressure_col,
+                height=height_col,
+                h_std=h_std_scalar,
+                dt=dt,
+                config=gwd_config
+            )
+            
+            return (
+                gwd_tendencies.dudt,
+                gwd_tendencies.dvdt,
+                gwd_tendencies.dtedt,
+                gwd_state.wave_stress[-1]  # Surface stress
+            )
+        
+        # Apply GWD using vmap
+        results = jax.vmap(
+            apply_gwd_to_column,
+            in_axes=(1, 1, 1, 1, 1, 0),
+            out_axes=(1, 1, 1, 0)
+        )(state.u_wind, state.v_wind, state.temperature,
+          pressure_levels, height_levels, h_std)
+        
+        # Unpack results
+        gwd_u_tend, gwd_v_tend, gwd_temp_tend, surface_stress = results
+        
+        # Create physics tendencies
+        physics_tendencies = PhysicsTendency(
+            u_wind=gwd_u_tend,
+            v_wind=gwd_v_tend,
+            temperature=gwd_temp_tend,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={}
+        )
+        
+        # Update physics data
+        gravity_wave_data = {
+            'gravity_wave_drag_enabled': True,
+            'surface_stress': surface_stress,
+            'mean_stress': jnp.mean(surface_stress),
+            'last_applied': True
+        }
+        
+        updated_physics_data = physics_data.copy(gravity_wave_data=gravity_wave_data)
+        
+        return physics_tendencies, updated_physics_data
     
     def _apply_chemistry(self, state, physics_data, boundaries, geometry, dt):
         """Apply chemistry tendencies"""

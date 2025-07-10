@@ -12,6 +12,7 @@ from typing import Optional
 
 from .convection import ConvectionParameters
 from .clouds import CloudParameters, MicrophysicsParameters
+from .gravity_waves import GravityWaveParameters
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,9 @@ class Parameters:
     
     # Microphysics parameters
     microphysics: MicrophysicsParameters = MicrophysicsParameters()
+    
+    # Gravity wave parameters
+    gravity_waves: GravityWaveParameters = GravityWaveParameters()
     
     # Radiation parameters (placeholder for future implementation)
     # radiation: RadiationParameters = RadiationParameters()
@@ -59,7 +63,8 @@ class Parameters:
         return self.__class__(
             convection=convection_params,
             clouds=self.clouds,
-            microphysics=self.microphysics
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves
         )
     
     def with_clouds(self, **kwargs) -> 'Parameters':
@@ -71,7 +76,8 @@ class Parameters:
         return self.__class__(
             convection=self.convection,
             clouds=cloud_params,
-            microphysics=self.microphysics
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves
         )
     
     def with_microphysics(self, **kwargs) -> 'Parameters':
@@ -83,5 +89,19 @@ class Parameters:
         return self.__class__(
             convection=self.convection,
             clouds=self.clouds,
-            microphysics=micro_params
+            microphysics=micro_params,
+            gravity_waves=self.gravity_waves
+        )
+    
+    def with_gravity_waves(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated gravity wave parameters"""
+        gwd_params = self.gravity_waves.__class__(**{
+            **self.gravity_waves.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=gwd_params
         )
