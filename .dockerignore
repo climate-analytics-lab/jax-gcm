@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+
+# Build artifacts
+build/
+docs/build/
+docs/source/generated/
+
+# Git and CI
+.github/
+.vscode/

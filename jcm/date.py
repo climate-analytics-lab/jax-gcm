@@ -3,7 +3,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 from datetime import datetime
-from jax import tree_util
 
 ### NOTE, the below code is taken verbatim from the NeuralGCM experimental branch and should be
 ### imported from there (or wherever it ends up) once it is stable

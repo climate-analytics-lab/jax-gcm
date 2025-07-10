@@ -25,3 +25,7 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
 @jit
 def pass_fn(operand):
     return operand
+
+def ones_like(x):
+    import jax.tree_util as jtu
+    return jtu.tree_map(lambda y: jnp.ones_like(y), x)
