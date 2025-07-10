@@ -321,6 +321,9 @@ def radiation_scheme(
         rad_state.pressure_interfaces
     )
     
+    # Ensure SW heating is zero when no sunlight (avoid NaN propagation)
+    sw_heating_rate = jnp.where(cos_zenith > 0, sw_heating_rate, 0.0)
+    
     total_heating = lw_heating_rate + sw_heating_rate
     
     # Extract diagnostic fluxes

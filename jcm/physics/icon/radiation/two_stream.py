@@ -81,20 +81,22 @@ def layer_reflectance_transmittance(
     # Calculate lambda (eigenvalue)
     lambda_val = jnp.sqrt(gamma1**2 - gamma2**2)
     
-    # Handle large optical depths separately to avoid numerical issues
-    large_tau = tau >= 100
-    
     # For normal optical depths, calculate exponentials
     lambda_tau = lambda_val * tau
-    exp_plus = jnp.where(lambda_tau > 100, jnp.inf, jnp.exp(lambda_tau))
-    exp_minus = jnp.where(lambda_tau > 100, 0.0, jnp.exp(-lambda_tau))
+    
+    # Handle large optical depths consistently - use lambda_tau threshold
+    # Use 88 as threshold since exp(90) = inf, so be conservative
+    large_tau = lambda_tau >= 88
+    
+    exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
+    exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
     # Helper terms
     term1 = 1.0 / (lambda_val + gamma1)
     term2 = 1.0 / (lambda_val - gamma1)
     
-    # For normal optical depths, avoid NaN by using safe values when large_tau=True
-    # When large_tau=True, these values won't be used anyway
+    # For large optical depths, avoid NaN by using safe values
+    # Use finite values instead of inf for subsequent calculations
     exp_plus_safe = jnp.where(large_tau, 1.0, exp_plus)
     exp_minus_safe = jnp.where(large_tau, 0.0, exp_minus)
     
