@@ -491,14 +491,15 @@ class IconPhysics(Physics):
         # Get cloud fraction from cloud scheme output
         cloud_fraction = physics_data.cloud_data.get('cloud_fraction', jnp.ones_like(state.temperature) * 0.1)
         
-        # Air density
-        air_density = pressure_levels / (287.0 * state.temperature)
+        # Air density using proper gas constant
+        air_density = pressure_levels / (physical_constants.rd * state.temperature)
         
         # Layer thickness (approximate from pressure)
         dz = jnp.zeros_like(pressure_levels)
-        # Use hydrostatic approximation: dz = -dp/(rho*g)
+        # Use hydrostatic approximation: dz = dp/(rho*g)
+        # Since pressure increases downward, dp is positive
         dz = dz.at[1:].set(
-            -(pressure_levels[1:] - pressure_levels[:-1]) / (air_density[1:] * 9.81)
+            (pressure_levels[1:] - pressure_levels[:-1]) / (air_density[1:] * physical_constants.grav)
         )
         dz = dz.at[0].set(dz[1])  # Set top layer same as layer below
         
@@ -614,8 +615,8 @@ class IconPhysics(Physics):
         sigma_levels = geometry.fsg
         pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
         
-        # Approximate height from geopotential
-        height_levels = state.geopotential / 9.81
+        # Convert geopotential to height
+        height_levels = state.geopotential / physical_constants.grav
         
         # Get GWD configuration
         gwd_config = self.parameters.gravity_waves if hasattr(self.parameters, 'gravity_waves') else None
