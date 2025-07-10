@@ -1,9 +1,9 @@
 from jcm.geometry import Geometry
-from jcm.params import Parameters
-from jcm.physics_data import ablco2_ref, PhysicsData
+from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
 from jcm.boundaries import BoundaryData
-from jcm.physics import PhysicsState, PhysicsTendency
-from jcm.shortwave_radiation import get_zonal_average_fields
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics.speedy.shortwave_radiation import get_zonal_average_fields
 import jax.numpy as jnp
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005

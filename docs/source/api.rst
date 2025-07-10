@@ -6,7 +6,8 @@ API
    :recursive:
 
    jcm.model
-   jcm.model.SpeedyModel
-   jcm.physics
-   jcm.physics.PhysicsState
-   jcm.physics.PhysicsTendency
+   jcm.model.Model
+   jcm.physics_interface
+   jcm.physics_interface.PhysicsState
+   jcm.physics_interface.PhysicsTendency
+   jcm.physics_interface.Physics
