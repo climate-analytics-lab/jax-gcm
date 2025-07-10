@@ -79,3 +79,9 @@ tmelt = physical_constants.tmelt
 rhow = physical_constants.rhow
 rhoi = physical_constants.rhoi
 epsilon = physical_constants.epsilon
+
+# Aliases for compatibility
+rhoh2o = rhow  # Density of water
+alv = alhc     # Latent heat of vaporization
+als = alhs     # Latent heat of sublimation  
+alf = alhf     # Latent heat of fusion

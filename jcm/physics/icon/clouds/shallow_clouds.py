@@ -23,7 +23,7 @@ from ..constants.physical_constants import (
 
 
 @dataclass(frozen=True)
-class CloudConfig:
+class CloudParameters:
     """Configuration parameters for shallow cloud scheme"""
     
     # Cloud fraction parameters
@@ -132,7 +132,7 @@ def calculate_cloud_fraction(
     specific_humidity: jnp.ndarray,
     pressure: jnp.ndarray,
     surface_pressure: float,
-    config: CloudConfig
+    config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Calculate cloud fraction using relative humidity scheme
@@ -184,7 +184,7 @@ def calculate_cloud_fraction(
 def partition_cloud_phase(
     temperature: jnp.ndarray,
     total_cloud_water: jnp.ndarray,
-    config: CloudConfig
+    config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Partition cloud water between liquid and ice phases
@@ -220,7 +220,7 @@ def condensation_evaporation(
     cloud_fraction: jnp.ndarray,
     pressure: jnp.ndarray,
     dt: float,
-    config: CloudConfig
+    config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Calculate condensation/evaporation tendencies
@@ -319,7 +319,7 @@ def shallow_cloud_scheme(
     cloud_ice: jnp.ndarray,
     surface_pressure: float,
     dt: float,
-    config: Optional[CloudConfig] = None
+    config: Optional[CloudParameters] = None
 ) -> Tuple[CloudTendencies, CloudState]:
     """
     Main shallow cloud scheme
@@ -338,7 +338,7 @@ def shallow_cloud_scheme(
         Tuple of (tendencies, cloud_state)
     """
     if config is None:
-        config = CloudConfig()
+        config = CloudParameters()
     
     # Ensure all inputs are arrays
     temperature = jnp.atleast_1d(temperature)
@@ -346,9 +346,7 @@ def shallow_cloud_scheme(
     pressure = jnp.atleast_1d(pressure)
     cloud_water = jnp.atleast_1d(cloud_water)
     cloud_ice = jnp.atleast_1d(cloud_ice)
-    
-    nlev = temperature.shape[0]
-    
+        
     # Calculate cloud fraction and relative humidity
     cloud_fraction, rel_humidity = calculate_cloud_fraction(
         temperature, specific_humidity, pressure, surface_pressure, config

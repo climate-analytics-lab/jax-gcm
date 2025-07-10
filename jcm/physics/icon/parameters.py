@@ -1,0 +1,87 @@
+"""
+Overall parameters for ICON physics
+
+This module provides a unified Parameters class that contains all the 
+configuration parameters for the various ICON physics parameterizations.
+
+Date: 2025-01-10
+"""
+
+from dataclasses import dataclass
+from typing import Optional
+
+from .convection import ConvectionParameters
+from .clouds import CloudParameters, MicrophysicsParameters
+
+
+@dataclass(frozen=True)
+class Parameters:
+    """
+    Overall parameters for ICON physics
+    
+    This class contains all the configuration parameters for the various
+    ICON physics parameterizations, following the same pattern as 
+    SpeedyPhysics.
+    """
+    
+    # Convection parameters
+    convection: ConvectionParameters = ConvectionParameters()
+    
+    # Cloud parameters (shallow clouds)
+    clouds: CloudParameters = CloudParameters()
+    
+    # Microphysics parameters
+    microphysics: MicrophysicsParameters = MicrophysicsParameters()
+    
+    # Radiation parameters (placeholder for future implementation)
+    # radiation: RadiationParameters = RadiationParameters()
+    
+    # Vertical diffusion parameters (placeholder for future implementation)
+    # vertical_diffusion: VerticalDiffusionParameters = VerticalDiffusionParameters()
+    
+    # Surface parameters (placeholder for future implementation)
+    # surface: SurfaceParameters = SurfaceParameters()
+    
+    # Gravity wave drag parameters (placeholder for future implementation)
+    # gravity_waves: GravityWaveParameters = GravityWaveParameters()
+    
+    @classmethod
+    def default(cls) -> 'Parameters':
+        """Create default parameters"""
+        return cls()
+    
+    def with_convection(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated convection parameters"""
+        convection_params = self.convection.__class__(**{
+            **self.convection.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=convection_params,
+            clouds=self.clouds,
+            microphysics=self.microphysics
+        )
+    
+    def with_clouds(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated cloud parameters"""
+        cloud_params = self.clouds.__class__(**{
+            **self.clouds.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=cloud_params,
+            microphysics=self.microphysics
+        )
+    
+    def with_microphysics(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated microphysics parameters"""
+        micro_params = self.microphysics.__class__(**{
+            **self.microphysics.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=micro_params
+        )

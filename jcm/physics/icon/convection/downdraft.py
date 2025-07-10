@@ -22,7 +22,7 @@ from ..constants.physical_constants import (
     grav, rd, rv, cp, eps, tmelt, alhc, alhs
 )
 from .tiedtke_nordeng import (
-    ConvectionConfig, saturation_mixing_ratio
+    ConvectionParameters, saturation_mixing_ratio
 )
 from .updraft import saturation_adjustment
 
@@ -84,7 +84,7 @@ def find_lfs(
     precip_rate: jnp.ndarray,
     kbase: int,
     ktop: int,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> Tuple[int, bool]:
     """
     Find level of free sinking for downdraft initiation
@@ -270,7 +270,7 @@ def calculate_downdraft(
     precip_rate: jnp.ndarray,
     kbase: int,
     ktop: int,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> DowndraftState:
     """
     Calculate full downdraft profile

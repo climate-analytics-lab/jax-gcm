@@ -36,7 +36,7 @@ from ..constants.physical_constants import (
 
 
 @dataclass(frozen=True)
-class ConvectionConfig:
+class ConvectionParameters:
     """Configuration parameters for Tiedtke-Nordeng convection scheme"""
     
     # Time stepping
@@ -187,7 +187,7 @@ def initialize_convection(temperature: jnp.ndarray,
                          height: jnp.ndarray,
                          u_wind: jnp.ndarray,
                          v_wind: jnp.ndarray,
-                         config: ConvectionConfig) -> ConvectionState:
+                         config: ConvectionParameters) -> ConvectionState:
     """
     Initialize convection state variables
     
@@ -242,7 +242,7 @@ def initialize_convection(temperature: jnp.ndarray,
 def find_cloud_base(temperature: jnp.ndarray,
                    humidity: jnp.ndarray, 
                    pressure: jnp.ndarray,
-                   config: ConvectionConfig) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                   config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Find lifting condensation level (cloud base)
     
@@ -298,7 +298,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
                       pressure: jnp.ndarray,
                       height: jnp.ndarray,
                       cloud_base: int,
-                      config: ConvectionConfig) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                      config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Calculate CAPE and CIN for convective instability
     
@@ -379,7 +379,7 @@ def tiedtke_nordeng_convection(
     v_wind: jnp.ndarray,
     tracers: jnp.ndarray,
     dt: float,
-    config: Optional[ConvectionConfig] = None,
+    config: Optional[ConvectionParameters] = None,
     tracer_indices: Optional['TracerIndices'] = None
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """
@@ -401,7 +401,7 @@ def tiedtke_nordeng_convection(
         Tuple of (tendencies, final_state) with tracer transport
     """
     if config is None:
-        config = ConvectionConfig()
+        config = ConvectionParameters()
     
     nlev = len(temperature)
     

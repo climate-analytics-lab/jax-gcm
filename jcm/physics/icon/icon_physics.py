@@ -21,8 +21,9 @@ from jcm.physics.icon.constants import physical_constants
 
 # Import physics modules (will be implemented progressively)
 # from jcm.physics.icon.radiation import radiation_heating
-from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionConfig, ConvectionTendencies
-from jcm.physics.icon.clouds import shallow_cloud_scheme, CloudConfig
+from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionTendencies
+from jcm.physics.icon.clouds import shallow_cloud_scheme
+from jcm.physics.icon.parameters import Parameters
 # from jcm.physics.icon.vertical_diffusion import vertical_diffusion
 # from jcm.physics.icon.surface import surface_fluxes
 # from jcm.physics.icon.gravity_waves import gravity_wave_drag
@@ -116,20 +117,20 @@ class IconPhysics(Physics):
     def __init__(self, 
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
-                 convection_config: Optional[ConvectionConfig] = None):
+                 parameters: Optional[Parameters] = None):
         """
         Initialize the ICON physics.
         
         Args:
             write_output: Whether to write physics output to predictions
             checkpoint_terms: Whether to checkpoint physics terms
-            convection_config: Optional convection configuration
+            parameters: Optional physics parameters (uses defaults if None)
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
         
-        # Store convection configuration
-        self.convection_config = convection_config or ConvectionConfig()
+        # Store parameters
+        self.parameters = parameters or Parameters.default()
         
         # Build list of physics terms
         self.terms = self._build_physics_terms()
@@ -293,7 +294,7 @@ class IconPhysics(Physics):
                 v_wind=v_col,
                 tracers=tracers_col,
                 dt=dt,
-                config=self.convection_config,
+                config=self.parameters.convection,
                 tracer_indices=tracer_indices
             )
             
@@ -377,8 +378,8 @@ class IconPhysics(Physics):
         cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
         cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
         
-        # Create cloud configuration
-        cloud_config = CloudConfig()
+        # Get cloud configuration from parameters
+        cloud_config = self.parameters.clouds
         
         # Define single column cloud function
         def apply_clouds_to_column(temp_col, humid_col, pressure_col, qc_col, qi_col, ps_col):

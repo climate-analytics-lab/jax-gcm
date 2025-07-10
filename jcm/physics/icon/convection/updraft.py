@@ -22,7 +22,7 @@ from ..constants.physical_constants import (
     grav, rd, rv, cp, eps, tmelt, alhc, alhs
 )
 from .tiedtke_nordeng import (
-    ConvectionConfig, saturation_mixing_ratio, saturation_vapor_pressure
+    ConvectionParameters, saturation_mixing_ratio, saturation_vapor_pressure
 )
 
 
@@ -46,7 +46,7 @@ def calculate_entrainment_detrainment(
     buoy: jnp.ndarray,
     dz: jnp.ndarray,
     rho: jnp.ndarray,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Calculate entrainment and detrainment rates
@@ -251,7 +251,7 @@ def calculate_updraft(
     ktop: int, 
     ktype: int,
     mass_flux_base: float,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> UpdatedraftState:
     """
     Calculate full updraft profile

@@ -20,7 +20,7 @@ from typing import Tuple
 from ..constants.physical_constants import (
     grav, cp, alhc, alhs, tmelt
 )
-from .tiedtke_nordeng import ConvectionConfig, ConvectionTendencies
+from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
 
@@ -29,7 +29,7 @@ def calculate_precipitation_rate(
     updraft_state: UpdatedraftState,
     kbase: int,
     dt: float,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> jnp.ndarray:
     """
     Calculate surface precipitation rate from convection
@@ -121,7 +121,7 @@ def calculate_tendencies(
     kbase: int,
     ktop: int,
     dt: float,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> ConvectionTendencies:
     """
     Calculate final tendencies from convective fluxes
@@ -244,7 +244,7 @@ def mass_flux_closure(
     cin: jnp.ndarray,
     moisture_conv: jnp.ndarray,
     ktype: int,
-    config: ConvectionConfig
+    config: ConvectionParameters
 ) -> jnp.ndarray:
     """
     Determine cloud base mass flux using appropriate closure
