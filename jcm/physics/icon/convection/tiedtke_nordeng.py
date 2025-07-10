@@ -377,11 +377,13 @@ def tiedtke_nordeng_convection(
     height: jnp.ndarray,
     u_wind: jnp.ndarray,
     v_wind: jnp.ndarray,
+    tracers: jnp.ndarray,
     dt: float,
-    config: Optional[ConvectionConfig] = None
+    config: Optional[ConvectionConfig] = None,
+    tracer_indices: Optional['TracerIndices'] = None
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """
-    Main Tiedtke-Nordeng convection scheme
+    Main Tiedtke-Nordeng convection scheme with tracer transport
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -390,11 +392,13 @@ def tiedtke_nordeng_convection(
         height: Geopotential height (m) [nlev]
         u_wind: Zonal wind (m/s) [nlev]
         v_wind: Meridional wind (m/s) [nlev]
+        tracers: Tracer concentrations [nlev, ntrac] including qc, qi
         dt: Time step (s)
         config: Convection configuration
+        tracer_indices: Indices for different tracer types
         
     Returns:
-        Tuple of (tendencies, final_state)
+        Tuple of (tendencies, final_state) with tracer transport
     """
     if config is None:
         config = ConvectionConfig()
@@ -448,7 +452,7 @@ def tiedtke_nordeng_convection(
     # Calculate air density
     rho = pressure / (rd * temperature)
     
-    # Apply full convection scheme if active
+    # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
         # Determine cloud top based on CAPE profile  
         # Simplified - full version would search for equilibrium level
@@ -494,11 +498,55 @@ def tiedtke_nordeng_convection(
             active=False    # No downdraft for now
         )
         
-        # Calculate final tendencies
+        # Calculate final tendencies for basic variables
         tendencies = calculate_tendencies(
             temperature, humidity, u_wind, v_wind, pressure, rho,
             updraft_state, downdraft_state, 
             cloud_base, ktop, dt, config
+        )
+        
+        # Calculate tracer transport (always included)
+        ntrac = tracers.shape[1] if tracers.ndim > 1 else 0
+        dtracer_dt = jnp.zeros((nlev, ntrac), dtype=jnp.float32)
+        
+        # Apply tracer transport if tracers are provided
+        def calculate_tracer_transport():
+            # Simple tracer transport based on mass flux divergence
+            mass_flux_profile = updraft_state.mfu - downdraft_state.mfd
+            
+            def calculate_tracer_tendency(tracer_profile):
+                # Simple finite difference for transport
+                tracer_flux = mass_flux_profile * tracer_profile * 0.1  # Mixing efficiency
+                # Tendency from flux divergence (simplified)
+                return jnp.diff(tracer_flux, append=0.0) * 0.001  # Scale factor
+            
+            # Apply to all tracers using vmap over tracer dimension
+            return jax.vmap(calculate_tracer_tendency, in_axes=1, out_axes=1)(tracers)
+        
+        # Calculate tracer tendencies if tracers exist
+        dtracer_dt = lax.cond(
+            ntrac > 0,
+            calculate_tracer_transport,
+            lambda: jnp.zeros((nlev, ntrac), dtype=jnp.float32)
+        )
+        
+        # Enhanced cloud water/ice production from condensation
+        qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu * 0.1, 0.0)
+        qi_conv = jnp.where(
+            jnp.logical_and(updraft_state.mfu > 0, temperature < tmelt),
+            updraft_state.lu * 0.05, 0.0
+        )
+        
+        # Create enhanced tendencies with tracer transport
+        enhanced_tendencies = ConvectionTendencies(
+            dtedt=tendencies.dtedt,
+            dqdt=tendencies.dqdt,
+            dudt=tendencies.dudt,
+            dvdt=tendencies.dvdt,
+            qc_conv=qc_conv,
+            qi_conv=qi_conv,
+            precip_conv=tendencies.precip_conv,
+            dtracer_dt=dtracer_dt
         )
         
         # Update state
@@ -509,16 +557,21 @@ def tiedtke_nordeng_convection(
             ud=u_wind, vd=v_wind,  # Simplified
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
             ktype=jnp.array(conv_type), kbase=jnp.array(cloud_base), 
-            ktop=jnp.array(ktop), prate=tendencies.precip_conv
+            ktop=jnp.array(ktop), prate=enhanced_tendencies.precip_conv
         )
         
-        return tendencies, new_state
+        return enhanced_tendencies, new_state
     
-    # No convection case
+    # No convection case (with tracer placeholders)
     def no_convection():
+        # Initialize tracer tendencies to zero
+        ntrac = tracers.shape[1] if tracers.ndim > 1 else 0
+        dtracer_dt = jnp.zeros((nlev, ntrac), dtype=jnp.float32)
+        
         tendencies = ConvectionTendencies(
             dtedt=dtedt, dqdt=dqdt, dudt=dudt, dvdt=dvdt,
-            qc_conv=qc_conv, qi_conv=qi_conv, precip_conv=precip_conv
+            qc_conv=qc_conv, qi_conv=qi_conv, precip_conv=precip_conv,
+            dtracer_dt=dtracer_dt
         )
         return tendencies, state
     
@@ -532,103 +585,3 @@ def tiedtke_nordeng_convection(
     return tendencies, updated_state
 
 
-def tiedtke_nordeng_convection_with_tracers(
-    temperature: jnp.ndarray,
-    humidity: jnp.ndarray, 
-    pressure: jnp.ndarray,
-    height: jnp.ndarray,
-    u_wind: jnp.ndarray,
-    v_wind: jnp.ndarray,
-    tracers: jnp.ndarray,
-    dt: float,
-    config: Optional[ConvectionConfig] = None,
-    tracer_indices: Optional['TracerIndices'] = None
-) -> Tuple[ConvectionTendencies, ConvectionState]:
-    """
-    Enhanced Tiedtke-Nordeng convection with tracer transport
-    
-    Args:
-        temperature: Environmental temperature (K) [nlev]
-        humidity: Environmental specific humidity (kg/kg) [nlev]
-        pressure: Environmental pressure (Pa) [nlev]
-        height: Geopotential height (m) [nlev]
-        u_wind: Zonal wind (m/s) [nlev]
-        v_wind: Meridional wind (m/s) [nlev]
-        tracers: Tracer concentrations [nlev, ntrac] including qc, qi
-        dt: Time step (s)
-        config: Convection configuration
-        tracer_indices: Indices for different tracer types
-        
-    Returns:
-        Tuple of (tendencies, final_state) with tracer transport
-    """
-    # First run standard convection
-    tendencies, state = tiedtke_nordeng_convection(
-        temperature, humidity, pressure, height,
-        u_wind, v_wind, dt, config
-    )
-    
-    # If no convection, return with zero tracer tendencies
-    if state.ktype == 0:
-        ntrac = tracers.shape[1] if tracers.ndim > 1 else 0
-        tendencies = tendencies._replace(
-            dtracer_dt=jnp.zeros((len(temperature), ntrac))
-        )
-        return tendencies, state
-    
-    # Import tracer transport module
-    from .tracer_transport import transport_tracers, TracerIndices
-    
-    if tracer_indices is None:
-        tracer_indices = TracerIndices()
-    
-    # Calculate air density
-    rho = pressure / (rd * temperature)
-    
-    # Import updraft/downdraft modules
-    from .updraft import calculate_updraft
-    from .downdraft import calculate_downdraft
-    
-    # Recalculate updraft and downdraft states for tracer transport
-    # (In a full implementation, these would be cached from the main calculation)
-    cape, cin = calculate_cape_cin(
-        temperature, humidity, pressure, height, 
-        state.kbase, config or ConvectionConfig()
-    )
-    
-    # Get mass flux from closure
-    from .flux_tendencies import mass_flux_closure
-    mass_flux_base = mass_flux_closure(
-        cape, cin, jnp.array(0.0), state.ktype, 
-        config or ConvectionConfig()
-    )
-    
-    # Calculate updraft
-    updraft_state = calculate_updraft(
-        temperature, humidity, pressure, height, rho,
-        state.kbase, state.ktop, state.ktype, 
-        mass_flux_base, config or ConvectionConfig()
-    )
-    
-    # Calculate downdraft
-    downdraft_state = calculate_downdraft(
-        temperature, humidity, pressure, height, rho,
-        updraft_state, state.prate, state.kbase, state.ktop,
-        config or ConvectionConfig()
-    )
-    
-    # Transport tracers
-    tracer_transport = transport_tracers(
-        tracers, temperature, pressure, rho,
-        updraft_state, downdraft_state, dt, tracer_indices
-    )
-    
-    # Update tendencies with tracer transport
-    # Note: qc and qi tendencies from detrainment are in dtracer_dt
-    tendencies = tendencies._replace(
-        dtracer_dt=tracer_transport.dtracer_dt,
-        qc_conv=tracer_transport.detrain_qc,  # Instantaneous detrainment
-        qi_conv=tracer_transport.detrain_qi   # Instantaneous detrainment
-    )
-    
-    return tendencies, state

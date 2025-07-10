@@ -7,8 +7,7 @@ associated cloud and precipitation processes.
 """
 
 from .tiedtke_nordeng import (
-    tiedtke_nordeng_convection, 
-    tiedtke_nordeng_convection_with_tracers,
+    tiedtke_nordeng_convection,
     ConvectionConfig, 
     ConvectionState, 
     ConvectionTendencies
@@ -17,7 +16,6 @@ from .tracer_transport import TracerIndices, TracerTransport, initialize_tracers
 
 __all__ = [
     "tiedtke_nordeng_convection",
-    "tiedtke_nordeng_convection_with_tracers",
     "ConvectionConfig",
     "ConvectionState", 
     "ConvectionTendencies",

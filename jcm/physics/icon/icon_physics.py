@@ -113,75 +113,38 @@ class IconPhysics(Physics):
     """
     
     def __init__(self, 
+                 tracers: jnp.ndarray,
                  write_output: bool = True,
-                 enable_radiation: bool = True,
-                 enable_convection: bool = True,
-                 enable_clouds: bool = True,
-                 enable_vertical_diffusion: bool = True,
-                 enable_surface: bool = True,
-                 enable_gravity_waves: bool = True,
-                 enable_chemistry: bool = False,
                  checkpoint_terms: bool = True,
                  convection_config: Optional[ConvectionConfig] = None):
         """
         Initialize the ICON physics.
         
         Args:
+            tracers: Tracer array [nlev, nlat, nlon, ntrac] - always required
             write_output: Whether to write physics output to predictions
-            enable_radiation: Enable radiation calculations
-            enable_convection: Enable convection parameterization
-            enable_clouds: Enable cloud microphysics
-            enable_vertical_diffusion: Enable vertical diffusion
-            enable_surface: Enable surface flux calculations
-            enable_gravity_waves: Enable gravity wave drag
-            enable_chemistry: Enable chemistry schemes
             checkpoint_terms: Whether to checkpoint physics terms
+            convection_config: Optional convection configuration
         """
         self.write_output = write_output
-        self.enable_radiation = enable_radiation
-        self.enable_convection = enable_convection
-        self.enable_clouds = enable_clouds
-        self.enable_vertical_diffusion = enable_vertical_diffusion
-        self.enable_surface = enable_surface
-        self.enable_gravity_waves = enable_gravity_waves
-        self.enable_chemistry = enable_chemistry
         self.checkpoint_terms = checkpoint_terms
         
         # Store convection configuration
         self.convection_config = convection_config or ConvectionConfig()
+        
+        # Store tracers (always required)
+        self.tracers = tracers
         
         # Build list of physics terms
         self.terms = self._build_physics_terms()
     
     def _build_physics_terms(self) -> list:
         """Build list of physics terms to be applied"""
-        terms = []
         
         # Add physics terms based on configuration
         # These will be implemented progressively
-        
-        # if self.enable_radiation:
-        #     terms.append(self._apply_radiation)
-        
-        if self.enable_convection:
-            terms.append(self._apply_convection)
-        
-        # if self.enable_clouds:
-        #     terms.append(self._apply_clouds)
-        
-        # if self.enable_vertical_diffusion:
-        #     terms.append(self._apply_vertical_diffusion)
-        
-        # if self.enable_surface:
-        #     terms.append(self._apply_surface)
-        
-        # if self.enable_gravity_waves:
-        #     terms.append(self._apply_gravity_waves)
-        
-        # if self.enable_chemistry:
-        #     terms.append(self._apply_chemistry)
-        
-        return terms
+
+        return [self._apply_convection]
     
     def compute_tendencies(self, 
                  state: PhysicsState,
@@ -262,6 +225,7 @@ class IconPhysics(Physics):
         """Apply full Tiedtke-Nordeng convection scheme with updraft/downdraft physics"""
         from jcm.physics.speedy.physical_constants import p0
         from jcm.physics.icon.convection.tiedtke_nordeng import tiedtke_nordeng_convection
+        from jcm.physics.icon.convection.tracer_transport import TracerIndices
         
         # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
         nlev, ncols = state.temperature.shape
@@ -281,11 +245,18 @@ class IconPhysics(Physics):
         # Calculate height from geopotential
         height_levels = state.geopotential / physical_constants.grav  # m
         
-        # Define single column Tiedtke-Nordeng convection function
-        def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col):
-            """Apply full Tiedtke-Nordeng convection to a single column"""
+        # Reshape tracers to 2D format [nlev, ncols, ntrac] - always present
+        original_shape = self.tracers.shape  # [nlev, nlat, nlon, ntrac]
+        ntrac = original_shape[-1]
+        tracers_2d = self.tracers.reshape(nlev, ncols, ntrac)  # [nlev, ncols, ntrac]
+        
+        # Setup tracer indices
+        tracer_indices = TracerIndices(iqv=0, iqc=1, iqi=2, iqt=3)
+        
+        # Define single column convection function (always includes tracers)
+        def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col, tracers_col):
+            """Apply unified Tiedtke-Nordeng convection with tracer transport to a single column"""
             
-            # Apply full Tiedtke-Nordeng convection scheme
             conv_tendencies, conv_state = tiedtke_nordeng_convection(
                 temperature=temp_col,
                 humidity=humid_col,
@@ -293,11 +264,13 @@ class IconPhysics(Physics):
                 height=height_col,
                 u_wind=u_col,
                 v_wind=v_col,
+                tracers=tracers_col,
                 dt=dt,
-                config=self.convection_config
+                config=self.convection_config,
+                tracer_indices=tracer_indices
             )
             
-            # Return tendencies as simple arrays for vmap compatibility
+            # Return tendencies and tracer tendencies
             return (
                 conv_tendencies.dtedt,      # Temperature tendency
                 conv_tendencies.dqdt,       # Humidity tendency  
@@ -305,19 +278,20 @@ class IconPhysics(Physics):
                 conv_tendencies.dvdt,       # V-wind tendency
                 conv_tendencies.qc_conv,    # Convective cloud water
                 conv_tendencies.qi_conv,    # Convective cloud ice
-                conv_tendencies.precip_conv # Convective precipitation
+                conv_tendencies.precip_conv, # Convective precipitation
+                conv_tendencies.dtracer_dt if conv_tendencies.dtracer_dt is not None else jnp.zeros((nlev, ntrac))  # Tracer tendencies
             )
         
-        # Apply Tiedtke-Nordeng convection to all columns using vmap
+        # Apply convection with tracers using vmap
         results = jax.vmap(
             apply_tiedtke_to_column, 
-            in_axes=(1, 1, 1, 1, 1, 1), 
-            out_axes=(1, 1, 1, 1, 1, 1, 0)  # precip is surface field, so axis 0
+            in_axes=(1, 1, 1, 1, 1, 1, 1), 
+            out_axes=(1, 1, 1, 1, 1, 1, 0, 1)  # tracer tendencies: out_axis=1 for [nlev, ncols, ntrac]
         )(state.temperature, state.specific_humidity, pressure_levels, height_levels, 
-          state.u_wind, state.v_wind)
+          state.u_wind, state.v_wind, tracers_2d)
         
-        # Unpack results
-        conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv = results
+        # Unpack results with tracer tendencies
+        conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv, tracer_tendencies = results
         
         # Create physics tendencies (already in 2D format [nlev, ncols])
         physics_tendencies = PhysicsTendency(
@@ -327,17 +301,23 @@ class IconPhysics(Physics):
             specific_humidity=conv_humid_tend
         )
         
-        # Update physics data with convection diagnostics
-        updated_physics_data = physics_data.copy(
-            convection_data={
-                'convection_enabled': True,
-                'tiedtke_nordeng_active': True,
-                'convective_cloud_water': qc_conv,
-                'convective_cloud_ice': qi_conv,
-                'convective_precipitation': precip_conv,
-                'last_applied': True
-            }
-        )
+        # Reshape tracer tendencies back to 3D format [nlev, nlat, nlon, ntrac]
+        nlev, nlat, nlon = state.temperature.shape[0], original_shape[1], original_shape[2]
+        ntrac = original_shape[-1]
+        tracer_tendencies_3d = tracer_tendencies.reshape(nlev, nlat, nlon, ntrac)
+        
+        # Update physics data with convection diagnostics (always includes tracers)
+        convection_data = {
+            'convection_enabled': True,
+            'tiedtke_nordeng_active': True,
+            'convective_cloud_water': qc_conv,
+            'convective_cloud_ice': qi_conv,
+            'convective_precipitation': precip_conv,
+            'tracer_tendencies': tracer_tendencies_3d,
+            'last_applied': True
+        }
+        
+        updated_physics_data = physics_data.copy(convection_data=convection_data)
         
         return physics_tendencies, updated_physics_data
     
