@@ -22,7 +22,7 @@ from jcm.physics.icon.constants import physical_constants
 # Import physics modules (will be implemented progressively)
 # from jcm.physics.icon.radiation import radiation_heating
 from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionConfig, ConvectionTendencies
-# from jcm.physics.icon.clouds import cloud_microphysics
+from jcm.physics.icon.clouds import shallow_cloud_scheme, CloudConfig
 # from jcm.physics.icon.vertical_diffusion import vertical_diffusion
 # from jcm.physics.icon.surface import surface_fluxes
 # from jcm.physics.icon.gravity_waves import gravity_wave_drag
@@ -140,7 +140,7 @@ class IconPhysics(Physics):
         # Add physics terms based on configuration
         # These will be implemented progressively
 
-        return [self._apply_convection]
+        return [self._apply_convection, self._apply_clouds]
     
     def compute_tendencies(self, 
                  state: PhysicsState,
@@ -360,10 +360,95 @@ class IconPhysics(Physics):
         
         return physics_tendencies, updated_physics_data
     
-    def _apply_clouds(self, state, physics_data, boundaries, geometry, dt):
-        """Apply cloud microphysics"""
-        # Placeholder - will implement cloud_microphysics function
-        return PhysicsTendency.zeros(state.temperature.shape), physics_data
+    def _apply_clouds(self, state, physics_data, boundaries, geometry):
+        """Apply shallow cloud scheme with microphysics"""
+        from jcm.physics.speedy.physical_constants import p0
+        
+        # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
+        nlev, ncols = state.temperature.shape
+        dt = 1800.0  # Time step for cloud physics
+        
+        # Calculate pressure levels from surface pressure and sigma coordinates
+        surface_pressure = state.surface_pressure * p0  # Pa, shape [ncols]
+        sigma_levels = geometry.fsg  # sigma coordinates at level centers
+        pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
+        
+        # Get cloud water and ice from tracers, or initialize to zero
+        cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+        cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+        
+        # Create cloud configuration
+        cloud_config = CloudConfig()
+        
+        # Define single column cloud function
+        def apply_clouds_to_column(temp_col, humid_col, pressure_col, qc_col, qi_col, ps_col):
+            """Apply shallow cloud scheme to a single column"""
+            
+            cloud_tendencies, cloud_state = shallow_cloud_scheme(
+                temperature=temp_col,
+                specific_humidity=humid_col,
+                pressure=pressure_col,
+                cloud_water=qc_col,
+                cloud_ice=qi_col,
+                surface_pressure=ps_col,
+                dt=dt,
+                config=cloud_config
+            )
+            
+            # Return tendencies and diagnostic fields
+            return (
+                cloud_tendencies.dtedt,      # Temperature tendency
+                cloud_tendencies.dqdt,       # Humidity tendency
+                cloud_tendencies.dqcdt,      # Cloud water tendency
+                cloud_tendencies.dqidt,      # Cloud ice tendency
+                cloud_state.cloud_fraction,  # Cloud fraction
+                cloud_state.rel_humidity,    # Relative humidity
+                cloud_tendencies.rain_flux,  # Rain flux
+                cloud_tendencies.snow_flux   # Snow flux
+            )
+        
+        # Apply cloud scheme using vmap
+        results = jax.vmap(
+            apply_clouds_to_column,
+            in_axes=(1, 1, 1, 1, 1, 0),  # surface_pressure is 1D
+            out_axes=(1, 1, 1, 1, 1, 1, 0, 0)  # rain/snow fluxes are scalars per column
+        )(state.temperature, state.specific_humidity, pressure_levels,
+          cloud_water, cloud_ice, surface_pressure)
+        
+        # Unpack results
+        cloud_temp_tend, cloud_humid_tend, cloud_qc_tend, cloud_qi_tend, \
+        cloud_fraction, rel_humidity, rain_flux, snow_flux = results
+        
+        # Build tracer tendencies dictionary
+        tracer_tend_dict = {}
+        if 'qc' in state.tracers:
+            tracer_tend_dict['qc'] = cloud_qc_tend
+        if 'qi' in state.tracers:
+            tracer_tend_dict['qi'] = cloud_qi_tend
+        
+        # Create physics tendencies (already in 2D format [nlev, ncols])
+        physics_tendencies = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from clouds
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=cloud_temp_tend,
+            specific_humidity=cloud_humid_tend,
+            tracers=tracer_tend_dict
+        )
+        
+        # Update physics data with cloud diagnostics
+        cloud_data = {
+            'cloud_scheme_enabled': True,
+            'cloud_fraction': cloud_fraction,
+            'relative_humidity': rel_humidity,
+            'rain_flux': rain_flux,
+            'snow_flux': snow_flux,
+            'total_precipitation': rain_flux + snow_flux,
+            'last_applied': True
+        }
+        
+        updated_physics_data = physics_data.copy(cloud_data=cloud_data)
+        
+        return physics_tendencies, updated_physics_data
     
     def _apply_vertical_diffusion(self, state, physics_data, boundaries, geometry, dt):
         """Apply vertical diffusion"""
