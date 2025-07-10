@@ -26,6 +26,10 @@ class RadiationParameters:
     n_sw_bands: int = 2              # Number of shortwave bands
     n_lw_bands: int = 3              # Number of longwave bands
     
+    # Band limits (wavenumber in cm⁻¹)
+    lw_band_limits: tuple = ((10, 350), (350, 500), (500, 2500))  # LW bands
+    sw_band_limits: tuple = ((4000, 14500), (14500, 50000))       # SW bands
+    
     # Gas concentrations (volume mixing ratios)
     co2_vmr: float = 400e-6          # CO2 volume mixing ratio
     ch4_vmr: float = 1.8e-6          # CH4 volume mixing ratio
@@ -98,9 +102,9 @@ class RadiationFluxes(NamedTuple):
 class RadiationTendencies(NamedTuple):
     """Tendencies from radiation"""
     
-    dtedt: jnp.ndarray               # Temperature tendency (K/s) [nlev]
-    heating_sw: jnp.ndarray          # Shortwave heating rate (K/s) [nlev]
-    heating_lw: jnp.ndarray          # Longwave heating rate (K/s) [nlev]
+    temperature_tendency: jnp.ndarray # Temperature tendency (K/s) [nlev]
+    longwave_heating: jnp.ndarray     # Longwave heating rate (K/s) [nlev]
+    shortwave_heating: jnp.ndarray    # Shortwave heating rate (K/s) [nlev]
 
 
 class OpticalProperties(NamedTuple):

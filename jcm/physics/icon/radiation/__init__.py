@@ -95,7 +95,21 @@ def get_solar_implementation():
     return _SOLAR_IMPLEMENTATION
 
 
+# Import main radiation interface
+from .radiation_scheme import (
+    radiation_scheme,
+    radiation_column,
+    RadiationDiagnostics,
+    prepare_radiation_state
+)
+
 __all__ = [
+    # Main interface
+    "radiation_scheme",
+    "radiation_column",
+    "RadiationDiagnostics",
+    "prepare_radiation_state",
+    
     # Solar functions
     "calculate_solar_radiation_gcm",
     "cosine_solar_zenith_angle", 

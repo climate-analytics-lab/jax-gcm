@@ -13,6 +13,7 @@ from typing import Optional
 from .convection import ConvectionParameters
 from .clouds import CloudParameters, MicrophysicsParameters
 from .gravity_waves import GravityWaveParameters
+from .radiation import RadiationParameters
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,8 @@ class Parameters:
     # Gravity wave parameters
     gravity_waves: GravityWaveParameters = GravityWaveParameters()
     
-    # Radiation parameters (placeholder for future implementation)
-    # radiation: RadiationParameters = RadiationParameters()
+    # Radiation parameters
+    radiation: RadiationParameters = RadiationParameters()
     
     # Vertical diffusion parameters (placeholder for future implementation)
     # vertical_diffusion: VerticalDiffusionParameters = VerticalDiffusionParameters()
@@ -64,7 +65,8 @@ class Parameters:
             convection=convection_params,
             clouds=self.clouds,
             microphysics=self.microphysics,
-            gravity_waves=self.gravity_waves
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation
         )
     
     def with_clouds(self, **kwargs) -> 'Parameters':
@@ -77,7 +79,8 @@ class Parameters:
             convection=self.convection,
             clouds=cloud_params,
             microphysics=self.microphysics,
-            gravity_waves=self.gravity_waves
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation
         )
     
     def with_microphysics(self, **kwargs) -> 'Parameters':
@@ -90,7 +93,8 @@ class Parameters:
             convection=self.convection,
             clouds=self.clouds,
             microphysics=micro_params,
-            gravity_waves=self.gravity_waves
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation
         )
     
     def with_gravity_waves(self, **kwargs) -> 'Parameters':
@@ -103,5 +107,20 @@ class Parameters:
             convection=self.convection,
             clouds=self.clouds,
             microphysics=self.microphysics,
-            gravity_waves=gwd_params
+            gravity_waves=gwd_params,
+            radiation=self.radiation
+        )
+    
+    def with_radiation(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated radiation parameters"""
+        rad_params = self.radiation.__class__(**{
+            **self.radiation.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=rad_params
         )

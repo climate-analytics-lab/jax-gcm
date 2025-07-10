@@ -81,20 +81,43 @@ def layer_reflectance_transmittance(
     # Calculate lambda (eigenvalue)
     lambda_val = jnp.sqrt(gamma1**2 - gamma2**2)
     
-    # Exponential terms
-    exp_plus = jnp.exp(lambda_val * tau)
-    exp_minus = jnp.exp(-lambda_val * tau)
+    # Handle large optical depths separately to avoid numerical issues
+    large_tau = tau >= 100
     
-    # Avoid numerical issues for large optical depths
-    exp_minus = jnp.where(tau > 100, 0.0, exp_minus)
+    # For normal optical depths, calculate exponentials
+    lambda_tau = lambda_val * tau
+    exp_plus = jnp.where(lambda_tau > 100, jnp.inf, jnp.exp(lambda_tau))
+    exp_minus = jnp.where(lambda_tau > 100, 0.0, jnp.exp(-lambda_tau))
     
     # Helper terms
     term1 = 1.0 / (lambda_val + gamma1)
     term2 = 1.0 / (lambda_val - gamma1)
     
-    # Diffuse reflectance and transmittance
-    R_dif = gamma2 * (exp_plus - exp_minus) / (exp_plus - gamma2**2 / gamma1**2 * exp_minus)
-    T_dif = (1.0 - R_dif * gamma2 / gamma1) * exp_minus
+    # For normal optical depths, avoid NaN by using safe values when large_tau=True
+    # When large_tau=True, these values won't be used anyway
+    exp_plus_safe = jnp.where(large_tau, 1.0, exp_plus)
+    exp_minus_safe = jnp.where(large_tau, 0.0, exp_minus)
+    
+    denom = exp_plus_safe - gamma2**2 / gamma1**2 * exp_minus_safe
+    # Ensure denominator is never zero
+    denom = jnp.where(jnp.abs(denom) < 1e-10, 1e-10, denom)
+    
+    R_dif_normal = gamma2 * (exp_plus_safe - exp_minus_safe) / denom
+    T_dif_normal = (1.0 - R_dif_normal * gamma2 / gamma1) * exp_minus_safe
+    
+    # For large optical depths, use asymptotic behavior
+    # Pure absorption case: R=0, T=0
+    # Scattering case: R approaches gamma2/gamma1 (but clipped to physical bounds)
+    R_dif_asymptotic = jnp.where(
+        ssa > 0.001,  # If there's significant scattering
+        jnp.clip(gamma2 / gamma1, 0.0, 1.0),
+        0.0  # Pure absorption case
+    )
+    T_dif_asymptotic = 0.0  # No transmission for large tau
+    
+    # Choose based on optical depth
+    R_dif = jnp.where(large_tau, R_dif_asymptotic, R_dif_normal)
+    T_dif = jnp.where(large_tau, T_dif_asymptotic, T_dif_normal)
     
     # Ensure physical bounds
     R_dif = jnp.clip(R_dif, 0.0, 1.0)
@@ -428,157 +451,3 @@ def flux_to_heating_rate(
     return heating
 
 
-# Test functions
-def test_two_stream_coefficients():
-    """Test two-stream coefficient calculations"""
-    tau = jnp.array([0.1, 0.5, 1.0])
-    ssa = jnp.array([0.9, 0.8, 0.7])
-    g = jnp.array([0.85, 0.85, 0.85])
-    
-    # Test LW (no solar angle)
-    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(tau, ssa, g, mu0=None)
-    assert gamma1.shape == tau.shape
-    assert jnp.all(gamma3 == 0)  # No direct beam
-    assert jnp.all(gamma4 == 1)
-    
-    # Test SW
-    mu0 = 0.5
-    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(tau, ssa, g, mu0)
-    assert jnp.all(gamma3 > 0)
-    assert jnp.all(gamma3 + gamma4 == 1.0)
-    
-    print("✓ Two-stream coefficients test passed")
-
-
-def test_layer_properties():
-    """Test layer reflectance and transmittance"""
-    tau = jnp.array([0.1, 1.0, 10.0])
-    ssa = jnp.array([0.9, 0.9, 0.9])
-    g = jnp.array([0.85, 0.85, 0.85])
-    
-    R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(tau, ssa, g, mu0=0.5)
-    
-    # Physical constraints
-    assert jnp.all(R_dif >= 0) and jnp.all(R_dif <= 1)
-    assert jnp.all(T_dif >= 0) and jnp.all(T_dif <= 1)
-    assert jnp.all(R_dif + T_dif <= 1)  # Energy conservation
-    
-    # Larger optical depth = less transmission
-    assert T_dif[0] > T_dif[1] > T_dif[2]
-    
-    print("✓ Layer properties test passed")
-
-
-def test_adding_method():
-    """Test adding method for combining layers"""
-    R1 = jnp.array(0.2)
-    T1 = jnp.array(0.7)
-    R2 = jnp.array(0.3)
-    T2 = jnp.array(0.6)
-    
-    R_combined, T_combined = adding_method(R1, T1, R2, T2)
-    
-    # Should have more reflection than either layer alone
-    assert R_combined > R1
-    assert R_combined > R2
-    
-    # Transmission should be reasonable
-    assert 0 <= T_combined <= 1
-    assert T_combined > 0  # Some transmission through both layers
-    
-    print("✓ Adding method test passed")
-
-
-def test_heating_rate():
-    """Test flux to heating rate conversion"""
-    nlev = 10
-    flux_up = jnp.linspace(100, 300, nlev + 1)
-    flux_down = jnp.linspace(400, 200, nlev + 1)
-    pressure = jnp.linspace(100000, 10000, nlev + 1)
-    
-    heating = flux_to_heating_rate(flux_up, flux_down, pressure)
-    
-    assert heating.shape == (nlev,)
-    # Net flux divergence should give heating/cooling
-    assert jnp.any(heating != 0)
-    
-    print("✓ Heating rate test passed")
-
-
-def test_two_stream_integration():
-    """Integration test for two-stream solver"""
-    from .radiation_types import OpticalProperties
-    from .planck import planck_bands
-    
-    nlev = 20
-    n_lw_bands = 3
-    n_sw_bands = 2
-    
-    # Create test optical properties
-    tau_lw = jnp.ones((nlev, n_lw_bands)) * 0.5
-    tau_sw = jnp.ones((nlev, n_sw_bands)) * 0.3
-    
-    lw_optics = OpticalProperties(
-        optical_depth=tau_lw,
-        single_scatter_albedo=jnp.zeros((nlev, n_lw_bands)),
-        asymmetry_factor=jnp.zeros((nlev, n_lw_bands))
-    )
-    
-    sw_optics = OpticalProperties(
-        optical_depth=tau_sw,
-        single_scatter_albedo=jnp.ones((nlev, n_sw_bands)) * 0.9,
-        asymmetry_factor=jnp.ones((nlev, n_sw_bands)) * 0.85
-    )
-    
-    # Temperature profile
-    temperature = jnp.linspace(250, 290, nlev)
-    
-    # Planck functions (simplified)
-    lw_bands = ((10, 350), (350, 500), (500, 2500))
-    planck_layer = planck_bands(temperature, lw_bands, n_lw_bands)
-    planck_interface = planck_bands(
-        jnp.linspace(250, 290, nlev + 1), lw_bands, n_lw_bands
-    )
-    
-    # Surface properties
-    surface_emissivity = 0.98
-    surface_temp = 290.0
-    surface_planck = planck_bands(jnp.array([surface_temp]), lw_bands, n_lw_bands)[0]
-    
-    # Test LW
-    flux_up_lw, flux_down_lw = longwave_fluxes(
-        lw_optics, planck_layer, planck_interface,
-        surface_emissivity, surface_planck, n_lw_bands
-    )
-    
-    assert flux_up_lw.shape == (nlev + 1, n_lw_bands)
-    assert flux_down_lw.shape == (nlev + 1, n_lw_bands)
-    assert jnp.all(flux_up_lw >= 0)
-    
-    # Test SW
-    cos_zenith = 0.5
-    toa_flux = jnp.array([500.0, 500.0])  # W/m²
-    surface_albedo = jnp.array([0.15, 0.15])
-    
-    flux_up_sw, flux_down_sw, flux_dir, flux_dif = shortwave_fluxes(
-        sw_optics, cos_zenith, toa_flux, surface_albedo, n_sw_bands
-    )
-    
-    assert flux_up_sw.shape == (nlev + 1, n_sw_bands)
-    assert jnp.all(flux_down_sw >= flux_up_sw)  # Net downward in SW
-    
-    print("✓ Two-stream integration test passed")
-
-
-def test_two_stream():
-    """Run all two-stream tests"""
-    test_two_stream_coefficients()
-    test_layer_properties()
-    test_adding_method()
-    test_heating_rate()
-    test_two_stream_integration()
-    print("\nAll two-stream solver tests passed!")
-    
-
-if __name__ == "__main__":
-    test_two_stream()

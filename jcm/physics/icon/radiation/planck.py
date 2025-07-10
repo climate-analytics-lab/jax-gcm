@@ -93,23 +93,31 @@ def planck_bands(
     Calculate Planck function for multiple spectral bands.
     
     Args:
-        temperature: Temperature (K) [nlev]
+        temperature: Temperature (K) [nlev] or scalar
         band_limits: Tuple of band limit tuples
         n_bands: Number of bands
         
     Returns:
-        Band-integrated Planck function (W/m²/sr) [nlev, n_bands]
+        Band-integrated Planck function (W/m²/sr) [nlev, n_bands] or [n_bands]
     """
+    # Ensure temperature is at least 1D
+    temp_array = jnp.atleast_1d(temperature)
+    is_scalar = temperature.ndim == 0
+    
     # Calculate for all bands
-    nlev = temperature.shape[0]
+    nlev = temp_array.shape[0]
     planck = jnp.zeros((nlev, n_bands))
     
     # Use a simple loop since band_limits is a tuple
     for band in range(n_bands):
-        b_band = integrated_planck_function(temperature, band_limits[band])
+        b_band = integrated_planck_function(temp_array, band_limits[band])
         planck = planck.at[:, band].set(b_band)
     
-    return planck
+    # Return scalar result if input was scalar
+    if is_scalar:
+        return planck[0, :]
+    else:
+        return planck
 
 
 @jax.jit

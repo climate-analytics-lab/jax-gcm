@@ -20,7 +20,7 @@ from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
 
 # Import physics modules (will be implemented progressively)
-# from jcm.physics.icon.radiation import radiation_heating
+from jcm.physics.icon.radiation import radiation_scheme, RadiationDiagnostics
 from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionTendencies
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
@@ -149,12 +149,21 @@ class IconPhysics(Physics):
         # Add physics terms based on configuration
         # These will be implemented progressively
 
-        return [
+        terms = []
+        
+        # Radiation is typically applied first
+        if hasattr(self.parameters, 'radiation'):
+            terms.append(self._apply_radiation)
+            
+        # Then other physics
+        terms.extend([
             self._apply_convection, 
             self._apply_clouds,
             self._apply_microphysics,
             self._apply_gravity_waves
-        ]
+        ])
+        
+        return terms
     
     def compute_tendencies(self, 
                  state: PhysicsState,
@@ -242,11 +251,111 @@ class IconPhysics(Physics):
         
         return tendencies, physics_data
     
-    # Physics term methods (to be implemented)
-    def _apply_radiation(self, state, physics_data, boundaries, geometry, dt):
+    # Physics term methods
+    def _apply_radiation(self, state, physics_data, boundaries, geometry):
         """Apply radiation heating rates"""
-        # Placeholder - will implement radiation_heating function
-        return PhysicsTendency.zeros(state.temperature.shape), physics_data
+        from jcm.physics.speedy.physical_constants import p0
+        
+        # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
+        nlev, ncols = state.temperature.shape
+        
+        # Get date information for solar calculations
+        date = physics_data.date
+        day_of_year = date.day_of_year if hasattr(date, 'day_of_year') else 172.0  # Default to summer
+        seconds_since_midnight = date.seconds_since_midnight if hasattr(date, 'seconds_since_midnight') else 43200.0  # Default to noon
+        
+        # Get lat/lon from geometry - for now use dummy values
+        # In real implementation, these would come from geometry for each column
+        latitudes = jnp.zeros(ncols)  # Equator for now
+        longitudes = jnp.linspace(-180, 180, ncols)  # Span globe
+        
+        # Get cloud properties from tracers and previous physics
+        cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+        cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+        
+        # Get cloud fraction from cloud scheme or use simple parameterization
+        if 'cloud_fraction' in physics_data.cloud_data:
+            cloud_fraction = physics_data.cloud_data['cloud_fraction']
+        else:
+            # Simple RH-based cloud fraction
+            # First need to calculate RH - simplified version
+            rh = state.specific_humidity * 0.5  # Very simplified!
+            cloud_fraction = jnp.where(rh > 0.8, (rh - 0.8) / 0.2, 0.0)
+            cloud_fraction = jnp.clip(cloud_fraction, 0.0, 1.0)
+        
+        # Define single column radiation function
+        def apply_radiation_to_column(temp_col, humid_col, ps_col, geopot_col,
+                                    qc_col, qi_col, cf_col, lat, lon):
+            """Apply radiation to single column"""
+            
+            tendencies, diagnostics = radiation_scheme(
+                temperature=temp_col,
+                specific_humidity=humid_col,
+                surface_pressure=ps_col,  # Already normalized
+                geopotential=geopot_col,
+                cloud_water=qc_col,
+                cloud_ice=qi_col,
+                cloud_fraction=cf_col,
+                day_of_year=day_of_year,
+                seconds_since_midnight=seconds_since_midnight,
+                latitude=lat,
+                longitude=lon,
+                parameters=self.parameters.radiation
+            )
+            
+            # Return temperature tendency and key diagnostics
+            return (
+                tendencies.temperature_tendency,  # K/s
+                tendencies.longwave_heating,      # K/s
+                tendencies.shortwave_heating,     # K/s
+                diagnostics.toa_lw_up,           # W/m²
+                diagnostics.toa_sw_down,         # W/m²
+                diagnostics.toa_sw_up,           # W/m²
+                diagnostics.surface_lw_down,     # W/m²
+                diagnostics.surface_sw_down      # W/m²
+            )
+        
+        # Apply radiation using vmap
+        results = jax.vmap(
+            apply_radiation_to_column,
+            in_axes=(1, 1, 0, 1, 1, 1, 1, 0, 0),  # ps, lat, lon are 1D
+            out_axes=(1, 1, 1, 0, 0, 0, 0, 0)     # fluxes are scalars per column
+        )(state.temperature, state.specific_humidity, state.surface_pressure,
+          state.geopotential, cloud_water, cloud_ice, cloud_fraction,
+          latitudes, longitudes)
+        
+        # Unpack results
+        rad_temp_tend, lw_heating, sw_heating, olr, toa_sw_down, toa_sw_up, \
+        sfc_lw_down, sfc_sw_down = results
+        
+        # Create physics tendencies (already in 2D format [nlev, ncols])
+        physics_tendencies = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from radiation
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=rad_temp_tend,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={}
+        )
+        
+        # Update physics data with radiation diagnostics
+        radiation_data = {
+            'radiation_enabled': True,
+            'longwave_heating': lw_heating,
+            'shortwave_heating': sw_heating,
+            'olr': olr,  # Outgoing longwave radiation
+            'toa_sw_down': toa_sw_down,
+            'toa_sw_up': toa_sw_up,
+            'toa_net_radiation': toa_sw_down - toa_sw_up - olr,
+            'surface_lw_down': sfc_lw_down,
+            'surface_sw_down': sfc_sw_down,
+            'mean_olr': jnp.mean(olr),
+            'mean_sw_down': jnp.mean(toa_sw_down),
+            'last_applied': True
+        }
+        
+        updated_physics_data = physics_data.copy(radiation_data=radiation_data)
+        
+        return physics_tendencies, updated_physics_data
     
     def _apply_convection(self, state, physics_data, boundaries, geometry):
         """Apply full Tiedtke-Nordeng convection scheme with updraft/downdraft physics"""
