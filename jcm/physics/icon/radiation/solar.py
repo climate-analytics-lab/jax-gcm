@@ -174,10 +174,11 @@ def daylight_fraction(
     daylight_hours = jnp.where(polar_night, 0.0, daylight_hours)
     
     # For instantaneous calculation
-    if timestep_hours <= 1.0:
-        return jnp.where(daylight_hours > 0, 1.0, 0.0)
-    else:
-        return jnp.clip(daylight_hours / 24.0, 0.0, 1.0)
+    return jnp.where(
+        timestep_hours <= 1.0,
+        jnp.where(daylight_hours > 0, 1.0, 0.0),
+        jnp.clip(daylight_hours / 24.0, 0.0, 1.0)
+    )
 
 
 # Simplified interface that would use jax_solar in production

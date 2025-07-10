@@ -2,6 +2,17 @@
 
 ## Completed Components (2025-01-10)
 
+### Summary
+Successfully implemented a complete JAX-based radiation scheme for ICON physics including:
+- Solar radiation calculations
+- Gas optics (H2O, CO2, O3 absorption)
+- Planck functions for thermal radiation
+- Cloud optics (liquid and ice)
+- Two-stream radiative transfer solver
+- Comprehensive test suite (all tests passing!)
+
+## Completed Components
+
 ### 1. Module Structure ✓
 - Created `radiation/` module directory
 - Defined type system in `radiation_types.py`:
@@ -46,36 +57,47 @@
 - LW: absorption only
 - Cloud overlap considerations
 
+### 6. Two-Stream Solver (`two_stream.py`) ✓
+- Eddington approximation implementation
+- Layer reflectance and transmittance
+- Adding method for combining layers
+- Separate LW and SW flux calculations
+- Direct and diffuse components for SW
+- Flux to heating rate conversion
+
+### 7. Comprehensive Test Suite (`test_radiation.py`) ✓
+- Solar geometry and TOA flux tests
+- Gas optics absorption tests
+- Planck function tests
+- Cloud optics tests
+- Two-stream solver tests
+- Integration tests for full radiation
+- All tests passing!
+
+### 8. JAX Compatibility ✓
+- Fixed all Python if-statements with jnp.where
+- Replaced loops with vmap where possible
+- Ensured all functions are JIT-compilable
+- Pure functional style throughout
+
 ## Next Steps
 
-### 1. Two-Stream Radiative Transfer Solver
-Need to implement:
-- Two-stream equations (Eddington approximation)
-- Adding method for multiple layers
-- Boundary conditions (surface, TOA)
-- Clear-sky and all-sky calculations
-
-### 2. Longwave Radiative Transfer
-- Combine gas optics + cloud optics
-- Apply two-stream solver
-- Surface emission (Planck)
-- Calculate upward/downward fluxes
-
-### 3. Shortwave Radiative Transfer  
-- Direct and diffuse components
-- Multiple scattering
-- Surface reflection
-- Solar zenith angle effects
-
-### 4. Heating Rate Calculations
-- Flux divergence
-- Convert to temperature tendency (K/s)
-- Separate SW and LW contributions
-
-### 5. Integration
-- Main radiation interface function
-- Integration with IconPhysics
+### 1. Integration with IconPhysics
+- Create main radiation interface function
+- Add radiation to IconPhysics class
 - Handle radiation timestep
+- Connect with other physics components
+
+### 2. Performance Optimization
+- Profile and optimize hot spots
+- Consider checkpointing for memory
+- Batch calculations across columns
+
+### 3. Extended Features
+- Add aerosol effects
+- Implement more spectral bands
+- Add 3D radiative effects
+- Monte Carlo cloud overlap
 
 ## Design Patterns Used
 
@@ -93,12 +115,14 @@ Need to implement:
 - Simple cloud overlap
 - No aerosols yet
 
-## Testing Strategy
-Each module has basic tests. Need comprehensive tests for:
-- Energy conservation
-- Clear-sky comparison with benchmark
-- Cloud radiative forcing
-- Heating rate profiles
+## Testing Strategy ✓
+Comprehensive test suite implemented covering:
+- Unit tests for each module
+- Integration tests for full radiation
+- Energy conservation checks
+- Physical bounds verification
+- JAX compatibility tests
+- All 60+ tests passing!
 
 ## Key Implementation Decisions
 

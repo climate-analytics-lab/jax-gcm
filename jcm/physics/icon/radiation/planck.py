@@ -75,9 +75,10 @@ def integrated_planck_function(
     # Calculate Planck function at each wavenumber
     b_values = jax.vmap(lambda nu: planck_function_wavenumber(temperature, nu))(wavenumbers)
     
-    # Trapezoidal integration
+    # Trapezoidal integration (manual since JAX doesn't have trapz)
     delta_nu = (band_limits[1] - band_limits[0]) / (n_points - 1)
-    integrated = jnp.trapz(b_values, dx=delta_nu, axis=0)
+    # Trapezoidal rule: sum of (f[i] + f[i+1])/2 * dx
+    integrated = delta_nu * (0.5 * b_values[0] + jnp.sum(b_values[1:-1]) + 0.5 * b_values[-1])
     
     return integrated
 
@@ -99,9 +100,11 @@ def planck_bands(
     Returns:
         Band-integrated Planck function (W/m²/sr) [nlev, n_bands]
     """
+    # Calculate for all bands
     nlev = temperature.shape[0]
     planck = jnp.zeros((nlev, n_bands))
     
+    # Use a simple loop since band_limits is a tuple
     for band in range(n_bands):
         b_band = integrated_planck_function(temperature, band_limits[band])
         planck = planck.at[:, band].set(b_band)
@@ -194,9 +197,10 @@ def band_fraction(
     # Total emission
     total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
     
-    # Band emissions
+    # Calculate band emissions
     fractions = jnp.zeros(n_bands)
     
+    # Use a simple loop since band_limits is a tuple
     for band in range(n_bands):
         b_band = integrated_planck_function(temperature, band_limits[band])
         fractions = fractions.at[band].set(b_band / total)

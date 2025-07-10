@@ -97,28 +97,26 @@ def liquid_cloud_optics_sw(
     cwp = cloud_water_path * 1000.0
     
     # Optical depth parameterization
-    if band == 0:  # Visible
-        a_tau = 2.21
-        b_tau = -0.023
-    else:  # Near-IR
-        a_tau = 2.17
-        b_tau = -0.020
+    a_tau = jnp.where(band == 0, 2.21, 2.17)
+    b_tau = jnp.where(band == 0, -0.023, -0.020)
     
     tau = cwp * (a_tau + b_tau * effective_radius)
     
     # Single scattering albedo
-    if band == 0:  # Visible
-        ssa = 1.0 - 5e-7 * effective_radius**2
-    else:  # Near-IR
-        ssa = 1.0 - 0.06 - 2e-5 * effective_radius**2
+    ssa = jnp.where(
+        band == 0,
+        1.0 - 5e-7 * effective_radius**2,  # Visible
+        1.0 - 0.06 - 2e-5 * effective_radius**2  # Near-IR
+    )
     
     ssa = jnp.clip(ssa, 0.5, 0.99999)
     
     # Asymmetry factor
-    if band == 0:  # Visible
-        g = 0.85 + 0.0015 * effective_radius
-    else:  # Near-IR
-        g = 0.80 + 0.002 * effective_radius
+    g = jnp.where(
+        band == 0,
+        0.85 + 0.0015 * effective_radius,  # Visible
+        0.80 + 0.002 * effective_radius   # Near-IR
+    )
     
     g = jnp.clip(g, 0.7, 0.95)
     
@@ -148,16 +146,18 @@ def ice_cloud_optics_sw(
     cip = cloud_ice_path * 1000.0
     
     # Optical depth - ice less efficient than liquid
-    if band == 0:  # Visible
-        tau = cip * (1.5 / effective_radius)
-    else:  # Near-IR
-        tau = cip * (1.3 / effective_radius)
+    tau = cip * jnp.where(
+        band == 0,
+        1.5 / effective_radius,  # Visible
+        1.3 / effective_radius   # Near-IR
+    )
     
     # Single scattering albedo - ice more absorbing
-    if band == 0:  # Visible
-        ssa = 0.999 - 1e-5 * effective_radius
-    else:  # Near-IR
-        ssa = 0.95 - 0.001 * effective_radius
+    ssa = jnp.where(
+        band == 0,
+        0.999 - 1e-5 * effective_radius,  # Visible
+        0.95 - 0.001 * effective_radius   # Near-IR
+    )
     
     ssa = jnp.clip(ssa, 0.5, 0.99999)
     
@@ -188,10 +188,11 @@ def liquid_cloud_optics_lw(
         Optical depth (absorption)
     """
     # Absorption coefficient depends on band
-    if band == 0:  # Window region
-        k_abs = 50.0  # m²/kg
-    else:  # Water vapor bands
-        k_abs = 130.0  # m²/kg
+    k_abs = jnp.where(
+        band == 0,
+        50.0,   # Window region (m²/kg)
+        130.0   # Water vapor bands (m²/kg)
+    )
     
     # Weak dependence on droplet size
     size_factor = jnp.sqrt(10.0 / effective_radius)
@@ -219,10 +220,11 @@ def ice_cloud_optics_lw(
         Optical depth (absorption)
     """
     # Ice absorption coefficient
-    if band == 0:  # Window region
-        k_abs = 20.0  # m²/kg
-    else:  # Water vapor bands
-        k_abs = 65.0  # m²/kg
+    k_abs = jnp.where(
+        band == 0,
+        20.0,   # Window region (m²/kg)
+        65.0    # Water vapor bands (m²/kg)
+    )
     
     # Size dependence
     size_factor = jnp.sqrt(30.0 / effective_radius)
@@ -264,14 +266,8 @@ def cloud_optics(
         cloud_ice_path / jnp.maximum(1.0, cloud_water_path + cloud_ice_path)
     )
     
-    # Initialize arrays
-    tau_sw = jnp.zeros((nlev, n_sw_bands))
-    ssa_sw = jnp.ones((nlev, n_sw_bands))
-    g_sw = jnp.zeros((nlev, n_sw_bands))
-    tau_lw = jnp.zeros((nlev, n_lw_bands))
-    
-    # Calculate properties for each band
-    for band in range(n_sw_bands):
+    # Calculate SW properties for all bands
+    def calculate_sw_band(band):
         # Liquid clouds
         tau_liq, ssa_liq, g_liq = liquid_cloud_optics_sw(
             cloud_water_path, r_eff_liq, band
@@ -300,15 +296,24 @@ def cloud_optics(
             0.0
         )
         
-        tau_sw = tau_sw.at[:, band].set(tau_total)
-        ssa_sw = ssa_sw.at[:, band].set(ssa_combined)
-        g_sw = g_sw.at[:, band].set(g_combined)
+        return tau_total, ssa_combined, g_combined
     
-    # Longwave (absorption only)
-    for band in range(n_lw_bands):
+    # Apply to all SW bands
+    sw_bands = jnp.arange(n_sw_bands)
+    tau_sw, ssa_sw, g_sw = jax.vmap(calculate_sw_band)(sw_bands)
+    tau_sw = tau_sw.T
+    ssa_sw = ssa_sw.T
+    g_sw = g_sw.T
+    
+    # Calculate LW properties for all bands
+    def calculate_lw_band(band):
         tau_liq = liquid_cloud_optics_lw(cloud_water_path, r_eff_liq, band)
         tau_ice = ice_cloud_optics_lw(cloud_ice_path, r_eff_ice, band)
-        tau_lw = tau_lw.at[:, band].set(tau_liq + tau_ice)
+        return tau_liq + tau_ice
+    
+    # Apply to all LW bands
+    lw_bands = jnp.arange(n_lw_bands)
+    tau_lw = jax.vmap(calculate_lw_band)(lw_bands).T
     
     # Create optical properties
     sw_optics = OpticalProperties(

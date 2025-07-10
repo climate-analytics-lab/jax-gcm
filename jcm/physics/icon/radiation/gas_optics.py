@@ -53,12 +53,15 @@ def water_vapor_continuum(
     P_factor = pressure / P_ref
     
     # Band-dependent coefficients (simplified)
-    if band == 0:  # Window region
-        k_ref = 0.01
-    elif band == 1:  # Weak absorption
-        k_ref = 0.1
-    else:  # Strong absorption
-        k_ref = 1.0
+    k_ref = jnp.where(
+        band == 0,
+        0.01,  # Window region
+        jnp.where(
+            band == 1,
+            0.1,   # Weak absorption
+            1.0    # Strong absorption
+        )
+    )
     
     # Absorption coefficient
     k_abs = k_ref * T_factor * P_factor * h2o_mmr
@@ -88,9 +91,16 @@ def co2_absorption(
         Absorption coefficient (m²/kg)
     """
     # Only significant in band 1 (CO2 band around 667 cm⁻¹)
-    if band != 1:
-        return jnp.zeros_like(temperature)
-    
+    return jnp.where(
+        band != 1,
+        jnp.zeros_like(temperature),
+        # Calculate absorption for band 1
+        _calculate_co2_band1(temperature, pressure, co2_vmr)
+    )
+
+
+def _calculate_co2_band1(temperature, pressure, co2_vmr):
+    """Helper function to calculate CO2 absorption in band 1"""
     # Reference conditions
     T_ref = 296.0
     P_ref = 101325.0
@@ -128,13 +138,14 @@ def ozone_absorption_sw(
         Absorption coefficient (m²/kg)
     """
     # Ozone absorbs mainly in UV/visible (band 0)
-    if band == 0:
-        # Simplified absorption cross-section
-        k_o3 = 100.0  # m²/kg (very simplified)
-        o3_mmr = o3_vmr * (48.0 / 29.0)  # M_O3 / M_air
-        return k_o3 * o3_mmr
-    else:
-        return jnp.zeros_like(o3_vmr)
+    k_o3 = 100.0  # m²/kg (very simplified)
+    o3_mmr = o3_vmr * (48.0 / 29.0)  # M_O3 / M_air
+    
+    return jnp.where(
+        band == 0,
+        k_o3 * o3_mmr,
+        jnp.zeros_like(o3_vmr)
+    )
 
 
 @jax.jit
@@ -157,14 +168,16 @@ def ozone_absorption_lw(
         Absorption coefficient (m²/kg)
     """
     # Ozone 9.6 micron band (around 1042 cm⁻¹) - mainly in band 2
-    if band == 2:
-        T_ref = 296.0
-        T_factor = jnp.sqrt(T_ref / temperature)
-        k_o3 = 50.0  # Simplified
-        o3_mmr = o3_vmr * (48.0 / 29.0)
-        return k_o3 * T_factor * o3_mmr
-    else:
-        return jnp.zeros_like(temperature)
+    T_ref = 296.0
+    T_factor = jnp.sqrt(T_ref / temperature)
+    k_o3 = 50.0  # Simplified
+    o3_mmr = o3_vmr * (48.0 / 29.0)
+    
+    return jnp.where(
+        band == 2,
+        k_o3 * T_factor * o3_mmr,
+        jnp.zeros_like(temperature)
+    )
 
 
 @partial(jax.jit, static_argnames=['n_bands'])
@@ -195,9 +208,9 @@ def gas_optical_depth_lw(
         Optical depth [nlev, n_bands]
     """
     nlev = temperature.shape[0]
-    tau = jnp.zeros((nlev, n_bands))
     
-    for band in range(n_bands):
+    # Calculate absorption for all bands using vmap
+    def single_band_absorption(band):
         # Water vapor absorption
         k_h2o = water_vapor_continuum(temperature, pressure, h2o_vmr, band)
         
@@ -211,8 +224,11 @@ def gas_optical_depth_lw(
         k_total = k_h2o + k_co2 + k_o3
         
         # Optical depth = absorption * density * path length
-        tau_band = k_total * air_density * layer_thickness
-        tau = tau.at[:, band].set(tau_band)
+        return k_total * air_density * layer_thickness
+    
+    # Apply to all bands
+    bands = jnp.arange(n_bands)
+    tau = jax.vmap(single_band_absorption)(bands).T
     
     return tau
 
@@ -243,18 +259,19 @@ def gas_optical_depth_sw(
         Optical depth [nlev, n_bands]
     """
     nlev = pressure.shape[0]
-    tau = jnp.zeros((nlev, n_bands))
     
     # Path length correction for solar angle
     sec_zenith = 1.0 / jnp.maximum(cos_zenith, 0.01)
     
-    for band in range(n_bands):
+    # Calculate absorption for all bands
+    def single_band_absorption(band):
         # Water vapor absorption (simplified - mainly NIR)
-        if band == 1:  # NIR band
-            h2o_mmr = h2o_vmr * 0.622
-            k_h2o = 0.01 * h2o_mmr  # Very simplified
-        else:
-            k_h2o = 0.0
+        h2o_mmr = h2o_vmr * 0.622
+        k_h2o = jnp.where(
+            band == 1,  # NIR band
+            0.01 * h2o_mmr,  # Very simplified
+            0.0
+        )
         
         # Ozone absorption
         k_o3 = ozone_absorption_sw(o3_vmr, band)
@@ -263,8 +280,11 @@ def gas_optical_depth_sw(
         k_total = k_h2o + k_o3
         
         # Optical depth with slant path correction
-        tau_band = k_total * air_density * layer_thickness * sec_zenith
-        tau = tau.at[:, band].set(tau_band)
+        return k_total * air_density * layer_thickness * sec_zenith
+    
+    # Apply to all bands
+    bands = jnp.arange(n_bands)
+    tau = jax.vmap(single_band_absorption)(bands).T
     
     return tau
 

@@ -8,7 +8,10 @@ xarray[io, parallel]
 # Testing requirements
 pytest-cov
 
-#Sphinx
+# Sphinx
 sphinx
 furo
+
+# Radiation scheme
+jax-solar  # Requires Python 3.11+
 
