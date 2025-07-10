@@ -86,8 +86,9 @@ def set_physics_flags(
     Returns:
         Tuple of (initialized physics tendencies, updated physics data)
     """
-    # Initialize zero tendencies
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    # Initialize zero tendencies with tracer tendencies
+    tracer_tends = {name: jnp.zeros_like(tracer) for name, tracer in state.tracers.items()}
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape, tracers=tracer_tends)
     
     # For now, return unchanged data
     # In full implementation, this would set flags for:
@@ -113,7 +114,6 @@ class IconPhysics(Physics):
     """
     
     def __init__(self, 
-                 tracers: jnp.ndarray,
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
                  convection_config: Optional[ConvectionConfig] = None):
@@ -121,7 +121,6 @@ class IconPhysics(Physics):
         Initialize the ICON physics.
         
         Args:
-            tracers: Tracer array [nlev, nlat, nlon, ntrac] - always required
             write_output: Whether to write physics output to predictions
             checkpoint_terms: Whether to checkpoint physics terms
             convection_config: Optional convection configuration
@@ -131,9 +130,6 @@ class IconPhysics(Physics):
         
         # Store convection configuration
         self.convection_config = convection_config or ConvectionConfig()
-        
-        # Store tracers (always required)
-        self.tracers = tracers
         
         # Build list of physics terms
         self.terms = self._build_physics_terms()
@@ -173,7 +169,7 @@ class IconPhysics(Physics):
             convection_data={'initialized': True}
         )
         
-        # Set physics flags and initialize tendencies
+        # Set physics flags and initialize tendencies with tracers
         tendencies, physics_data = set_physics_flags(
             state, physics_data, boundaries, geometry
         )
@@ -183,14 +179,20 @@ class IconPhysics(Physics):
         ncols = nlat * nlon
         
         # Create vectorized physics state for column-wise processing
-        # Reshape from [nlev, nlat, nlon] to [nlev, ncols] 
+        # Reshape from [nlev, nlat, nlon] to [nlev, ncols]
+        # Also reshape tracers
+        vectorized_tracers = {}
+        for name, tracer in state.tracers.items():
+            vectorized_tracers[name] = tracer.reshape(nlev, ncols)
+            
         vectorized_state = PhysicsState(
             u_wind=state.u_wind.reshape(nlev, ncols),
             v_wind=state.v_wind.reshape(nlev, ncols),
             temperature=state.temperature.reshape(nlev, ncols),
             specific_humidity=state.specific_humidity.reshape(nlev, ncols),
             geopotential=state.geopotential.reshape(nlev, ncols),
-            surface_pressure=state.surface_pressure.reshape(ncols)
+            surface_pressure=state.surface_pressure.reshape(ncols),
+            tracers=vectorized_tracers
         )
         
         # Apply physics terms sequentially with vectorization
@@ -204,11 +206,17 @@ class IconPhysics(Physics):
             )
             
             # Reshape tendencies back to 3D and accumulate
+            # Also reshape tracer tendencies
+            reshaped_tracers = {}
+            for name, tracer_tend in term_tendency.tracers.items():
+                reshaped_tracers[name] = tracer_tend.reshape(nlev, nlat, nlon)
+                
             reshaped_tendency = PhysicsTendency(
                 u_wind=term_tendency.u_wind.reshape(nlev, nlat, nlon),
                 v_wind=term_tendency.v_wind.reshape(nlev, nlat, nlon),
                 temperature=term_tendency.temperature.reshape(nlev, nlat, nlon),
-                specific_humidity=term_tendency.specific_humidity.reshape(nlev, nlat, nlon)
+                specific_humidity=term_tendency.specific_humidity.reshape(nlev, nlat, nlon),
+                tracers=reshaped_tracers
             )
             
             tendencies = tendencies + reshaped_tendency
@@ -245,10 +253,29 @@ class IconPhysics(Physics):
         # Calculate height from geopotential
         height_levels = state.geopotential / physical_constants.grav  # m
         
-        # Reshape tracers to 2D format [nlev, ncols, ntrac] - always present
-        original_shape = self.tracers.shape  # [nlev, nlat, nlon, ntrac]
-        ntrac = original_shape[-1]
-        tracers_2d = self.tracers.reshape(nlev, ncols, ntrac)  # [nlev, ncols, ntrac]
+        # Extract tracers from physics state and combine with specific humidity
+        # Build tracer array with specific humidity as first tracer
+        tracer_list = [state.specific_humidity]  # Index 0: water vapor
+        
+        # Add cloud water (qc), cloud ice (qi), and other tracers if present
+        if 'qc' in state.tracers:
+            tracer_list.append(state.tracers['qc'])  # Index 1: cloud water
+        else:
+            tracer_list.append(jnp.zeros_like(state.temperature))  # Default to zero
+            
+        if 'qi' in state.tracers:
+            tracer_list.append(state.tracers['qi'])  # Index 2: cloud ice  
+        else:
+            tracer_list.append(jnp.zeros_like(state.temperature))  # Default to zero
+            
+        # Add any additional tracers
+        for name, tracer in state.tracers.items():
+            if name not in ['qc', 'qi']:
+                tracer_list.append(tracer)
+                
+        # Stack tracers into array [nlev, ncols, ntrac]
+        tracers_2d = jnp.stack(tracer_list, axis=-1)
+        ntrac = tracers_2d.shape[-1]
         
         # Setup tracer indices
         tracer_indices = TracerIndices(iqv=0, iqc=1, iqi=2, iqt=3)
@@ -293,18 +320,30 @@ class IconPhysics(Physics):
         # Unpack results with tracer tendencies
         conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv, tracer_tendencies = results
         
+        # Split tracer tendencies back to individual tracers
+        tracer_tend_dict = {}
+        if ntrac > 1 and 'qc' in state.tracers:
+            tracer_tend_dict['qc'] = tracer_tendencies[:, :, 1]
+        if ntrac > 2 and 'qi' in state.tracers:
+            tracer_tend_dict['qi'] = tracer_tendencies[:, :, 2]
+        # Add other tracers
+        idx = 3
+        for name in state.tracers.keys():
+            if name not in ['qc', 'qi'] and idx < ntrac:
+                tracer_tend_dict[name] = tracer_tendencies[:, :, idx]
+                idx += 1
+        
         # Create physics tendencies (already in 2D format [nlev, ncols])
         physics_tendencies = PhysicsTendency(
             u_wind=conv_u_tend,
             v_wind=conv_v_tend,
             temperature=conv_temp_tend,
-            specific_humidity=conv_humid_tend
+            specific_humidity=conv_humid_tend,
+            tracers=tracer_tend_dict
         )
         
-        # Reshape tracer tendencies back to 3D format [nlev, nlat, nlon, ntrac]
-        nlev, nlat, nlon = state.temperature.shape[0], original_shape[1], original_shape[2]
-        ntrac = original_shape[-1]
-        tracer_tendencies_3d = tracer_tendencies.reshape(nlev, nlat, nlon, ntrac)
+        # Note: tracer tendencies are already handled in tracer_tend_dict and don't need 3D reshaping
+        # They will be reshaped in compute_tendencies when going back to 3D
         
         # Update physics data with convection diagnostics (always includes tracers)
         convection_data = {
@@ -313,7 +352,7 @@ class IconPhysics(Physics):
             'convective_cloud_water': qc_conv,
             'convective_cloud_ice': qi_conv,
             'convective_precipitation': precip_conv,
-            'tracer_tendencies': tracer_tendencies_3d,
+            'tracer_tendencies': tracer_tend_dict,
             'last_applied': True
         }
         

@@ -36,7 +36,9 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
             coords,
             PHYSICS_SPECS)
 
-        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp)
+        # Create empty tracers dict for the state
+        tracers = {}
+        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp, tracers)
 
         dynamics_state = physics_state_to_dynamics_state(state, primitive)
         physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)
@@ -50,7 +52,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         kx, ix, il = 8, 96, 48
         qa = jnp.ones((kx, il, ix)) * -1
 
-        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa, tracers={})
 
         updated_state = verify_state(state)
 
@@ -58,6 +60,6 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
 
         qa = jnp.ones((kx, il, ix)) * -1e-5
 
-        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa, tracers={})
 
         updated_state = verify_state(state)

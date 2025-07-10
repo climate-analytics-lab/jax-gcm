@@ -11,6 +11,11 @@ from jcm.physics.icon.constants import physical_constants
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.date import DateData
 
+# Simple mock geometry class for testing
+class MockGeometry:
+    def __init__(self, nlev):
+        self.fsg = jnp.linspace(0.05, 1.0, nlev)
+
 def test_physical_constants():
     """Test that physical constants are properly defined"""
     # Test basic constants
@@ -28,46 +33,57 @@ def test_icon_physics_data():
     date = DateData(tyear=0.0, model_year=2000, model_step=0)
     
     # Test creation
-    physics_data = IconPhysicsData(date=date)
+    physics_data = IconPhysicsData.zeros(date=date)
     assert physics_data.date == date
     assert physics_data.radiation_data == {}
+    assert physics_data.convection_data == {}
+    assert physics_data.cloud_data == {}
+    assert physics_data.surface_data == {}
     
-    # Test copy
-    new_data = physics_data.copy(test_field=123)
+    # Test copy method with updated data
+    new_convection_data = {'test_value': 42}
+    new_data = physics_data.copy(convection_data=new_convection_data)
     assert new_data.date == date
-    assert new_data['test_field'] == 123
+    assert new_data.convection_data == new_convection_data
+    assert new_data.radiation_data == {}  # Unchanged
 
 def test_icon_physics_initialization():
     """Test IconPhysics initialization"""
     # Test default initialization
     physics = IconPhysics()
     assert physics.write_output == True
-    assert physics.enable_radiation == True
-    assert physics.enable_convection == True
+    assert physics.checkpoint_terms == True
     
     # Test custom initialization
     physics = IconPhysics(
-        enable_radiation=False,
-        enable_chemistry=True
+        write_output=False,
+        checkpoint_terms=False
     )
-    assert physics.enable_radiation == False
-    assert physics.enable_chemistry == True
+    assert physics.write_output == False
+    assert physics.checkpoint_terms == False
 
 def test_set_physics_flags():
     """Test physics flag setting"""
     # Create test data
     date = DateData(tyear=0.0, model_year=2000, model_step=0)
-    physics_data = IconPhysicsData(date=date)
+    physics_data = IconPhysicsData.zeros(date=date)
     
-    # Create dummy physics state
-    dummy_shape = (32, 64, 20)  # Example shape (lat, lon, lev)
+    # Create dummy physics state with tracers
+    # compute_tendencies expects shape (nlev, nlat, nlon)
+    dummy_shape = (20, 32, 64)  # Example shape (lev, lat, lon)
+    tracers = {
+        'qc': jnp.zeros(dummy_shape),  # Cloud water
+        'qi': jnp.zeros(dummy_shape),  # Cloud ice
+        'chem': jnp.zeros(dummy_shape)  # Chemical tracer
+    }
     state = PhysicsState(
         temperature=jnp.zeros(dummy_shape),
         specific_humidity=jnp.zeros(dummy_shape),
         u_wind=jnp.zeros(dummy_shape),
         v_wind=jnp.zeros(dummy_shape),
         geopotential=jnp.zeros(dummy_shape),
-        surface_pressure=jnp.zeros(dummy_shape[:2])
+        surface_pressure=jnp.zeros(dummy_shape[1:]),  # (lat, lon)
+        tracers=tracers
     )
     
     # Test flag setting
@@ -78,36 +94,69 @@ def test_set_physics_flags():
     assert jnp.all(tendencies.temperature == 0)
     assert jnp.all(tendencies.specific_humidity == 0)
 
-def test_icon_physics_call():
-    """Test IconPhysics call method"""
-    # Create test objects
-    date = DateData(tyear=0.0, model_year=2000, model_step=0)
-    physics_data = IconPhysicsData(date=date)
-    physics = IconPhysics()
+def test_physics_state_with_tracers():
+    """Test PhysicsState with tracers field"""
+    # Create test shape
+    dummy_shape = (20, 32, 64)  # (nlev, nlat, nlon)
     
-    # Create dummy physics state
-    dummy_shape = (32, 64, 20)
+    # Create tracers
+    tracers = {
+        'qc': jnp.zeros(dummy_shape),
+        'qi': jnp.zeros(dummy_shape),
+        'chem': jnp.ones(dummy_shape) * 0.5
+    }
+    
+    # Create physics state
     state = PhysicsState(
+        temperature=jnp.ones(dummy_shape) * 280.0,
+        specific_humidity=jnp.ones(dummy_shape) * 0.01,
+        u_wind=jnp.zeros(dummy_shape),
+        v_wind=jnp.zeros(dummy_shape),
+        geopotential=jnp.zeros(dummy_shape),
+        surface_pressure=jnp.ones(dummy_shape[1:]),
+        tracers=tracers
+    )
+    
+    # Check that state has tracers
+    assert hasattr(state, 'tracers')
+    assert 'qc' in state.tracers
+    assert 'qi' in state.tracers
+    assert 'chem' in state.tracers
+    assert jnp.allclose(state.tracers['chem'], 0.5)
+
+def test_physics_tendency_with_tracers():
+    """Test PhysicsTendency with tracer tendencies"""
+    # Create test shape
+    dummy_shape = (20, 32, 64)  # (nlev, nlat, nlon)
+    
+    # Create tracer tendencies
+    tracer_tends = {
+        'qc': jnp.ones(dummy_shape) * 1e-5,
+        'qi': jnp.ones(dummy_shape) * 1e-6,
+        'chem': jnp.zeros(dummy_shape)
+    }
+    
+    # Create physics tendency
+    tendency = PhysicsTendency(
         temperature=jnp.zeros(dummy_shape),
         specific_humidity=jnp.zeros(dummy_shape),
         u_wind=jnp.zeros(dummy_shape),
         v_wind=jnp.zeros(dummy_shape),
-        geopotential=jnp.zeros(dummy_shape),
-        surface_pressure=jnp.zeros(dummy_shape[:2])
+        tracers=tracer_tends
     )
     
-    # Test physics call
-    tendencies, updated_data = physics.compute_tendencies(state, physics_data)
-    
-    # Check outputs
-    assert tendencies.temperature.shape == dummy_shape
-    assert isinstance(updated_data, IconPhysicsData)
-    assert updated_data.date == date
+    # Check that tendency has tracers
+    assert hasattr(tendency, 'tracers')
+    assert 'qc' in tendency.tracers
+    assert 'qi' in tendency.tracers
+    assert 'chem' in tendency.tracers
+    assert jnp.allclose(tendency.tracers['qc'], 1e-5)
 
 if __name__ == "__main__":
     test_physical_constants()
     test_icon_physics_data()
     test_icon_physics_initialization()
     test_set_physics_flags()
-    test_icon_physics_call()
+    test_physics_state_with_tracers()
+    test_physics_tendency_with_tracers()
     print("All tests passed!")

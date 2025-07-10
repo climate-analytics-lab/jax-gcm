@@ -44,7 +44,7 @@ def create_test_atmosphere(nlev=40, unstable=True):
         rel_humidity = surface_rh * jnp.exp(-height / humidity_scale)
         
         # Convert to specific humidity
-        from ..tiedtke_nordeng import saturation_mixing_ratio
+        from .tiedtke_nordeng import saturation_mixing_ratio
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = rel_humidity * qs
     else:
