@@ -28,6 +28,27 @@ class PhysicsState:
     surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
     tracers: Dict[str, jnp.ndarray]  # Additional tracers beyond specific_humidity
 
+    def __init__(self, u_wind, v_wind, temperature, specific_humidity, geopotential, surface_pressure, tracers=None):
+        """
+        Initialize the PhysicsState with the given variables.
+
+        Args:
+            u_wind: U wind component
+            v_wind: V wind component
+            temperature: Temperature field
+            specific_humidity: Specific humidity field
+            geopotential: Geopotential field
+            surface_pressure: Surface pressure field (normalized by p0)
+            tracers: Additional tracers as a dictionary
+        """
+        self.u_wind = u_wind
+        self.v_wind = v_wind
+        self.temperature = temperature
+        self.specific_humidity = specific_humidity
+        self.geopotential = geopotential
+        self.surface_pressure = surface_pressure
+        self.tracers = tracers if tracers is not None else {}
+
     @classmethod
     def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
         return PhysicsState(
@@ -76,6 +97,13 @@ class PhysicsTendency:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     tracers: Dict[str, jnp.ndarray]  # Tendencies for additional tracers
+
+    def __init__(self, u_wind, v_wind, temperature, specific_humidity, tracers=None):
+        self.u_wind = u_wind
+        self.v_wind = v_wind
+        self.temperature = temperature
+        self.specific_humidity = specific_humidity
+        self.tracers = tracers if tracers is not None else {}
 
     @classmethod
     def zeros(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,tracers=None):
