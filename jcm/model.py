@@ -189,7 +189,7 @@ class Model:
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return Predictions(dynamics=physics_state,physics=physics_data)
+        return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
