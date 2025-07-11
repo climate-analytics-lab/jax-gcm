@@ -2,15 +2,16 @@
 Date: 1/25/2024
 For storing and initializing physical constants.
 """
+import jcm.constants as c
 
 # Physical constants for dynamics
 rearth = 6.371e+6 # Radius of Earth (m)
 omega = 7.292e-05 # Rotation rate of Earth (rad/s)
-grav = 9.81 # Gravitational acceleration (m/s/s)
+grav = c.grav # Gravitational acceleration (m/s/s)
 
 # Physical constants for thermodynamics
-p0 = 1.e+5 # Reference pressure (Pa)
-cp = 1004.0 # Specific heat at constant pressure (J/K/kg)
+p0 = c.p0 # Reference pressure (Pa)
+cp = c.cp # Specific heat at constant pressure (J/K/kg)
 akap = 2.0/7.0 # 1 - 1/gamma where gamma is the heat capacity ratio of a perfect diatomic gas (7/5)
 rgas = akap * cp # Gas constant per unit mass for dry air (J/K/kg)
 alhc = 2501.0 # Latent heat of condensation, in J/g for consistency with specific humidity in g/Kg

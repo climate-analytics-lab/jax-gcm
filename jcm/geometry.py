@@ -4,7 +4,7 @@ For storing all variables related to the model's grid space.
 """
 import jax.numpy as jnp
 import tree_math
-import jcm.physics.speedy.physical_constants as pc
+from jcm.constants import p0, grav, cp
 from dinosaur.coordinate_systems import CoordinateSystem
 
 sigma_layer_boundaries = {
@@ -24,8 +24,8 @@ def _initialize_vertical(kx):
     sigl = jnp.log(fsg)
 
     # 1.2 Functions of sigma and latitude (from initialize_physics in speedy.F90)
-    grdsig = pc.grav/(dhs*pc.p0)
-    grdscp = grdsig/pc.cp
+    grdsig = grav/(dhs*p0)
+    grdscp = grdsig/cp
 
     # Weights for vertical interpolation at half-levels(1,kx) and surface
     # Note that for phys.par. half-lev(k) is between full-lev k and k+1

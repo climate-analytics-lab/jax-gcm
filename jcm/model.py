@@ -1,20 +1,27 @@
 import jax
 import jax.numpy as jnp
+import tree_math
 from numpy import timedelta64
+from typing import Any
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
+from jcm.constants import p0
+from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.physics.speedy.params import Parameters
-from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.physics.speedy.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+from jcm.physics.speedy.params import Parameters
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+@tree_math.struct
+class Predictions:
+    dynamics: PhysicsState
+    physics: Any
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -89,8 +96,7 @@ class Model:
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
-            p0=p0 * units.pascal,
-            p1=.05 * p0 * units.pascal,
+            p0=p0*units.pascal,
         )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
@@ -155,7 +161,7 @@ class Model:
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
             state.log_surface_pressure = self.coords.horizontal.to_modal(
-                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(self.physics_specs.nondimensionalize(p0 * units.pascal)) # Makes this robust to different physics_specs, which will change default_state_fn behavior
             )
 
             # need to add specific humidity as a tracer
@@ -164,7 +170,7 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def post_process(self, state):
+    def post_process(self, state: primitive_equations.State) -> Predictions:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
@@ -181,13 +187,10 @@ class Model:
         
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
-        
-        return {
-            'dynamics': physics_state,
-            'physics': physics_data
-        }
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
+        return Predictions(dynamics=physics_state, physics=physics_data)
+
+    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
@@ -204,8 +207,8 @@ class Model:
     def predictions_to_xarray(self, predictions):
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
-        dynamics_predictions = predictions['dynamics']
-        physics_predictions = predictions['physics']
+        dynamics_predictions = predictions.dynamics
+        physics_predictions = predictions.physics
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)

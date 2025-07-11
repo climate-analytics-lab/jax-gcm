@@ -7,14 +7,12 @@ to the specific physics being used.
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
-from jcm.physics.speedy.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.physics.speedy.physical_constants import p0
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
 
@@ -25,7 +23,7 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
+    surface_pressure: jnp.ndarray # Normalized by p0
 
     @classmethod
     def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
