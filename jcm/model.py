@@ -1,7 +1,11 @@
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
+import tree_math
 from numpy import timedelta64
 import dinosaur
+from typing import Callable, Any
+from dinosaur import typing
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
@@ -15,6 +19,47 @@ from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+@tree_math.struct
+class ModelOutput:
+    dynamics: PhysicsState
+    physics: Any
+
+def trajectory_from_step(
+    step_fn: typing.TimeStepFn,
+    outer_steps: int,
+    inner_steps: int,
+    *,
+    start_with_input: bool = False,
+    post_process_fn: typing.PostProcessFn = lambda x: x,
+    outer_step_post_process_fn: typing.PostProcessFn = lambda x: x,
+) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
+    """Returns a function that accumulates repeated applications of `step_fn`.
+    Compute a trajectory by repeatedly calling `step_fn()`
+    `outer_steps * inner_steps` times.
+    Args:
+        step_fn: function that takes a state and returns state after one time step.
+        outer_steps: number of steps to save in the generated trajectory.
+        inner_steps: number of repeated calls to step_fn() between saved steps.
+        start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
+        post_process_fn: function to apply to trajectory outputs.
+        outer_step_post_process_fn: function to apply to outer step outputs (for post processing that commutes with the time average).
+    Returns:
+        A function that takes an initial state and returns a tuple consisting of:
+        (1) the final frame of the trajectory.
+        (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
+    """
+    def inner_step(carry, _):
+        x, x_sum = carry
+        x_next = step_fn(x)
+        return (x_next, x_sum + post_process_fn(x_next)), None
+
+    def outer_step(carry, _):
+        zeros = tree_map(lambda a: jnp.zeros_like(a), post_process_fn(carry))
+        (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
+        return x_final, x_sum / inner_steps
+
+    return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -42,7 +87,8 @@ class Model:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
+                 initial_state: PhysicsState=None, physics: Physics=None,
+                 output_averages=False) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -52,7 +98,7 @@ class Model:
             total_time: Total integration time in days
             start_date: Start date of the simulation
             layers: Number of vertical layers
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
+            horizontal_resolution: Horizontal resolution of the model (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
@@ -141,6 +187,7 @@ class Model:
             ),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
+        self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
@@ -182,20 +229,20 @@ class Model:
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return {
-            'dynamics': physics_state,
-            'physics': physics_data
-        }
+        return ModelOutput(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+        integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
-            post_process_fn=self.post_process,
+            post_process_fn=self.post_process if self.physics.write_output else lambda x: x, # post_process on inner steps if we are computing physics output
         ))
-        return integrate_fn(state)
+        final_state, predictions = integrate_fn(state)
+        if not self.physics.write_output:
+            predictions = self.post_process(predictions) # if not computing physics output, post_process commutes with time average, so we can apply it here
+        return final_state, predictions
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
@@ -204,8 +251,8 @@ class Model:
     def predictions_to_xarray(self, predictions):
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
-        dynamics_predictions = predictions['dynamics']
-        physics_predictions = predictions['physics']
+        dynamics_predictions = predictions.dynamics
+        physics_predictions = predictions.physics
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
