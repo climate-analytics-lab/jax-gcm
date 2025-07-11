@@ -1,6 +1,8 @@
 import jax
 import jax.numpy as jnp
+import tree_math
 from numpy import timedelta64
+from typing import Any
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
@@ -15,6 +17,11 @@ from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+
+@tree_math.struct
+class Predictions:
+    dynamics: PhysicsState
+    physics: Any
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -164,7 +171,7 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def post_process(self, state):
+    def post_process(self, state: primitive_equations.State) -> Predictions:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
@@ -182,12 +189,9 @@ class Model:
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return {
-            'dynamics': physics_state,
-            'physics': physics_data
-        }
+        return Predictions(dynamics=physics_state, physics=physics_data)
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
+    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
@@ -204,8 +208,8 @@ class Model:
     def predictions_to_xarray(self, predictions):
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
-        dynamics_predictions = predictions['dynamics']
-        physics_predictions = predictions['physics']
+        dynamics_predictions = predictions.dynamics
+        physics_predictions = predictions.physics
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
