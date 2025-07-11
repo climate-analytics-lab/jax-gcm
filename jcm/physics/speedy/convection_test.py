@@ -10,7 +10,7 @@ class TestConvectionUnit(unittest.TestCase):
         
         global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
         from jcm.boundaries import BoundaryData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
@@ -18,11 +18,11 @@ class TestConvectionUnit(unittest.TestCase):
         fsg = geometry.fsg
         grdscp = geometry.grdscp
         grdsig = geometry.grdsig
-        from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.convection import diagnose_convection, get_convection_tendencies
-        from jcm.physical_constants import rgas, cp
-        from jcm.humidity import get_qsat
+        from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.convection import diagnose_convection, get_convection_tendencies
+        from jcm.physics.speedy.physical_constants import rgas, cp
+        from jcm.physics.speedy.humidity import get_qsat
 
     def test_diagnose_convection_varying(self):
         ps = jnp.ones((ix, il))
@@ -34,10 +34,10 @@ class TestConvectionUnit(unittest.TestCase):
         
         iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, boundaries, geometry)
 
-        from os import path
-        test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
-        iptop_f90 = jnp.load(test_data_dir + '/iptop.npy')
-        qdif_f90 = jnp.load(test_data_dir + '/qdif.npy')
+        from pathlib import Path
+        test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
+        iptop_f90 = jnp.load(test_data_dir / 'iptop.npy')
+        qdif_f90 = jnp.load(test_data_dir / 'qdif.npy')
 
         self.assertTrue(jnp.allclose(iptop, iptop_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(qdif, qdif_f90, atol=1e-4))
@@ -63,13 +63,13 @@ class TestConvectionUnit(unittest.TestCase):
         xy = (ix, il)
         zxy = (kx, ix, il)
         
-        physics_data = PhysicsData.ones(xy, kx)  
+        physics_data = PhysicsData.ones(xy, kx)
         
         state = PhysicsState.ones(zxy)
 
         boundaries = BoundaryData.ones(xy)
         
-        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry) 
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry)
         
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy, kx)
@@ -116,13 +116,13 @@ class TestConvectionUnit(unittest.TestCase):
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
 
-        from os import path
-        test_data_dir = path.dirname(path.realpath(__file__)) + '/data/test'
-        iptop_f90 = jnp.load(test_data_dir + '/iptop.npy')
-        cmbf_f90 = jnp.load(test_data_dir + '/cbmf.npy')
-        precnv_f90 = jnp.load(test_data_dir + '/precnv.npy')
-        dfse_f90 = jnp.load(test_data_dir + '/dfse.npy')
-        dfqa_f90 = jnp.load(test_data_dir + '/dfqa.npy')
+        from pathlib import Path
+        test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
+        iptop_f90 = jnp.load(test_data_dir / 'iptop.npy')
+        cmbf_f90 = jnp.load(test_data_dir / 'cbmf.npy')
+        precnv_f90 = jnp.load(test_data_dir / 'precnv.npy')
+        dfse_f90 = jnp.load(test_data_dir / 'dfse.npy')
+        dfqa_f90 = jnp.load(test_data_dir / 'dfqa.npy')
 
         self.assertTrue(jnp.allclose(physics_data.convection.iptop, iptop_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, cmbf_f90, atol=1e-4))
@@ -169,7 +169,7 @@ class TestConvectionUnit(unittest.TestCase):
         zxy = (kx, ix, il)
         #test using moist adiabatic temperature profile with mid-troposphere dry anomaly
 
-        #se = cp * ta + phi, need to set ta and phi so that get convection tendencies will compute this se 
+        #se = cp * ta + phi, need to set ta and phi so that get convection tendencies will compute this se
         se = jnp.array([482562.19904568, 404459.50322158, 364997.46113127, 343674.54474717, 328636.42287272, 316973.69544231, 301500., 301500.]) / cp
         qa = jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -206,7 +206,7 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(physics_data.convection.cbmf[0,0], test_cbmf, places=4)
         self.assertAlmostEqual(physics_data.convection.precnv[0,0], test_precnv, places=4)
 
-        #check a few values of the fluxes
+        # Check a few values of the fluxes
         self.assertAlmostEqual(physics_tendencies.temperature[4,0,0], test_ttend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.specific_humidity[4,0,0], test_qtend[4], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[5,0,0], test_ttend[5], places=2)

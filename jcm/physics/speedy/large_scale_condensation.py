@@ -6,10 +6,10 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, cp, alhc, grav
+from jcm.physics.speedy.params import Parameters
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physical_constants import p0, cp, alhc, grav
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -23,7 +23,7 @@ def get_large_scale_condensation_tendencies(
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
-        psa: Normalized surface pressure 
+        psa: Normalized surface pressure
         qa: Specific humidity [g/kg] - state.specific_humidity
         qsat: Saturation specific humidity [g/kg] - humidity.qsat
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop

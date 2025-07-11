@@ -10,14 +10,14 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
             parameters, geometry, BoundaryData
-        from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         geometry = Geometry.from_grid_shape((ix, il), kx)
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
 
     def test_get_vertical_diffusion_tend(self):
         se = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(400,300,kx)[:, jnp.newaxis, jnp.newaxis]
@@ -46,7 +46,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-9))
         self.assertTrue(np.allclose(qtenvd[:,0,0], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-9))
 
-    def test_get_vertical_diffusion_gradients_isnan_ones(self): 
+    def test_get_vertical_diffusion_gradients_isnan_ones(self):
         """Test that we can calculate gradients of vertical diffusion without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -57,7 +57,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 

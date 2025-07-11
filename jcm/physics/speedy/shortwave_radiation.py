@@ -4,10 +4,10 @@ from jax import lax
 import jax
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physical_constants import epssw, solc, epsilon
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
+from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.utils import pass_fn
 
 @jit
@@ -23,9 +23,9 @@ def get_shortwave_rad_fluxes(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
-        shortwave_rad_fluxes, 
-        pass_fn, 
+        physics_data.shortwave_rad.compute_shortwave,
+        shortwave_rad_fluxes,
+        pass_fn,
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
@@ -127,7 +127,6 @@ def shortwave_rad_fluxes(operand):
     dfabs = dfabs.at[k].add(- flux_1[k])
     
     # 3.3 Absorption and reflection in the troposphere
-    # scan alert!
     # here's the function that will compute the flux
     propagate_flux_1 = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
     
@@ -250,7 +249,7 @@ def get_zonal_average_fields(
     stratz : jnp.ndarray
         Polar night cooling in the stratosphere
     zenit : jnp.ndarray
-        The Zenit angle
+        The zenith angle
     """
     kx, ix, il = state.temperature.shape
 
@@ -316,9 +315,9 @@ def get_clouds(
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
     state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave, 
-        clouds, 
-        pass_fn, 
+        physics_data.shortwave_rad.compute_shortwave,
+        clouds,
+        pass_fn,
         operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
     )
 
@@ -355,7 +354,6 @@ def clouds(operand):
     conv = physics_data.convection
     condensation = physics_data.condensation
     kx = state.temperature.shape[0]
-    compute_shortwave = physics_data.shortwave_rad.compute_shortwave
 
     # Constants
     nl1  = kx-2
@@ -371,12 +369,12 @@ def clouds(operand):
     #       between the top of convection/condensation and
     #       the level of maximum relative humidity.
 
-    #First for loop (2 levels)
+    # First for loop (2 levels)
     mask = humidity.rh[nl1] > parameters.shortwave_radiation.rhcl1  # Create a mask where the condition is true
     cloudc = jnp.where(mask, humidity.rh[nl1] - parameters.shortwave_radiation.rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1, nlp) # Assign icltop values based on the mask
 
-    #Second for loop (three levels)
+    # Second for loop (three levels)
     drh = humidity.rh[2:kx-2] - parameters.shortwave_radiation.rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
     mask = (drh > cloudc[jnp.newaxis]) & (state.specific_humidity[2:kx-2] > parameters.shortwave_radiation.qacl)  # Create a boolean mask where the conditions are met
     cloudc_update = jnp.where(mask, drh, cloudc[jnp.newaxis])  # Update cloudc where the mask is True
@@ -387,7 +385,7 @@ def clouds(operand):
     icltop_update = jnp.where(mask, k_indices[:, jnp.newaxis, jnp.newaxis], icltop[jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
     icltop = jnp.where(cloudc[jnp.newaxis] == cloudc_update, icltop_update, icltop[jnp.newaxis]).max(axis=0)
 
-    #Third for loop (two levels)
+    # Third for loop (two levels)
     # Perform the calculations (Two Loops)
     pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
     cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
@@ -401,7 +399,7 @@ def clouds(operand):
     clfact = 1.2
     rgse   = 1.0/(parameters.shortwave_radiation.gse_s1 - parameters.shortwave_radiation.gse_s0)
 
-    #Fourth for loop (Two Loops)
+    # Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
     fstab = jnp.clip(rgse * (gse - parameters.shortwave_radiation.gse_s0), 0.0, 1.0)
     # Stratocumulus clouds over sea
