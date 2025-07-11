@@ -93,8 +93,13 @@ The `unit_conversions.py` module provides:
    - Tracers (already in kg/kg)
 
 3. **Time Step**: 
+   - Model timestep is specified in minutes in Model class
    - Physics modules expect dt in seconds
-   - Currently hardcoded to 1800s (30 minutes) in IconPhysics
+   - Must set dt_conv parameter when creating IconPhysics:
+     ```python
+     parameters = Parameters.default().with_convection(dt_conv=time_step_minutes * 60)
+     physics = IconPhysics(parameters=parameters)
+     ```
 
 ## Testing
 
