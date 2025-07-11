@@ -23,7 +23,7 @@ PHYS_CONST = PhysicalConstants()
 def compute_ice_albedo(
     ice_thickness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute sea ice albedo as a function of ice thickness and snow cover.
@@ -76,7 +76,7 @@ def compute_ice_albedo(
 def compute_ice_roughness(
     ice_thickness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute sea ice surface roughness.
@@ -111,7 +111,7 @@ def ice_heat_conduction(
     ice_thickness: jnp.ndarray,
     surface_temp: jnp.ndarray,
     ocean_temp: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute heat conduction through sea ice.
@@ -149,7 +149,7 @@ def ice_surface_temperature_step(
     snow_depth: jnp.ndarray,
     ocean_temp: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Update ice surface temperature and check for melting.
@@ -214,7 +214,7 @@ def ice_thickness_evolution(
     surface_fluxes: SurfaceFluxes,
     ocean_temp: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute ice thickness evolution due to freezing/melting.
@@ -301,7 +301,7 @@ def snow_evolution(
     precipitation_snow: jnp.ndarray,
     ice_temp: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute snow depth evolution on sea ice.
@@ -363,7 +363,7 @@ def sea_ice_physics_step(
     exchange_coeff_moisture: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """
     Complete sea ice physics step.

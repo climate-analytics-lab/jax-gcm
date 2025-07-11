@@ -56,7 +56,7 @@ class AerosolParameters:
     background_aod: jnp.ndarray   # Background AOD at 550nm (scalar)
     
     @classmethod
-    def default(cls):
+    def default(cls, background_aod=0.02) -> 'AerosolParameters':
         """
         Create default MACv2-SP aerosol parameters
         
@@ -200,7 +200,7 @@ class AerosolParameters:
             sig_lat_W=sig_lat_W,
             theta=theta,
             ftr_weight=ftr_weight,
-            background_aod=jnp.array(0.02)
+            background_aod=jnp.array(background_aod)
         )
     
     def isnan(self):

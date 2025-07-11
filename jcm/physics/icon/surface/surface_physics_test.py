@@ -46,7 +46,7 @@ class TestInitializeSurfaceState:
         assert jnp.allclose(surface_state.fraction, surface_fractions)
         
         # Check that temperatures are set correctly
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         assert jnp.allclose(surface_state.temperature[:, params.iwtr], ocean_temp)
         assert jnp.allclose(surface_state.temperature[:, params.iice], ice_temp[:, 0])
         assert jnp.allclose(surface_state.temperature[:, params.ilnd], soil_temp[:, 0])
@@ -97,7 +97,7 @@ class TestInitializeSurfaceState:
         assert jnp.allclose(surface_state.soil_moisture, 0.3)
         
         # Check roughness lengths
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         assert jnp.allclose(surface_state.roughness_momentum[:, params.iwtr], params.z0_water)
         assert jnp.allclose(surface_state.roughness_momentum[:, params.iice], params.z0_ice)
         assert jnp.allclose(surface_state.roughness_momentum[:, params.ilnd], params.z0_land)
@@ -115,7 +115,7 @@ class TestInitializeSurfaceState:
             ncol, surface_fractions, ocean_temp, ice_temp, soil_temp
         )
         
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         
         # Check ocean albedos
         assert jnp.allclose(surface_state.albedo_visible_direct[:, params.iwtr], 0.06)

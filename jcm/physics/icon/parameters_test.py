@@ -11,7 +11,7 @@ from jcm.physics.icon.icon_physics import IconPhysics
 
 def test_parameters_initialization():
     """Test that Parameters can be initialized with defaults"""
-    params = Parameters()
+    params = Parameters.default()
     
     # Check that sub-parameters exist
     assert params.convection is not None
@@ -28,7 +28,7 @@ def test_parameters_initialization():
 
 def test_parameters_with_methods():
     """Test the with_* methods for updating parameters"""
-    params = Parameters()
+    params = Parameters.default()
     
     # Test with_convection
     params2 = params.with_convection(entrpen=4.0e-4)
@@ -56,7 +56,7 @@ def test_icon_physics_with_parameters():
     assert physics1.parameters.convection.entrpen == 1.0e-4
     
     # Custom parameters
-    custom_params = Parameters().with_convection(entrpen=5.0e-4)
+    custom_params = Parameters.default().with_convection(entrpen=5.0e-4)
     physics2 = IconPhysics(parameters=custom_params)
     assert physics2.parameters.convection.entrpen == 5.0e-4
     
@@ -84,7 +84,7 @@ def test_physics_terms_use_parameters():
     )
     
     # Create physics with custom parameters
-    custom_params = Parameters().with_clouds(crt=0.8)
+    custom_params = Parameters.default().with_clouds(crt=0.8)
     physics = IconPhysics(parameters=custom_params)
     
     # The physics should be able to compute tendencies

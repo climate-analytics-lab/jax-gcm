@@ -15,35 +15,55 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-from dataclasses import dataclass
+import tree_math
 
 from ..constants.physical_constants import (
     tmelt, alhc, alhs, rd, rv, cp, eps, grav
 )
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class CloudParameters:
     """Configuration parameters for shallow cloud scheme"""
     
     # Cloud fraction parameters
-    crt: float = 0.9           # Critical relative humidity at surface  
-    crs: float = 0.7           # Critical relative humidity at TOA  
-    nex: float = 4.0           # Exponent for RH threshold profile
-    csatsc: float = 0.97       # Saturation factor for stratocumulus
+    crt: float           # Critical relative humidity at surface  
+    crs: float           # Critical relative humidity at TOA  
+    nex: float           # Exponent for RH threshold profile
+    csatsc: float        # Saturation factor for stratocumulus
     
     # Microphysics parameters
-    ccraut: float = 0.0005     # Autoconversion threshold (kg/kg)
-    ceffmin: float = 10.0      # Minimum cloud droplet radius (microns)
-    ceffmax: float = 150.0     # Maximum cloud droplet radius (microns)
+    ccraut: float        # Autoconversion threshold (kg/kg)
+    ceffmin: float       # Minimum cloud droplet radius (microns)
+    ceffmax: float       # Maximum cloud droplet radius (microns)
     
     # Numerical parameters
-    epsilon: float = 1.0e-12   # Small number for numerical stability
+    epsilon: float       # Small number for numerical stability
     
     # Cloud ice temperature thresholds
-    t_ice: float = 238.15      # Temperature below which all cloud is ice (K)
-    t_mix_min: float = 238.15  # Lower bound of mixed phase (K)
-    t_mix_max: float = 273.15  # Upper bound of mixed phase (K)
+    t_ice: float         # Temperature below which all cloud is ice (K)
+    t_mix_min: float     # Lower bound of mixed phase (K)
+    t_mix_max: float     # Upper bound of mixed phase (K)
+
+    @classmethod
+    def default(cls, crt=0.9, crs=0.7, nex=4.0,
+                 csatsc=0.97, ccraut=0.0005, ceffmin=10.0, 
+                 ceffmax=150.0, epsilon=1.0e-12,
+                 t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
+        """Return default cloud parameters"""
+        return cls(
+            crt=jnp.array(crt),
+            crs=jnp.array(crs),
+            nex=jnp.array(nex),
+            csatsc=jnp.array(csatsc),
+            ccraut=jnp.array(ccraut),
+            ceffmin=jnp.array(ceffmin),
+            ceffmax=jnp.array(ceffmax),
+            epsilon=jnp.array(epsilon),
+            t_ice=jnp.array(t_ice),
+            t_mix_min=jnp.array(t_mix_min),
+            t_mix_max=jnp.array(t_mix_max)
+        )
 
 
 class CloudState(NamedTuple):
@@ -338,7 +358,7 @@ def shallow_cloud_scheme(
         Tuple of (tendencies, cloud_state)
     """
     if config is None:
-        config = CloudParameters()
+        config = CloudParameters.default()
     
     # Ensure all inputs are arrays
     temperature = jnp.atleast_1d(temperature)

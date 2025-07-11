@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-from dataclasses import dataclass
+import tree_math
 
 from ..constants.physical_constants import (
     grav, rd, rv, cp, eps, tmelt, alhc, alhs
@@ -35,40 +35,62 @@ from ..constants.physical_constants import (
 # This avoids circular imports
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class ConvectionParameters:
     """Configuration parameters for Tiedtke-Nordeng convection scheme"""
     
     # Time stepping
-    dt_conv: float = 3600.0           # Convection timestep (s)
+    dt_conv: float           # Convection timestep (s)
     
     # Entrainment/detrainment parameters
-    entrpen: float = 1.0e-4           # Entrainment rate for penetrative convection (m⁻¹)
-    entrscv: float = 3.0e-3           # Entrainment rate for shallow convection (m⁻¹) 
-    entrmid: float = 1.0e-4           # Entrainment rate for mid-level convection (m⁻¹)
+    entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
+    entrscv: float           # Entrainment rate for shallow convection (m⁻¹) 
+    entrmid: float           # Entrainment rate for mid-level convection (m⁻¹)
     
     # CAPE closure
-    tau: float = 7200.0               # CAPE adjustment timescale (s)
+    tau: float               # CAPE adjustment timescale (s)
     
     # Cloud base mass flux
-    cmfcmax: float = 1.0              # Maximum cloud base mass flux (kg/m²/s)
-    cmfcmin: float = 1.0e-10          # Minimum cloud base mass flux (kg/m²/s)
+    cmfcmax: float           # Maximum cloud base mass flux (kg/m²/s)
+    cmfcmin: float           # Minimum cloud base mass flux (kg/m²/s)
     
     # Precipitation parameters
-    cprcon: float = 1.4e-3            # Coefficient for precipitation conversion
+    cprcon: float            # Coefficient for precipitation conversion
     
     # Evaporation parameters
-    cevapcu: float = 2.0e-5           # Coefficient for rain evaporation
+    cevapcu: float           # Coefficient for rain evaporation
     
     # Numerical parameters
-    epsilon: float = 1.0e-12          # Small number for numerical stability
+    epsilon: float           # Small number for numerical stability
     
     # Convection type thresholds
-    rlcrit: float = 8.0e-4            # Critical relative humidity for shallow convection
-    rhcrit: float = 0.9               # Critical relative humidity threshold
+    rlcrit: float            # Critical relative humidity for shallow convection
+    rhcrit: float            # Critical relative humidity threshold
     
     # Momentum transport
-    cmfctop: float = 0.33             # Mass flux fraction at cloud top
+    cmfctop: float           # Mass flux fraction at cloud top
+
+    @classmethod
+    def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+                 tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=1.4e-3,
+                 cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
+                 cmfctop=0.33) -> 'ConvectionParameters':
+        """Return default convection parameters"""
+        return cls(
+            dt_conv=jnp.array(dt_conv),
+            entrpen=jnp.array(entrpen),
+            entrscv=jnp.array(entrscv),
+            entrmid=jnp.array(entrmid),
+            tau=jnp.array(tau),
+            cmfcmax=jnp.array(cmfcmax),
+            cmfcmin=jnp.array(cmfcmin),
+            cprcon=jnp.array(cprcon),
+            cevapcu=jnp.array(cevapcu),
+            epsilon=jnp.array(epsilon),
+            rlcrit=jnp.array(rlcrit),
+            rhcrit=jnp.array(rhcrit),
+            cmfctop=jnp.array(cmfctop)
+        )
 
 
 class ConvectionState(NamedTuple):
@@ -401,7 +423,7 @@ def tiedtke_nordeng_convection(
         Tuple of (tendencies, final_state) with tracer transport
     """
     if config is None:
-        config = ConvectionParameters()
+        config = ConvectionParameters.default()
     
     nlev = len(temperature)
     

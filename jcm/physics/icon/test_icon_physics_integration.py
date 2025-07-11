@@ -220,7 +220,7 @@ class TestIconPhysicsIntegration:
     def test_parameter_customization(self):
         """Test physics with custom parameters"""
         # Create custom parameters
-        params = Parameters().with_convection(
+        params = Parameters.default().with_convection(
             entrpen=2e-4  # Penetrative entrainment rate
         ).with_gravity_waves(
             gkdrag=1.0,

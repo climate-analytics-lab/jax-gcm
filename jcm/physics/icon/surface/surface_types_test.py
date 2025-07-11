@@ -17,7 +17,7 @@ class TestSurfaceParameters:
     
     def test_default_parameters(self):
         """Test default parameter values."""
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         
         # Surface types
         assert params.nsfc_type == 3

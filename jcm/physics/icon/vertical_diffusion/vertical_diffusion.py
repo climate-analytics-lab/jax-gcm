@@ -210,7 +210,7 @@ def vertical_diffusion_scheme(
     tke: jnp.ndarray,
     thv_variance: jnp.ndarray,
     dt: float,
-    params: VDiffParameters = VDiffParameters(),
+    params: VDiffParameters,
     tracers: jnp.ndarray = None
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
     """

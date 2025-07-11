@@ -24,7 +24,7 @@ def compute_land_albedo(
     vegetation_fraction: jnp.ndarray,
     soil_wetness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute land surface albedo based on vegetation, soil, and snow.
@@ -82,7 +82,7 @@ def compute_land_albedo(
 def compute_land_roughness(
     vegetation_fraction: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute land surface roughness.
@@ -118,7 +118,7 @@ def soil_heat_conduction(
     soil_temp: jnp.ndarray,
     surface_temp: jnp.ndarray,
     soil_depths: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute heat conduction in soil layers.
@@ -152,7 +152,7 @@ def soil_temperature_step(
     soil_depths: jnp.ndarray,
     soil_moisture: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Update soil temperature using heat diffusion equation.
@@ -215,7 +215,7 @@ def compute_transpiration(
     net_radiation: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
     air_density: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute transpiration from vegetation using simplified Penman-Monteith.
@@ -273,7 +273,7 @@ def soil_moisture_step(
     transpiration: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Update soil moisture including precipitation, evaporation, and transpiration.
@@ -354,7 +354,7 @@ def land_surface_physics_step(
     vegetation_fraction: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """
     Complete land surface physics step.

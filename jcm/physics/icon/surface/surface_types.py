@@ -7,39 +7,69 @@ following the ICON model structure for land-atmosphere exchange.
 
 from typing import NamedTuple, Optional
 import jax.numpy as jnp
+import tree_math
 
 
-class SurfaceParameters(NamedTuple):
+@tree_math.struct
+class SurfaceParameters:
     """Parameters for surface physics schemes."""
     
     # Surface types
-    nsfc_type: int = 3         # Number of surface types (water, ice, land)
-    iwtr: int = 0             # Index for water surface
-    iice: int = 1             # Index for ice surface  
-    ilnd: int = 2             # Index for land surface
+    nsfc_type: int         # Number of surface types (water, ice, land)
+    iwtr: int              # Index for water surface
+    iice: int              # Index for ice surface  
+    ilnd: int              # Index for land surface
     
     # Mixed layer ocean parameters
-    ml_depth: float = 50.0     # Mixed layer depth [m]
-    rho_water: float = 1025.0  # Water density [kg/m³]
-    cp_water: float = 3994.0   # Specific heat of water [J/kg/K]
+    ml_depth: float        # Mixed layer depth [m]
+    rho_water: float       # Water density [kg/m³]
+    cp_water: float        # Specific heat of water [J/kg/K]
     
     # Sea ice parameters
-    rho_ice: float = 917.0     # Ice density [kg/m³]
-    cp_ice: float = 2106.0     # Specific heat of ice [J/kg/K]
-    conduct_ice: float = 2.2   # Ice thermal conductivity [W/m/K]
+    rho_ice: float         # Ice density [kg/m³]
+    cp_ice: float          # Specific heat of ice [J/kg/K]
+    conduct_ice: float     # Ice thermal conductivity [W/m/K]
     
     # Surface radiation parameters
-    emissivity: float = 0.99   # Surface emissivity [-]
-    stefan_boltzmann: float = 5.67e-8  # Stefan-Boltzmann constant [W/m²/K⁴]
+    emissivity: float      # Surface emissivity [-]
+    stefan_boltzmann: float  # Stefan-Boltzmann constant [W/m²/K⁴]
     
     # Roughness lengths [m]
-    z0_water: float = 1e-4     # Water surface
-    z0_ice: float = 1e-3       # Ice surface
-    z0_land: float = 0.1       # Land surface (can be spatially varying)
+    z0_water: float        # Water surface
+    z0_ice: float          # Ice surface
+    z0_land: float         # Land surface (can be spatially varying)
     
     # Turbulent exchange parameters
-    von_karman: float = 0.4    # von Kármán constant [-]
-    min_wind_speed: float = 1.0  # Minimum wind speed for flux calculations [m/s]
+    von_karman: float      # von Kármán constant [-]
+    min_wind_speed: float  # Minimum wind speed for flux calculations [m/s]
+
+    @classmethod
+    def default(cls,  nsfc_type=3, iwtr=0, iice=1, ilnd=2,
+                 ml_depth=50.0, rho_water=1025.0, cp_water=3994.0,
+                 rho_ice=917.0, cp_ice=2106.0, conduct_ice=2.2,
+                 emissivity=0.99, stefan_boltzmann=5.67e-8,
+                 z0_water=1e-4, z0_ice=1e-3, z0_land=0.1,
+                 von_karman=0.4, min_wind_speed=1.0) -> 'SurfaceParameters':
+        """Return default surface parameters"""
+        return cls(
+            nsfc_type=jnp.array(nsfc_type),
+            iwtr=jnp.array(iwtr),
+            iice=jnp.array(iice),
+            ilnd=jnp.array(ilnd),
+            ml_depth=jnp.array(ml_depth),
+            rho_water=jnp.array(rho_water),
+            cp_water=jnp.array(cp_water),
+            rho_ice=jnp.array(rho_ice),
+            cp_ice=jnp.array(cp_ice),
+            conduct_ice=jnp.array(conduct_ice),
+            emissivity=jnp.array(emissivity),
+            stefan_boltzmann=jnp.array(stefan_boltzmann),
+            z0_water=jnp.array(z0_water),
+            z0_ice=jnp.array(z0_ice),
+            z0_land=jnp.array(z0_land),
+            von_karman=jnp.array(von_karman),
+            min_wind_speed=jnp.array(min_wind_speed)
+        )
 
 
 class SurfaceState(NamedTuple):

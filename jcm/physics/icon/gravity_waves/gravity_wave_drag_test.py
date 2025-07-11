@@ -61,7 +61,7 @@ class TestOrographicSource:
     
     def test_source_magnitude(self):
         """Test that source scales with wind and orography"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         # Base case
         u_sfc = jnp.array(10.0)
@@ -89,7 +89,7 @@ class TestOrographicSource:
     
     def test_source_direction(self):
         """Test that source opposes wind direction"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         n_sfc = jnp.array(0.01)
         h_std = jnp.array(100.0)
@@ -113,7 +113,7 @@ class TestOrographicSource:
     
     def test_froude_number_effect(self):
         """Test Froude number dependence"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         n_sfc = jnp.array(0.01)
         h_std = jnp.array(500.0)  # Tall mountains
@@ -139,7 +139,7 @@ class TestWaveBreaking:
     
     def test_richardson_number_breaking(self):
         """Test breaking based on Richardson number"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         nlev = 10
         
         # Create profile with strong shear
@@ -169,7 +169,7 @@ class TestWaveBreaking:
     
     def test_amplitude_breaking(self):
         """Test breaking based on wave amplitude"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         nlev = 10
         
         height = jnp.linspace(0, 20000, nlev)
@@ -197,7 +197,7 @@ class TestGravityWaveDrag:
     
     def test_momentum_deposition(self):
         """Test that momentum is deposited correctly"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         # Create westerly jet
         nlev = 30
@@ -226,7 +226,7 @@ class TestGravityWaveDrag:
     
     def test_critical_level_filtering(self):
         """Test that waves are absorbed at critical levels"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         nlev = 20
         height = jnp.linspace(0, 20000, nlev)
@@ -278,7 +278,7 @@ class TestGravityWaveDrag:
     
     def test_energy_conservation(self):
         """Test that kinetic energy is converted to heat"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         nlev = 20
         height = jnp.linspace(0, 20000, nlev)
@@ -320,7 +320,7 @@ class TestGravityWaveDrag:
     
     def test_jax_transformations(self):
         """Test JAX transformations"""
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
         
         def gwd_loss(u_wind):
             nlev = len(u_wind)

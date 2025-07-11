@@ -108,8 +108,8 @@ def compute_exchange_coefficients(
     roughness_heat: jnp.ndarray,
     stability_heat: jnp.ndarray,
     stability_momentum: jnp.ndarray,
+    params: SurfaceParameters,
     reference_height: float = 10.0,
-    params: SurfaceParameters = SurfaceParameters()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute bulk exchange coefficients for momentum, heat, and moisture.
@@ -192,7 +192,7 @@ def compute_turbulent_fluxes(
     exchange_coeffs_momentum: jnp.ndarray,
     exchange_coeffs_heat: jnp.ndarray,
     exchange_coeffs_moisture: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceFluxes:
     """
     Compute turbulent surface fluxes using bulk aerodynamic formulas.
@@ -301,7 +301,7 @@ def compute_surface_resistances(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     richardson_number: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceResistances:
     """
     Compute surface resistances for heat, moisture, and momentum transfer.
@@ -364,7 +364,7 @@ def compute_surface_diagnostics(
     surface_state: SurfaceState,
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceDiagnostics:
     """
     Compute standard surface diagnostics (2m temperature, 10m wind, etc.).

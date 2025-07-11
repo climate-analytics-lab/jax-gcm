@@ -140,10 +140,11 @@ class CloudData:
     # Precipitation
     precip_rain: jnp.ndarray         # Rain precipitation [kg/m²/s] (ncols,)
     precip_snow: jnp.ndarray         # Snow precipitation [kg/m²/s] (ncols,)
-    
-    # Relative humidity
-    relative_humidity: jnp.ndarray   # Relative humidity [1] (nlev, ncols)
-    
+
+    # Cloud properties
+    # These can be used for diagnostics or further calculations
+    droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
+        
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -154,9 +155,9 @@ class CloudData:
             qs=jnp.zeros((nlev,) + nodal_shape),
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
-            relative_humidity=jnp.zeros((nlev,) + nodal_shape),
+            droplet_number=jnp.zeros((nlev,) + nodal_shape),
         )
-    
+
     def copy(self, **kwargs):
         new_data = {
             'cloud_fraction': self.cloud_fraction,
@@ -166,7 +167,7 @@ class CloudData:
             'qs': self.qs,
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
-            'relative_humidity': self.relative_humidity,
+            'droplet_number': self.droplet_number,
         }
         new_data.update(kwargs)
         return CloudData(**new_data)
@@ -272,6 +273,9 @@ class DiagnosticData:
     pressure_half: jnp.ndarray       # Pressure at half levels [Pa] (nlev+1, ncols)
     height_full: jnp.ndarray         # Height at full levels [m] (nlev, ncols)
     height_half: jnp.ndarray         # Height at half levels [m] (nlev+1, ncols)
+
+    relative_humidity: jnp.ndarray  # Relative humidity [1] (nlev, ncols)
+    surface_pressure: jnp.ndarray  # Surface pressure [Pa] (ncols,)
     
     # Air density and layer thickness
     air_density: jnp.ndarray         # Air density [kg/m³] (nlev, ncols)
@@ -284,6 +288,8 @@ class DiagnosticData:
             pressure_half=jnp.zeros((nlev+1,) + nodal_shape),
             height_full=jnp.zeros((nlev,) + nodal_shape),
             height_half=jnp.zeros((nlev+1,) + nodal_shape),
+            relative_humidity=jnp.zeros((nlev,) + nodal_shape),
+            surface_pressure=jnp.zeros(nodal_shape),
             air_density=jnp.zeros((nlev,) + nodal_shape),
             layer_thickness=jnp.zeros((nlev,) + nodal_shape),
         )
@@ -294,6 +300,8 @@ class DiagnosticData:
             'pressure_half': self.pressure_half,
             'height_full': self.height_full,
             'height_half': self.height_half,
+            'relative_humidity': self.relative_humidity,
+            'surface_pressure': self.surface_pressure,
             'air_density': self.air_density,
             'layer_thickness': self.layer_thickness,
         }
@@ -382,4 +390,4 @@ class PhysicsData:
             'aerosol': self.aerosol,
         }
         new_data.update(kwargs)
-        return CloudData(**new_data)
+        return PhysicsData(**new_data)

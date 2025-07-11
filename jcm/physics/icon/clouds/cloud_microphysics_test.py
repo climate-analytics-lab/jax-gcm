@@ -24,7 +24,7 @@ class TestCloudDropletRadius:
         cloud_water = jnp.array(0.5e-3)  # 0.5 g/kg
         air_density = jnp.array(1.0)      # kg/m³
         droplet_number = jnp.array(100e6) # 100 per cm³ -> per kg
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         
         radius = cloud_droplet_radius(cloud_water, air_density, droplet_number, config)
         
@@ -33,7 +33,7 @@ class TestCloudDropletRadius:
     
     def test_limits(self):
         """Test radius limits are applied"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         
         # Very high cloud water with very few droplets should hit max radius
         radius_high = cloud_droplet_radius(
@@ -53,7 +53,7 @@ class TestAutoconversion:
     
     def test_kk2000_threshold(self):
         """Test KK2000 autoconversion has threshold behavior"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         air_density = jnp.array(1.0)
         cloud_fraction = jnp.array(0.5)
         droplet_number = jnp.array(100e6)
@@ -75,7 +75,7 @@ class TestAutoconversion:
     
     def test_kk2000_dependencies(self):
         """Test KK2000 dependencies on cloud water and droplet number"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         air_density = jnp.array(1.0)
         cloud_fraction = jnp.array(1.0)  # Full cloud cover to simplify
         dt = 1.0  # Very short timestep - we're testing the formula, not the limiter
@@ -111,7 +111,7 @@ class TestAutoconversion:
     
     def test_ice_autoconversion(self):
         """Test ice autoconversion to snow"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         cloud_fraction = jnp.array(0.7)
         dt = 1800.0
         
@@ -142,7 +142,7 @@ class TestAccretion:
     
     def test_rain_cloud_accretion(self):
         """Test accretion of cloud by rain"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         cloud_water = jnp.array(0.5e-3)
         rain_water = jnp.array(1e-3)
         cloud_fraction = jnp.array(0.6)
@@ -164,7 +164,7 @@ class TestAccretion:
     
     def test_snow_accretion(self):
         """Test accretion by snow (riming and aggregation)"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         target = jnp.array(0.3e-3)
         snow = jnp.array(0.5e-3)
         temperature = tmelt - 10.0
@@ -189,7 +189,7 @@ class TestMeltingFreezing:
     
     def test_melting_above_freezing(self):
         """Test snow melts above 0°C"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         snow = jnp.array(1e-3)
         rain = jnp.array(0.5e-3)
         dt = 100.0
@@ -204,7 +204,7 @@ class TestMeltingFreezing:
     
     def test_freezing_below_freezing(self):
         """Test rain freezes below 0°C"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         snow = jnp.array(0.5e-3)
         rain = jnp.array(1e-3)
         dt = 100.0
@@ -228,7 +228,7 @@ class TestEvaporationSublimation:
     
     def test_evaporation_subsaturated(self):
         """Test rain evaporation in subsaturated conditions"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         temperature = jnp.array(280.0)
         pressure = jnp.array(90000.0)
         rain = jnp.array(0.5e-3)
@@ -251,7 +251,7 @@ class TestEvaporationSublimation:
     
     def test_no_evaporation_saturated(self):
         """Test no evaporation at saturation"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         temperature = jnp.array(280.0)
         pressure = jnp.array(90000.0)
         rain = jnp.array(0.5e-3)
@@ -313,7 +313,7 @@ class TestFullMicrophysics:
     
     def test_warm_rain_process(self):
         """Test warm rain microphysics"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         nlev = 20
         
         # Create warm profile with clouds
@@ -353,7 +353,7 @@ class TestFullMicrophysics:
     
     def test_cold_cloud_process(self):
         """Test ice microphysics"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         nlev = 20
         
         # Create cold profile
@@ -393,7 +393,7 @@ class TestFullMicrophysics:
     
     def test_mixed_phase_process(self):
         """Test mixed-phase microphysics"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         nlev = 30
         
         # Create profile spanning freezing level
@@ -441,7 +441,7 @@ class TestFullMicrophysics:
     
     def test_conservation(self):
         """Test mass conservation in microphysics"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         nlev = 10
         
         # Simple setup
@@ -482,7 +482,7 @@ class TestFullMicrophysics:
     
     def test_jax_compatibility(self):
         """Test JAX transformations"""
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
         
         # Simple test case
         def create_state():

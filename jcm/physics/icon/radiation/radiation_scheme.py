@@ -183,7 +183,7 @@ def radiation_scheme(
     """
     # Use default parameters if not provided
     if parameters is None:
-        parameters = RadiationParameters()
+        parameters = RadiationParameters.default()
     
     nlev = temperature.shape[0]
     

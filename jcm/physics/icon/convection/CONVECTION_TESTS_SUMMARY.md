@@ -66,7 +66,7 @@ I've successfully implemented and tested the Tiedtke-Nordeng convection scheme f
    - Full JIT compilation support
    - Vectorization with vmap
    - Gradient computation for ML applications
-   - Frozen dataclass for hashable configuration
+   - @tree_math.struct for hashable configuration
 
 5. **Tracer Transport Framework**
    - Support for cloud water (qc) and cloud ice (qi)

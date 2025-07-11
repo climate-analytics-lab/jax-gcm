@@ -30,6 +30,7 @@ def get_simple_aerosol(
     """
         
     nlev, ncols = state.temperature.shape
+    parameters = parameters.aerosol
     
     # Get grid coordinates - for testing, use representative locations
     # In a real implementation, these would come from the grid geometry

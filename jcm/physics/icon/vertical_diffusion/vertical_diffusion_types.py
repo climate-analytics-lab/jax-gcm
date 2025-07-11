@@ -7,29 +7,50 @@ calculations, following the ICON model structure.
 
 from typing import NamedTuple, Optional
 import jax.numpy as jnp
+import tree_math
 
 
-class VDiffParameters(NamedTuple):
+@tree_math.struct
+class VDiffParameters:
     """Parameters for vertical diffusion scheme."""
     
     # Implicitness factors (following ICON's tpfac1, tpfac2, tpfac3)
-    tpfac1: float = 1.0       # Factor for new timestep (implicit)
-    tpfac2: float = 0.0       # Factor for old timestep (explicit part)
-    tpfac3: float = 0.0       # Factor for time interpolation
+    tpfac1: float       # Factor for new timestep (implicit)
+    tpfac2: float       # Factor for old timestep (explicit part)
+    tpfac3: float       # Factor for time interpolation
     
     # Turbulence parameters
-    totte_min: float = 1.0e-6  # Minimum TTE value
-    z0m_min: float = 1.0e-5    # Minimum roughness length
-    cchar: float = 0.018       # Charnock constant for ocean roughness
+    totte_min: float    # Minimum TTE value
+    z0m_min: float      # Minimum roughness length
+    cchar: float        # Charnock constant for ocean roughness
     
     # Surface types
-    nsfc_type: int = 3         # Number of surface types (water, ice, land)
-    iwtr: int = 0             # Index for water surface
-    iice: int = 1             # Index for ice surface
-    ilnd: int = 2             # Index for land surface
+    nsfc_type: int      # Number of surface types (water, ice, land)
+    iwtr: int           # Index for water surface
+    iice: int           # Index for ice surface
+    ilnd: int           # Index for land surface
     
     # Vertical structure
-    itop: int = 1             # Top level for turbulence calculation
+    itop: int           # Top level for turbulence calculation
+
+    @classmethod
+    def default(cls, tpfac1=1.0, tpfac2=0.0, tpfac3=0.0,
+                 totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
+                 nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1) -> 'VDiffParameters':
+        """Return default vertical diffusion parameters"""
+        return cls(
+            tpfac1=jnp.array(tpfac1),
+            tpfac2=jnp.array(tpfac2),
+            tpfac3=jnp.array(tpfac3),
+            totte_min=jnp.array(totte_min),
+            z0m_min=jnp.array(z0m_min),
+            cchar=jnp.array(cchar),
+            nsfc_type=jnp.array(nsfc_type),
+            iwtr=jnp.array(iwtr),
+            iice=jnp.array(iice),
+            ilnd=jnp.array(ilnd),
+            itop=jnp.array(itop)
+        )
 
 
 class VDiffState(NamedTuple):

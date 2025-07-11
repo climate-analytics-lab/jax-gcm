@@ -34,7 +34,7 @@ def initialize_surface_state(
     ocean_temp: jnp.ndarray,
     ice_temp: jnp.ndarray,
     soil_temp: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceState:
     """
     Initialize surface state from basic inputs.
@@ -134,7 +134,7 @@ def surface_physics_step(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """
     Complete surface physics step for all surface types.
@@ -348,7 +348,7 @@ def update_surface_state(
     surface_state: SurfaceState,
     tendencies: SurfaceTendencies,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceState:
     """
     Update surface state using computed tendencies.

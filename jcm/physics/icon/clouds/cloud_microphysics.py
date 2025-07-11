@@ -22,53 +22,86 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-from dataclasses import dataclass
+import tree_math
 
 from ..constants.physical_constants import (
     tmelt, alhf, alhc, alhs, rd, rv, cp, grav, rhow, eps
 )
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class MicrophysicsParameters:
     """Configuration parameters for cloud microphysics"""
     
     # Autoconversion parameters
-    ccraut: float = 5.0e-4      # Critical cloud water for autoconversion (kg/kg)
-    ccracl: float = 6.0         # Accretion coefficient (cloud to rain)
-    cauloc: float = 1.0         # Cloud droplet dispersion parameter
-    ceffmin: float = 10.0       # Minimum cloud droplet radius (microns)
-    ceffmax: float = 150.0      # Maximum cloud droplet radius (microns)
+    ccraut: float        # Critical cloud water for autoconversion (kg/kg)
+    ccracl: float        # Accretion coefficient (cloud to rain)
+    cauloc: float        # Cloud droplet dispersion parameter
+    ceffmin: float       # Minimum cloud droplet radius (microns)
+    ceffmax: float       # Maximum cloud droplet radius (microns)
     
     # Ice microphysics parameters
-    cn0s: float = 3.0e6         # Snow particle number density (1/m^3)
-    crhosno: float = 100.0      # Snow density (kg/m^3)
-    cvtfall: float = 3.29       # Terminal velocity factor for ice
-    cthomi: float = 233.15      # Homogeneous ice nucleation temperature (K)
-    csecfrl: float = 0.1        # Critical ice fraction for Bergeron-Findeisen
+    cn0s: float          # Snow particle number density (1/m^3)
+    crhosno: float       # Snow density (kg/m^3)
+    cvtfall: float       # Terminal velocity factor for ice
+    cthomi: float        # Homogeneous ice nucleation temperature (K)
+    csecfrl: float       # Critical ice fraction for Bergeron-Findeisen
     
     # Collection efficiencies
-    ccollec: float = 0.7        # Collection efficiency rain/cloud
-    ccollei: float = 0.3        # Collection efficiency snow/ice
+    ccollec: float       # Collection efficiency rain/cloud
+    ccollei: float       # Collection efficiency snow/ice
     
     # Time scale parameters
-    tau_melt: float = 100.0     # Melting time scale (s)
-    tau_freeze: float = 100.0   # Freezing time scale (s)
+    tau_melt: float      # Melting time scale (s)
+    tau_freeze: float    # Freezing time scale (s)
     
     # Evaporation/sublimation parameters
-    cevaprain: float = 1.0e-3   # Rain evaporation coefficient
-    cevapsnow: float = 5.0e-4   # Snow sublimation coefficient
+    cevaprain: float     # Rain evaporation coefficient
+    cevapsnow: float     # Snow sublimation coefficient
     
     # Sedimentation parameters
-    vt_ice: float = 0.1         # Ice crystal fall speed (m/s)
-    vt_snow_a: float = 8.8      # Snow fall speed coefficient a
-    vt_snow_b: float = 0.15     # Snow fall speed exponent b
-    vt_rain_a: float = 386.0    # Rain fall speed coefficient a
-    vt_rain_b: float = 0.67     # Rain fall speed exponent b
+    vt_ice: float        # Ice crystal fall speed (m/s)
+    vt_snow_a: float     # Snow fall speed coefficient a
+    vt_snow_b: float     # Snow fall speed exponent b
+    vt_rain_a: float     # Rain fall speed coefficient a
+    vt_rain_b: float     # Rain fall speed exponent b
     
     # Numerical parameters
-    epsilon: float = 1.0e-12    # Small number for numerical stability
-    dt_sedi: float = 10.0       # Sub-timestep for sedimentation (s)
+    epsilon: float       # Small number for numerical stability
+    dt_sedi: float       # Sub-timestep for sedimentation (s)
+
+    @classmethod
+    def default(cls, ccraut=5.0e-4, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
+                 crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
+                 ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
+                 cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
+                 vt_rain_a=386.0, vt_rain_b=0.67, epsilon=1.0e-12, dt_sedi=10.0) -> 'MicrophysicsParameters':
+        """Return default microphysics parameters"""
+        return cls(
+            ccraut=jnp.array(ccraut),
+            ccracl=jnp.array(ccracl),
+            cauloc=jnp.array(cauloc),
+            ceffmin=jnp.array(ceffmin),
+            ceffmax=jnp.array(ceffmax),
+            cn0s=jnp.array(cn0s),
+            crhosno=jnp.array(crhosno),
+            cvtfall=jnp.array(cvtfall),
+            cthomi=jnp.array(cthomi),
+            csecfrl=jnp.array(csecfrl),
+            ccollec=jnp.array(ccollec),
+            ccollei=jnp.array(ccollei),
+            tau_melt=jnp.array(tau_melt),
+            tau_freeze=jnp.array(tau_freeze),
+            cevaprain=jnp.array(cevaprain),
+            cevapsnow=jnp.array(cevapsnow),
+            vt_ice=jnp.array(vt_ice),
+            vt_snow_a=jnp.array(vt_snow_a),
+            vt_snow_b=jnp.array(vt_snow_b),
+            vt_rain_a=jnp.array(vt_rain_a),
+            vt_rain_b=jnp.array(vt_rain_b),
+            epsilon=jnp.array(epsilon),
+            dt_sedi=jnp.array(dt_sedi)
+        )
 
 
 class MicrophysicsState(NamedTuple):
@@ -513,7 +546,7 @@ def cloud_microphysics(
         Tuple of (tendencies, state)
     """
     if config is None:
-        config = MicrophysicsParameters()
+        config = MicrophysicsParameters.default()
     
     # Ensure all inputs are arrays
     temperature = jnp.atleast_1d(temperature)

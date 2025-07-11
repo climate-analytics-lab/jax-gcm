@@ -114,7 +114,7 @@ class TestTurbulenceCoefficients:
         # Create realistic atmospheric state
         ncol, nlev = 3, 10
         state = create_test_atmospheric_state(ncol, nlev)
-        params = VDiffParameters()
+        params = VDiffParameters.default()
         
         # Create mixing length
         mixing_length = jnp.linspace(10.0, 100.0, nlev)[None, :] * jnp.ones((ncol, nlev))
@@ -207,7 +207,7 @@ class TestMatrixSolver:
         """Test setup of matrix system."""
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
-        params = VDiffParameters()
+        params = VDiffParameters.default()
         
         # Create exchange coefficients
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
@@ -234,7 +234,7 @@ class TestMatrixSolver:
         """Test that vertical diffusion step conserves mass."""
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
-        params = VDiffParameters()
+        params = VDiffParameters.default()
         
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0

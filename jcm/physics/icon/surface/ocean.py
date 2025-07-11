@@ -22,7 +22,7 @@ PHYS_CONST = PhysicalConstants()
 @jax.jit
 def compute_ocean_albedo(
     solar_zenith_angle: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute ocean surface albedo as a function of solar zenith angle.
@@ -55,7 +55,7 @@ def compute_ocean_roughness(
     wind_speed: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Compute ocean surface roughness using Charnock relation.
@@ -95,7 +95,7 @@ def mixed_layer_ocean_step(
     surface_heat_flux: jnp.ndarray,
     shortwave_penetration: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Evolve mixed layer ocean temperature.
@@ -132,7 +132,7 @@ def compute_ocean_surface_fluxes(
     exchange_coeff_moisture: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, jnp.ndarray]:
     """
     Compute surface fluxes over ocean.
@@ -228,7 +228,7 @@ def ocean_surface_temperature_step(
     surface_fluxes: SurfaceFluxes,
     shortwave_penetration_fraction: float = 0.7,
     dt: float = 3600.0,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """
     Update ocean surface temperature using energy balance.
@@ -279,7 +279,7 @@ def ocean_physics_step(
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """
     Complete ocean physics step.
@@ -331,7 +331,7 @@ def ocean_physics_step(
 def compute_ocean_coupling_fluxes(
     surface_fluxes: SurfaceFluxes,
     precipitation_rate: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters()
+    params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute fluxes for ocean-atmosphere coupling.

@@ -82,7 +82,7 @@ class TestCloudFraction:
     
     def test_cloud_fraction_basic(self):
         """Test basic cloud fraction calculation"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create test profile
         nlev = 20
@@ -113,7 +113,7 @@ class TestCloudFraction:
     
     def test_cloud_fraction_profile(self):
         """Test that critical RH varies with height"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create pressure levels
         pressure = jnp.array([100000, 70000, 50000, 30000, 20000])
@@ -139,7 +139,7 @@ class TestCloudPhase:
     
     def test_partition_all_liquid(self):
         """Test all liquid phase above freezing"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         temperature = jnp.array(280.0)  # Above freezing
         total_water = jnp.array(0.001)   # 1 g/kg
@@ -151,7 +151,7 @@ class TestCloudPhase:
     
     def test_partition_all_ice(self):
         """Test all ice phase below threshold"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         temperature = jnp.array(230.0)  # Well below freezing
         total_water = jnp.array(0.001)   # 1 g/kg
@@ -163,7 +163,7 @@ class TestCloudPhase:
     
     def test_partition_mixed_phase(self):
         """Test mixed phase region"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Middle of mixed phase region
         temperature = jnp.array(255.0)
@@ -194,7 +194,7 @@ class TestCondensationEvaporation:
     
     def test_condensation(self):
         """Test condensation in supersaturated conditions"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         temperature = jnp.array(280.0)
         pressure = jnp.array(90000.0)
@@ -219,7 +219,7 @@ class TestCondensationEvaporation:
     
     def test_evaporation(self):
         """Test evaporation in subsaturated conditions"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         temperature = jnp.array(280.0)
         pressure = jnp.array(90000.0)
@@ -251,7 +251,7 @@ class TestShallowCloudScheme:
     
     def test_stable_conditions(self):
         """Test scheme in stable, dry conditions"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create stable profile
         nlev = 20
@@ -282,7 +282,7 @@ class TestShallowCloudScheme:
     
     def test_cloudy_conditions(self):
         """Test scheme with existing clouds"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create profile with clouds
         nlev = 20
@@ -316,7 +316,7 @@ class TestShallowCloudScheme:
     
     def test_precipitation_formation(self):
         """Test precipitation formation from thick clouds"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create profile with thick clouds
         temperature = jnp.array(280.0)
@@ -339,7 +339,7 @@ class TestShallowCloudScheme:
     
     def test_jax_transformations(self):
         """Test JAX transformations work correctly"""
-        config = CloudParameters()
+        config = CloudParameters.default()
         
         # Create test data
         def create_profile():

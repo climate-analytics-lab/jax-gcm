@@ -8,7 +8,6 @@ Date: 2025-01-10
 """
 
 import tree_math
-from dataclasses import field
 
 from .convection import ConvectionParameters
 from .clouds import CloudParameters, MicrophysicsParameters
@@ -29,35 +28,19 @@ class Parameters:
     """
     
     # Convection parameters
-    convection: ConvectionParameters = ConvectionParameters()
-    
-    # Cloud parameters (shallow clouds)
-    clouds: CloudParameters = CloudParameters()
-    
-    # Microphysics parameters
-    microphysics: MicrophysicsParameters = MicrophysicsParameters()
-    
-    # Gravity wave parameters
-    gravity_waves: GravityWaveParameters = GravityWaveParameters()
-    
-    # Radiation parameters
-    radiation: RadiationParameters = RadiationParameters()
-    
-    # Vertical diffusion parameters 
-    vertical_diffusion: VDiffParameters = VDiffParameters()
-    
-    # Surface parameters
-    surface: SurfaceParameters = SurfaceParameters()
-    
-    # Gravity wave drag parameters 
-    gravity_waves: GravityWaveParameters = GravityWaveParameters()
-
-    # Aerosol parameters
-    aerosol: AerosolParameters = field(default_factory=AerosolParameters.default)
+    convection: ConvectionParameters
+    clouds: CloudParameters
+    microphysics: MicrophysicsParameters
+    gravity_waves: GravityWaveParameters
+    radiation: RadiationParameters
+    vertical_diffusion: VDiffParameters
+    surface: SurfaceParameters
+    gravity_waves: GravityWaveParameters
+    aerosol: AerosolParameters
 
     @classmethod
-    def default(self):
-        return Parameters(
+    def default(cls):
+        return cls(
             convection = ConvectionParameters.default(),
             clouds = CloudParameters.default(),
             microphysics = MicrophysicsParameters.default(),
@@ -66,4 +49,140 @@ class Parameters:
             vertical_diffusion = VDiffParameters.default(),
             surface = SurfaceParameters.default(),
             aerosol = AerosolParameters.default()
+        )
+
+    def with_convection(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated convection parameters"""
+        convection_params = self.convection.__class__(**{
+            **self.convection.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=convection_params,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_clouds(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated cloud parameters"""
+        cloud_params = self.clouds.__class__(**{
+            **self.clouds.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=cloud_params,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_microphysics(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated microphysics parameters"""
+        micro_params = self.microphysics.__class__(**{
+            **self.microphysics.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=micro_params,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_gravity_waves(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated gravity wave parameters"""
+        gwd_params = self.gravity_waves.__class__(**{
+            **self.gravity_waves.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=gwd_params,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_radiation(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated radiation parameters"""
+        rad_params = self.radiation.__class__(**{
+            **self.radiation.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=rad_params,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_vertical_diffusion(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated vertical diffusion parameters"""
+        vdiff_params = self.vertical_diffusion.__class__(**{
+            **self.vertical_diffusion.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=vdiff_params,
+            surface=self.surface,
+            aerosol=self.aerosol
+        )
+    
+    def with_surface(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated surface parameters"""
+        surface_params = self.surface.__class__(**{
+            **self.surface.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=surface_params,
+            aerosol=self.aerosol
+        )
+    
+    def with_aerosol(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated aerosol parameters"""
+        aerosol_params = self.aerosol.__class__(**{
+            **self.aerosol.__dict__,
+            **kwargs
+        })
+        return self.__class__(
+            convection=self.convection,
+            clouds=self.clouds,
+            microphysics=self.microphysics,
+            gravity_waves=self.gravity_waves,
+            radiation=self.radiation,
+            vertical_diffusion=self.vertical_diffusion,
+            surface=self.surface,
+            aerosol=aerosol_params
         )

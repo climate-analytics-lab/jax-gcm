@@ -9,44 +9,72 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 from typing import NamedTuple, Optional
-from dataclasses import dataclass
+import tree_math
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class RadiationParameters:
     """Configuration parameters for radiation scheme"""
     
     # Time stepping
-    dt_rad: float = 3600.0           # Radiation time step (s)
+    dt_rad: float            # Radiation time step (s)
     
     # Solar parameters  
-    solar_constant: float = 1361.0    # Solar constant (W/m²)
+    solar_constant: float    # Solar constant (W/m²)
     
     # Spectral bands
-    n_sw_bands: int = 2              # Number of shortwave bands
-    n_lw_bands: int = 3              # Number of longwave bands
+    n_sw_bands: int          # Number of shortwave bands
+    n_lw_bands: int          # Number of longwave bands
     
     # Band limits (wavenumber in cm⁻¹)
-    lw_band_limits: tuple = ((10, 350), (350, 500), (500, 2500))  # LW bands
-    sw_band_limits: tuple = ((4000, 14500), (14500, 50000))       # SW bands
+    lw_band_limits: tuple    # LW bands
+    sw_band_limits: tuple    # SW bands
     
     # Gas concentrations (volume mixing ratios)
-    co2_vmr: float = 400e-6          # CO2 volume mixing ratio
-    ch4_vmr: float = 1.8e-6          # CH4 volume mixing ratio
-    n2o_vmr: float = 0.32e-6         # N2O volume mixing ratio
+    co2_vmr: float           # CO2 volume mixing ratio
+    ch4_vmr: float           # CH4 volume mixing ratio
+    n2o_vmr: float           # N2O volume mixing ratio
     
     # Surface properties
-    surface_albedo_vis: float = 0.15  # Visible band albedo
-    surface_albedo_nir: float = 0.15  # Near-IR band albedo
-    surface_emissivity: float = 0.98  # Longwave emissivity
+    surface_albedo_vis: float  # Visible band albedo
+    surface_albedo_nir: float  # Near-IR band albedo
+    surface_emissivity: float  # Longwave emissivity
     
     # Numerical parameters
-    min_cos_zenith: float = 0.035    # Minimum cosine solar zenith angle (~88 deg)
-    flux_epsilon: float = 1e-6       # Small value for flux calculations
+    min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
+    flux_epsilon: float      # Small value for flux calculations
     
     # Cloud optics parameters
-    cld_tau_min: float = 1e-6        # Minimum cloud optical depth
-    cld_frac_min: float = 1e-3       # Minimum cloud fraction
+    cld_tau_min: float       # Minimum cloud optical depth
+    cld_frac_min: float      # Minimum cloud fraction
+
+    @classmethod
+    def default(cls, dt_rad=3600.0, solar_constant=1361.0, n_sw_bands=2, n_lw_bands=3,
+                 lw_band_limits=((10, 350), (350, 500), (500, 2500)),
+                 sw_band_limits=((4000, 14500), (14500, 50000)),
+                 co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
+                 surface_albedo_vis=0.15, surface_albedo_nir=0.15,
+                 surface_emissivity=0.98, min_cos_zenith=0.035,
+                 flux_epsilon=1e-6, cld_tau_min=1e-6, cld_frac_min=1e-3) -> 'RadiationParameters':
+        """Return default radiation parameters"""
+        return cls(
+            dt_rad=jnp.array(dt_rad),
+            solar_constant=jnp.array(solar_constant),
+            n_sw_bands=jnp.asarray(n_sw_bands),
+            n_lw_bands=jnp.asarray(n_lw_bands),
+            lw_band_limits=jnp.asarray(lw_band_limits),
+            sw_band_limits=jnp.asarray(sw_band_limits),
+            co2_vmr=jnp.array(co2_vmr),
+            ch4_vmr=jnp.array(ch4_vmr),
+            n2o_vmr=jnp.array(n2o_vmr),
+            surface_albedo_vis=jnp.array(surface_albedo_vis),
+            surface_albedo_nir=jnp.array(surface_albedo_nir),
+            surface_emissivity=jnp.array(surface_emissivity),
+            min_cos_zenith=jnp.array(min_cos_zenith),
+            flux_epsilon=jnp.array(flux_epsilon),
+            cld_tau_min=jnp.array(cld_tau_min),
+            cld_frac_min=jnp.array(cld_frac_min)
+        )
 
 
 class RadiationState(NamedTuple):
@@ -115,7 +143,7 @@ class OpticalProperties(NamedTuple):
     asymmetry_factor: jnp.ndarray    # Asymmetry factor [nlev, nbands]
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class SpectralBands:
     """Definition of spectral bands"""
     

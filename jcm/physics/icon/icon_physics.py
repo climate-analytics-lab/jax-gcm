@@ -98,20 +98,69 @@ class IconPhysics(Physics):
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
         """
-        data = PhysicsData.zeros(
+        physics_data = PhysicsData.zeros(
             geometry.nodal_shape[1:],
             geometry.nodal_shape[0],
             date=date
         )
-        # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
-        # and implicitly passed to the next physics_term. tendencies are summed
-        physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
+
+        # Initialize zero tendencies with tracer tendencies
+        tracer_tends = {name: jnp.zeros_like(tracer) for name, tracer in state.tracers.items()}
+        tendencies = PhysicsTendency.zeros(state.temperature.shape, tracers=tracer_tends)
+
+        # Get array dimensions for vectorization
+        nlev, nlat, nlon = state.temperature.shape
+        ncols = nlat * nlon
         
+        # Create vectorized physics state for column-wise processing
+        # Reshape from [nlev, nlat, nlon] to [nlev, ncols]
+        # Also reshape tracers
+        vectorized_tracers = {}
+        for name, tracer in state.tracers.items():
+            vectorized_tracers[name] = tracer.reshape(nlev, ncols)
+            
+        vectorized_state = PhysicsState(
+            u_wind=state.u_wind.reshape(nlev, ncols),
+            v_wind=state.v_wind.reshape(nlev, ncols),
+            temperature=state.temperature.reshape(nlev, ncols),
+            specific_humidity=state.specific_humidity.reshape(nlev, ncols),
+            geopotential=state.geopotential.reshape(nlev, ncols),
+            surface_pressure=state.surface_pressure.reshape(ncols),
+            tracers=vectorized_tracers
+        )
+        
+        # Apply physics terms sequentially with vectorization
         for term in self.terms:
-            tend, data = term(state, data, self.parameters, boundaries, geometry)
-            physics_tendency += tend
+            if self.checkpoint_terms:
+                term = jax.checkpoint(term)
+            
+            # Apply term to vectorized state
+            term_tendency, physics_data = term(
+                vectorized_state, physics_data, self.parameters, boundaries, geometry
+            )
+            
+            # Reshape tendencies back to 3D and accumulate
+            # Also reshape tracer tendencies, ensuring all tracers are present
+            reshaped_tracers = {}
+            # First, initialize with zeros for all tracers in the state
+            for name in state.tracers.keys():
+                if name in term_tendency.tracers:
+                    reshaped_tracers[name] = term_tendency.tracers[name].reshape(nlev, nlat, nlon)
+                else:
+                    # If this physics term doesn't have a tendency for this tracer, use zeros
+                    reshaped_tracers[name] = jnp.zeros((nlev, nlat, nlon))
+                
+            reshaped_tendency = PhysicsTendency(
+                u_wind=term_tendency.u_wind.reshape(nlev, nlat, nlon),
+                v_wind=term_tendency.v_wind.reshape(nlev, nlat, nlon),
+                temperature=term_tendency.temperature.reshape(nlev, nlat, nlon),
+                specific_humidity=term_tendency.specific_humidity.reshape(nlev, nlat, nlon),
+                tracers=reshaped_tracers
+            )
+            
+            tendencies = tendencies + reshaped_tendency
         
-        return physics_tendency, data
+        return tendencies, physics_data
     
 
 @jit
@@ -139,15 +188,13 @@ def _prepare_common_physics_state(
     """
     from jcm.physics.speedy.physical_constants import p0
     
-    nlev, ncols = state.temperature.shape
-    
     # Calculate pressure levels from surface pressure and sigma coordinates
     surface_pressure = state.surface_pressure * p0  # Convert to Pa
     sigma_levels = geometry.fsg  # sigma coordinates at level centers
     pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
     
     # Calculate pressure at interfaces (half levels)
-    sigma_half = geometry.hs
+    sigma_half = geometry.hsg
     pressure_half = sigma_half[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
     
     # Convert geopotential to height
@@ -164,38 +211,24 @@ def _prepare_common_physics_state(
     dp = jnp.diff(pressure_half, axis=0)
     dz_full = -dp / (rho * physical_constants.grav)
     
-    # Extract tracers
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    rain_water = state.tracers.get('qr', jnp.zeros_like(state.temperature))
-    snow_water = state.tracers.get('qs', jnp.zeros_like(state.temperature))
-        
     # Calculate relative humidity
     es = 611.2 * jnp.exp(17.67 * (state.temperature - 273.15) / (state.temperature - 29.65))
     e = state.specific_humidity * pressure_levels / (0.622 + 0.378 * state.specific_humidity)
     rel_humidity = e / es
-    
-    # Get surface properties from boundaries
-    surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
-    roughness_length = boundaries.roughness_length if hasattr(boundaries, 'roughness_length') else jnp.full(ncols, 0.001)
-    
-    return physics_data.copy(
-        dt=parameters.convection.dt_conv,  # Use timestep from parameters
-        surface_pressure=surface_pressure,
-        pressure_levels=pressure_levels,
+
+    diagnostic_data = physics_data.diagnostics.copy(
+        pressure_full=pressure_levels,
         pressure_half=pressure_half,
-        height_levels=height_levels,
+        height_full=height_levels,
         height_half=height_half,
-        rho=rho,
-        dz=dz_full,
-        cloud_water=cloud_water,
-        cloud_ice=cloud_ice,
-        rain_water=rain_water,
-        snow_water=snow_water,
-        rel_humidity=rel_humidity,
-        surface_temp=surface_temp,
-        roughness_length=roughness_length,
+        relative_humidity=rel_humidity,
+        surface_pressure=surface_pressure,
+        air_density=rho,
+        layer_thickness=dz_full,
     )
+
+    zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    return zero_tendencies, physics_data.copy(diagnostics=diagnostic_data)
 
 # Physics term methods
 @jit
@@ -308,9 +341,9 @@ def apply_convection(
     from jcm.physics.icon.convection.tracer_transport import TracerIndices
     
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    height_levels = physics_data.height_levels
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    height_levels = physics_data.diagnostics.height_full
     
     # Extract tracers from physics state and combine with specific humidity
     # Build tracer array with specific humidity as first tracer
@@ -404,14 +437,13 @@ def apply_convection(
     # Note: tracer tendencies are already handled in tracer_tend_dict and don't need 3D reshaping
     # They will be reshaped in compute_tendencies when going back to 3D
     
-    # Update physics data with convection diagnostics (always includes tracers)
+    # Update physics data with convection diagnostics
     convection_data = physics_data.convection.copy(
-        convective_cloud_water=qc_conv,
-        convective_cloud_ice=qi_conv,
-        convective_precipitation=precip_conv,
-        tracer_tendencies=tracer_tend_dict
+        qc_conv=qc_conv,
+        qi_conv=qi_conv,
+        precip_conv=precip_conv,
     )
-    updated_physics_data = physics_data.copy(convection_data=convection_data)
+    updated_physics_data = physics_data.copy(convection=convection_data)
     
     return physics_tendencies, updated_physics_data
 
@@ -425,11 +457,12 @@ def apply_clouds(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply shallow cloud scheme with microphysics"""
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    surface_pressure = physics_data.surface_pressure
-    cloud_water = physics_data.cloud_water
-    cloud_ice = physics_data.cloud_ice
+    
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    surface_pressure = physics_data.diagnostics.surface_pressure
+    cloud_water = state.tracers.get('qc')
+    cloud_ice = state.tracers.get('qi')
     
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
@@ -491,12 +524,15 @@ def apply_clouds(
     
     # Update physics data with cloud diagnostics
     cloud_data = physics_data.clouds.copy(cloud_fraction=cloud_fraction,
-                                           relative_humidity=rel_humidity,
-                                           rain_flux=rain_flux,
-                                           snow_flux=snow_flux,
-                                           total_precipitation=rain_flux + snow_flux)
+                                           precip_rain=rain_flux,
+                                           precip_snow=snow_flux)
     
-    updated_physics_data = physics_data.copy(cloud_data=cloud_data)
+    diagnostics = physics_data.diagnostics.copy(
+        relative_humidity=rel_humidity,
+    )
+
+    updated_physics_data = physics_data.copy(clouds=cloud_data, 
+                                             diagnostics=diagnostics)
     
     return physics_tendencies, updated_physics_data
 
@@ -511,15 +547,17 @@ def apply_microphysics(
     """Apply cloud microphysics scheme"""
     
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    cloud_water = physics_data.cloud_water
-    cloud_ice = physics_data.cloud_ice
-    rain_water = physics_data.rain_water
-    snow = physics_data.snow_water
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
     cloud_fraction = physics_data.clouds.cloud_fraction
-    air_density = physics_data.rho
-    dz = physics_data.dz
+    air_density = physics_data.diagnostics.air_density
+    dz = physics_data.diagnostics.layer_thickness
+
+    # Extract cloud water, ice, rain, and snow from state
+    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    rain_water = state.tracers.get('qr', jnp.zeros_like(state.temperature))
+    snow = state.tracers.get('qs', jnp.zeros_like(state.temperature))
     
     # Droplet number concentration (simple profile)
     droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
@@ -594,14 +632,13 @@ def apply_microphysics(
     )
     
     # Update physics data
-    micro_data = physics_data.microphysics.copy(
-        rain_flux=rain_flux,
-        snow_flux=snow_flux,
-        total_precipitation=rain_flux + snow_flux,
+    micro_data = physics_data.clouds.copy(
+        precip_rain=rain_flux,
+        precip_snow=snow_flux,
         droplet_number=droplet_number
     )
     
-    updated_physics_data = physics_data.copy(microphysics_data=micro_data)
+    updated_physics_data = physics_data.copy(clouds=micro_data)
     
     return physics_tendencies, updated_physics_data
 
@@ -614,18 +651,16 @@ def apply_vertical_diffusion(
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply vertical diffusion and boundary layer physics"""
-    from jcm.physics.icon.vertical_diffusion.vertical_diffusion_types import VDiffParameters
+    from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
     
     nlev, ncols = state.temperature.shape
     dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    pressure_half = physics_data.pressure_half
-    height_levels = physics_data.height_levels
+    pressure_levels = physics_data.diagnostics.pressure_levels
+    pressure_half = physics_data.pressure_full
+    height_levels = physics_data.height_full
     height_half = physics_data.height_half
-    cloud_water = physics_data.cloud_water
-    cloud_ice = physics_data.cloud_ice
-    surface_temp = physics_data.surface_temp
-    roughness_length = physics_data.roughness_length
+    cloud_water = state.tracers.get('qc')
+    cloud_ice = state.tracers.get('qi')
     
     # Initialize prognostic variables if not present
     tke = physics_data.vertical_diffusion.tke if hasattr(physics_data.vertical_diffusion, 'tke') else jnp.ones((nlev, ncols)) * 0.1
@@ -636,6 +671,10 @@ def apply_vertical_diffusion(
     surface_fraction = jnp.zeros((ncols, nsfc_type))
     surface_fraction = surface_fraction.at[:, 2].set(1.0)  # All land for now
     
+    # Get surface properties from boundaries
+    surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
+    roughness_length = boundaries.roughness_length if hasattr(boundaries, 'roughness_length') else jnp.full(ncols, 0.001)
+
     surface_temperature = jnp.repeat(surface_temp[:, jnp.newaxis], nsfc_type, axis=1)
     roughness = jnp.repeat(roughness_length[:, jnp.newaxis], nsfc_type, axis=1)
     
@@ -762,11 +801,11 @@ def apply_surface(
     from jcm.physics.icon.surface import initialize_surface_state
     
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    surface_temp = physics_data.surface_temp
-    roughness_length = physics_data.roughness_length
-    
+    dt = parameters.convection.dt
+    pressure_levels = physics_data.diagnostics.pressure_full
+    # Get surface properties from boundaries
+    surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
+
     # Initialize surface state (simplified)
     # In reality, this should come from the model's surface state
     nsfc_type = parameters.surface.nsfc_type
@@ -904,9 +943,9 @@ def apply_gravity_waves(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply gravity wave drag"""
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
-    pressure_levels = physics_data.pressure_levels
-    height_levels = physics_data.height_levels
+    dt = parameters.convection.dt
+    pressure_levels = physics_data.diagnostics.pressure_full
+    height_levels = physics_data.diagnostics.height_levels
     
     # Need orography standard deviation - use a placeholder for now
     # In a real implementation, this would come from boundary data

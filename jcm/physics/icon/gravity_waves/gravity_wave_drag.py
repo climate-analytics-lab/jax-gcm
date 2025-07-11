@@ -20,41 +20,64 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-from dataclasses import dataclass
 from functools import partial
+import tree_math
 
 from ..constants.physical_constants import (
     grav, rd, cp
 )
 
 
-@dataclass(frozen=True)
+@tree_math.struct
 class GravityWaveParameters:
     """Parameters for gravity wave drag scheme"""
     
     # Orographic drag parameters
-    gkdrag: float = 0.5           # Surface drag coefficient
-    gkwake: float = 0.5           # Wake drag coefficient
-    grcrit: float = 0.25          # Critical Froude number
-    gssec: float = 0.0001         # Security parameter for Richardson number
-    gtsec: float = 0.0001         # Security parameter for Brunt-Vaisala frequency
+    gkdrag: float           # Surface drag coefficient
+    gkwake: float           # Wake drag coefficient
+    grcrit: float           # Critical Froude number
+    gssec: float            # Security parameter for Richardson number
+    gtsec: float            # Security parameter for Brunt-Vaisala frequency
     
     # Non-orographic parameters
-    ruwmax: float = 1.0           # Launch momentum flux for non-orographic waves (N/m²)
-    nslope: float = 1.0           # Slope of wave spectrum
+    ruwmax: float           # Launch momentum flux for non-orographic waves (N/m²)
+    nslope: float           # Slope of wave spectrum
     
     # Wave breaking parameters
-    ric: float = 0.25             # Critical Richardson number
-    efmin: float = 0.0            # Minimum efficiency
-    efmax: float = 0.1            # Maximum efficiency
+    ric: float              # Critical Richardson number
+    efmin: float            # Minimum efficiency
+    efmax: float            # Maximum efficiency
     
     # Numerical parameters
-    zmin: float = 1000.0          # Minimum height for GWD (m)
-    zmax: float = 100000.0        # Maximum height for GWD (m)
+    zmin: float             # Minimum height for GWD (m)
+    zmax: float             # Maximum height for GWD (m)
     
     # Tuning parameters
-    gwdrag_cd: float = 1.0        # Drag coefficient multiplier
-    gwdrag_ef: float = 0.05       # Efficiency factor
+    gwdrag_cd: float        # Drag coefficient multiplier
+    gwdrag_ef: float        # Efficiency factor
+
+    @classmethod
+    def default(cls, gkdrag=0.5, gkwake=0.5, grcrit=0.25, gssec=0.0001,
+                 gtsec=0.0001, ruwmax=1.0, nslope=1.0, ric=0.25,
+                 efmin=0.0, efmax=0.1, zmin=1000.0, zmax=100000.0,
+                 gwdrag_cd=1.0, gwdrag_ef=0.05) -> 'GravityWaveParameters':
+        """Return default gravity wave parameters"""
+        return cls(
+            gkdrag=jnp.array(gkdrag),
+            gkwake=jnp.array(gkwake),
+            grcrit=jnp.array(grcrit),
+            gssec=jnp.array(gssec),
+            gtsec=jnp.array(gtsec),
+            ruwmax=jnp.array(ruwmax),
+            nslope=jnp.array(nslope),
+            ric=jnp.array(ric),
+            efmin=jnp.array(efmin),
+            efmax=jnp.array(efmax),
+            zmin=jnp.array(zmin),
+            zmax=jnp.array(zmax),
+            gwdrag_cd=jnp.array(gwdrag_cd),
+            gwdrag_ef=jnp.array(gwdrag_ef)
+        )
 
 
 class GravityWaveState(NamedTuple):
@@ -284,7 +307,7 @@ def gravity_wave_drag(
         Tuple of (tendencies, state)
     """
     if config is None:
-        config = GravityWaveParameters()
+        config = GravityWaveParameters.default()
     
     nlev = u_wind.shape[0]
     

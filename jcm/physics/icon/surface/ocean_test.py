@@ -160,7 +160,7 @@ class TestMixedLayerOcean:
         assert temp_tendency[1] < 0.0  # Cooling
         # Neutral case might be slightly positive due to shortwave penetration
     
-    def test_mixed_layer_ocean_heat_capacity(self):
+    def test_mixed_layer_ocean_heat_capacit y(self):
         """Test heat capacity scaling."""
         ncol = 2
         ocean_temp = jnp.array([280.0, 280.0])
@@ -169,9 +169,9 @@ class TestMixedLayerOcean:
         dt = 3600.0
         
         # Different mixed layer depths
-        params_shallow = SurfaceParameters(ml_depth=25.0)
-        params_deep = SurfaceParameters(ml_depth=100.0)
-        
+        params_shallow = SurfaceParameters.default(ml_depth=25.0)
+        params_deep = SurfaceParameters.default(ml_depth=100.0)
+
         temp_tendency_shallow = mixed_layer_ocean_step(
             ocean_temp, surface_heat_flux, shortwave_penetration, dt, params_shallow
         )
@@ -189,7 +189,7 @@ class TestMixedLayerOcean:
         surface_heat_flux = jnp.array([100.0])  # W/m²
         shortwave_penetration = jnp.array([20.0])
         dt = 3600.0
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         
         temp_tendency = mixed_layer_ocean_step(
             ocean_temp, surface_heat_flux, shortwave_penetration, dt, params
@@ -360,7 +360,7 @@ class TestOceanTemperatureStep:
         )
         
         dt = 3600.0
-        params = SurfaceParameters()
+        params = SurfaceParameters.default()
         
         temp_tendency = ocean_surface_temperature_step(ocean_temp, fluxes, dt=dt, params=params)
         
