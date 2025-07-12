@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-from functools import partial
+# from functools import partial  # No longer needed
 import tree_math
 
 from ..constants.physical_constants import (
@@ -146,7 +146,7 @@ def brunt_vaisala_frequency(
     return n2
 
 
-@partial(jax.jit, static_argnames=['config'])
+@jax.jit
 def orographic_source(
     u_sfc: jnp.ndarray,
     v_sfc: jnp.ndarray,
@@ -190,7 +190,7 @@ def orographic_source(
     return tau_x, tau_y
 
 
-@partial(jax.jit, static_argnames=['config'])
+@jax.jit
 def wave_breaking_criterion(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -279,7 +279,7 @@ def wave_breaking_criterion(
     return breaking_mask, deposited_momentum
 
 
-@partial(jax.jit, static_argnames=['config'])
+@jax.jit
 def gravity_wave_drag(
     u_wind: jnp.ndarray,
     v_wind: jnp.ndarray,

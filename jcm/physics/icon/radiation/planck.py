@@ -10,7 +10,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from typing import Tuple
-from functools import partial
+# from functools import partial  # Not needed anymore
 
 
 # Physical constants
@@ -83,7 +83,7 @@ def integrated_planck_function(
     return integrated
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def planck_bands(
     temperature: jnp.ndarray,
     band_limits: Tuple[Tuple[float, float], ...],
@@ -104,14 +104,20 @@ def planck_bands(
     temp_array = jnp.atleast_1d(temperature)
     is_scalar = temperature.ndim == 0
     
-    # Calculate for all bands
+    # Calculate for all bands - use fixed size for JAX compatibility
     nlev = temp_array.shape[0]
-    planck = jnp.zeros((nlev, n_bands))
+    max_bands = 10
+    planck_all = jnp.zeros((nlev, max_bands))
     
     # Use a simple loop since band_limits is a tuple
-    for band in range(n_bands):
+    # We compute for all possible bands but mask later
+    for band in range(min(len(band_limits) - 1, max_bands)):
         b_band = integrated_planck_function(temp_array, band_limits[band])
-        planck = planck.at[:, band].set(b_band)
+        planck_all = planck_all.at[:, band].set(b_band)
+    
+    # Mask unused bands
+    band_mask = jnp.arange(max_bands) < n_bands
+    planck = jnp.where(band_mask[None, :], planck_all, 0.0)
     
     # Return scalar result if input was scalar
     if is_scalar:
@@ -185,7 +191,7 @@ def effective_temperature(flux: jnp.ndarray) -> jnp.ndarray:
     return (flux / STEFAN_BOLTZMANN) ** 0.25
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def band_fraction(
     temperature: jnp.ndarray,
     band_limits: Tuple[Tuple[float, float], ...],
@@ -205,13 +211,18 @@ def band_fraction(
     # Total emission
     total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
     
-    # Calculate band emissions
-    fractions = jnp.zeros(n_bands)
+    # Calculate band emissions - use fixed size for JAX compatibility
+    max_bands = 10
+    fractions_all = jnp.zeros(max_bands)
     
     # Use a simple loop since band_limits is a tuple
-    for band in range(n_bands):
+    for band in range(min(len(band_limits) - 1, max_bands)):
         b_band = integrated_planck_function(temperature, band_limits[band])
-        fractions = fractions.at[band].set(b_band / total)
+        fractions_all = fractions_all.at[band].set(b_band / total)
+    
+    # Mask unused bands
+    band_mask = jnp.arange(max_bands) < n_bands
+    fractions = jnp.where(band_mask, fractions_all, 0.0)
     
     return fractions
 

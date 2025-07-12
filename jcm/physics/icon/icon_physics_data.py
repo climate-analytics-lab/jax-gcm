@@ -349,7 +349,7 @@ class AerosolData:
             'cdnc_factor': self.cdnc_factor,
         }
         new_data.update(kwargs)
-        return CloudData(**new_data)
+        return AerosolData(**new_data)
 
 
 @tree_math.struct

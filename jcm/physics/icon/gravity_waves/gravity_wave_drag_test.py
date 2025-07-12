@@ -251,7 +251,7 @@ class TestGravityWaveDrag:
     
     def test_height_limits(self):
         """Test that GWD only applies within height limits"""
-        config = GravityWaveParameters(zmin=5000.0, zmax=25000.0)
+        config = GravityWaveParameters.default(zmin=5000.0, zmax=25000.0)
         
         nlev = 40
         height = jnp.linspace(0, 40000, nlev)
@@ -269,11 +269,11 @@ class TestGravityWaveDrag:
         )
         
         # No tendencies below zmin
-        below_mask = height < config.zmin
+        below_mask = height < float(config.zmin)
         assert jnp.all(tendencies.dudt[below_mask] == 0)
         
         # No tendencies above zmax
-        above_mask = height > config.zmax
+        above_mask = height > float(config.zmax)
         assert jnp.all(tendencies.dudt[above_mask] == 0)
     
     def test_energy_conservation(self):

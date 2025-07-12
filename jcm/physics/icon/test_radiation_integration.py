@@ -19,7 +19,8 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
 from jcm.date import DateData
-from jcm.physics.icon.icon_physics import IconPhysics, IconPhysicsData
+from jcm.physics.icon.icon_physics import IconPhysics
+from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.parameters import Parameters
 
 
@@ -59,17 +60,10 @@ def create_test_state(nlev=20, nlat=8, nlon=16):
     )
 
 
-def create_test_geometry(nlev=20):
+def create_test_geometry(nlev=20, nlat=8, nlon=16):
     """Create test geometry with sigma levels"""
-    # Create evenly spaced sigma levels
-    fsg = jnp.linspace(1.0, 0.0, nlev + 1)
-    fsg_center = 0.5 * (fsg[:-1] + fsg[1:])
-    
-    # Simple geometry - would be more complex in real model
-    return type('Geometry', (), {
-        'fsg': fsg_center,
-        'nlev': nlev
-    })()
+    # Use real Geometry.from_grid_shape as suggested in the NOTE
+    return Geometry.from_grid_shape((nlev, nlat, nlon))
 
 
 def test_radiation_in_icon_physics():
@@ -77,10 +71,17 @@ def test_radiation_in_icon_physics():
     print("Testing radiation integration in IconPhysics...")
     
     # Create test state
-    state = create_test_state()
+    nlev, nlat, nlon = 20, 8, 16
+    state = create_test_state(nlev, nlat, nlon)
     
     # Create geometry
-    geometry = create_test_geometry()
+    geometry = create_test_geometry(nlev, nlat, nlon)
+    
+    # Create boundaries
+    boundaries = BoundaryData(
+        sea_ice_cover=jnp.zeros((nlat, nlon)),
+        surface_temperature=jnp.ones((nlat, nlon)) * 288.0
+    )
     
     # Create date for summer noon
     date = DateData(
@@ -100,26 +101,27 @@ def test_radiation_in_icon_physics():
     )
     
     print(f"Physics terms: {len(physics.terms)}")
-    print(f"Has radiation: {'_apply_radiation' in [t.__name__ for t in physics.terms]}")
+    print(f"Has radiation: {'apply_radiation' in [t.__name__ for t in physics.terms]}")
     
     # Apply physics
     tendencies, physics_data = physics.compute_tendencies(
         state=state,
+        boundaries=boundaries,
         geometry=geometry,
         date=date
     )
     
     # Check radiation was applied
-    assert 'radiation_enabled' in physics_data.radiation_data
-    assert physics_data.radiation_data['radiation_enabled']
+    assert hasattr(physics_data, 'radiation')
+    assert physics_data.radiation.olr is not None
     
     # Check we have radiation heating
     assert jnp.any(tendencies.temperature != 0)
     
     # Print diagnostics
     print("\nRadiation diagnostics:")
-    print(f"Mean OLR: {physics_data.radiation_data['mean_olr']:.1f} W/m²")
-    print(f"Mean SW down: {physics_data.radiation_data['mean_sw_down']:.1f} W/m²")
+    print(f"Mean OLR: {jnp.mean(physics_data.radiation.olr):.1f} W/m²")
+    print(f"Mean SW down: {jnp.mean(physics_data.radiation.toa_sw_down):.1f} W/m²")
     
     # Check heating rates are reasonable
     heating_rate_K_day = tendencies.temperature * 86400
@@ -142,8 +144,13 @@ def test_radiation_with_custom_parameters():
     print("\nTesting radiation with custom parameters...")
     
     # Create test state
-    state = create_test_state(nlev=10, nlat=4, nlon=8)
-    geometry = create_test_geometry(nlev=10)
+    nlev, nlat, nlon = 10, 4, 8
+    state = create_test_state(nlev, nlat, nlon)
+    geometry = create_test_geometry(nlev, nlat, nlon)
+    boundaries = BoundaryData(
+        sea_ice_cover=jnp.zeros((nlat, nlon)),
+        surface_temperature=jnp.ones((nlat, nlon)) * 288.0
+    )
     date = DateData(
         tyear=80.0/365.25,  # Spring
         model_year=2000,
@@ -164,6 +171,7 @@ def test_radiation_with_custom_parameters():
     # Apply physics
     tendencies, physics_data = physics.compute_tendencies(
         state=state,
+        boundaries=boundaries,
         geometry=geometry,
         date=date
     )
@@ -196,7 +204,11 @@ def test_radiation_conservation():
         tracers={}
     )
     
-    geometry = create_test_geometry(nlev)
+    geometry = create_test_geometry(nlev, nlat, nlon)
+    boundaries = BoundaryData(
+        sea_ice_cover=jnp.zeros((nlat, nlon)),
+        surface_temperature=jnp.ones((nlat, nlon)) * 288.0
+    )
     date = DateData(
         tyear=80.0/365.25,  # Day 80
         model_year=2000,
@@ -208,12 +220,13 @@ def test_radiation_conservation():
     physics = IconPhysics()
     tendencies, physics_data = physics.compute_tendencies(
         state=state,
+        boundaries=boundaries,
         geometry=geometry,
         date=date
     )
     
     # Get net radiation at TOA
-    toa_net = physics_data.radiation_data['toa_net_radiation']
+    toa_net = physics_data.radiation.toa_net_radiation
     print(f"TOA net radiation: {jnp.mean(toa_net):.1f} W/m²")
     
     # For isothermal atmosphere, should have net warming from SW

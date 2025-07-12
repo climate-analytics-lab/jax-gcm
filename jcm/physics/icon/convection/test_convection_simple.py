@@ -10,7 +10,7 @@ import numpy as np
 
 # Import basic convection functions
 from jcm.physics.icon.convection.tiedtke_nordeng import (
-    ConvectionConfig,
+    ConvectionParameters,
     saturation_mixing_ratio,
     find_cloud_base,
     calculate_cape_cin
@@ -75,7 +75,7 @@ def test_cloud_base():
     print("\n=== Testing Cloud Base Detection ===")
     
     atm = create_simple_atmosphere()
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     
     cloud_base, has_cloud_base = find_cloud_base(
         atm['temperature'], atm['humidity'], atm['pressure'], config
@@ -95,7 +95,7 @@ def test_cape():
     print("\n=== Testing CAPE Calculation ===")
     
     atm = create_simple_atmosphere()
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     
     # Find cloud base first
     cloud_base, has_cloud_base = find_cloud_base(

@@ -12,7 +12,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from typing import Tuple
-from functools import partial
+# from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
 
@@ -180,7 +180,7 @@ def ozone_absorption_lw(
     )
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def gas_optical_depth_lw(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
@@ -226,14 +226,18 @@ def gas_optical_depth_lw(
         # Optical depth = absorption * density * path length
         return k_total * air_density * layer_thickness
     
-    # Apply to all bands
-    bands = jnp.arange(n_bands)
-    tau = jax.vmap(single_band_absorption)(bands).T
+    # Apply to all bands - use fixed range for JAX compatibility
+    max_bands = 10
+    bands = jnp.arange(max_bands)
+    band_mask = bands < n_bands
+    tau_all = jax.vmap(single_band_absorption)(bands)
+    # Return full size array with inactive bands masked to zero
+    tau = jnp.where(band_mask[:, None], tau_all, 0.0).T
     
     return tau
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def gas_optical_depth_sw(
     pressure: jnp.ndarray,
     h2o_vmr: jnp.ndarray,
@@ -282,9 +286,13 @@ def gas_optical_depth_sw(
         # Optical depth with slant path correction
         return k_total * air_density * layer_thickness * sec_zenith
     
-    # Apply to all bands
-    bands = jnp.arange(n_bands)
-    tau = jax.vmap(single_band_absorption)(bands).T
+    # Apply to all bands - use fixed range for JAX compatibility
+    max_bands = 10
+    bands = jnp.arange(max_bands)
+    band_mask = bands < n_bands
+    tau_all = jax.vmap(single_band_absorption)(bands)
+    # Return full size array with inactive bands masked to zero
+    tau = jnp.where(band_mask[:, None], tau_all, 0.0).T
     
     return tau
 
@@ -374,22 +382,30 @@ def create_gas_optics(
     nlev = state.temperature.shape[0]
     
     # Longwave: pure absorption
+    # Create fixed-size arrays for JAX compatibility
+    max_bands = 10
+    lw_band_mask = jnp.arange(max_bands) < config.n_lw_bands
+    lw_ssa_all = jnp.zeros((nlev, max_bands))
+    lw_g_all = jnp.zeros((nlev, max_bands))
+    
     lw_optics = OpticalProperties(
         optical_depth=tau_lw,
-        single_scatter_albedo=jnp.zeros((nlev, config.n_lw_bands)),
-        asymmetry_factor=jnp.zeros((nlev, config.n_lw_bands))
+        single_scatter_albedo=jnp.where(lw_band_mask[None, :], lw_ssa_all, 0.0),
+        asymmetry_factor=jnp.where(lw_band_mask[None, :], lw_g_all, 0.0)
     )
     
     # Shortwave: Rayleigh scattering in visible
-    sw_ssa = jnp.zeros((nlev, config.n_sw_bands))
-    sw_ssa = sw_ssa.at[:, 0].set(
+    sw_band_mask = jnp.arange(max_bands) < config.n_sw_bands
+    sw_ssa_all = jnp.zeros((nlev, max_bands))
+    sw_ssa_all = sw_ssa_all.at[:, 0].set(
         tau_rayleigh / jnp.maximum(tau_sw[:, 0], 1e-10)
     )
+    sw_g_all = jnp.zeros((nlev, max_bands))
     
     sw_optics = OpticalProperties(
         optical_depth=tau_sw,
-        single_scatter_albedo=sw_ssa,
-        asymmetry_factor=jnp.zeros((nlev, config.n_sw_bands))  # Rayleigh: g=0
+        single_scatter_albedo=jnp.where(sw_band_mask[None, :], sw_ssa_all, 0.0),
+        asymmetry_factor=jnp.where(sw_band_mask[None, :], sw_g_all, 0.0)  # Rayleigh: g=0
     )
     
     return sw_optics, lw_optics

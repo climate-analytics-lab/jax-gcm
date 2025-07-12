@@ -38,6 +38,7 @@ from .vertical_diffusion import (
     vertical_diffusion_scheme,
     vertical_diffusion_scheme_vectorized,
     prepare_vertical_diffusion_state,
+    vertical_diffusion_column,
     compute_dry_static_energy,
     compute_virtual_temperature
 )
@@ -67,6 +68,7 @@ __all__ = [
     "vertical_diffusion_scheme",
     "vertical_diffusion_scheme_vectorized",
     "prepare_vertical_diffusion_state",
+    "vertical_diffusion_column",
     "compute_dry_static_energy",
     "compute_virtual_temperature"
 ]

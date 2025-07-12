@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from jcm.physics.icon.convection import (
     tiedtke_nordeng_convection,
-    ConvectionConfig
+    ConvectionParameters
 )
 
 
@@ -176,7 +176,7 @@ def main():
     profile = create_tropical_profile(nlev=40)
     
     # Configure convection scheme
-    config = ConvectionConfig(
+    config = ConvectionParameters.default(
         tau=7200.0,           # 2-hour CAPE adjustment
         entrpen=1.0e-4,       # Entrainment for deep convection
         entrscv=3.0e-3,       # Entrainment for shallow convection

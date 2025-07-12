@@ -17,7 +17,7 @@ import jax
 from typing import Tuple, Union
 import jax_solar
 import jax_datetime as jdt
-from functools import partial
+# from functools import partial  # Not needed anymore
 
 
 # Re-export jax-solar constants
@@ -61,7 +61,7 @@ def calculate_solar_radiation_from_datetime(
     return flux, cos_zenith, altitude_degrees
 
 
-@partial(jax.jit, static_argnames=['n_times'])
+@jax.jit
 def calculate_daily_integrated_radiation(
     date_str: str,
     longitude: jnp.ndarray,

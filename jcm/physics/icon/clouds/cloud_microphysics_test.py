@@ -39,13 +39,13 @@ class TestCloudDropletRadius:
         radius_high = cloud_droplet_radius(
             jnp.array(10e-3), jnp.array(1.0), jnp.array(1e5), config  # Very few droplets
         )
-        assert jnp.allclose(radius_high, config.ceffmax * 1e-6)
+        assert jnp.allclose(radius_high, float(config.ceffmax) * 1e-6)
         
         # Very low cloud water with many droplets should hit min radius
         radius_low = cloud_droplet_radius(
             jnp.array(1e-6), jnp.array(1.0), jnp.array(1000e6), config  # Many droplets
         )
-        assert jnp.allclose(radius_low, config.ceffmin * 1e-6)
+        assert jnp.allclose(radius_low, float(config.ceffmin) * 1e-6)
 
 
 class TestAutoconversion:
@@ -503,7 +503,7 @@ class TestFullMicrophysics:
                     air_density, layer_thickness, droplet_number)
         
         # Test JIT compilation
-        jitted_micro = jax.jit(cloud_microphysics, static_argnames=['config'])
+        jitted_micro = jax.jit(cloud_microphysics)
         
         state_vars = create_state()
         tendencies, state = jitted_micro(*state_vars, 60.0, config)

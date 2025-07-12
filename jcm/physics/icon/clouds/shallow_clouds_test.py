@@ -351,7 +351,7 @@ class TestShallowCloudScheme:
             return temperature, specific_humidity, pressure, cloud_water, cloud_ice
         
         # Test JIT compilation
-        jitted_scheme = jax.jit(shallow_cloud_scheme, static_argnames=['config'])
+        jitted_scheme = jax.jit(shallow_cloud_scheme)
         
         t, q, p, qc, qi = create_profile()
         tendencies, state = jitted_scheme(t, q, p, qc, qi, 100000.0, 1800.0, config)

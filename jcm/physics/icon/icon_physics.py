@@ -72,7 +72,7 @@ class IconPhysics(Physics):
             apply_microphysics,
             get_simple_aerosol,
             apply_radiation, 
-            apply_vertical_diffusion,
+            apply_vertical_diffusion, 
             apply_surface,
             apply_gravity_waves
         ]
@@ -292,18 +292,14 @@ def apply_radiation(state: PhysicsState,
         )
     
     # Apply radiation using vmap
-    results = jax.vmap(
+    rad_temp_tend, rad_out = jax.vmap(
         apply_radiation_to_column,
         in_axes=(1, 1, 0, 1, 1, 1, 1, 0, 0),  # ps, lat, lon are 1D
         out_axes=(1, 1, 1, 0, 0, 0, 0, 0)     # fluxes are scalars per column
     )(state.temperature, state.specific_humidity, state.surface_pressure,
         state.geopotential, cloud_water, cloud_ice, physics_data.clouds.cloud_fraction,
         latitudes, longitudes)
-    
-    # Unpack results
-    rad_temp_tend, lw_heating, sw_heating, olr, toa_sw_down, toa_sw_up, \
-    sfc_lw_down, sfc_sw_down = results
-    
+        
     # Create physics tendencies (already in 2D format [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from radiation
@@ -314,18 +310,7 @@ def apply_radiation(state: PhysicsState,
     )
     
     # Update physics data with radiation diagnostics
-
-    rad_out = physics_data.radiation.copy(
-        longwave_heating=lw_heating,
-        shortwave_heating=sw_heating,
-        olr=olr,
-        toa_sw_down=toa_sw_down,
-        toa_sw_up=toa_sw_up,
-        toa_net_radiation=toa_sw_down - toa_sw_up - olr,
-        surface_lw_down=sfc_lw_down,
-        surface_sw_down=sfc_sw_down
-    )
-    updated_physics_data = physics_data.copy(radiation_data=rad_out)
+    updated_physics_data = physics_data.copy(radiation=rad_out)
     
     return physics_tendencies, updated_physics_data
 
@@ -654,11 +639,11 @@ def apply_vertical_diffusion(
     from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
     
     nlev, ncols = state.temperature.shape
-    dt = physics_data.dt
+    dt = parameters.convection.dt
     pressure_levels = physics_data.diagnostics.pressure_levels
-    pressure_half = physics_data.pressure_full
-    height_levels = physics_data.height_full
-    height_half = physics_data.height_half
+    pressure_half = physics_data.diagnostics.pressure_full
+    height_levels = physics_data.diagnostics.height_full
+    height_half = physics_data.diagnostics.height_half
     cloud_water = state.tracers.get('qc')
     cloud_ice = state.tracers.get('qi')
     
@@ -808,9 +793,9 @@ def apply_surface(
 
     # Initialize surface state (simplified)
     # In reality, this should come from the model's surface state
-    nsfc_type = parameters.surface.nsfc_type
+    nsfc_type = 3  # Fixed value: water, ice, land
     surface_fractions = jnp.zeros((ncols, nsfc_type))
-    surface_fractions = surface_fractions.at[:, parameters.surface.ilnd].set(1.0)  # All land for now
+    surface_fractions = surface_fractions.at[:, 2].set(1.0)  # All land for now (index 2)
     
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
@@ -829,32 +814,36 @@ def apply_surface(
     atm_p = pressure_levels[-1, :]
     
     # Height of lowest model level above surface
-    ref_height = physics_data.height_levels[-1, :] - physics_data.height_levels[-1, :].min()
+    ref_height = physics_data.diagnostics.height_full[-1, :] - physics_data.diagnostics.height_full[-1, :].min()
     ref_height = jnp.maximum(ref_height, 10.0)  # At least 10m
-    
-    # Radiative fluxes (simplified - should come from radiation scheme)
-    sw_down = jnp.full(ncols, 200.0)  # 200 W/m² downward SW
-    lw_down = jnp.full(ncols, 300.0)  # 300 W/m² downward LW
     
     # Define single column surface physics function
     def apply_surface_to_column(col_idx):
         """Apply surface physics to a single column"""
         
         # Create atmospheric forcing for this column
+        # Initialize exchange coefficients with dummy values for now
+        nsfc_type = 3
+        dummy_exchange = jnp.ones(nsfc_type) * 0.001  # Small exchange coefficient
+        
         atm_forcing = AtmosphericForcing(
             temperature=atm_temp[col_idx],
-            specific_humidity=atm_qv[col_idx],
+            humidity=atm_qv[col_idx],
             u_wind=atm_u[col_idx],
             v_wind=atm_v[col_idx],
             pressure=atm_p[col_idx],
-            reference_height=ref_height[col_idx],
-            sw_radiation_down=sw_down[col_idx],
-            lw_radiation_down=lw_down[col_idx]
+            sw_downward=physics_data.radiation.sw_down[col_idx],
+            lw_downward=physics_data.radiation.lw_down[col_idx],
+            rain_rate=0.0,  # No rain for now
+            snow_rate=0.0,  # No snow for now
+            exchange_coeff_heat=dummy_exchange,
+            exchange_coeff_moisture=dummy_exchange,
+            exchange_coeff_momentum=dummy_exchange
         )
         
         # Extract surface state for this column
-        col_surface_state = surface_state.extract_column(col_idx)
-        
+        col_surface_state = surface_state.at[col_idx]
+
         # Apply surface physics
         fluxes, tendencies, diagnostics = surface_physics_step(
             atm_forcing, col_surface_state, dt, parameters.surface
@@ -943,9 +932,9 @@ def apply_gravity_waves(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply gravity wave drag"""
     nlev, ncols = state.temperature.shape
-    dt = parameters.convection.dt
+    dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
-    height_levels = physics_data.diagnostics.height_levels
+    height_levels = physics_data.diagnostics.height_full
     
     # Need orography standard deviation - use a placeholder for now
     # In a real implementation, this would come from boundary data

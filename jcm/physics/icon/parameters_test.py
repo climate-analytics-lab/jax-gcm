@@ -19,9 +19,9 @@ def test_parameters_initialization():
     assert params.microphysics is not None
     
     # Check some default values
-    assert params.convection.entrpen == 1.0e-4
-    assert params.clouds.crt == 0.9
-    assert params.microphysics.ccraut == 5.0e-4
+    assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7
+    assert abs(float(params.clouds.crt) - 0.9) < 1e-7
+    assert abs(float(params.microphysics.ccraut) - 5.0e-4) < 1e-7
     
     print("✓ Default parameters initialized correctly")
 
@@ -32,18 +32,18 @@ def test_parameters_with_methods():
     
     # Test with_convection
     params2 = params.with_convection(entrpen=4.0e-4)
-    assert params2.convection.entrpen == 4.0e-4
-    assert params.convection.entrpen == 1.0e-4  # Original unchanged
+    assert abs(float(params2.convection.entrpen) - 4.0e-4) < 1e-7
+    assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7  # Original unchanged
     
     # Test with_clouds
     params3 = params.with_clouds(crt=0.85)
-    assert params3.clouds.crt == 0.85
-    assert params.clouds.crt == 0.9  # Original unchanged
+    assert abs(float(params3.clouds.crt) - 0.85) < 1e-7
+    assert abs(float(params.clouds.crt) - 0.9) < 1e-7  # Original unchanged
     
     # Test with_microphysics
     params4 = params.with_microphysics(ccraut=0.5e-3)
-    assert params4.microphysics.ccraut == 0.5e-3
-    assert params.microphysics.ccraut == 5.0e-4  # Original unchanged
+    assert abs(float(params4.microphysics.ccraut) - 0.5e-3) < 1e-7
+    assert abs(float(params.microphysics.ccraut) - 5.0e-4) < 1e-7  # Original unchanged
     
     print("✓ Parameter update methods work correctly")
 
@@ -53,12 +53,12 @@ def test_icon_physics_with_parameters():
     # Default parameters
     physics1 = IconPhysics()
     assert physics1.parameters is not None
-    assert physics1.parameters.convection.entrpen == 1.0e-4
+    assert abs(float(physics1.parameters.convection.entrpen) - 1.0e-4) < 1e-7
     
     # Custom parameters
     custom_params = Parameters.default().with_convection(entrpen=5.0e-4)
     physics2 = IconPhysics(parameters=custom_params)
-    assert physics2.parameters.convection.entrpen == 5.0e-4
+    assert abs(float(physics2.parameters.convection.entrpen) - 5.0e-4) < 1e-7
     
     print("✓ IconPhysics accepts Parameters object")
 
@@ -67,6 +67,7 @@ def test_physics_terms_use_parameters():
     """Test that physics terms can access parameters"""
     from jcm.physics_interface import PhysicsState
     from jcm.date import DateData
+    from jcm.boundaries import BoundaryData
     
     # Create simple test state
     nlev, nlat, nlon = 8, 4, 4
@@ -91,10 +92,13 @@ def test_physics_terms_use_parameters():
     # (This is a basic smoke test)
     import jcm.geometry as geo
     geometry = geo.Geometry.from_grid_shape((nlat, nlon), nlev)
+    boundaries = BoundaryData.zeros((nlat, nlon),
+                                    tsea=jnp.ones((nlat, nlon)) * 288.0,
+                                    sice_am=jnp.zeros((nlat, nlon, 365)))
     
     tendencies, physics_data = physics.compute_tendencies(
         state, 
-        boundaries=None,
+        boundaries=boundaries,
         geometry=geometry,
         date=DateData.zeros()
     )

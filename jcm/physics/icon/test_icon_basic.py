@@ -5,7 +5,7 @@ Basic test script for ICON physics implementation (no pytest required)
 
 import sys
 import jax.numpy as jnp
-from jcm.physics.icon.icon_physics import IconPhysics, IconPhysicsData, set_physics_flags
+from jcm.physics.icon.icon_physics import IconPhysics, PhysicsData, set_physics_flags
 from jcm.physics.icon.constants import physical_constants
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.date import DateData
@@ -22,12 +22,12 @@ def test_physical_constants():
     print("✓ Physical constants test passed")
 
 def test_icon_physics_data():
-    """Test IconPhysicsData container"""
-    print("Testing IconPhysicsData...")
+    """Test PhysicsData container"""
+    print("Testing PhysicsData...")
     date = DateData(year=2000, month=1, day=1, hour=0, minute=0, second=0, model_step=0)
     
     # Test creation
-    physics_data = IconPhysicsData(date=date)
+    physics_data = PhysicsData(date=date)
     assert physics_data.date == date
     assert physics_data.radiation_data == {}
     
@@ -35,7 +35,7 @@ def test_icon_physics_data():
     new_data = physics_data.copy(test_field=123)
     assert new_data.date == date
     assert new_data['test_field'] == 123
-    print("✓ IconPhysicsData test passed")
+    print("✓ PhysicsData test passed")
 
 def test_icon_physics_initialization():
     """Test IconPhysics initialization"""
@@ -60,7 +60,7 @@ def test_set_physics_flags():
     print("Testing set_physics_flags...")
     # Create test data
     date = DateData(year=2000, month=1, day=1, hour=0, minute=0, second=0, model_step=0)
-    physics_data = IconPhysicsData(date=date)
+    physics_data = PhysicsData(date=date)
     
     # Create dummy physics state
     dummy_shape = (32, 64, 20)  # Example shape (lat, lon, lev)
@@ -87,7 +87,7 @@ def test_icon_physics_call():
     print("Testing IconPhysics call...")
     # Create test objects
     date = DateData(year=2000, month=1, day=1, hour=0, minute=0, second=0, model_step=0)
-    physics_data = IconPhysicsData(date=date)
+    physics_data = PhysicsData(date=date)
     physics = IconPhysics()
     
     # Create dummy physics state
@@ -106,7 +106,7 @@ def test_icon_physics_call():
     
     # Check outputs
     assert tendencies.temperature.shape == dummy_shape
-    assert isinstance(updated_data, IconPhysicsData)
+    assert isinstance(updated_data, PhysicsData)
     assert updated_data.date == date
     print("✓ IconPhysics call test passed")
 

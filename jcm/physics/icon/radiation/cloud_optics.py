@@ -11,7 +11,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from typing import Tuple
-from functools import partial
+# from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
 
@@ -234,7 +234,7 @@ def ice_cloud_optics_lw(
     return tau
 
 
-@partial(jax.jit, static_argnames=['n_sw_bands', 'n_lw_bands'])
+@jax.jit
 def cloud_optics(
     cloud_water_path: jnp.ndarray,
     cloud_ice_path: jnp.ndarray,
@@ -299,8 +299,15 @@ def cloud_optics(
         return tau_total, ssa_combined, g_combined
     
     # Apply to all SW bands
-    sw_bands = jnp.arange(n_sw_bands)
-    tau_sw, ssa_sw, g_sw = jax.vmap(calculate_sw_band)(sw_bands)
+    # Handle dynamic n_sw_bands by computing for fixed size and masking
+    max_sw_bands = 10  # Maximum supported bands
+    sw_bands = jnp.arange(max_sw_bands)
+    tau_sw_all, ssa_sw_all, g_sw_all = jax.vmap(calculate_sw_band)(sw_bands)
+    # Mask out unused bands
+    band_mask = sw_bands[:, None] < n_sw_bands
+    tau_sw = jnp.where(band_mask, tau_sw_all, 0.0)
+    ssa_sw = jnp.where(band_mask, ssa_sw_all, 0.0)
+    g_sw = jnp.where(band_mask, g_sw_all, 0.0)
     tau_sw = tau_sw.T
     ssa_sw = ssa_sw.T
     g_sw = g_sw.T
@@ -312,8 +319,13 @@ def cloud_optics(
         return tau_liq + tau_ice
     
     # Apply to all LW bands
-    lw_bands = jnp.arange(n_lw_bands)
-    tau_lw = jax.vmap(calculate_lw_band)(lw_bands).T
+    # Handle dynamic n_lw_bands by computing for fixed size and masking
+    max_lw_bands = 10  # Maximum supported bands  
+    lw_bands = jnp.arange(max_lw_bands)
+    tau_lw_all = jax.vmap(calculate_lw_band)(lw_bands)
+    # Mask out unused bands
+    lw_band_mask = lw_bands[:, None] < n_lw_bands
+    tau_lw = jnp.where(lw_band_mask, tau_lw_all, 0.0).T
     
     # Create optical properties
     sw_optics = OpticalProperties(
@@ -322,10 +334,14 @@ def cloud_optics(
         asymmetry_factor=g_sw
     )
     
+    # Create fixed-size arrays for LW SSA and g
+    lw_ssa_all = jnp.zeros((nlev, max_lw_bands))
+    lw_g_all = jnp.zeros((nlev, max_lw_bands))
+    
     lw_optics = OpticalProperties(
         optical_depth=tau_lw,
-        single_scatter_albedo=jnp.zeros((nlev, n_lw_bands)),  # Pure absorption
-        asymmetry_factor=jnp.zeros((nlev, n_lw_bands))
+        single_scatter_albedo=jnp.where(lw_band_mask.T, lw_ssa_all, 0.0),  # Pure absorption
+        asymmetry_factor=jnp.where(lw_band_mask.T, lw_g_all, 0.0)
     )
     
     return sw_optics, lw_optics

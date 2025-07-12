@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.icon.icon_physics import IconPhysics
-from jcm.physics.icon.convection import ConvectionConfig
+from jcm.physics.icon.convection import ConvectionParameters
 from jcm.geometry import Geometry
 from jcm.date import DateData
 
@@ -86,7 +86,7 @@ def test_convection_scheme():
     print(f"✅ Created test state: {state.temperature.shape}")
     
     # Create physics instance with convection enabled
-    convection_config = ConvectionConfig(
+    convection_config = ConvectionParameters.default(
         entrpen=1.0e-4,    # Deep convection entrainment
         entrscv=3.0e-4,    # Shallow convection entrainment  
         entrmid=1.0e-4,    # Mid-level convection entrainment
@@ -191,7 +191,7 @@ def test_jax_patterns():
     
     # Test that the functions can be JIT compiled
     try:
-        from jcm.physics.icon.convection.updraft import calculate_updraft, ConvectionConfig
+        from jcm.physics.icon.convection.updraft import calculate_updraft, ConvectionParameters
         from jcm.physics.icon.convection.downdraft import calculate_downdraft
         
         # Create test data
@@ -202,7 +202,7 @@ def test_jax_patterns():
         height = jnp.linspace(0, 10000, nlev)
         rho = jnp.linspace(1.2, 0.3, nlev)
         
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         print("🔄 Testing updraft calculation...")
         

@@ -160,7 +160,7 @@ class TestMixedLayerOcean:
         assert temp_tendency[1] < 0.0  # Cooling
         # Neutral case might be slightly positive due to shortwave penetration
     
-    def test_mixed_layer_ocean_heat_capacit y(self):
+    def test_mixed_layer_ocean_heat_capacity(self):
         """Test heat capacity scaling."""
         ncol = 2
         ocean_temp = jnp.array([280.0, 280.0])

@@ -11,8 +11,8 @@ import jax
 import jax.numpy as jnp
 # import matplotlib.pyplot as plt
 from jcm.model import Model
-from jcm.physics.icon.icon_physics import IconPhysics, IconPhysicsData
-from jcm.physics.icon.convection import ConvectionConfig
+from jcm.physics.icon.icon_physics import IconPhysics, PhysicsData
+from jcm.physics.icon.convection import ConvectionParameters
 from jcm.date import DateData, Timestamp
 from jcm.boundaries import default_boundaries
 
@@ -21,7 +21,7 @@ def create_test_model():
     """Create a test model with ICON physics including convection"""
     
     # Create convection configuration
-    convection_config = ConvectionConfig(
+    convection_config = ConvectionParameters(
         tau=7200.0,           # 2-hour CAPE adjustment
         entrpen=1.0e-4,       # Entrainment for deep convection
         entrscv=3.0e-3,       # Entrainment for shallow convection
@@ -78,7 +78,7 @@ def run_model_test():
         from datetime import datetime
         initial_timestamp = Timestamp.from_datetime(datetime(2000, 1, 1))
         initial_date = DateData.set_date(initial_timestamp, model_year=2000, model_step=0)
-        physics_data = IconPhysicsData.zeros(
+        physics_data = PhysicsData.zeros(
             date=initial_date,
             convection_data={'initialized': True}
         )

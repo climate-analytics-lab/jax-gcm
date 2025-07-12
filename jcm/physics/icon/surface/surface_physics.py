@@ -50,7 +50,8 @@ def initialize_surface_state(
     Returns:
         Initialized surface state
     """
-    nsfc_type = params.nsfc_type
+    # Use fixed value for nsfc_type since it needs to be concrete for array creation
+    nsfc_type = 3  # Always 3: water, ice, land
     nice_layers = 2  # Default ice layers
     nsoil_layers = 4  # Default soil layers
     

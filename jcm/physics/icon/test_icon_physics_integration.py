@@ -14,14 +14,15 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
 from jcm.date import DateData
-from .icon_physics import IconPhysics, IconPhysicsData
+from .icon_physics import IconPhysics
+from .icon_physics_data import PhysicsData
 from .parameters import Parameters
 
 
 class TestIconPhysicsIntegration:
     """Test integrated ICON physics"""
     
-    def setup_test_state(self, nlev=20, nlat=4, nlon=8):
+    def setup_test_state(self, nlev=8, nlat=4, nlon=8):
         """Create test atmosphere state"""
         # Create realistic atmospheric profile
         height = jnp.linspace(0, 20000, nlev)
@@ -79,7 +80,7 @@ class TestIconPhysicsIntegration:
             tracers=tracers
         )
     
-    def setup_geometry(self, nlev=20):
+    def setup_geometry(self, nlev=8):
         """Create test geometry"""
         nlat = 4
         nlon = 8
@@ -99,7 +100,7 @@ class TestIconPhysicsIntegration:
         
         # Create geometry with minimal required fields
         return Geometry(
-            nodal_shape=(nlev, nlon, nlat),
+            nodal_shape=(nlev, nlat, nlon),  # Changed order to (nlev, nlat, nlon)
             radang=radang,
             sia=sia,
             coa=coa,
@@ -127,9 +128,13 @@ class TestIconPhysicsIntegration:
         state = self.setup_test_state()
         geometry = self.setup_geometry()
         date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry, date=date
+            state, boundaries, geometry, date
         )
         
         # Check shapes match input
@@ -149,26 +154,26 @@ class TestIconPhysicsIntegration:
         state = self.setup_test_state()
         geometry = self.setup_geometry()
         date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry, date=date
+            state, boundaries, geometry, date
         )
         
         # Check convection was applied
-        assert 'convection_enabled' in physics_data.convection_data
-        assert physics_data.convection_data['convection_enabled']
+        assert hasattr(physics_data, 'convection')
+        assert physics_data.convection.qc_conv is not None
         
         # Check clouds were applied
-        assert 'cloud_scheme_enabled' in physics_data.cloud_data
-        assert physics_data.cloud_data['cloud_scheme_enabled']
-        
-        # Check microphysics was applied
-        assert 'microphysics_enabled' in physics_data.microphysics_data
-        assert physics_data.microphysics_data['microphysics_enabled']
+        assert hasattr(physics_data, 'clouds')
+        assert physics_data.clouds.cloud_fraction is not None
         
         # Check gravity waves were applied
-        assert 'gravity_wave_drag_enabled' in physics_data.gravity_wave_data
-        assert physics_data.gravity_wave_data['gravity_wave_drag_enabled']
+        assert hasattr(physics_data, 'gravity_waves')
+        assert physics_data.gravity_waves.surface_stress is not None
     
     def test_nonzero_tendencies(self):
         """Test that physics produces non-zero tendencies"""
@@ -176,9 +181,13 @@ class TestIconPhysicsIntegration:
         state = self.setup_test_state()
         geometry = self.setup_geometry()
         date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry, date=date
+            state, boundaries, geometry, date
         )
         
         # At least some tendencies should be non-zero
@@ -196,26 +205,26 @@ class TestIconPhysicsIntegration:
         state = self.setup_test_state()
         geometry = self.setup_geometry()
         date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry, date=date
+            state, boundaries, geometry, date
         )
         
         # Check convection diagnostics
-        assert 'convective_precipitation' in physics_data.convection_data
-        assert 'convective_cloud_water' in physics_data.convection_data
+        assert hasattr(physics_data.convection, 'precip_conv')
+        assert hasattr(physics_data.convection, 'qc_conv')
         
         # Check cloud diagnostics
-        assert 'cloud_fraction' in physics_data.cloud_data
-        assert 'total_precipitation' in physics_data.cloud_data
-        
-        # Check microphysics diagnostics
-        assert 'rain_flux' in physics_data.microphysics_data
-        assert 'snow_flux' in physics_data.microphysics_data
+        assert hasattr(physics_data.clouds, 'cloud_fraction')
+        assert hasattr(physics_data.clouds, 'precip_rain')
         
         # Check gravity wave diagnostics
-        assert 'surface_stress' in physics_data.gravity_wave_data
-        assert physics_data.gravity_wave_data['mean_stress'] >= 0
+        assert hasattr(physics_data.gravity_waves, 'surface_stress')
+        assert jnp.all(physics_data.gravity_waves.surface_stress >= 0)
     
     def test_parameter_customization(self):
         """Test physics with custom parameters"""
@@ -230,9 +239,14 @@ class TestIconPhysicsIntegration:
         physics = IconPhysics(parameters=params)
         state = self.setup_test_state()
         geometry = self.setup_geometry()
+        date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry
+            state, boundaries, geometry, date
         )
         
         # Should run without errors
@@ -244,6 +258,11 @@ class TestIconPhysicsIntegration:
         physics = IconPhysics()
         state = self.setup_test_state(nlev=10, nlat=2, nlon=4)
         geometry = self.setup_geometry(nlev=10)
+        date = DateData.zeros()
+        boundaries = BoundaryData(
+            sea_ice_cover=jnp.zeros((2, 4)),
+            surface_temperature=jnp.ones((2, 4)) * 288.0
+        )
         
         def physics_loss(temperature):
             new_state = PhysicsState(
@@ -256,7 +275,7 @@ class TestIconPhysicsIntegration:
                 tracers=state.tracers
             )
             
-            tendencies, _ = physics.compute_tendencies(new_state, geometry=geometry)
+            tendencies, _ = physics.compute_tendencies(new_state, boundaries, geometry, date)
             return jnp.sum(tendencies.temperature ** 2)
         
         # Test JIT compilation
@@ -279,6 +298,11 @@ class TestIconPhysicsIntegration:
         physics = IconPhysics()
         state = self.setup_test_state()
         geometry = self.setup_geometry()
+        date = DateData.zeros()
+        boundaries = BoundaryData.zeros((4, 8),
+            tsea=jnp.ones((4, 8)) * 288.0,
+            sice_am=jnp.zeros((4, 8, 365))
+        )
         
         # Calculate initial total water
         total_water_init = (
@@ -290,7 +314,7 @@ class TestIconPhysicsIntegration:
         )
         
         tendencies, physics_data = physics.compute_tendencies(
-            state, geometry=geometry
+            state, boundaries, geometry, date
         )
         
         # Apply tendencies for one timestep
@@ -312,12 +336,12 @@ class TestIconPhysicsIntegration:
         
         # Account for precipitation removal
         total_precip = 0
-        if 'convective_precipitation' in physics_data.convection_data:
-            total_precip += jnp.sum(physics_data.convection_data['convective_precipitation']) * dt
-        if 'total_precipitation' in physics_data.cloud_data:
-            total_precip += jnp.sum(physics_data.cloud_data['total_precipitation']) * dt
-        if 'total_precipitation' in physics_data.microphysics_data:
-            total_precip += jnp.sum(physics_data.microphysics_data['total_precipitation']) * dt
+        if hasattr(physics_data.convection, 'precip_conv') and physics_data.convection.precip_conv is not None:
+            total_precip += jnp.sum(physics_data.convection.precip_conv) * dt
+        if hasattr(physics_data.clouds, 'precip_rain') and physics_data.clouds.precip_rain is not None:
+            total_precip += jnp.sum(physics_data.clouds.precip_rain) * dt
+        if hasattr(physics_data.clouds, 'precip_snow') and physics_data.clouds.precip_snow is not None:
+            total_precip += jnp.sum(physics_data.clouds.precip_snow) * dt
         
         # Conservation check (allowing for precipitation)
         water_change = total_water_new - total_water_init

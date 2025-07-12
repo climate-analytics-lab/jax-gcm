@@ -13,7 +13,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from typing import Tuple, Optional
-from functools import partial
+# from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
 
@@ -239,7 +239,7 @@ def longwave_fluxes_single_band(
     return flux_up, flux_down
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def longwave_fluxes(
     optical_properties: OpticalProperties,
     planck_layers: jnp.ndarray,
@@ -275,9 +275,14 @@ def longwave_fluxes(
         )
         return flux_up_band, flux_down_band
     
-    # Apply to all bands
-    band_indices = jnp.arange(n_bands)
-    flux_up, flux_down = jax.vmap(process_band)(band_indices)
+    # Apply to all bands - use fixed size for JAX compatibility
+    max_bands = 10
+    band_indices = jnp.arange(max_bands)
+    band_mask = band_indices < n_bands
+    flux_up_all, flux_down_all = jax.vmap(process_band)(band_indices)
+    # Mask inactive bands (keep full size)
+    flux_up = jnp.where(band_mask[:, None], flux_up_all, 0.0)
+    flux_down = jnp.where(band_mask[:, None], flux_down_all, 0.0)
     
     # Transpose to get [nlev+1, n_bands] shape
     flux_up = flux_up.T
@@ -369,7 +374,7 @@ def shortwave_fluxes_single_band(
     return flux_up_total, flux_down_total, flux_direct, flux_down_dif
 
 
-@partial(jax.jit, static_argnames=['n_bands'])
+@jax.jit
 def shortwave_fluxes(
     optical_properties: OpticalProperties,
     cos_zenith: float,
@@ -403,9 +408,16 @@ def shortwave_fluxes(
         )
         return flux_up, flux_down, flux_dir, flux_dif
     
-    # Apply to all bands
-    band_indices = jnp.arange(n_bands)
-    flux_up, flux_down, flux_direct, flux_diffuse = jax.vmap(process_band)(band_indices)
+    # Apply to all bands - use fixed size for JAX compatibility
+    max_bands = 10
+    band_indices = jnp.arange(max_bands)
+    band_mask = band_indices < n_bands
+    flux_up_all, flux_down_all, flux_direct_all, flux_diffuse_all = jax.vmap(process_band)(band_indices)
+    # Mask inactive bands (keep full size)
+    flux_up = jnp.where(band_mask[:, None], flux_up_all, 0.0)
+    flux_down = jnp.where(band_mask[:, None], flux_down_all, 0.0)
+    flux_direct = jnp.where(band_mask[:, None], flux_direct_all, 0.0)
+    flux_diffuse = jnp.where(band_mask[:, None], flux_diffuse_all, 0.0)
     
     # Transpose to get [nlev+1, n_bands] shape
     flux_up = flux_up.T

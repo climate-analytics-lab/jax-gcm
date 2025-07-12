@@ -9,11 +9,12 @@ import jax.numpy as jnp
 import jax
 from jax import random
 
-from jcm.physics.icon.convection import (
+from jcm.physics.icon.convection.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
-    ConvectionConfig,
+    ConvectionParameters,
     ConvectionState,
-    ConvectionTendencies
+    ConvectionTendencies,
+    saturation_mixing_ratio
 )
 
 
@@ -44,7 +45,6 @@ def create_test_atmosphere(nlev=40, unstable=True):
         rel_humidity = surface_rh * jnp.exp(-height / humidity_scale)
         
         # Convert to specific humidity
-        from .tiedtke_nordeng import saturation_mixing_ratio
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = rel_humidity * qs
     else:
@@ -74,9 +74,11 @@ class TestConvectionScheme:
         """Test that stable atmosphere produces no convection"""
         # Create stable profile
         atm = create_test_atmosphere(unstable=False)
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         # Run convection scheme
+        nlev = len(atm['temperature'])
+        tracers = jnp.zeros((nlev, 2))  # [nlev, ntrac] with 2 tracers (qc, qi)
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -84,6 +86,7 @@ class TestConvectionScheme:
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            tracers=tracers,
             dt=3600.0,
             config=config
         )
@@ -98,9 +101,11 @@ class TestConvectionScheme:
         """Test that unstable atmosphere triggers convection"""
         # Create unstable profile
         atm = create_test_atmosphere(unstable=True)
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         # Run convection scheme
+        nlev = len(atm['temperature'])
+        tracers = jnp.zeros((nlev, 2))  # [nlev, ntrac] with 2 tracers (qc, qi)
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -108,6 +113,7 @@ class TestConvectionScheme:
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            tracers=tracers,
             dt=3600.0,
             config=config
         )
@@ -129,9 +135,11 @@ class TestConvectionScheme:
         """Test mass flux conservation"""
         # Create test profile
         atm = create_test_atmosphere(unstable=True)
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         # Run convection scheme
+        nlev = len(atm['temperature'])
+        tracers = jnp.zeros((nlev, 2))  # [nlev, ntrac] with 2 tracers (qc, qi)
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -139,6 +147,7 @@ class TestConvectionScheme:
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            tracers=tracers,
             dt=3600.0,
             config=config
         )
@@ -156,9 +165,11 @@ class TestConvectionScheme:
         """Test approximate energy conservation"""
         # Create test profile
         atm = create_test_atmosphere(unstable=True)
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         # Run convection scheme
+        nlev = len(atm['temperature'])
+        tracers = jnp.zeros((nlev, 2))  # [nlev, ntrac] with 2 tracers (qc, qi)
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -166,6 +177,7 @@ class TestConvectionScheme:
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            tracers=tracers,
             dt=3600.0,
             config=config
         )
@@ -190,11 +202,13 @@ class TestConvectionScheme:
         """Test JAX transformations work correctly"""
         # Create test profile
         atm = create_test_atmosphere(unstable=True)
-        config = ConvectionConfig()
+        config = ConvectionParameters.default()
         
         # Test jit compilation
         jitted_convection = jax.jit(tiedtke_nordeng_convection)
         
+        nlev = len(atm['temperature'])
+        tracers = jnp.zeros((2, nlev))
         tendencies, state = jitted_convection(
             atm['temperature'],
             atm['humidity'],
@@ -202,6 +216,7 @@ class TestConvectionScheme:
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            tracers=tracers,
             dt=3600.0,
             config=config
         )
@@ -215,6 +230,7 @@ class TestConvectionScheme:
                 atm['height'],
                 atm['u_wind'],
                 atm['v_wind'],
+                tracers=tracers,
                 dt=3600.0,
                 config=config
             )
@@ -231,9 +247,9 @@ class TestConvectionScheme:
         
         # Test with different CAPE timescales
         configs = [
-            ConvectionConfig(tau=3600.0),   # Fast adjustment
-            ConvectionConfig(tau=7200.0),   # Default
-            ConvectionConfig(tau=14400.0),  # Slow adjustment
+            ConvectionParameters.default(tau=jnp.array(3600.0)),   # Fast adjustment
+            ConvectionParameters.default(tau=jnp.array(7200.0)),   # Default
+            ConvectionParameters.default(tau=jnp.array(14400.0)),  # Slow adjustment
         ]
         
         precip_rates = []

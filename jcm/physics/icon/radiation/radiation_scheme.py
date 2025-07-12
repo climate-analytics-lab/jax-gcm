@@ -15,10 +15,11 @@ from functools import partial
 from .radiation_types import (
     RadiationParameters, 
     RadiationState,
-    RadiationFluxes,
     RadiationTendencies,
     OpticalProperties
 )
+from ..icon_physics_data import RadiationData
+
 from . import (
     calculate_solar_radiation_gcm,
     gas_optical_depth_lw,
@@ -27,7 +28,7 @@ from . import (
     planck_bands,
     longwave_fluxes,
     shortwave_fluxes,
-    flux_to_heating_rate
+    flux_to_heating_rate,
 )
 from ..unit_conversions import (
     convert_surface_pressure,
@@ -35,24 +36,6 @@ from ..unit_conversions import (
     geopotential_to_height
 )
 from ..constants import physical_constants
-
-
-class RadiationDiagnostics(NamedTuple):
-    """Diagnostics from radiation calculation"""
-    sw_flux_up: jnp.ndarray      # Upward SW flux at interfaces
-    sw_flux_down: jnp.ndarray    # Downward SW flux at interfaces
-    lw_flux_up: jnp.ndarray      # Upward LW flux at interfaces  
-    lw_flux_down: jnp.ndarray    # Downward LW flux at interfaces
-    sw_heating_rate: jnp.ndarray # SW heating rate (K/s)
-    lw_heating_rate: jnp.ndarray # LW heating rate (K/s)
-    toa_sw_down: float          # TOA downward SW flux
-    toa_sw_up: float            # TOA upward SW flux
-    toa_lw_up: float            # TOA upward LW flux (OLR)
-    surface_sw_down: float      # Surface downward SW flux
-    surface_sw_up: float        # Surface upward SW flux
-    surface_lw_down: float      # Surface downward LW flux
-    surface_lw_up: float        # Surface upward LW flux
-    cloud_fraction: jnp.ndarray # Cloud fraction used
 
 
 def prepare_radiation_state(
@@ -152,10 +135,10 @@ def radiation_scheme(
     seconds_since_midnight: float,
     latitude: float,
     longitude: float,
-    parameters: Optional[RadiationParameters] = None,
+    parameters: RadiationParameters,
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: float = 400e-6
-) -> Tuple[RadiationTendencies, RadiationDiagnostics]:
+) -> Tuple[RadiationTendencies, RadiationData]:
     """
     Main radiation scheme entry point.
     
@@ -181,10 +164,7 @@ def radiation_scheme(
     Returns:
         Tuple of (radiation tendencies, radiation diagnostics)
     """
-    # Use default parameters if not provided
-    if parameters is None:
-        parameters = RadiationParameters.default()
-    
+
     nlev = temperature.shape[0]
     
     # Create simple sigma levels for pressure calculation
@@ -237,8 +217,8 @@ def radiation_scheme(
         o3_vmr=rad_state.o3_vmr,
         co2_vmr=co2_vmr,
         layer_thickness=layer_properties['thickness'],
-        air_density=layer_properties['density'],
-        n_bands=parameters.n_lw_bands
+        air_density=layer_properties['density']
+        # n_bands will use default value of 3
     )
     
     gas_tau_sw = gas_optical_depth_sw(
@@ -247,8 +227,8 @@ def radiation_scheme(
         o3_vmr=rad_state.o3_vmr,
         layer_thickness=layer_properties['thickness'],
         air_density=layer_properties['density'],
-        cos_zenith=cos_zenith,
-        n_bands=parameters.n_sw_bands
+        cos_zenith=cos_zenith
+        # n_bands will use default value of 2
     )
     
     # Calculate cloud optical properties
@@ -297,7 +277,11 @@ def radiation_scheme(
     
     # Calculate shortwave fluxes (only if sun is up)
     # TOA flux per band (assume equal distribution)
-    toa_flux_bands = jnp.ones(parameters.n_sw_bands) * toa_flux / parameters.n_sw_bands
+    # Create fixed-size array and mask for dynamic n_sw_bands
+    max_sw_bands = 10
+    toa_flux_bands_all = jnp.ones(max_sw_bands) * toa_flux / jnp.maximum(parameters.n_sw_bands, 1.0)
+    sw_band_mask = jnp.arange(max_sw_bands) < parameters.n_sw_bands
+    toa_flux_bands = jnp.where(sw_band_mask, toa_flux_bands_all, 0.0)
     
     flux_up_sw, flux_down_sw, flux_direct_sw, flux_diffuse_sw = shortwave_fluxes(
         sw_optics, cos_zenith, toa_flux_bands,
@@ -340,7 +324,7 @@ def radiation_scheme(
         shortwave_heating=sw_heating_rate
     )
     
-    diagnostics = RadiationDiagnostics(
+    diagnostics = RadiationData(
         sw_flux_up=flux_up_sw,
         sw_flux_down=flux_down_sw,
         lw_flux_up=flux_up_lw,
@@ -354,7 +338,6 @@ def radiation_scheme(
         surface_sw_up=jnp.sum(flux_up_sw[-1, :]),  # Use calculated upward flux
         surface_lw_down=surface_lw_down,
         surface_lw_up=jnp.sum(flux_up_lw[-1, :]),  # Use calculated upward flux
-        cloud_fraction=cloud_fraction
     )
     
     return tendencies, diagnostics
