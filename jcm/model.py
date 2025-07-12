@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax.tree_util import tree_map
 import tree_math
 from numpy import timedelta64
+from typing import Any
 import dinosaur
 from typing import Callable, Any
 from dinosaur import typing
@@ -21,7 +22,7 @@ from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
 @tree_math.struct
-class ModelOutput:
+class Predictions:
     dynamics: PhysicsState
     physics: Any
 
@@ -211,7 +212,7 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def post_process(self, state):
+    def post_process(self, state: primitive_equations.State) -> Predictions:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
@@ -229,9 +230,9 @@ class Model:
         # convert back to SI to match convention for user-defined initial PhysicsStates
         physics_state.surface_pressure = physics_state.surface_pressure * p0
         
-        return ModelOutput(dynamics=physics_state, physics=physics_data)
+        return Predictions(dynamics=physics_state, physics=physics_data)
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, primitive_equations.State]:
+    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(self.trajectory_fn(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
