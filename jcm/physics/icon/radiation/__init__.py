@@ -99,15 +99,15 @@ def get_solar_implementation():
 from .radiation_scheme import (
     radiation_scheme,
     radiation_column,
-    RadiationDiagnostics,
     prepare_radiation_state
 )
+from ..icon_physics_data import RadiationData
 
 __all__ = [
     # Main interface
     "radiation_scheme",
     "radiation_column",
-    "RadiationDiagnostics",
+    "RadiationData",
     "prepare_radiation_state",
     
     # Solar functions

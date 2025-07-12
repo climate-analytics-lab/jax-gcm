@@ -21,7 +21,7 @@ from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
 
 # Import physics modules (will be implemented progressively)
-from jcm.physics.icon.radiation import radiation_scheme, RadiationDiagnostics
+from jcm.physics.icon.radiation import radiation_scheme, RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionTendencies
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters

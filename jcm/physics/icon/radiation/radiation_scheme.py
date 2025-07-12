@@ -357,7 +357,7 @@ def radiation_column(
     latitude: float,
     longitude: float,
     parameters: Optional[RadiationParameters] = None
-) -> Tuple[RadiationTendencies, RadiationDiagnostics]:
+) -> Tuple[RadiationTendencies, RadiationData]:
     """Single column radiation calculation"""
     return radiation_scheme(
         temperature=temperature,
