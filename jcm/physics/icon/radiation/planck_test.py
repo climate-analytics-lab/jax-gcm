@@ -10,7 +10,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import pytest
 from jcm.physics.icon.radiation.planck import (
-    planck_bands_lw, planck_bands_sw,
+    planck_bands_lw,
     planck_function_wavenumber,
     planck_derivative,
     total_thermal_emission
@@ -117,15 +117,6 @@ def test_planck_bands_single_temperature():
     # All bands should have values for LW
     assert jnp.all(planck_vals > 0)
     
-    # Test with SW bands
-    band_limits_2 = ((10, 1000), (1000, 3000))
-    planck_vals_2 = planck_bands_sw(temperature, band_limits_2)
-    
-    from jcm.physics.icon.radiation.constants import N_SW_BANDS
-    assert planck_vals_2.shape == (N_SW_BANDS,)
-    # All bands should have values
-    assert jnp.all(planck_vals_2 > 0)
-
 
 def test_planck_bands_array_input():
     """Test planck_bands with array temperature input"""

@@ -75,7 +75,7 @@ from .cloud_optics import (
 )
 
 from .planck import (
-    planck_bands,
+    planck_bands_lw,
     total_thermal_emission,
     planck_function_wavenumber
 )
@@ -137,7 +137,7 @@ __all__ = [
     "effective_radius_ice",
     
     # Planck functions
-    "planck_bands",
+    "planck_bands_lw",
     "total_thermal_emission",
     "planck_function_wavenumber",
     

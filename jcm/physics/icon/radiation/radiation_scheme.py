@@ -12,8 +12,6 @@ import jax.numpy as jnp
 from typing import Tuple, Optional, NamedTuple
 from functools import partial
 
-from jcm.physics.icon.radiation.planck import planck_bands_lw
-
 from .radiation_types import (
     RadiationParameters, 
     RadiationState,
@@ -27,7 +25,7 @@ from . import (
     gas_optical_depth_lw,
     gas_optical_depth_sw,
     cloud_optics,
-    planck_bands,
+    planck_bands_lw,
     longwave_fluxes,
     shortwave_fluxes,
     flux_to_heating_rate,

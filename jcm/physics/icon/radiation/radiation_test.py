@@ -39,7 +39,7 @@ from .gas_optics import (
 )
 from .planck import (
     planck_bands_lw, planck_function_wavenumber, integrated_planck_function,
-    planck_bands, planck_derivative, total_thermal_emission,
+    planck_derivative, total_thermal_emission,
     effective_temperature, band_fraction, layer_planck_function
 )
 from .cloud_optics import (

@@ -10,7 +10,7 @@ I analyzed the argument consistency within key ICON physics modules (radiation, 
 - Main functions have matching signatures for internal calls
 - `gas_optical_depth_lw` and `gas_optical_depth_sw` are called correctly with matching arguments
 - `cloud_optics` function is called correctly
-- `planck_bands`, `longwave_fluxes`, `shortwave_fluxes`, and `flux_to_heating_rate` all have correct signatures
+- `planck_bands_lw`, `longwave_fluxes`, `shortwave_fluxes`, and `flux_to_heating_rate` all have correct signatures
 
 ### ⚠️ Minor Issues Found:
 1. **Missing import**: The function `calculate_solar_radiation_gcm` is imported from `.` but not explicitly from a specific module

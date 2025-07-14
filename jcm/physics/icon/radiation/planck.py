@@ -111,33 +111,6 @@ def planck_bands_lw(
 
 
 @jax.jit
-def planck_bands_sw(
-    temperature: jnp.ndarray,
-    band_limits: Tuple[Tuple[float, float], ...]
-) -> jnp.ndarray:
-    """Calculate SW planck bands"""
-    from .constants import N_SW_BANDS
-    
-    # Ensure temperature is at least 1D
-    temp_array = jnp.atleast_1d(temperature)
-    is_scalar = temperature.ndim == 0
-    
-    nlev = temp_array.shape[0]
-    planck = jnp.zeros((nlev, N_SW_BANDS))
-    
-    # Calculate for each band
-    for band in range(min(len(band_limits), N_SW_BANDS)):
-        b_band = integrated_planck_function(temp_array, band_limits[band])
-        planck = planck.at[:, band].set(b_band)
-    
-    # Return scalar result if input was scalar
-    if is_scalar:
-        return planck[0, :]
-    else:
-        return planck
-
-
-@jax.jit
 def planck_derivative(
     temperature: jnp.ndarray,
     wavenumber: float
@@ -340,7 +313,7 @@ def test_planck_functions():
     
     # Test multiple bands
     bands = ((10, 350), (350, 500), (500, 2500))
-    B_bands = planck_bands(jnp.array([250.0, 300.0]), bands, is_lw=True)
+    B_bands = planck_bands_lw(jnp.array([250.0, 300.0]), bands)
     from .constants import N_LW_BANDS
     assert B_bands.shape == (2, N_LW_BANDS)
     assert jnp.all(B_bands > 0)
