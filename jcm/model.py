@@ -19,70 +19,8 @@ from jcm.physics.speedy.params import Parameters
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
 @tree_math.struct
-class State:
-    u_wind: jnp.ndarray
-    v_wind: jnp.ndarray
-    temperature: jnp.ndarray
-    specific_humidity: jnp.ndarray
-    geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray # Surface pressure in SI
-
-    @classmethod
-    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
-        return cls(
-            u_wind if u_wind is not None else jnp.zeros(shape),
-            v_wind if v_wind is not None else jnp.zeros(shape),
-            temperature if temperature is not None else jnp.zeros(shape),
-            specific_humidity if specific_humidity is not None else jnp.zeros(shape),
-            geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
-        )
-
-    @classmethod
-    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
-        return cls(
-            u_wind if u_wind is not None else jnp.ones(shape),
-            v_wind if v_wind is not None else jnp.ones(shape),
-            temperature if temperature is not None else jnp.ones(shape),
-            specific_humidity if specific_humidity is not None else jnp.ones(shape),
-            geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
-        )
-    
-    @classmethod
-    def from_physics_state(cls, physics_state: PhysicsState):
-        return cls(
-            u_wind=physics_state.u_wind,
-            v_wind=physics_state.v_wind,
-            temperature=physics_state.temperature,
-            specific_humidity=physics_state.specific_humidity,
-            geopotential=physics_state.geopotential,
-            surface_pressure=physics_state.normalized_surface_pressure * p0  # Convert back to SI
-        )
-    
-    def to_physics_state(self) -> PhysicsState:
-        return PhysicsState(
-            u_wind=self.u_wind,
-            v_wind=self.v_wind,
-            temperature=self.temperature,
-            specific_humidity=self.specific_humidity,
-            geopotential=self.geopotential,
-            normalized_surface_pressure=self.surface_pressure / p0  # Normalize by mean SLP
-        )
-
-    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
-        return State(
-            u_wind if u_wind is not None else self.u_wind,
-            v_wind if v_wind is not None else self.v_wind,
-            temperature if temperature is not None else self.temperature,
-            specific_humidity if specific_humidity is not None else self.specific_humidity,
-            geopotential if geopotential is not None else self.geopotential,
-            surface_pressure if surface_pressure is not None else self.surface_pressure
-        )
-
-@tree_math.struct
 class Predictions:
-    dynamics: State
+    dynamics: PhysicsState
     physics: Any
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
@@ -111,7 +49,7 @@ class Model:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: State=None, physics: Physics=None) -> None:
+                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -213,11 +151,10 @@ class Model:
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
 
-        # Either use the designated initial state, or generate one. The initial state to the model is a modal primitive_equations.State,
-        # but the optional initial state from the user is a nodal jcm.model.State
+        # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
+        # but the optional initial state from the user is a nodal PhysicsState
         if self.initial_state is not None:
-            initial_physics_state = self.initial_state.to_physics_state()
-            state = physics_state_to_dynamics_state(initial_physics_state, self.primitive)
+            state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
@@ -247,10 +184,7 @@ class Model:
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
 
-        return Predictions(
-            dynamics=State.from_physics_state(physics_state),
-            physics=physics_data
-        )
+        return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
