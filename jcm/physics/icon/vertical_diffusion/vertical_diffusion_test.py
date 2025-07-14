@@ -272,6 +272,8 @@ class TestVerticalDiffusionScheme:
         qv = jnp.ones((ncol, nlev)) * 0.01
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
+
+        params = VDiffParameters.default()
         
         # Pressure profile
         pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
@@ -305,7 +307,7 @@ class TestVerticalDiffusionScheme:
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
-            ocean_u, ocean_v, tke, thv_variance, dt
+            ocean_u, ocean_v, tke, thv_variance, dt, params
         )
         
         # Check that outputs are reasonable
@@ -325,6 +327,8 @@ class TestVerticalDiffusionScheme:
         """Test energy conservation in vertical diffusion."""
         ncol, nlev = 2, 8
         nsfc_type = 3
+
+        params = VDiffParameters.default()
         
         # Create initial state
         u = jnp.ones((ncol, nlev)) * 10.0
@@ -333,7 +337,7 @@ class TestVerticalDiffusionScheme:
         qv = jnp.ones((ncol, nlev)) * 0.01
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
-        
+
         pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
         
@@ -369,7 +373,7 @@ class TestVerticalDiffusionScheme:
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
-            ocean_u, ocean_v, tke, thv_variance, dt
+            ocean_u, ocean_v, tke, thv_variance, dt, params
         )
         
         # Check energy balance (should be approximately conserved in absence of surface fluxes)
@@ -387,7 +391,8 @@ class TestVerticalDiffusionScheme:
         """Test that vertical diffusion effectively mixes the atmosphere."""
         ncol, nlev = 1, 10
         nsfc_type = 3
-        
+        params = VDiffParameters.default()
+
         # Create strong vertical gradients
         u = jnp.array([[0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0]])
         v = jnp.zeros((ncol, nlev))
@@ -423,7 +428,7 @@ class TestVerticalDiffusionScheme:
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
-            ocean_u, ocean_v, tke, thv_variance, dt
+            ocean_u, ocean_v, tke, thv_variance, dt, params
         )
         
         # Check that mixing occurs: lower levels should gain momentum, upper levels should lose it

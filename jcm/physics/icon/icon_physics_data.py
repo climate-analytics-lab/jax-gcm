@@ -59,7 +59,6 @@ class RadiationData:
             toa_sw_up=jnp.zeros(nodal_shape),
             toa_lw_up=jnp.zeros(nodal_shape),
             toa_sw_down=jnp.zeros(nodal_shape),
-            toa_lw_down=jnp.zeros(nodal_shape)
         )
     
     def copy(self, **kwargs):
@@ -268,7 +267,7 @@ class SurfaceData:
             'cm': self.cm,
         }
         new_data.update(kwargs)
-        return CloudData(**new_data)
+        return SurfaceData(**new_data)
 
 
 @tree_math.struct

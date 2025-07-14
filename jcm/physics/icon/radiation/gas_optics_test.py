@@ -127,8 +127,8 @@ def test_gas_optical_depth_lw():
         layer_thickness, air_density, n_bands
     )
     
-    # Check output shape
-    assert tau.shape == (nlev, n_bands)
+    # Check output shape - hardcoded to max_bands=10
+    assert tau.shape == (nlev, 10)  # max_bands hardcoded
     
     # Optical depth should be non-negative
     assert jnp.all(tau >= 0)
@@ -160,8 +160,8 @@ def test_gas_optical_depth_sw():
         air_density, cos_zenith, n_bands
     )
     
-    # Check output shape
-    assert tau.shape == (nlev, n_bands)
+    # Check output shape - hardcoded to max_bands=10
+    assert tau.shape == (nlev, 10)  # max_bands hardcoded
     
     # Optical depth should be non-negative
     assert jnp.all(tau >= 0)

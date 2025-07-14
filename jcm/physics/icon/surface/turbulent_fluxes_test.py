@@ -272,7 +272,7 @@ class TestExchangeCoefficients:
     def test_minimum_wind_speed(self):
         """Test minimum wind speed handling."""
         ncol, nsfc_type = 2, 3
-        params = SurfaceParameters(min_wind_speed=1.0)
+        params = SurfaceParameters.default(min_wind_speed=1.0)
         
         wind_speed = jnp.array([0.1, 0.5])  # Below minimum
         roughness_momentum = jnp.ones((ncol, nsfc_type)) * 0.01

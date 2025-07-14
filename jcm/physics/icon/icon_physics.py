@@ -21,12 +21,14 @@ from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
 
 # Import physics modules (will be implemented progressively)
-from jcm.physics.icon.radiation import radiation_scheme, RadiationData
-from jcm.physics.icon.convection import tiedtke_nordeng_convection, ConvectionTendencies
+from jcm.physics.icon.radiation import radiation_scheme
+from jcm.physics.icon.icon_physics_data import RadiationData
+from jcm.physics.icon.convection import tiedtke_nordeng_convection
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme
-from jcm.physics.icon.surface import surface_physics_step
+from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
+from jcm.physics.icon.surface.surface_types import SurfaceState, AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
 # from jcm.physics.icon.chemistry import chemistry_tendencies
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
@@ -67,13 +69,13 @@ class IconPhysics(Physics):
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
+            get_simple_aerosol,  # Aerosol before radiation
+            apply_radiation,     # Radiation early for surface fluxes
             apply_convection, 
             apply_clouds,
             apply_microphysics,
-            get_simple_aerosol,
-            apply_radiation, 
+            apply_surface,       # Surface after radiation
             apply_vertical_diffusion, 
-            apply_surface,
             apply_gravity_waves
         ]
     
@@ -186,7 +188,7 @@ def _prepare_common_physics_state(
     Returns:
         Dictionary with common physics variables
     """
-    from jcm.physics.speedy.physical_constants import p0
+    p0 = physical_constants.p0
     
     # Calculate pressure levels from surface pressure and sigma coordinates
     surface_pressure = state.surface_pressure * p0  # Convert to Pa
@@ -240,7 +242,7 @@ def apply_radiation(state: PhysicsState,
 ) -> tuple[PhysicsTendency, PhysicsData]:
 
     """Apply radiation heating rates"""
-    from jcm.physics.speedy.physical_constants import p0
+    p0 = physical_constants.p0
     
     # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
     nlev, ncols = state.temperature.shape
@@ -258,6 +260,12 @@ def apply_radiation(state: PhysicsState,
     # Get cloud properties from tracers and previous physics
     cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    
+    # Cloud fraction needs to be reshaped to 2D if it's 3D
+    cloud_fraction = physics_data.clouds.cloud_fraction
+    if cloud_fraction.ndim == 3:
+        nlev_cf, nlat, nlon = cloud_fraction.shape
+        cloud_fraction = cloud_fraction.reshape(nlev_cf, nlat * nlon)
 
     # Define single column radiation function
     def apply_radiation_to_column(temp_col, humid_col, ps_col, geopot_col,
@@ -280,36 +288,52 @@ def apply_radiation(state: PhysicsState,
         )
         
         # Return temperature tendency and key diagnostics
-        return (
-            tendencies.temperature_tendency,  # K/s
-            tendencies.longwave_heating,      # K/s
-            tendencies.shortwave_heating,     # K/s
-            diagnostics.toa_lw_up,           # W/m²
-            diagnostics.toa_sw_down,         # W/m²
-            diagnostics.toa_sw_up,           # W/m²
-            diagnostics.surface_lw_down,     # W/m²
-            diagnostics.surface_sw_down      # W/m²
-        )
+        return tendencies, diagnostics
     
     # Apply radiation using vmap
-    rad_temp_tend, rad_out = jax.vmap(
+    results = jax.vmap(
         apply_radiation_to_column,
         in_axes=(1, 1, 0, 1, 1, 1, 1, 0, 0),  # ps, lat, lon are 1D
-        out_axes=(1, 1, 1, 0, 0, 0, 0, 0)     # fluxes are scalars per column
+        out_axes=0  # Map over the first (column) dimension of outputs
     )(state.temperature, state.specific_humidity, state.surface_pressure,
-        state.geopotential, cloud_water, cloud_ice, physics_data.clouds.cloud_fraction,
+        state.geopotential, cloud_water, cloud_ice, cloud_fraction,
         latitudes, longitudes)
-        
-    # Create physics tendencies (already in 2D format [nlev, ncols])
+    
+    # Unpack the vmapped results
+    # results is a tuple of (RadiationTendencies, RadiationData) with column dimension first
+    tendencies_vmapped, diagnostics_vmapped = results
+    
+    # Extract temperature tendencies and transpose to [nlev, ncols]
+    temperature_tendency = tendencies_vmapped.temperature_tendency.T
+    
+    # Create physics tendencies
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from radiation
         v_wind=jnp.zeros_like(state.v_wind),
-        temperature=rad_temp_tend,
+        temperature=temperature_tendency,
         specific_humidity=jnp.zeros_like(state.specific_humidity),
         tracers={}
     )
     
-    # Update physics data with radiation diagnostics
+    # Reconstruct RadiationData from vmapped diagnostics
+    # Most fields need to be transposed from [ncols, ...] to [..., ncols]
+    rad_out = RadiationData(
+        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),  # [ncols, 1] -> [ncols]
+        sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2),  # [ncols, nlev+1, nbands] -> [nlev+1, ncols, nbands]
+        sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2),
+        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+        lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2),
+        lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2),
+        lw_heating_rate=tendencies_vmapped.longwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+        surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
+        surface_lw_down=diagnostics_vmapped.surface_lw_down,
+        surface_sw_up=diagnostics_vmapped.surface_sw_up,
+        surface_lw_up=diagnostics_vmapped.surface_lw_up,
+        toa_sw_up=diagnostics_vmapped.toa_sw_up,
+        toa_lw_up=diagnostics_vmapped.toa_lw_up,
+        toa_sw_down=diagnostics_vmapped.toa_sw_down
+    )
+    
     updated_physics_data = physics_data.copy(radiation=rad_out)
     
     return physics_tendencies, updated_physics_data
@@ -446,8 +470,8 @@ def apply_clouds(
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     surface_pressure = physics_data.diagnostics.surface_pressure
-    cloud_water = state.tracers.get('qc')
-    cloud_ice = state.tracers.get('qi')
+    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
@@ -639,13 +663,13 @@ def apply_vertical_diffusion(
     from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
     
     nlev, ncols = state.temperature.shape
-    dt = parameters.convection.dt
-    pressure_levels = physics_data.diagnostics.pressure_levels
-    pressure_half = physics_data.diagnostics.pressure_full
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    pressure_half = physics_data.diagnostics.pressure_half
     height_levels = physics_data.diagnostics.height_full
     height_half = physics_data.diagnostics.height_half
-    cloud_water = state.tracers.get('qc')
-    cloud_ice = state.tracers.get('qi')
+    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Initialize prognostic variables if not present
     tke = physics_data.vertical_diffusion.tke if hasattr(physics_data.vertical_diffusion, 'tke') else jnp.ones((nlev, ncols)) * 0.1
@@ -786,7 +810,7 @@ def apply_surface(
     from jcm.physics.icon.surface import initialize_surface_state
     
     nlev, ncols = state.temperature.shape
-    dt = parameters.convection.dt
+    dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     # Get surface properties from boundaries
     surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
@@ -817,56 +841,37 @@ def apply_surface(
     ref_height = physics_data.diagnostics.height_full[-1, :] - physics_data.diagnostics.height_full[-1, :].min()
     ref_height = jnp.maximum(ref_height, 10.0)  # At least 10m
     
-    # Define single column surface physics function
-    def apply_surface_to_column(col_idx):
-        """Apply surface physics to a single column"""
-        
-        # Create atmospheric forcing for this column
-        # Initialize exchange coefficients with dummy values for now
-        nsfc_type = 3
-        dummy_exchange = jnp.ones(nsfc_type) * 0.001  # Small exchange coefficient
-        
-        atm_forcing = AtmosphericForcing(
-            temperature=atm_temp[col_idx],
-            humidity=atm_qv[col_idx],
-            u_wind=atm_u[col_idx],
-            v_wind=atm_v[col_idx],
-            pressure=atm_p[col_idx],
-            sw_downward=physics_data.radiation.sw_down[col_idx],
-            lw_downward=physics_data.radiation.lw_down[col_idx],
-            rain_rate=0.0,  # No rain for now
-            snow_rate=0.0,  # No snow for now
-            exchange_coeff_heat=dummy_exchange,
-            exchange_coeff_moisture=dummy_exchange,
-            exchange_coeff_momentum=dummy_exchange
-        )
-        
-        # Extract surface state for this column
-        col_surface_state = surface_state.at[col_idx]
-
-        # Apply surface physics
-        fluxes, tendencies, diagnostics = surface_physics_step(
-            atm_forcing, col_surface_state, dt, parameters.surface
-        )
-        
-        return (
-            fluxes.sensible_heat_mean,
-            fluxes.latent_heat_mean,
-            fluxes.momentum_u_mean,
-            fluxes.momentum_v_mean,
-            fluxes.evaporation_mean,
-            tendencies.surface_temp_tendency.mean(),  # Area-weighted mean
-            diagnostics.surface_exchange_coeff_heat,
-            diagnostics.surface_exchange_coeff_momentum,
-            diagnostics.surface_resistance
-        )
+    # Create atmospheric forcing for all columns
+    # Initialize exchange coefficients with dummy values for now
+    nsfc_type = 3
+    dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient
     
-    # Apply surface physics using vmap
-    results = jax.vmap(apply_surface_to_column)(jnp.arange(ncols))
+    atm_forcing = AtmosphericForcing(
+        temperature=atm_temp,
+        humidity=atm_qv,
+        u_wind=atm_u,
+        v_wind=atm_v,
+        pressure=atm_p,
+        sw_downward=physics_data.radiation.surface_sw_down,
+        lw_downward=physics_data.radiation.surface_lw_down,
+        rain_rate=jnp.zeros(ncols),  # No rain for now
+        snow_rate=jnp.zeros(ncols),  # No snow for now
+        exchange_coeff_heat=dummy_exchange,
+        exchange_coeff_moisture=dummy_exchange,
+        exchange_coeff_momentum=dummy_exchange
+    )
     
-    # Unpack results
-    (sensible_heat, latent_heat, tau_u, tau_v, evaporation,
-        surf_temp_tend, ch, cm, resistance) = results
+    # Apply surface physics to all columns
+    fluxes, tendencies, diagnostics = surface_physics_step(
+        atm_forcing, surface_state, dt, parameters.surface
+    )
+    
+    # Extract grid-box mean fluxes
+    sensible_heat = fluxes.sensible_heat_mean
+    latent_heat = fluxes.latent_heat_mean
+    tau_u = fluxes.momentum_u_mean
+    tau_v = fluxes.momentum_v_mean
+    evaporation = fluxes.evaporation_mean
     
     # Convert fluxes to atmospheric tendencies
     # Only the lowest model level is directly affected by surface fluxes

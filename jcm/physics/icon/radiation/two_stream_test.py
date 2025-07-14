@@ -166,9 +166,12 @@ def test_longwave_fluxes():
         surface_emissivity, surface_planck, n_lw_bands
     )
     
-    # Check shapes
-    assert flux_up_lw.shape == (nlev + 1, n_lw_bands)
-    assert flux_down_lw.shape == (nlev + 1, n_lw_bands)
+    # Check shapes (hardcoded max_bands=10)
+    assert flux_up_lw.shape == (nlev + 1, 10)
+    assert flux_down_lw.shape == (nlev + 1, 10)
+    # Only first n_lw_bands should have values
+    assert jnp.all(flux_up_lw[:, n_lw_bands:] == 0)
+    assert jnp.all(flux_down_lw[:, n_lw_bands:] == 0)
     
     # Check physical constraints
     assert jnp.all(flux_up_lw >= 0)
@@ -202,11 +205,14 @@ def test_shortwave_fluxes():
         sw_optics, cos_zenith, toa_flux, surface_albedo, n_sw_bands
     )
     
-    # Check shapes
-    assert flux_up_sw.shape == (nlev + 1, n_sw_bands)
-    assert flux_down_sw.shape == (nlev + 1, n_sw_bands)
-    assert flux_dir.shape == (nlev + 1, n_sw_bands)
-    assert flux_dif.shape == (nlev + 1, n_sw_bands)
+    # Check shapes (hardcoded max_bands=10)
+    assert flux_up_sw.shape == (nlev + 1, 10)
+    assert flux_down_sw.shape == (nlev + 1, 10)
+    assert flux_dir.shape == (nlev + 1, 10)
+    assert flux_dif.shape == (nlev + 1, 10)
+    # Only first n_sw_bands should have values
+    assert jnp.all(flux_up_sw[:, n_sw_bands:] == 0)
+    assert jnp.all(flux_down_sw[:, n_sw_bands:] == 0)
     
     # Check physical constraints
     assert jnp.all(flux_up_sw >= 0)

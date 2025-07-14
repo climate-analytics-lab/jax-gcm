@@ -90,13 +90,14 @@ def test_cloud_optics_integration():
     )
     
     # Check output shapes
-    assert sw_optics.optical_depth.shape == (nlev, n_sw_bands)
-    assert sw_optics.single_scatter_albedo.shape == (nlev, n_sw_bands)
-    assert sw_optics.asymmetry_factor.shape == (nlev, n_sw_bands)
+    # Hardcoded to max_bands=10
+    assert sw_optics.optical_depth.shape == (nlev, 10)
+    assert sw_optics.single_scatter_albedo.shape == (nlev, 10)
+    assert sw_optics.asymmetry_factor.shape == (nlev, 10)
     
-    assert lw_optics.optical_depth.shape == (nlev, n_lw_bands)
-    assert lw_optics.single_scatter_albedo.shape == (nlev, n_lw_bands)
-    assert lw_optics.asymmetry_factor.shape == (nlev, n_lw_bands)
+    assert lw_optics.optical_depth.shape == (nlev, 10)
+    assert lw_optics.single_scatter_albedo.shape == (nlev, 10)
+    assert lw_optics.asymmetry_factor.shape == (nlev, 10)
     
     # Physical constraints
     assert jnp.all(sw_optics.optical_depth >= 0)
@@ -169,9 +170,9 @@ def test_cloud_optics_extreme_values():
     assert not jnp.any(jnp.isnan(sw_optics.optical_depth))
     assert not jnp.any(jnp.isnan(lw_optics.optical_depth))
     
-    # Should have high optical depths
-    assert jnp.all(sw_optics.optical_depth > 1.0)
-    assert jnp.all(lw_optics.optical_depth > 0.1)
+    # Should have high optical depths (only first 2 bands for SW, 3 for LW)
+    assert jnp.all(sw_optics.optical_depth[:, :2] > 1.0)
+    assert jnp.all(lw_optics.optical_depth[:, :3] > 0.1)
 
 
 def test_cloud_optics_temperature_dependence():
@@ -224,9 +225,9 @@ def test_cloud_optics_mixed_phase():
     water_only_level = 1  # Only water
     ice_only_level = 5  # Only ice
     
-    # Mixed phase should have substantial optical depth
-    assert jnp.all(sw_optics.optical_depth[mixed_level, :] > 0)
-    assert jnp.all(lw_optics.optical_depth[mixed_level, :] > 0)
+    # Mixed phase should have substantial optical depth (only first n_bands)
+    assert jnp.all(sw_optics.optical_depth[mixed_level, :2] > 0)
+    assert jnp.all(lw_optics.optical_depth[mixed_level, :3] > 0)
 
 
 def test_cloud_optics_band_variations():
@@ -274,8 +275,8 @@ def test_cloud_optics_scattering_properties():
         cloud_water_path, cloud_ice_path, temperature, 2, 3
     )
     
-    # SW should have high single scattering albedo (clouds scatter well in visible)
-    assert jnp.all(sw_optics.single_scatter_albedo > 0.8)
+    # SW should have high single scattering albedo (clouds scatter well in visible) - only first 2 bands
+    assert jnp.all(sw_optics.single_scatter_albedo[:, :2] > 0.8)
     
     # LW should have lower single scattering albedo (more absorption in IR)
     # Note: Different number of bands, so compare averages
@@ -283,11 +284,11 @@ def test_cloud_optics_scattering_properties():
     sw_ssa_avg = jnp.mean(sw_optics.single_scatter_albedo, axis=1)
     assert jnp.all(lw_ssa_avg <= sw_ssa_avg)
     
-    # Asymmetry factor should be physical
-    assert jnp.all(sw_optics.asymmetry_factor >= -1)
-    assert jnp.all(sw_optics.asymmetry_factor <= 1)
-    assert jnp.all(lw_optics.asymmetry_factor >= -1)
-    assert jnp.all(lw_optics.asymmetry_factor <= 1)
+    # Asymmetry factor should be physical (only first bands have values)
+    assert jnp.all(sw_optics.asymmetry_factor[:, :2] >= -1)
+    assert jnp.all(sw_optics.asymmetry_factor[:, :2] <= 1)
+    assert jnp.all(lw_optics.asymmetry_factor[:, :3] >= -1)
+    assert jnp.all(lw_optics.asymmetry_factor[:, :3] <= 1)
     
     # Clouds typically have forward scattering (g > 0)
     cloudy_levels = cloud_water_path + cloud_ice_path > 0
