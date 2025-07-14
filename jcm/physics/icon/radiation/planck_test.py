@@ -10,8 +10,8 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import pytest
 from jcm.physics.icon.radiation.planck import (
+    planck_bands_lw, planck_bands_sw,
     planck_function_wavenumber,
-    planck_bands,
     planck_derivative,
     total_thermal_emission
 )
@@ -86,21 +86,21 @@ def test_planck_bands():
     band_limits = ((10, 350), (350, 500), (500, 2500))  # cm⁻¹
     n_bands = 3
     
-    planck_integrated = planck_bands(temperatures, band_limits, n_bands)
+    planck_integrated = planck_bands(temperatures, band_limits, is_lw=True)
     
-    # Check output shape - hardcoded to max_bands=10
-    assert planck_integrated.shape == (nlev, 10)  # max_bands hardcoded
+    # Check output shape
+    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    assert planck_integrated.shape == (nlev, N_LW_BANDS)
     
-    # Check that we have at least 2 bands with values (implementation detail)
-    assert jnp.sum(planck_integrated[0] > 0) >= 2
-    # Later bands should be zero
-    assert jnp.all(planck_integrated[:, 3:] == 0)  # Unused bands are zero
+    # All bands should have values for LW
+    assert jnp.all(planck_integrated > 0)
     
     # Should not have NaN values
     assert not jnp.any(jnp.isnan(planck_integrated))
     
     # Higher temperatures should give higher Planck values
-    for band in range(n_bands):
+    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    for band in range(N_LW_BANDS):
         assert jnp.all(planck_integrated[1:, band] >= planck_integrated[:-1, band])
 
 
@@ -110,22 +110,21 @@ def test_planck_bands_single_temperature():
     
     # Test with single temperature (should work with scalars)
     band_limits = ((100, 500), (500, 1500), (1500, 3000))
-    planck_vals = planck_bands(temperature, band_limits, 3)
+    planck_vals = planck_bands_lw(temperature, band_limits)
     
-    assert planck_vals.shape == (10,)  # max_bands hardcoded
-    # Check that we have at least 2 bands with values (implementation detail)
-    assert jnp.sum(planck_vals > 0) >= 2
-    # Later bands should be zero
-    assert jnp.all(planck_vals[3:] == 0)
+    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    assert planck_vals.shape == (N_LW_BANDS,)
+    # All bands should have values for LW
+    assert jnp.all(planck_vals > 0)
     
-    # Test with different number of bands
+    # Test with SW bands
     band_limits_2 = ((10, 1000), (1000, 3000))
-    planck_vals_2 = planck_bands(temperature, band_limits_2, 2)
+    planck_vals_2 = planck_bands_sw(temperature, band_limits_2)
     
-    assert planck_vals_2.shape == (10,)  # max_bands hardcoded
-    # Check that we have at least 1 band with values (implementation detail)
-    assert jnp.sum(planck_vals_2 > 0) >= 1
-    assert jnp.all(planck_vals_2[2:] == 0)
+    from jcm.physics.icon.radiation.constants import N_SW_BANDS
+    assert planck_vals_2.shape == (N_SW_BANDS,)
+    # All bands should have values
+    assert jnp.all(planck_vals_2 > 0)
 
 
 def test_planck_bands_array_input():
@@ -133,13 +132,12 @@ def test_planck_bands_array_input():
     temperatures = jnp.array([250.0, 288.0, 320.0])
     band_limits = ((200, 800), (800, 1200), (1200, 2000))
     
-    planck_vals = planck_bands(temperatures, band_limits, 3)
+    planck_vals = planck_bands_lw(temperatures, band_limits)
     
-    assert planck_vals.shape == (3, 10)  # (n_temp, max_bands hardcoded)
-    # Check that we have at least 2 bands per temperature (implementation detail)
-    assert jnp.all(jnp.sum(planck_vals > 0, axis=1) >= 2)
-    # Later bands should be zero
-    assert jnp.all(planck_vals[:, 3:] == 0)  # Unused bands are zero
+    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    assert planck_vals.shape == (3, N_LW_BANDS)  # (n_temp, n_bands)
+    # All bands should have values for LW
+    assert jnp.all(planck_vals > 0)
     assert not jnp.any(jnp.isnan(planck_vals))
     
     # Each temperature should give different results

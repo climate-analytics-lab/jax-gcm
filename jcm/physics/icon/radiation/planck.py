@@ -84,40 +84,51 @@ def integrated_planck_function(
 
 
 @jax.jit
-def planck_bands(
+def planck_bands_lw(
     temperature: jnp.ndarray,
-    band_limits: Tuple[Tuple[float, float], ...],
-    n_bands: int = 3
+    band_limits: Tuple[Tuple[float, float], ...]
 ) -> jnp.ndarray:
-    """
-    Calculate Planck function for multiple spectral bands.
+    """Calculate LW planck bands"""
+    from .constants import N_LW_BANDS
     
-    Args:
-        temperature: Temperature (K) [nlev] or scalar
-        band_limits: Tuple of band limit tuples
-        n_bands: Number of bands
-        
-    Returns:
-        Band-integrated Planck function (W/m²/sr) [nlev, n_bands] or [n_bands]
-    """
     # Ensure temperature is at least 1D
     temp_array = jnp.atleast_1d(temperature)
     is_scalar = temperature.ndim == 0
     
-    # Calculate for all bands - use fixed size for JAX compatibility
     nlev = temp_array.shape[0]
-    max_bands = 10
-    planck_all = jnp.zeros((nlev, max_bands))
+    planck = jnp.zeros((nlev, N_LW_BANDS))
     
-    # Use a simple loop since band_limits is a tuple
-    # We compute for all possible bands but mask later
-    for band in range(min(len(band_limits) - 1, max_bands)):
+    # Calculate for each band
+    for band in range(min(len(band_limits), N_LW_BANDS)):
         b_band = integrated_planck_function(temp_array, band_limits[band])
-        planck_all = planck_all.at[:, band].set(b_band)
+        planck = planck.at[:, band].set(b_band)
     
-    # Mask unused bands
-    band_mask = jnp.arange(max_bands) < n_bands
-    planck = jnp.where(band_mask[None, :], planck_all, 0.0)
+    # Return scalar result if input was scalar
+    if is_scalar:
+        return planck[0, :]
+    else:
+        return planck
+
+
+@jax.jit
+def planck_bands_sw(
+    temperature: jnp.ndarray,
+    band_limits: Tuple[Tuple[float, float], ...]
+) -> jnp.ndarray:
+    """Calculate SW planck bands"""
+    from .constants import N_SW_BANDS
+    
+    # Ensure temperature is at least 1D
+    temp_array = jnp.atleast_1d(temperature)
+    is_scalar = temperature.ndim == 0
+    
+    nlev = temp_array.shape[0]
+    planck = jnp.zeros((nlev, N_SW_BANDS))
+    
+    # Calculate for each band
+    for band in range(min(len(band_limits), N_SW_BANDS)):
+        b_band = integrated_planck_function(temp_array, band_limits[band])
+        planck = planck.at[:, band].set(b_band)
     
     # Return scalar result if input was scalar
     if is_scalar:
@@ -191,11 +202,10 @@ def effective_temperature(flux: jnp.ndarray) -> jnp.ndarray:
     return (flux / STEFAN_BOLTZMANN) ** 0.25
 
 
-@jax.jit
 def band_fraction(
     temperature: jnp.ndarray,
     band_limits: Tuple[Tuple[float, float], ...],
-    n_bands: int = 3
+    is_lw: bool = True
 ) -> jnp.ndarray:
     """
     Calculate fraction of total thermal emission in each band.
@@ -203,26 +213,56 @@ def band_fraction(
     Args:
         temperature: Temperature (K)
         band_limits: Tuple of band limit tuples  
-        n_bands: Number of bands
+        is_lw: True for longwave (3 bands), False for shortwave (2 bands)
         
     Returns:
         Fraction of total emission in each band [n_bands]
     """
+    # Create separate JIT'd functions to avoid tracer issues
+    if is_lw:
+        return _band_fraction_lw(temperature, band_limits)
+    else:
+        return _band_fraction_sw(temperature, band_limits)
+
+
+@jax.jit
+def _band_fraction_lw(
+    temperature: jnp.ndarray,
+    band_limits: Tuple[Tuple[float, float], ...]
+) -> jnp.ndarray:
+    """Calculate LW band fractions"""
+    from .constants import N_LW_BANDS
+    
     # Total emission
     total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
     
-    # Calculate band emissions - use fixed size for JAX compatibility
-    max_bands = 10
-    fractions_all = jnp.zeros(max_bands)
+    fractions = jnp.zeros(N_LW_BANDS)
     
-    # Use a simple loop since band_limits is a tuple
-    for band in range(min(len(band_limits) - 1, max_bands)):
+    # Calculate band emissions
+    for band in range(min(len(band_limits), N_LW_BANDS)):
         b_band = integrated_planck_function(temperature, band_limits[band])
-        fractions_all = fractions_all.at[band].set(b_band / total)
+        fractions = fractions.at[band].set(b_band / total)
     
-    # Mask unused bands
-    band_mask = jnp.arange(max_bands) < n_bands
-    fractions = jnp.where(band_mask, fractions_all, 0.0)
+    return fractions
+
+
+@jax.jit
+def _band_fraction_sw(
+    temperature: jnp.ndarray,
+    band_limits: Tuple[Tuple[float, float], ...]
+) -> jnp.ndarray:
+    """Calculate SW band fractions"""
+    from .constants import N_SW_BANDS
+    
+    # Total emission
+    total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
+    
+    fractions = jnp.zeros(N_SW_BANDS)
+    
+    # Calculate band emissions
+    for band in range(min(len(band_limits), N_SW_BANDS)):
+        b_band = integrated_planck_function(temperature, band_limits[band])
+        fractions = fractions.at[band].set(b_band / total)
     
     return fractions
 
@@ -300,8 +340,9 @@ def test_planck_functions():
     
     # Test multiple bands
     bands = ((10, 350), (350, 500), (500, 2500))
-    B_bands = planck_bands(jnp.array([250.0, 300.0]), bands, 3)
-    assert B_bands.shape == (2, 3)
+    B_bands = planck_bands(jnp.array([250.0, 300.0]), bands, is_lw=True)
+    from .constants import N_LW_BANDS
+    assert B_bands.shape == (2, N_LW_BANDS)
     assert jnp.all(B_bands > 0)
     
     # Test that warmer temperature gives more emission

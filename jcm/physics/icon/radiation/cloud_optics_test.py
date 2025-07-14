@@ -80,24 +80,21 @@ def test_cloud_optics_integration():
     
     temperature = jnp.linspace(288.0, 200.0, nlev)
     
-    n_sw_bands = 2
-    n_lw_bands = 3
     
     # Calculate cloud optics
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature,
-        n_sw_bands, n_lw_bands
+        cloud_water_path, cloud_ice_path, temperature
     )
     
-    # Check output shapes
-    # Hardcoded to max_bands=10
-    assert sw_optics.optical_depth.shape == (nlev, 10)
-    assert sw_optics.single_scatter_albedo.shape == (nlev, 10)
-    assert sw_optics.asymmetry_factor.shape == (nlev, 10)
+    # Check output shapes - now using fixed bands
+    from jcm.physics.icon.radiation.constants import N_SW_BANDS, N_LW_BANDS
+    assert sw_optics.optical_depth.shape == (nlev, N_SW_BANDS)
+    assert sw_optics.single_scatter_albedo.shape == (nlev, N_SW_BANDS)
+    assert sw_optics.asymmetry_factor.shape == (nlev, N_SW_BANDS)
     
-    assert lw_optics.optical_depth.shape == (nlev, 10)
-    assert lw_optics.single_scatter_albedo.shape == (nlev, 10)
-    assert lw_optics.asymmetry_factor.shape == (nlev, 10)
+    assert lw_optics.optical_depth.shape == (nlev, N_LW_BANDS)
+    assert lw_optics.single_scatter_albedo.shape == (nlev, N_LW_BANDS)
+    assert lw_optics.asymmetry_factor.shape == (nlev, N_LW_BANDS)
     
     # Physical constraints
     assert jnp.all(sw_optics.optical_depth >= 0)
@@ -129,7 +126,7 @@ def test_cloud_optics_no_clouds():
     temperature = jnp.linspace(288.0, 220.0, nlev)
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, 2, 3
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # Should have zero optical depth everywhere
@@ -151,7 +148,7 @@ def test_cloud_optics_extreme_values():
     cloud_ice_path = jnp.ones(nlev) * 1e-8
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, 2, 3
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # Should handle small values without NaN
@@ -163,7 +160,7 @@ def test_cloud_optics_extreme_values():
     cloud_ice_path = jnp.ones(nlev) * 5.0
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, 2, 3
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # Should handle large values
@@ -184,13 +181,13 @@ def test_cloud_optics_temperature_dependence():
     # Warm temperatures
     temp_warm = jnp.ones(nlev) * 290.0
     sw_warm, lw_warm = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_warm, 2, 3
+        cloud_water_path, cloud_ice_path, temp_warm
     )
     
     # Cold temperatures  
     temp_cold = jnp.ones(nlev) * 230.0
     sw_cold, lw_cold = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_cold, 2, 3
+        cloud_water_path, cloud_ice_path, temp_cold
     )
     
     # Temperature should affect optical properties
@@ -213,7 +210,7 @@ def test_cloud_optics_mixed_phase():
     cloud_ice_path = jnp.array([0.0, 0.0, 0.05, 0.1, 0.15, 0.1, 0.05, 0.0])
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, 2, 3
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # Total optical depth should be combination of water and ice
@@ -237,12 +234,8 @@ def test_cloud_optics_band_variations():
     cloud_ice_path = jnp.zeros(nlev)
     temperature = jnp.ones(nlev) * 280.0
     
-    n_sw_bands = 4
-    n_lw_bands = 6
-    
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature,
-        n_sw_bands, n_lw_bands
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # Should have variations across bands
@@ -272,7 +265,7 @@ def test_cloud_optics_scattering_properties():
     temperature = jnp.ones(nlev) * 260.0
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, 2, 3
+        cloud_water_path, cloud_ice_path, temperature
     )
     
     # SW should have high single scattering albedo (clouds scatter well in visible) - only first 2 bands

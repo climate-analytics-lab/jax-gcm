@@ -239,8 +239,6 @@ def cloud_optics(
     cloud_water_path: jnp.ndarray,
     cloud_ice_path: jnp.ndarray,
     temperature: jnp.ndarray,
-    n_sw_bands: int = 2,
-    n_lw_bands: int = 3,
     land_fraction: float = 0.5
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """
@@ -298,19 +296,17 @@ def cloud_optics(
         
         return tau_total, ssa_combined, g_combined
     
-    # Apply to all SW bands
-    # Handle dynamic n_sw_bands by computing for fixed size and masking
-    max_sw_bands = 10  # Maximum supported bands
-    sw_bands = jnp.arange(max_sw_bands)
-    tau_sw_all, ssa_sw_all, g_sw_all = jax.vmap(calculate_sw_band)(sw_bands)
-    # Mask out unused bands
-    band_mask = sw_bands[:, None] < n_sw_bands
-    tau_sw = jnp.where(band_mask, tau_sw_all, 0.0)
-    ssa_sw = jnp.where(band_mask, ssa_sw_all, 0.0)
-    g_sw = jnp.where(band_mask, g_sw_all, 0.0)
-    tau_sw = tau_sw.T
-    ssa_sw = ssa_sw.T
-    g_sw = g_sw.T
+    # Apply to all SW bands - use fixed shape
+    from .constants import N_SW_BANDS
+    tau_sw = jnp.zeros((nlev, N_SW_BANDS))
+    ssa_sw = jnp.zeros((nlev, N_SW_BANDS))
+    g_sw = jnp.zeros((nlev, N_SW_BANDS))
+    
+    for band in range(N_SW_BANDS):
+        tau_band, ssa_band, g_band = calculate_sw_band(band)
+        tau_sw = tau_sw.at[:, band].set(tau_band)
+        ssa_sw = ssa_sw.at[:, band].set(ssa_band)
+        g_sw = g_sw.at[:, band].set(g_band)
     
     # Calculate LW properties for all bands
     def calculate_lw_band(band):
@@ -318,14 +314,12 @@ def cloud_optics(
         tau_ice = ice_cloud_optics_lw(cloud_ice_path, r_eff_ice, band)
         return tau_liq + tau_ice
     
-    # Apply to all LW bands
-    # Handle dynamic n_lw_bands by computing for fixed size and masking
-    max_lw_bands = 10  # Maximum supported bands  
-    lw_bands = jnp.arange(max_lw_bands)
-    tau_lw_all = jax.vmap(calculate_lw_band)(lw_bands)
-    # Mask out unused bands
-    lw_band_mask = lw_bands[:, None] < n_lw_bands
-    tau_lw = jnp.where(lw_band_mask, tau_lw_all, 0.0).T
+    # Apply to all LW bands - use fixed shape
+    from .constants import N_LW_BANDS
+    tau_lw = jnp.zeros((nlev, N_LW_BANDS))
+    
+    for band in range(N_LW_BANDS):
+        tau_lw = tau_lw.at[:, band].set(calculate_lw_band(band))
     
     # Create optical properties
     sw_optics = OpticalProperties(
@@ -334,14 +328,14 @@ def cloud_optics(
         asymmetry_factor=g_sw
     )
     
-    # Create fixed-size arrays for LW SSA and g
-    lw_ssa_all = jnp.zeros((nlev, max_lw_bands))
-    lw_g_all = jnp.zeros((nlev, max_lw_bands))
+    # LW properties (pure absorption)
+    lw_ssa = jnp.zeros((nlev, N_LW_BANDS))
+    lw_g = jnp.zeros((nlev, N_LW_BANDS))
     
     lw_optics = OpticalProperties(
         optical_depth=tau_lw,
-        single_scatter_albedo=jnp.where(lw_band_mask.T, lw_ssa_all, 0.0),  # Pure absorption
-        asymmetry_factor=jnp.where(lw_band_mask.T, lw_g_all, 0.0)
+        single_scatter_albedo=lw_ssa,  # Pure absorption
+        asymmetry_factor=lw_g
     )
     
     return sw_optics, lw_optics
@@ -389,11 +383,12 @@ def test_cloud_optics():
     cip = jnp.where(temperature <= 273, 0.05, 0.0)  # Ice below freezing
     
     # Calculate optics
-    sw_optics, lw_optics = cloud_optics(cwp, cip, temperature, 2, 3)
+    sw_optics, lw_optics = cloud_optics(cwp, cip, temperature)
     
     # Check shapes
-    assert sw_optics.optical_depth.shape == (nlev, 2)
-    assert lw_optics.optical_depth.shape == (nlev, 3)
+    from .constants import N_SW_BANDS, N_LW_BANDS
+    assert sw_optics.optical_depth.shape == (nlev, N_SW_BANDS)
+    assert lw_optics.optical_depth.shape == (nlev, N_LW_BANDS)
     
     # Check values
     assert jnp.all(sw_optics.optical_depth >= 0)

@@ -188,8 +188,7 @@ def gas_optical_depth_lw(
     o3_vmr: jnp.ndarray,
     co2_vmr: float,
     layer_thickness: jnp.ndarray,
-    air_density: jnp.ndarray,
-    n_bands: int = 3
+    air_density: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Calculate longwave gas optical depths.
@@ -226,13 +225,11 @@ def gas_optical_depth_lw(
         # Optical depth = absorption * density * path length
         return k_total * air_density * layer_thickness
     
-    # Apply to all bands - use fixed range for JAX compatibility
-    max_bands = 10
-    bands = jnp.arange(max_bands)
-    band_mask = bands < n_bands
-    tau_all = jax.vmap(single_band_absorption)(bands)
-    # Return full size array with inactive bands masked to zero
-    tau = jnp.where(band_mask[:, None], tau_all, 0.0).T
+    # Apply to all LW bands - use fixed shape
+    from .constants import N_LW_BANDS
+    tau = jnp.zeros((nlev, N_LW_BANDS))
+    for band in range(N_LW_BANDS):
+        tau = tau.at[:, band].set(single_band_absorption(band))
     
     return tau
 
@@ -244,8 +241,7 @@ def gas_optical_depth_sw(
     o3_vmr: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     air_density: jnp.ndarray,
-    cos_zenith: jnp.ndarray,
-    n_bands: int = 2
+    cos_zenith: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Calculate shortwave gas optical depths.
@@ -286,13 +282,11 @@ def gas_optical_depth_sw(
         # Optical depth with slant path correction
         return k_total * air_density * layer_thickness * sec_zenith
     
-    # Apply to all bands - use fixed range for JAX compatibility
-    max_bands = 10
-    bands = jnp.arange(max_bands)
-    band_mask = bands < n_bands
-    tau_all = jax.vmap(single_band_absorption)(bands)
-    # Return full size array with inactive bands masked to zero
-    tau = jnp.where(band_mask[:, None], tau_all, 0.0).T
+    # Apply to all SW bands - use fixed shape
+    from .constants import N_SW_BANDS
+    tau = jnp.zeros((nlev, N_SW_BANDS))
+    for band in range(N_SW_BANDS):
+        tau = tau.at[:, band].set(single_band_absorption(band))
     
     return tau
 
@@ -355,8 +349,7 @@ def create_gas_optics(
         state.o3_vmr,
         config.co2_vmr,
         layer_properties['thickness'],
-        layer_properties['density'],
-        config.n_lw_bands
+        layer_properties['density']
     )
     
     # Shortwave optical depths
@@ -366,8 +359,7 @@ def create_gas_optics(
         state.o3_vmr,
         layer_properties['thickness'],
         layer_properties['density'],
-        cos_zenith,
-        config.n_sw_bands
+        cos_zenith
     )
     
     # Add Rayleigh scattering to visible band
@@ -427,10 +419,11 @@ def test_gas_optics():
     # Test LW optical depth
     tau_lw = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr,
-        400e-6, thickness, density, 3
+        400e-6, thickness, density
     )
     
-    assert tau_lw.shape == (nlev, 3)
+    from .constants import N_LW_BANDS
+    assert tau_lw.shape == (nlev, N_LW_BANDS)
     assert jnp.all(tau_lw >= 0)
     assert jnp.all(jnp.isfinite(tau_lw))
     

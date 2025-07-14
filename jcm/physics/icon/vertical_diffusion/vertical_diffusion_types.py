@@ -45,11 +45,11 @@ class VDiffParameters:
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
             cchar=jnp.array(cchar),
-            nsfc_type=jnp.array(nsfc_type),
-            iwtr=jnp.array(iwtr),
-            iice=jnp.array(iice),
-            ilnd=jnp.array(ilnd),
-            itop=jnp.array(itop)
+            nsfc_type=nsfc_type,  # Keep as Python int for static shape
+            iwtr=iwtr,  # Keep as Python int for indexing
+            iice=iice,  # Keep as Python int for indexing
+            ilnd=ilnd,  # Keep as Python int for indexing
+            itop=itop   # Keep as Python int for indexing
         )
 
 

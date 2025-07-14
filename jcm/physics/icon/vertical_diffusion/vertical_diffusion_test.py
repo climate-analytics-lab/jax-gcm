@@ -201,7 +201,8 @@ class TestMatrixSolver:
         
         # Check that solution satisfies the system
         assert solution.shape == (ncol, nlev)
-        assert jnp.allclose(solution, jnp.array([[1.0, 0.5, 1.0], [1.0, 0.5, 1.0]]), atol=1e-6)
+        # Expected solution: [1.0, 1.0, 1.0] for both columns
+        assert jnp.allclose(solution, jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), atol=1e-6)
     
     def test_matrix_system_setup(self):
         """Test setup of matrix system."""

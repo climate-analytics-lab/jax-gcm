@@ -38,7 +38,7 @@ from .gas_optics import (
     rayleigh_optical_depth
 )
 from .planck import (
-    planck_function_wavenumber, integrated_planck_function,
+    planck_bands_lw, planck_function_wavenumber, integrated_planck_function,
     planck_bands, planck_derivative, total_thermal_emission,
     effective_temperature, band_fraction, layer_planck_function
 )
@@ -156,23 +156,21 @@ class TestGasOptics:
         # Longwave
         tau_lw = gas_optical_depth_lw(
             self.temperature, self.pressure, self.h2o_vmr, self.o3_vmr,
-            400e-6, self.thickness, self.density, n_bands=3
+            400e-6, self.thickness, self.density
         )
-        assert tau_lw.shape == (self.nlev, 10)  # hardcoded max_bands=10
+        from jcm.physics.icon.radiation.constants import N_LW_BANDS
+        assert tau_lw.shape == (self.nlev, N_LW_BANDS)
         assert jnp.all(tau_lw >= 0)
         assert jnp.all(jnp.isfinite(tau_lw))
-        # Only first 3 bands should have values
-        assert jnp.all(tau_lw[:, 3:] == 0)
         
         # Shortwave
         tau_sw = gas_optical_depth_sw(
             self.pressure, self.h2o_vmr, self.o3_vmr,
-            self.thickness, self.density, cos_zenith=0.5, n_bands=2
+            self.thickness, self.density, cos_zenith=0.5
         )
-        assert tau_sw.shape == (self.nlev, 10)  # hardcoded max_bands=10
+        from jcm.physics.icon.radiation.constants import N_SW_BANDS
+        assert tau_sw.shape == (self.nlev, N_SW_BANDS)
         assert jnp.all(tau_sw >= 0)
-        # Only first 2 bands should have values
-        assert jnp.all(tau_sw[:, 2:] == 0)
     
     def test_rayleigh_scattering(self):
         """Test Rayleigh optical depth"""
@@ -238,15 +236,15 @@ class TestPlanckFunctions:
         """Test thermal emission band fractions"""
         T = 288.0
         bands = ((10, 350), (350, 500), (500, 2500))
-        fracs = band_fraction(T, bands, n_bands=3)
+        fracs = band_fraction(T, bands, is_lw=True)
         
-        assert fracs.shape == (10,)  # hardcoded max_bands=10
+        from jcm.physics.icon.radiation.constants import N_LW_BANDS
+        assert fracs.shape == (N_LW_BANDS,)
         assert jnp.all(fracs >= 0) and jnp.all(fracs <= 1)
         # These bands only cover a small portion of the spectrum
         # So the sum will be much less than 1
-        assert jnp.sum(fracs[:3]) > 0  # Should have some emission (first 3 bands only)
-        assert jnp.sum(fracs[:3]) < 0.2  # But not too much for these limited bands
-        assert jnp.all(fracs[3:] == 0)  # Unused bands should be zero
+        assert jnp.sum(fracs) > 0  # Should have some emission
+        assert jnp.sum(fracs) < 0.2  # But not too much for these limited bands
 
 
 class TestCloudOptics:
@@ -298,26 +296,21 @@ class TestCloudOptics:
     def test_combined_cloud_optics(self):
         """Test combined cloud optics calculation"""
         sw_optics, lw_optics = cloud_optics(
-            self.cwp, self.cip, self.temperature,
-            n_sw_bands=2, n_lw_bands=3
+            self.cwp, self.cip, self.temperature
         )
         
-        # Check shapes (hardcoded max_bands=10)
-        assert sw_optics.optical_depth.shape == (self.nlev, 10)
-        assert lw_optics.optical_depth.shape == (self.nlev, 10)
+        # Check shapes
+        from jcm.physics.icon.radiation.constants import N_SW_BANDS, N_LW_BANDS
+        assert sw_optics.optical_depth.shape == (self.nlev, N_SW_BANDS)
+        assert lw_optics.optical_depth.shape == (self.nlev, N_LW_BANDS)
         
-        # Check values (only first n_bands should have values)
+        # Check values
         assert jnp.all(sw_optics.optical_depth >= 0)
         assert jnp.all(sw_optics.single_scatter_albedo >= 0)
         assert jnp.all(sw_optics.single_scatter_albedo <= 1)
         
-        # Only first 2 bands for SW should have values
-        assert jnp.all(sw_optics.optical_depth[:, 2:] == 0)
-        # Only first 3 bands for LW should have values
-        assert jnp.all(lw_optics.optical_depth[:, 3:] == 0)
-        
-        # LW should be pure absorption (where present)
-        assert jnp.all(lw_optics.single_scatter_albedo[:, :3] == 0)
+        # LW should be pure absorption
+        assert jnp.all(lw_optics.single_scatter_albedo == 0)
     
     def test_cloud_overlap(self):
         """Test cloud overlap calculation"""
@@ -443,16 +436,16 @@ class TestRadiationIntegration:
         """Test complete longwave calculation"""
         # Planck functions
         lw_bands = ((10, 350), (350, 500), (500, 2500))
-        planck_layer = planck_bands(self.temperature, lw_bands, self.n_lw_bands)
-        
+        planck_layer = planck_bands_lw(self.temperature, lw_bands)
+
         temp_interface = jnp.linspace(288, 220, self.nlev + 1)
-        planck_interface = planck_bands(temp_interface, lw_bands, self.n_lw_bands)
-        
+        planck_interface = planck_bands_lw(temp_interface, lw_bands)
+
         # Surface
         surface_emissivity = 0.98
         surface_temp = 288.0
-        surface_planck = planck_bands(
-            jnp.array([surface_temp]), lw_bands, self.n_lw_bands
+        surface_planck = planck_bands_lw(
+            jnp.array([surface_temp]), lw_bands
         )[0]
         
         # Calculate fluxes
@@ -544,19 +537,19 @@ def test_energy_conservation():
     
     # Planck functions
     bands = ((10, 350), (350, 500), (500, 2500))
-    planck_layer = planck_bands(temperature, bands, 3)
+    planck_layer = planck_bands_lw(temperature, bands)
     
     temp_interface = jnp.interp(
         jnp.linspace(0, 1, nlev + 1),
         jnp.linspace(0, 1, nlev),
         temperature
     )
-    planck_interface = planck_bands(temp_interface, bands, 3)
-    
+    planck_interface = planck_bands_lw(temp_interface, bands)
+
     # Surface
     surface_temp = temperature[-1]
-    surface_planck = planck_bands(jnp.array([surface_temp]), bands, 3)[0]
-    
+    surface_planck = planck_bands_lw(jnp.array([surface_temp]), bands)[0]
+
     # Calculate fluxes
     flux_up, flux_down = longwave_fluxes(
         optics, planck_layer, planck_interface,

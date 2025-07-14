@@ -18,7 +18,7 @@ from jcm.physics.icon.radiation.two_stream import (
     flux_to_heating_rate
 )
 from jcm.physics.icon.radiation.radiation_types import OpticalProperties
-from jcm.physics.icon.radiation.planck import planck_bands
+from jcm.physics.icon.radiation.planck import planck_bands_lw
 
 
 def test_two_stream_coefficients():
@@ -150,15 +150,15 @@ def test_longwave_fluxes():
     
     # Planck functions
     lw_bands = ((10, 350), (350, 500), (500, 2500))
-    planck_layer = planck_bands(temperature, lw_bands, n_lw_bands)
-    planck_interface = planck_bands(
-        jnp.linspace(250, 290, nlev + 1), lw_bands, n_lw_bands
+    planck_layer = planck_bands_lw(temperature, lw_bands)
+    planck_interface = planck_bands_lw(
+        jnp.linspace(250, 290, nlev + 1), lw_bands
     )
     
     # Surface properties
     surface_emissivity = 0.98
     surface_temp = 290.0
-    surface_planck = planck_bands(jnp.array([surface_temp]), lw_bands, n_lw_bands)[0]
+    surface_planck = planck_bands_lw(jnp.array([surface_temp]), lw_bands)[0]
     
     # Calculate fluxes
     flux_up_lw, flux_down_lw = longwave_fluxes(
@@ -255,15 +255,15 @@ def test_two_stream_integration():
     
     # Planck functions
     lw_bands = ((10, 350), (350, 500), (500, 2500))
-    planck_layer = planck_bands(temperature, lw_bands, n_lw_bands)
-    planck_interface = planck_bands(
-        jnp.linspace(250, 290, nlev + 1), lw_bands, n_lw_bands
+    planck_layer = planck_bands_lw(temperature, lw_bands)
+    planck_interface = planck_bands_lw(
+        jnp.linspace(250, 290, nlev + 1), lw_bands
     )
     
     # Surface properties
     surface_emissivity = 0.98
     surface_temp = 290.0
-    surface_planck = planck_bands(jnp.array([surface_temp]), lw_bands, n_lw_bands)[0]
+    surface_planck = planck_bands_lw(jnp.array([surface_temp]), lw_bands)[0]
     
     # Test LW
     flux_up_lw, flux_down_lw = longwave_fluxes(

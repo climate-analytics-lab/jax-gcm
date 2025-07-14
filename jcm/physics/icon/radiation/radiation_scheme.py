@@ -12,6 +12,8 @@ import jax.numpy as jnp
 from typing import Tuple, Optional, NamedTuple
 from functools import partial
 
+from jcm.physics.icon.radiation.planck import planck_bands_lw
+
 from .radiation_types import (
     RadiationParameters, 
     RadiationState,
@@ -235,9 +237,7 @@ def radiation_scheme(
     cloud_sw_optics, cloud_lw_optics = cloud_optics(
         cloud_water_path=rad_state.cloud_water_path,
         cloud_ice_path=rad_state.cloud_ice_path,
-        temperature=temperature,
-        n_sw_bands=parameters.n_sw_bands,
-        n_lw_bands=parameters.n_lw_bands
+        temperature=temperature
     )
     
     # Combine gas and cloud optical depths
@@ -259,20 +259,20 @@ def radiation_scheme(
     
     # Calculate Planck functions for longwave
     lw_band_limits = parameters.lw_band_limits
-    planck_layers = planck_bands(temperature, lw_band_limits, parameters.n_lw_bands)
-    planck_interfaces = planck_bands(
+    planck_layers = planck_bands_lw(temperature, lw_band_limits)
+    planck_interfaces = planck_bands_lw(
         jnp.linspace(temperature[0], temperature[-1], nlev + 1),
-        lw_band_limits, parameters.n_lw_bands
+        lw_band_limits
     )
     
     # Surface properties
     surface_temp = temperature[-1]
-    surface_planck = planck_bands(jnp.array([surface_temp]), lw_band_limits, parameters.n_lw_bands)[0]
+    surface_planck = planck_bands_lw(jnp.array([surface_temp]), lw_band_limits)[0]
     
     # Calculate longwave fluxes
     flux_up_lw, flux_down_lw = longwave_fluxes(
         lw_optics, planck_layers, planck_interfaces,
-        rad_state.surface_emissivity[0], surface_planck, parameters.n_lw_bands
+        rad_state.surface_emissivity[0], surface_planck
     )
     
     # Calculate shortwave fluxes (only if sun is up)

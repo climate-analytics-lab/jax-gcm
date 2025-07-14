@@ -121,14 +121,14 @@ def test_gas_optical_depth_lw():
     air_density = pressure / (287.0 * temperature)
     layer_thickness = jnp.ones(nlev) * 2000.0  # 2 km layers
     
-    n_bands = 3
     tau = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, co2_vmr,
-        layer_thickness, air_density, n_bands
+        layer_thickness, air_density
     )
     
-    # Check output shape - hardcoded to max_bands=10
-    assert tau.shape == (nlev, 10)  # max_bands hardcoded
+    # Check output shape
+    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    assert tau.shape == (nlev, N_LW_BANDS)
     
     # Optical depth should be non-negative
     assert jnp.all(tau >= 0)
@@ -154,14 +154,14 @@ def test_gas_optical_depth_sw():
     layer_thickness = jnp.ones(nlev) * 2000.0
     cos_zenith = 0.5
     
-    n_bands = 2
     tau = gas_optical_depth_sw(
         pressure, h2o_vmr, o3_vmr, layer_thickness, 
-        air_density, cos_zenith, n_bands
+        air_density, cos_zenith
     )
     
-    # Check output shape - hardcoded to max_bands=10
-    assert tau.shape == (nlev, 10)  # max_bands hardcoded
+    # Check output shape
+    from jcm.physics.icon.radiation.constants import N_SW_BANDS
+    assert tau.shape == (nlev, N_SW_BANDS)
     
     # Optical depth should be non-negative
     assert jnp.all(tau >= 0)
@@ -196,7 +196,7 @@ def test_gas_optical_depth_lw_realistic():
     
     tau = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, 400e-6,
-        layer_thickness, air_density, 3
+        layer_thickness, air_density
     )
     
     # Should produce reasonable optical depths
@@ -222,12 +222,12 @@ def test_gas_optical_depth_zero_vmr():
     
     tau_lw = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, co2_vmr,
-        layer_thickness, air_density, 3
+        layer_thickness, air_density
     )
     
     tau_sw = gas_optical_depth_sw(
         pressure, h2o_vmr, o3_vmr, layer_thickness,
-        air_density, 0.5, 2
+        air_density, 0.5
     )
     
     # With zero concentrations, should get zero optical depth
@@ -250,19 +250,19 @@ def test_gas_optical_depth_scaling():
     
     tau_base = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, co2_vmr,
-        layer_thickness, air_density, 3
+        layer_thickness, air_density
     )
     
     # Double layer thickness
     tau_thick = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, co2_vmr,
-        layer_thickness * 2, air_density, 3
+        layer_thickness * 2, air_density
     )
     
     # Double air density
     tau_dense = gas_optical_depth_lw(
         temperature, pressure, h2o_vmr, o3_vmr, co2_vmr,
-        layer_thickness, air_density * 2, 3
+        layer_thickness, air_density * 2
     )
     
     # Optical depth should scale linearly with thickness and density
