@@ -114,11 +114,12 @@ def compute_mixing_length(
     
     # Apply stability correction based on Richardson number
     # Extend Richardson number to full levels (pad with boundary values)
+    # Richardson number is defined at interfaces (nlev-1), need to interpolate to full levels (nlev)
     ri_extended = jnp.concatenate([
         richardson_number[:, :1],    # Extend top value
-        richardson_number,           # Interior values
-        richardson_number[:, -1:]    # Extend bottom value
+        richardson_number           # Interior values - this gives (nlev-1) more
     ], axis=1)
+    # ri_extended now has shape (ncol, nlev) which matches mixing_length
     
     # Stability function: reduce mixing length for stable conditions
     stability_factor = jnp.where(
@@ -161,18 +162,18 @@ def compute_exchange_coefficients(
     v_diff = jnp.diff(state.v, axis=1)
     height_diff = jnp.diff(state.height_full, axis=1)
     
-    # Extend to full levels
+    # Extend to full levels (nlev) by padding with boundary values
+    # u_diff and v_diff have shape (ncol, nlev-1), need to extend to (ncol, nlev)
     u_shear = jnp.concatenate([
-        u_diff[:, :1] / height_diff[:, :1],
-        u_diff / height_diff,
-        u_diff[:, -1:] / height_diff[:, -1:]
+        u_diff[:, :1] / height_diff[:, :1],  # Extend top value
+        u_diff / height_diff                # Interior values (nlev-1)
     ], axis=1)
     
     v_shear = jnp.concatenate([
-        v_diff[:, :1] / height_diff[:, :1],
-        v_diff / height_diff,
-        v_diff[:, -1:] / height_diff[:, -1:]
+        v_diff[:, :1] / height_diff[:, :1],  # Extend top value
+        v_diff / height_diff                # Interior values (nlev-1)
     ], axis=1)
+    # Both u_shear and v_shear now have shape (ncol, nlev)
     
     shear_magnitude = jnp.sqrt(u_shear**2 + v_shear**2)
     
