@@ -27,7 +27,7 @@ def spec_hum_to_rel_hum(
 
     Args:
         ta: Absolute temperature [K] - PhysicsState.temperature
-        ps: Normalized pressure (p/1000 hPa) - state.surface_pressure
+        ps: Normalized pressure (p/1000 hPa) - state.normalized_surface_pressure
         sig: Sigma level - fsg from geometry
         qa: Specific humidity - PhysicsState.specific_humidity
 
@@ -37,7 +37,7 @@ def spec_hum_to_rel_hum(
     """
 
     # compute thermodynamic variables: logic from physics.f90:110-114
-    psa = state.surface_pressure
+    psa = state.normalized_surface_pressure
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis

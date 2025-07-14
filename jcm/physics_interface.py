@@ -204,7 +204,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
     # take the log of normalized surface pressure and convert to modal
-    log_surface_pressure = jnp.log(physics_state.surface_pressure)
+    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     return State(
