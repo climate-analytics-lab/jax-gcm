@@ -111,8 +111,8 @@ class SWRadiationData:
         )
     
     def isnan(self):
-        self.icltop = jnp.zeros_like(self.icltop, dtype=jnp.float_)
-        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=jnp.float_)
+        self.icltop = jnp.zeros_like(self.icltop, dtype=jnp.float32)
+        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=jnp.float32)
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -120,7 +120,7 @@ class ModRadConData:
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
-    ablco2: jnp.float_ # CO2 absorptivity
+    ablco2: jnp.float32 # CO2 absorptivity
     alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
     alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
     albsfc: jnp.ndarray # Combined surface albedo (land + sea)
@@ -244,7 +244,7 @@ class ConvectionData:
     # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
     # or intended to be used.
     def isnan(self):
-        self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float_)
+        self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float32)
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
