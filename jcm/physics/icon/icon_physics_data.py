@@ -20,7 +20,6 @@ class RadiationData:
     
     # Solar/geometric variables
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
-    solar_flux_toa: jnp.ndarray      # TOA solar flux [W/m²] (ncols,)
     
     # Shortwave fluxes
     sw_flux_up: jnp.ndarray          # Upward SW flux [W/m²] (nlev+1, ncols)
@@ -35,16 +34,18 @@ class RadiationData:
     # Surface fluxes
     surface_sw_down: jnp.ndarray     # Surface downward SW [W/m²] (ncols,)
     surface_lw_down: jnp.ndarray     # Surface downward LW [W/m²] (ncols,)
+    surface_sw_up: jnp.ndarray       # Surface upward SW [W/m²] (ncols,)
+    surface_lw_up: jnp.ndarray       # Surface upward LW [W/m²] (ncols,)
     
     # TOA fluxes
     toa_sw_up: jnp.ndarray           # TOA upward SW [W/m²] (ncols,)
     toa_lw_up: jnp.ndarray           # TOA upward LW (OLR) [W/m²] (ncols,)
+    toa_sw_down: jnp.ndarray         # TOA downward SW [W/m²] (ncols,)
     
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
             cos_zenith=jnp.zeros(nodal_shape),
-            solar_flux_toa=jnp.zeros(nodal_shape),
             sw_flux_up=jnp.zeros((nlev+1,) + nodal_shape),
             sw_flux_down=jnp.zeros((nlev+1,) + nodal_shape),
             sw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
@@ -53,14 +54,17 @@ class RadiationData:
             lw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
             surface_sw_down=jnp.zeros(nodal_shape),
             surface_lw_down=jnp.zeros(nodal_shape),
+            surface_sw_up=jnp.zeros(nodal_shape),
+            surface_lw_up=jnp.zeros(nodal_shape),
             toa_sw_up=jnp.zeros(nodal_shape),
             toa_lw_up=jnp.zeros(nodal_shape),
+            toa_sw_down=jnp.zeros(nodal_shape),
+            toa_lw_down=jnp.zeros(nodal_shape)
         )
     
     def copy(self, **kwargs):
         new_data = {
             'cos_zenith': self.cos_zenith,
-            'solar_flux_toa': self.solar_flux_toa,
             'sw_flux_up': self.sw_flux_up,
             'sw_flux_down': self.sw_flux_down,
             'sw_heating_rate': self.sw_heating_rate,
@@ -69,8 +73,11 @@ class RadiationData:
             'lw_heating_rate': self.lw_heating_rate,
             'surface_sw_down': self.surface_sw_down,
             'surface_lw_down': self.surface_lw_down,
+            'surface_sw_up': self.surface_sw_up,
+            'surface_lw_up': self.surface_lw_up,
             'toa_sw_up': self.toa_sw_up,
             'toa_lw_up': self.toa_lw_up,
+            'toa_sw_down': self.toa_sw_down,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)

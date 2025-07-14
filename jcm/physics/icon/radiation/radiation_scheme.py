@@ -325,6 +325,7 @@ def radiation_scheme(
     )
     
     diagnostics = RadiationData(
+        cos_zenith=jnp.array([cos_zenith]),
         sw_flux_up=flux_up_sw,
         sw_flux_down=flux_down_sw,
         lw_flux_up=flux_up_lw,
@@ -356,7 +357,7 @@ def radiation_column(
     seconds_since_midnight: float,
     latitude: float,
     longitude: float,
-    parameters: Optional[RadiationParameters] = None
+    parameters: Optional[RadiationParameters]
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Single column radiation calculation"""
     return radiation_scheme(

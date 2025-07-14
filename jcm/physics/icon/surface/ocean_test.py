@@ -128,7 +128,7 @@ class TestOceanRoughness:
         wind_speed = jnp.array([0.0, 0.1])  # Very low wind
         ocean_u = jnp.zeros(ncol)
         ocean_v = jnp.zeros(ncol)
-        params = SurfaceParameters(min_wind_speed=1.0)
+        params = SurfaceParameters.default(min_wind_speed=1.0)
         
         roughness = compute_ocean_roughness(wind_speed, ocean_u, ocean_v, params)
         

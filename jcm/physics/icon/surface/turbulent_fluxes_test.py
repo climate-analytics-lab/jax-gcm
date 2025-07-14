@@ -202,7 +202,7 @@ class TestExchangeCoefficients:
         
         cd, ch, cq = compute_exchange_coefficients(
             wind_speed, roughness_momentum, roughness_heat,
-            stability_heat, stability_momentum
+            stability_heat, stability_momentum, min_wind_speed=1.0, von_karman=0.4
         )
         
         assert cd.shape == (ncol, nsfc_type)
@@ -231,12 +231,12 @@ class TestExchangeCoefficients:
         
         cd_smooth, _, _ = compute_exchange_coefficients(
             wind_speed, roughness_momentum_smooth, roughness_heat,
-            stability_heat, stability_momentum
+            stability_heat, stability_momentum, min_wind_speed=1.0, von_karman=0.4
         )
         
         cd_rough, _, _ = compute_exchange_coefficients(
             wind_speed, roughness_momentum_rough, roughness_heat,
-            stability_heat, stability_momentum
+            stability_heat, stability_momentum, min_wind_speed=1.0, von_karman=0.4
         )
         
         # Rougher surface should have higher exchange coefficients
@@ -256,12 +256,14 @@ class TestExchangeCoefficients:
         
         cd_stable, _, _ = compute_exchange_coefficients(
             wind_speed, roughness_momentum, roughness_heat,
-            stability_heat_stable, stability_momentum_stable
+            stability_heat_stable, stability_momentum_stable,
+            min_wind_speed=1.0, von_karman=0.4
         )
         
         cd_unstable, _, _ = compute_exchange_coefficients(
             wind_speed, roughness_momentum, roughness_heat,
-            stability_heat_unstable, stability_momentum_unstable
+            stability_heat_unstable, stability_momentum_unstable,
+            min_wind_speed=1.0, von_karman=0.4
         )
         
         # Unstable conditions should have higher exchange coefficients
@@ -280,7 +282,7 @@ class TestExchangeCoefficients:
         
         cd, ch, cq = compute_exchange_coefficients(
             wind_speed, roughness_momentum, roughness_heat,
-            stability_heat, stability_momentum, params=params
+            stability_heat, stability_momentum, params.min_wind_speed, params.von_karman
         )
         
         # Should be finite and positive
@@ -291,7 +293,7 @@ class TestExchangeCoefficients:
         cd_min, _, _ = compute_exchange_coefficients(
             jnp.ones(ncol) * params.min_wind_speed, 
             roughness_momentum, roughness_heat,
-            stability_heat, stability_momentum, params=params
+            stability_heat, stability_momentum, params.min_wind_speed, params.von_karman
         )
         
         assert jnp.allclose(cd, cd_min)

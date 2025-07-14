@@ -39,7 +39,7 @@ class TestSurfaceParameters:
     
     def test_custom_parameters(self):
         """Test custom parameter values."""
-        params = SurfaceParameters(
+        params = SurfaceParameters.default(
             nsfc_type=2,
             ml_depth=100.0,
             von_karman=0.35

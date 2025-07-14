@@ -108,7 +108,8 @@ def compute_exchange_coefficients(
     roughness_heat: jnp.ndarray,
     stability_heat: jnp.ndarray,
     stability_momentum: jnp.ndarray,
-    params: SurfaceParameters,
+    min_wind_speed: float,
+    von_karman: float,
     reference_height: float = 10.0,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
@@ -125,20 +126,18 @@ def compute_exchange_coefficients(
         
     Returns:
         Tuple of (momentum_coeff, heat_coeff, moisture_coeff) [m/s]
-    """
-    ncol, nsfc_type = roughness_momentum.shape
-    
+    """    
     # Ensure minimum wind speed
-    wind_speed_safe = jnp.maximum(wind_speed, params.min_wind_speed)
+    wind_speed_safe = jnp.maximum(wind_speed, min_wind_speed)
     
     # Logarithmic terms
     ln_z_z0m = jnp.log(reference_height / roughness_momentum)
     ln_z_z0h = jnp.log(reference_height / roughness_heat)
     
     # Exchange coefficients with stability correction
-    cd = (params.von_karman**2 / 
+    cd = (von_karman**2 / 
           (ln_z_z0m * stability_momentum)**2)
-    ch = (params.von_karman**2 / 
+    ch = (von_karman**2 / 
           (ln_z_z0m * ln_z_z0h * stability_momentum * stability_heat))
     
     # Convert to exchange coefficients [m/s]
@@ -327,7 +326,7 @@ def compute_surface_resistances(
     # Exchange coefficients
     momentum_coeff, heat_coeff, moisture_coeff = compute_exchange_coefficients(
         wind_speed, surface_state.roughness_momentum, surface_state.roughness_heat,
-        stability_heat, stability_momentum, params=params
+        stability_heat, stability_momentum, params.min_wind_speed, params.von_karman,
     )
     
     # Convert to resistances [s/m]

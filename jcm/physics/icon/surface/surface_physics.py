@@ -166,7 +166,7 @@ def surface_physics_step(
     # Compute exchange coefficients
     exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture = compute_exchange_coefficients(
         wind_speed, surface_state.roughness_momentum, surface_state.roughness_heat,
-        stability_heat, stability_momentum, params=params
+        stability_heat, stability_momentum, params.min_wind_speed, params.von_karman
     )
     
     # Initialize output arrays
