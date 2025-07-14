@@ -23,38 +23,38 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray # Normalized by p0
+    normalized_surface_pressure: jnp.ndarray # Normalized by global mean sea level pressure
 
     @classmethod
-    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.zeros(shape[1:])
         )
 
     @classmethod
-    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.ones(shape[1:])
         )
 
-    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,normalized_surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
             v_wind if v_wind is not None else self.v_wind,
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity,
             geopotential if geopotential is not None else self.geopotential,
-            surface_pressure if surface_pressure is not None else self.surface_pressure
+            normalized_surface_pressure if normalized_surface_pressure is not None else self.normalized_surface_pressure
         )
 
     def isnan(self):

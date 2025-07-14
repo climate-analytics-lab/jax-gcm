@@ -235,7 +235,7 @@ class TestModelUnit(unittest.TestCase):
         state = jvp_sum.dynamics
         physics_data = jvp_sum.physics
 
-        # Check dinosaur states
+        # Check dynamics state
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
         self.assertFalse(jnp.any(jnp.isnan(state.v_wind)))
         self.assertFalse(jnp.any(jnp.isnan(state.temperature)))

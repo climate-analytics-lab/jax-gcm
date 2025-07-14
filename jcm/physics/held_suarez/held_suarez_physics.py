@@ -51,9 +51,9 @@ class HeldSuarezPhysics(Physics):
         self.sigma = self.coords.vertical.centers
         self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
 
-    def equilibrium_temperature(self, nodal_surface_pressure): # nodal_surface_pressure should be normalized
+    def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis]
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
         )
         temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.maxT
@@ -94,7 +94,7 @@ class HeldSuarezPhysics(Physics):
             Physical tendencies in PhysicsTendency format
             Object containing physics data (unused)
         """
-        Teq = self.equilibrium_temperature(state.surface_pressure)
+        Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
         d_v_wind = -self.kv() * state.v_wind
