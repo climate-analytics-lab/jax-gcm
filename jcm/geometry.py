@@ -56,7 +56,7 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(self, coords: CoordinateSystem=None):
+    def from_coords(cls, coords: CoordinateSystem=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
@@ -75,13 +75,13 @@ class Geometry:
         kx = coords.nodal_shape[0]
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
-        return Geometry(nodal_shape=coords.nodal_shape,
-                        radang=radang, sia=sia, coa=coa,
-                        hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
-                        grdsig=grdsig, grdscp=grdscp, wvi=wvi)
+        return cls(nodal_shape=coords.nodal_shape,
+                   radang=radang, sia=sia, coa=coa,
+                   hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
+                   grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(self, nodal_shape=None, node_levels=None):
+    def from_grid_shape(cls, nodal_shape=None, node_levels=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
@@ -107,7 +107,7 @@ class Geometry:
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
-        return Geometry(nodal_shape=(node_levels,) + nodal_shape,
-                        radang=radang, sia=sia, coa=coa,
-                        hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
-                        grdsig=grdsig, grdscp=grdscp, wvi=wvi)
+        return cls(nodal_shape=(node_levels,) + nodal_shape,
+                   radang=radang, sia=sia, coa=coa,
+                   hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
+                   grdsig=grdsig, grdscp=grdscp, wvi=wvi)
