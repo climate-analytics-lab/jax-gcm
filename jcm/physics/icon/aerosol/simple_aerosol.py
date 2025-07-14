@@ -5,13 +5,13 @@ from jcm.physics.icon.icon_physics import PhysicsTendency
 from jcm.physics_interface import PhysicsState
 from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
-from jcm.physics.icon.parameters import Parameters
+from .aerosol_params import AerosolParameters
 
 
 def get_simple_aerosol(
     state: PhysicsState,
     physics_data: PhysicsData,
-    parameters: Parameters,
+    parameters: AerosolParameters,
     boundaries: BoundaryData = None,
     geometry: Geometry = None
 ) -> Tuple[PhysicsTendency, PhysicsData]:
