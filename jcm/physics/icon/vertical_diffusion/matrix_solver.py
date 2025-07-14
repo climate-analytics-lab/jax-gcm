@@ -45,17 +45,8 @@ def setup_matrix_system(
     nsfc_type = 3  # Fixed number of surface types (water, ice, land)
     
     # Number of variables and matrices
-    # Variables: u, v, T, qv, qc, qi, TKE, thv_var, [tracers]
-    nvar_base = 8  # Base variables
-    # Handle tracers - use static shape computation
-    if state.tracers is None:
-        ntracers = 0
-        nvar_total = nvar_base
-    else:
-        # For now, assume no tracers to avoid dynamic shape issues
-        # TODO: Handle tracers properly with static shapes
-        ntracers = 0 
-        nvar_total = nvar_base
+    # Variables: u, v, T, qv, qc, qi, TKE, thv_var (fixed 8 variables)
+    nvar_total = 8  # Fixed number of variables (no additional tracers)
     
     # Matrix types: momentum, heat, moisture, hydrometeors, TKE, thv_var
     nmatrix = 6
@@ -76,10 +67,7 @@ def setup_matrix_system(
         5      # thv_var -> thv_var matrix
     ])
     
-    # Add tracers to hydrometeor matrix
-    if ntracers > 0:
-        tracer_matrices = jnp.full(ntracers, 3)  # Hydrometeor matrix
-        variable_to_matrix = jnp.concatenate([variable_to_matrix, tracer_matrices])
+    # No additional tracers - qc and qi are already included in the base variables
     
     # Reciprocal air mass for matrix coefficients
     recip_air_mass = 1.0 / state.air_mass
@@ -119,7 +107,7 @@ def setup_matrix_system(
     )
     
     # Setup right-hand side vectors
-    rhs_vectors = setup_rhs_vectors(state, params, nvar_total, ntracers)
+    rhs_vectors = setup_rhs_vectors(state, params)
     
     return VDiffMatrixSystem(
         matrix_coeffs=matrix_coeffs,
@@ -280,15 +268,12 @@ def setup_thv_matrix(
 @jax.jit
 def setup_rhs_vectors(
     state: VDiffState,
-    params: VDiffParameters,
-    nvar_total: int,
-    ntracers: int
+    params: VDiffParameters
 ) -> jnp.ndarray:
     """Set up right-hand side vectors for the linear system."""
     ncol, nlev = state.u.shape
-    # Use fixed number of variables to avoid tracing issues
-    nvar_total_fixed = 8  # u, v, T, qv, qc, qi, TKE, thv_var
-    rhs = jnp.zeros((ncol, nlev, nvar_total_fixed))
+    # Fixed number of variables: u, v, T, qv, qc, qi, TKE, thv_var
+    rhs = jnp.zeros((ncol, nlev, 8))
     
     # Current values as initial guess (implicit time stepping)
     rhs = rhs.at[:, :, 0].set(state.u * params.tpfac2)  # u
@@ -299,11 +284,6 @@ def setup_rhs_vectors(
     rhs = rhs.at[:, :, 5].set(state.qi * params.tpfac2)  # qi
     rhs = rhs.at[:, :, 6].set(state.tke * params.tpfac2)  # TKE
     rhs = rhs.at[:, :, 7].set(state.thv_variance * params.tpfac2)  # thv_var
-    
-    # Add tracers if present
-    if ntracers > 0:
-        for i in range(ntracers):
-            rhs = rhs.at[:, :, 8 + i].set(state.tracers[:, :, i] * params.tpfac2)
     
     return rhs
 
@@ -436,16 +416,6 @@ def compute_tendencies_from_solution(
     # Convert temperature tendency to heating rate
     heating_rate = t_tend * state.air_mass * PHYS_CONST.cp
     
-    # Handle tracers if present
-    tracer_tendencies = None
-    if state.tracers is not None:
-        ntracers = state.tracers.shape[2]
-        tracer_tendencies = jnp.zeros((ncol, nlev, ntracers))
-        for i in range(ntracers):
-            tracer_new = solution[:, :, 8 + i]
-            tracer_tend = (tracer_new - state.tracers[:, :, i]) / dt
-            tracer_tendencies = tracer_tendencies.at[:, :, i].set(tracer_tend)
-    
     return VDiffTendencies(
         u_tendency=u_tend,
         v_tendency=v_tend,
@@ -454,7 +424,6 @@ def compute_tendencies_from_solution(
         qv_tendency=qv_tend,
         qc_tendency=qc_tend,
         qi_tendency=qi_tend,
-        tracer_tendencies=tracer_tendencies,
         tke_tendency=tke_tend,
         thv_var_tendency=thv_var_tend
     )

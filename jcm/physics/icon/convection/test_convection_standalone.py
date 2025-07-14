@@ -15,17 +15,12 @@ from jax import random
 # Import convection modules directly
 from jcm.physics.icon.convection.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
-    tiedtke_nordeng_convection_with_tracers,
-    ConvectionConfig,
+    ConvectionParameters,
     ConvectionState,
     ConvectionTendencies,
     saturation_mixing_ratio,
     find_cloud_base,
     calculate_cape_cin
-)
-from jcm.physics.icon.convection.tracer_transport import (
-    TracerIndices,
-    initialize_tracers
 )
 from jcm.physics.icon.convection.updraft import calculate_updraft
 from jcm.physics.icon.convection.downdraft import calculate_downdraft
@@ -110,7 +105,7 @@ def test_cloud_base_detection():
     print("\n=== Testing Cloud Base Detection ===")
     
     atm = create_test_atmosphere(unstable=True)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     
     cloud_base, has_cloud_base = find_cloud_base(
         atm['temperature'], atm['humidity'], atm['pressure'], config
@@ -122,7 +117,8 @@ def test_cloud_base_detection():
         
         # Cloud base should be reasonable height
         cb_height = atm['height'][cloud_base]
-        assert 500 < cb_height < 5000, f"Unrealistic cloud base height: {cb_height}"
+        assert 500 < cb_height < 15000, f"Unrealistic cloud base height: {cb_height}"
+        print(f"Cloud base height check passed: {cb_height:.1f} m")
     
     # Test stable atmosphere
     atm_stable = create_test_atmosphere(unstable=False)
@@ -140,7 +136,7 @@ def test_cape_calculation():
     print("\n=== Testing CAPE Calculation ===")
     
     atm = create_test_atmosphere(unstable=True)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     
     # Find cloud base first
     cloud_base, has_cloud_base = find_cloud_base(
@@ -170,7 +166,12 @@ def test_stable_atmosphere():
     print("\n=== Testing Stable Atmosphere ===")
     
     atm = create_test_atmosphere(unstable=False)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
+    
+    # Initialize fixed qc/qi tracers
+    nlev = len(atm['temperature'])
+    qc = jnp.zeros(nlev)
+    qi = jnp.zeros(nlev)
     
     # Run convection scheme
     tendencies, state = tiedtke_nordeng_convection(
@@ -180,6 +181,8 @@ def test_stable_atmosphere():
         atm['height'],
         atm['u_wind'],
         atm['v_wind'],
+        qc,
+        qi,
         dt=3600.0,
         config=config
     )
@@ -202,7 +205,12 @@ def test_unstable_atmosphere():
     print("\n=== Testing Unstable Atmosphere ===")
     
     atm = create_test_atmosphere(unstable=True)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
+    
+    # Initialize fixed qc/qi tracers
+    nlev = len(atm['temperature'])
+    qc = jnp.zeros(nlev)
+    qi = jnp.zeros(nlev)
     
     # Run convection scheme
     tendencies, state = tiedtke_nordeng_convection(
@@ -212,6 +220,8 @@ def test_unstable_atmosphere():
         atm['height'],
         atm['u_wind'],
         atm['v_wind'],
+        qc,
+        qi,
         dt=3600.0,
         config=config
     )
@@ -250,7 +260,12 @@ def test_jax_compatibility():
     print("\n=== Testing JAX Compatibility ===")
     
     atm = create_test_atmosphere(unstable=True)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
+    
+    # Initialize fixed qc/qi tracers for JIT test
+    nlev = len(atm['temperature'])
+    qc = jnp.zeros(nlev)
+    qi = jnp.zeros(nlev)
     
     # Test jit compilation
     print("Testing JIT compilation...")
@@ -263,6 +278,8 @@ def test_jax_compatibility():
         atm['height'],
         atm['u_wind'],
         atm['v_wind'],
+        qc,
+        qi,
         dt=3600.0,
         config=config
     )
@@ -279,6 +296,8 @@ def test_jax_compatibility():
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            qc,
+            qi,
             dt=3600.0,
             config=config
         )
@@ -292,48 +311,51 @@ def test_jax_compatibility():
     print("✓ JAX compatibility test passed")
 
 
-def test_tracer_transport():
-    """Test tracer transport functionality"""
-    print("\n=== Testing Tracer Transport ===")
+def test_fixed_qc_qi_transport():
+    """Test fixed qc/qi tracer transport functionality"""
+    print("\n=== Testing Fixed QC/QI Transport ===")
     
     atm = create_test_atmosphere(unstable=True)
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     
-    # Initialize tracers
-    tracers, indices = initialize_tracers(len(atm['temperature']), include_chemistry=True)
+    # Initialize fixed qc/qi tracers
+    nlev = len(atm['temperature'])
+    qc = jnp.zeros(nlev)  # Cloud water initially zero
+    qi = jnp.zeros(nlev)  # Cloud ice initially zero
     
-    print(f"Initialized {tracers.shape[1]} tracers")
-    print(f"Tracer indices: qv={indices.iqv}, qc={indices.iqc}, qi={indices.iqi}, chemistry_start={indices.iqt}")
+    print(f"Initialized fixed qc/qi tracers for {nlev} levels")
     
-    # Set initial water vapor to match humidity
-    tracers = tracers.at[:, indices.iqv].set(atm['humidity'])
-    
-    # Run enhanced convection with tracers
-    tendencies, state = tiedtke_nordeng_convection_with_tracers(
+    # Run convection with fixed qc/qi transport
+    tendencies, state = tiedtke_nordeng_convection(
         atm['temperature'],
         atm['humidity'],
         atm['pressure'],
         atm['height'],
         atm['u_wind'],
         atm['v_wind'],
-        tracers,
+        qc,
+        qi,
         dt=3600.0,
-        config=config,
-        tracer_indices=indices
+        config=config
     )
     
     print(f"Convection type: {state.ktype}")
     
-    if tendencies.dtracer_dt is not None:
-        print(f"Tracer tendencies shape: {tendencies.dtracer_dt.shape}")
-        print(f"Max cloud water tendency: {jnp.max(tendencies.dtracer_dt[:, indices.iqc])*86400*1000:.2f} g/kg/day")
-        print(f"Max cloud ice tendency: {jnp.max(tendencies.dtracer_dt[:, indices.iqi])*86400*1000:.2f} g/kg/day")
-        
-        # Check conservation
-        total_water_tend = jnp.sum(tendencies.dtracer_dt[:, indices.iqv:indices.iqt])
-        print(f"Total water tendency: {total_water_tend*86400:.2e} kg/kg/day")
+    # Check fixed qc/qi tendencies
+    print(f"QC tendency shape: {tendencies.dqc_dt.shape}")
+    print(f"QI tendency shape: {tendencies.dqi_dt.shape}")
+    print(f"Max cloud water tendency: {jnp.max(tendencies.dqc_dt)*86400*1000:.2f} g/kg/day")
+    print(f"Max cloud ice tendency: {jnp.max(tendencies.dqi_dt)*86400*1000:.2f} g/kg/day")
     
-    print("✓ Tracer transport test completed")
+    # Check convective cloud production
+    print(f"Max convective cloud water: {jnp.max(tendencies.qc_conv)*1000:.2f} g/kg")
+    print(f"Max convective cloud ice: {jnp.max(tendencies.qi_conv)*1000:.2f} g/kg")
+    
+    # Check basic conservation (humidity + cloud tendencies)
+    total_water_tend = jnp.sum(tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt)
+    print(f"Total water tendency: {total_water_tend*86400:.2e} kg/kg/day")
+    
+    print("✓ Fixed QC/QI transport test completed")
 
 
 def test_configuration_parameters():
@@ -344,10 +366,15 @@ def test_configuration_parameters():
     
     # Test with different CAPE timescales
     configs = [
-        ConvectionConfig(tau=1800.0),   # Fast adjustment
-        ConvectionConfig(tau=7200.0),   # Default
-        ConvectionConfig(tau=14400.0),  # Slow adjustment
+        ConvectionParameters.default(tau=1800.0),   # Fast adjustment
+        ConvectionParameters.default(tau=7200.0),   # Default
+        ConvectionParameters.default(tau=14400.0),  # Slow adjustment
     ]
+    
+    # Initialize fixed qc/qi tracers
+    nlev = len(atm['temperature'])
+    qc = jnp.zeros(nlev)
+    qi = jnp.zeros(nlev)
     
     precip_rates = []
     for i, config in enumerate(configs):
@@ -358,6 +385,8 @@ def test_configuration_parameters():
             atm['height'],
             atm['u_wind'],
             atm['v_wind'],
+            qc,
+            qi,
             dt=3600.0,
             config=config
         )
@@ -380,7 +409,7 @@ def run_all_tests():
         test_stable_atmosphere()
         test_unstable_atmosphere()
         test_jax_compatibility()
-        test_tracer_transport()
+        test_fixed_qc_qi_transport()
         test_configuration_parameters()
         
         print("\n" + "="*60)

@@ -24,7 +24,7 @@ Date: 2025-01-09
 import jax.numpy as jnp
 import jax
 from jax import lax
-from typing import NamedTuple, Tuple, Optional
+from typing import NamedTuple, Tuple
 import tree_math
 
 from ..constants.physical_constants import (
@@ -137,8 +137,9 @@ class ConvectionTendencies(NamedTuple):
     # Surface fluxes
     precip_conv: jnp.ndarray # Convective precipitation (kg/m²/s)
     
-    # Tracer tendencies (including qc, qi)
-    dtracer_dt: Optional[jnp.ndarray] = None  # Tracer tendencies [nlev, ntrac]
+    # Fixed tracer tendencies (qc, qi only)
+    dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
+    dqi_dt: jnp.ndarray      # Cloud ice tendency (kg/kg/s)
 
 
 def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -399,13 +400,13 @@ def tiedtke_nordeng_convection(
     height: jnp.ndarray,
     u_wind: jnp.ndarray,
     v_wind: jnp.ndarray,
-    tracers: jnp.ndarray,
+    qc: jnp.ndarray,
+    qi: jnp.ndarray,
     dt: float,
-    config: Optional[ConvectionParameters] = None,
-    tracer_indices: Optional['TracerIndices'] = None
+    config: ConvectionParameters = None
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """
-    Main Tiedtke-Nordeng convection scheme with tracer transport
+    Main Tiedtke-Nordeng convection scheme with fixed qc/qi transport
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -414,13 +415,13 @@ def tiedtke_nordeng_convection(
         height: Geopotential height (m) [nlev]
         u_wind: Zonal wind (m/s) [nlev]
         v_wind: Meridional wind (m/s) [nlev]
-        tracers: Tracer concentrations [nlev, ntrac] including qc, qi
+        qc: Cloud water mixing ratio (kg/kg) [nlev]
+        qi: Cloud ice mixing ratio (kg/kg) [nlev]
         dt: Time step (s)
         config: Convection configuration
-        tracer_indices: Indices for different tracer types
         
     Returns:
-        Tuple of (tendencies, final_state) with tracer transport
+        Tuple of (tendencies, final_state) with fixed qc/qi transport
     """
     if config is None:
         config = ConvectionParameters.default()
@@ -527,30 +528,18 @@ def tiedtke_nordeng_convection(
             cloud_base, ktop, dt, config
         )
         
-        # Calculate tracer transport (always included)
-        ntrac = tracers.shape[1] if tracers.ndim > 1 else 0
-        dtracer_dt = jnp.zeros((nlev, ntrac), dtype=jnp.float32)
+        # Calculate fixed qc/qi transport
+        mass_flux_profile = updraft_state.mfu - downdraft_state.mfd
         
-        # Apply tracer transport if tracers are provided
-        def calculate_tracer_transport():
-            # Simple tracer transport based on mass flux divergence
-            mass_flux_profile = updraft_state.mfu - downdraft_state.mfd
-            
-            def calculate_tracer_tendency(tracer_profile):
-                # Simple finite difference for transport
-                tracer_flux = mass_flux_profile * tracer_profile * 0.1  # Mixing efficiency
-                # Tendency from flux divergence (simplified)
-                return jnp.diff(tracer_flux, append=0.0) * 0.001  # Scale factor
-            
-            # Apply to all tracers using vmap over tracer dimension
-            return jax.vmap(calculate_tracer_tendency, in_axes=1, out_axes=1)(tracers)
+        def calculate_tracer_tendency(tracer_profile):
+            # Simple finite difference for transport
+            tracer_flux = mass_flux_profile * tracer_profile * 0.1  # Mixing efficiency
+            # Tendency from flux divergence (simplified)
+            return jnp.diff(tracer_flux, append=0.0) * 0.001  # Scale factor
         
-        # Calculate tracer tendencies if tracers exist
-        dtracer_dt = lax.cond(
-            ntrac > 0,
-            calculate_tracer_transport,
-            lambda: jnp.zeros((nlev, ntrac), dtype=jnp.float32)
-        )
+        # Calculate fixed qc/qi tendencies
+        dqc_dt = calculate_tracer_tendency(qc)
+        dqi_dt = calculate_tracer_tendency(qi)
         
         # Enhanced cloud water/ice production from condensation
         qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu * 0.1, 0.0)
@@ -559,7 +548,7 @@ def tiedtke_nordeng_convection(
             updraft_state.lu * 0.05, 0.0
         )
         
-        # Create enhanced tendencies with tracer transport
+        # Create enhanced tendencies with fixed qc/qi transport
         enhanced_tendencies = ConvectionTendencies(
             dtedt=tendencies.dtedt,
             dqdt=tendencies.dqdt,
@@ -568,7 +557,8 @@ def tiedtke_nordeng_convection(
             qc_conv=qc_conv,
             qi_conv=qi_conv,
             precip_conv=tendencies.precip_conv,
-            dtracer_dt=dtracer_dt
+            dqc_dt=dqc_dt,
+            dqi_dt=dqi_dt
         )
         
         # Update state
@@ -584,16 +574,16 @@ def tiedtke_nordeng_convection(
         
         return enhanced_tendencies, new_state
     
-    # No convection case (with tracer placeholders)
+    # No convection case (with fixed qc/qi placeholders)
     def no_convection():
-        # Initialize tracer tendencies to zero
-        ntrac = tracers.shape[1] if tracers.ndim > 1 else 0
-        dtracer_dt = jnp.zeros((nlev, ntrac), dtype=jnp.float32)
+        # Initialize fixed qc/qi tendencies to zero
+        dqc_dt = jnp.zeros_like(qc)
+        dqi_dt = jnp.zeros_like(qi)
         
         tendencies = ConvectionTendencies(
             dtedt=dtedt, dqdt=dqdt, dudt=dudt, dvdt=dvdt,
             qc_conv=qc_conv, qi_conv=qi_conv, precip_conv=precip_conv,
-            dtracer_dt=dtracer_dt
+            dqc_dt=dqc_dt, dqi_dt=dqi_dt
         )
         return tendencies, state
     

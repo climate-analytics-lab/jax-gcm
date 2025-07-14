@@ -9,7 +9,7 @@ conditional logic.
 
 import jax
 import jax.numpy as jnp
-from jcm.physics.icon.convection import ConvectionConfig, ConvectionTendencies
+from jcm.physics.icon.convection.tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 
 def simplified_convection_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col, dt, config):
     """
@@ -56,7 +56,9 @@ def simplified_convection_column(temp_col, humid_col, pressure_col, height_col, 
         dvdt=dvdt,
         qc_conv=jnp.zeros_like(temp_col),
         qi_conv=jnp.zeros_like(temp_col),
-        precip_conv=jnp.array(0.0)
+        precip_conv=jnp.array(0.0),
+        dqc_dt=jnp.zeros_like(temp_col),
+        dqi_dt=jnp.zeros_like(temp_col)
     )
 
 def test_vectorized_convection():
@@ -105,7 +107,7 @@ def test_vectorized_convection():
                 u_wind = u_wind.at[k, i, j].set(10.0 * jnp.cos(i * jnp.pi / nlat))
                 v_wind = v_wind.at[k, i, j].set(5.0 * jnp.sin(j * jnp.pi / nlon))
     
-    config = ConvectionConfig()
+    config = ConvectionParameters.default()
     dt = 1800.0
     
     print(f"✓ Test data created: {nlev} levels, {nlat}×{nlon} grid")

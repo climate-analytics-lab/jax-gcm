@@ -5,7 +5,7 @@ This module defines the key data structures used in vertical diffusion
 calculations, following the ICON model structure.
 """
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 import jax.numpy as jnp
 import tree_math
 
@@ -92,8 +92,6 @@ class VDiffState(NamedTuple):
     ocean_u: jnp.ndarray          # Ocean u-velocity [m/s] (ncol,)
     ocean_v: jnp.ndarray          # Ocean v-velocity [m/s] (ncol,)
     
-    # Tracers (optional)
-    tracers: Optional[jnp.ndarray] = None  # Additional tracers (ncol, nlev, ntrac)
 
 
 class VDiffTendencies(NamedTuple):
@@ -116,8 +114,6 @@ class VDiffTendencies(NamedTuple):
     tke_tendency: jnp.ndarray      # dTKE/dt [m²/s³] (ncol, nlev)
     thv_var_tendency: jnp.ndarray  # d(theta_v_var)/dt [K²/s] (ncol, nlev)
     
-    # Tracer tendencies (optional)
-    tracer_tendencies: Optional[jnp.ndarray] = None  # (ncol, nlev, ntrac)
 
 
 class VDiffDiagnostics(NamedTuple):

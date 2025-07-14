@@ -78,8 +78,7 @@ def prepare_vertical_diffusion_state(
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
     tke: jnp.ndarray,
-    thv_variance: jnp.ndarray,
-    tracers: jnp.ndarray = None
+    thv_variance: jnp.ndarray
 ) -> VDiffState:
     """
     Prepare the vertical diffusion state from input variables.
@@ -103,7 +102,6 @@ def prepare_vertical_diffusion_state(
         ocean_v: Ocean v-velocity [m/s] (ncol,)
         tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
         thv_variance: Variance of theta_v [K²] (ncol, nlev)
-        tracers: Additional tracers (ncol, nlev, ntrac)
         
     Returns:
         Complete vertical diffusion state
@@ -122,7 +120,6 @@ def prepare_vertical_diffusion_state(
         qv=qv,
         qc=qc,
         qi=qi,
-        tracers=tracers,
         pressure_full=pressure_full,
         pressure_half=pressure_half,
         geopotential=geopotential,
@@ -210,8 +207,7 @@ def vertical_diffusion_scheme(
     tke: jnp.ndarray,
     thv_variance: jnp.ndarray,
     dt: float,
-    params: VDiffParameters,
-    tracers: jnp.ndarray = None
+    params: VDiffParameters
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
     """
     Main vertical diffusion scheme interface.
@@ -237,7 +233,6 @@ def vertical_diffusion_scheme(
         thv_variance: Variance of theta_v [K²] (ncol, nlev)
         dt: Time step [s]
         params: Vertical diffusion parameters
-        tracers: Additional tracers (ncol, nlev, ntrac)
         
     Returns:
         Tuple of (tendencies, diagnostics)
@@ -248,7 +243,7 @@ def vertical_diffusion_scheme(
         pressure_full, pressure_half, geopotential,
         height_full, height_half,
         surface_temperature, surface_fraction, roughness_length,
-        ocean_u, ocean_v, tke, thv_variance, tracers
+        ocean_u, ocean_v, tke, thv_variance
     )
     
     # Compute vertical diffusion
@@ -260,6 +255,6 @@ def vertical_diffusion_scheme(
 # Vectorized version for multiple columns
 vertical_diffusion_scheme_vectorized = jax.vmap(
     vertical_diffusion_scheme,
-    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, 0),
+    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
     out_axes=(0, 0)
 )

@@ -346,44 +346,20 @@ def apply_convection(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply full Tiedtke-Nordeng convection scheme with updraft/downdraft physics"""
-    from jcm.physics.icon.convection.tracer_transport import TracerIndices
+    """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
     
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     height_levels = physics_data.diagnostics.height_full
     
-    # Extract tracers from physics state and combine with specific humidity
-    # Build tracer array with specific humidity as first tracer
-    tracer_list = [state.specific_humidity]  # Index 0: water vapor
+    # Extract fixed qc/qi tracers (with defaults if not present)
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Add cloud water (qc), cloud ice (qi), and other tracers if present
-    if 'qc' in state.tracers:
-        tracer_list.append(state.tracers['qc'])  # Index 1: cloud water
-    else:
-        tracer_list.append(jnp.zeros_like(state.temperature))  # Default to zero
-        
-    if 'qi' in state.tracers:
-        tracer_list.append(state.tracers['qi'])  # Index 2: cloud ice  
-    else:
-        tracer_list.append(jnp.zeros_like(state.temperature))  # Default to zero
-        
-    # Add any additional tracers
-    for name, tracer in state.tracers.items():
-        if name not in ['qc', 'qi']:
-            tracer_list.append(tracer)
-            
-    # Stack tracers into array [nlev, ncols, ntrac]
-    tracers_2d = jnp.stack(tracer_list, axis=-1)
-    ntrac = tracers_2d.shape[-1]
-    
-    # Setup tracer indices
-    tracer_indices = TracerIndices(iqv=0, iqc=1, iqi=2, iqt=3)
-    
-    # Define single column convection function (always includes tracers)
-    def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col, tracers_col):
-        """Apply unified Tiedtke-Nordeng convection with tracer transport to a single column"""
+    # Define single column convection function with fixed qc/qi
+    def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col, qc_col, qi_col):
+        """Apply Tiedtke-Nordeng convection with fixed qc/qi transport to a single column"""
         
         conv_tendencies, conv_state = tiedtke_nordeng_convection(
             temperature=temp_col,
@@ -392,13 +368,13 @@ def apply_convection(
             height=height_col,
             u_wind=u_col,
             v_wind=v_col,
-            tracers=tracers_col,
+            qc=qc_col,
+            qi=qi_col,
             dt=dt,
-            config=parameters.convection,
-            tracer_indices=tracer_indices
+            config=parameters.convection
         )
         
-        # Return tendencies and tracer tendencies
+        # Return tendencies and fixed qc/qi tendencies
         return (
             conv_tendencies.dtedt,      # Temperature tendency
             conv_tendencies.dqdt,       # Humidity tendency  
@@ -407,32 +383,26 @@ def apply_convection(
             conv_tendencies.qc_conv,    # Convective cloud water
             conv_tendencies.qi_conv,    # Convective cloud ice
             conv_tendencies.precip_conv, # Convective precipitation
-            conv_tendencies.dtracer_dt if conv_tendencies.dtracer_dt is not None else jnp.zeros((nlev, ntrac))  # Tracer tendencies
+            conv_tendencies.dqc_dt,     # Cloud water tendency
+            conv_tendencies.dqi_dt      # Cloud ice tendency
         )
     
-    # Apply convection with tracers using vmap
+    # Apply convection with fixed qc/qi using vmap
     results = jax.vmap(
         apply_tiedtke_to_column, 
-        in_axes=(1, 1, 1, 1, 1, 1, 1), 
-        out_axes=(1, 1, 1, 1, 1, 1, 0, 1)  # tracer tendencies: out_axis=1 for [nlev, ncols, ntrac]
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1), 
+        out_axes=(1, 1, 1, 1, 1, 1, 0, 1, 1)  # Fixed qc/qi tendencies: out_axis=1 for [nlev, ncols]
     )(state.temperature, state.specific_humidity, pressure_levels, height_levels, 
-        state.u_wind, state.v_wind, tracers_2d)
+        state.u_wind, state.v_wind, qc, qi)
     
-    # Unpack results with tracer tendencies
-    conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv, tracer_tendencies = results
+    # Unpack results with fixed qc/qi tendencies
+    conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv, dqc_dt, dqi_dt = results
     
-    # Split tracer tendencies back to individual tracers
-    tracer_tend_dict = {}
-    if ntrac > 1 and 'qc' in state.tracers:
-        tracer_tend_dict['qc'] = tracer_tendencies[:, :, 1]
-    if ntrac > 2 and 'qi' in state.tracers:
-        tracer_tend_dict['qi'] = tracer_tendencies[:, :, 2]
-    # Add other tracers
-    idx = 3
-    for name in state.tracers.keys():
-        if name not in ['qc', 'qi'] and idx < ntrac:
-            tracer_tend_dict[name] = tracer_tendencies[:, :, idx]
-            idx += 1
+    # Create fixed qc/qi tracer tendencies dictionary
+    tracer_tend_dict = {
+        'qc': dqc_dt,
+        'qi': dqi_dt
+    }
     
     # Create physics tendencies (already in 2D format [nlev, ncols])
     physics_tendencies = PhysicsTendency(
@@ -470,8 +440,8 @@ def apply_clouds(
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     surface_pressure = physics_data.diagnostics.surface_pressure
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
@@ -509,7 +479,7 @@ def apply_clouds(
         in_axes=(1, 1, 1, 1, 1, 0),  # surface_pressure is 1D
         out_axes=(1, 1, 1, 1, 1, 1, 0, 0)  # rain/snow fluxes are scalars per column
     )(state.temperature, state.specific_humidity, pressure_levels,
-        cloud_water, cloud_ice, surface_pressure)
+        qc, qi, surface_pressure)
     
     # Unpack results
     cloud_temp_tend, cloud_humid_tend, cloud_qc_tend, cloud_qi_tend, \
@@ -562,11 +532,9 @@ def apply_microphysics(
     air_density = physics_data.diagnostics.air_density
     dz = physics_data.diagnostics.layer_thickness
 
-    # Extract cloud water, ice, rain, and snow from state
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    rain_water = state.tracers.get('qr', jnp.zeros_like(state.temperature))
-    snow = state.tracers.get('qs', jnp.zeros_like(state.temperature))
+    # Extract fixed cloud water and ice tracers only
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Droplet number concentration (simple profile)
     droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
@@ -576,8 +544,7 @@ def apply_microphysics(
     
     # Define single column microphysics function
     def apply_microphysics_to_column(temp_col, humid_col, pressure_col, 
-                                    qc_col, qi_col, qr_col, qs_col,
-                                    cf_col, rho_col, dz_col, nc_col):
+                                    qc_col, qi_col, cf_col, rho_col, dz_col, nc_col):
         """Apply microphysics to a single column"""
         
         micro_tendencies, micro_state = cloud_microphysics(
@@ -586,8 +553,6 @@ def apply_microphysics(
             pressure=pressure_col,
             cloud_water=qc_col,
             cloud_ice=qi_col,
-            rain_water=qr_col,
-            snow=qs_col,
             cloud_fraction=cf_col,
             air_density=rho_col,
             layer_thickness=dz_col,
@@ -597,39 +562,31 @@ def apply_microphysics(
         )
         
         return (
-            micro_tendencies.dtedt,
-            micro_tendencies.dqdt,
-            micro_tendencies.dqcdt,
-            micro_tendencies.dqidt,
-            micro_tendencies.dqrdt,
-            micro_tendencies.dqsdt,
-            micro_state.precip_rain,
-            micro_state.precip_snow
+            micro_tendencies.dtedt,     # Temperature tendency
+            micro_tendencies.dqdt,      # Humidity tendency
+            micro_tendencies.dqcdt,     # Cloud water tendency
+            micro_tendencies.dqidt,     # Cloud ice tendency
+            micro_state.precip_rain,    # Rain precipitation
+            micro_state.precip_snow     # Snow precipitation
         )
     
     # Apply microphysics using vmap
     results = jax.vmap(
         apply_microphysics_to_column,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
-        out_axes=(1, 1, 1, 1, 1, 1, 0, 0)
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1),
+        out_axes=(1, 1, 1, 1, 0, 0)
     )(state.temperature, state.specific_humidity, pressure_levels,
-        cloud_water, cloud_ice, rain_water, snow,
-        cloud_fraction, air_density, dz, droplet_number)
+        qc, qi, cloud_fraction, air_density, dz, droplet_number)
     
     # Unpack results
     micro_temp_tend, micro_humid_tend, micro_qc_tend, micro_qi_tend, \
-    micro_qr_tend, micro_qs_tend, rain_flux, snow_flux = results
+    rain_flux, snow_flux = results
     
-    # Build tracer tendencies
-    tracer_tend_dict = {}
-    if 'qc' in state.tracers:
-        tracer_tend_dict['qc'] = micro_qc_tend
-    if 'qi' in state.tracers:
-        tracer_tend_dict['qi'] = micro_qi_tend
-    if 'qr' in state.tracers:
-        tracer_tend_dict['qr'] = micro_qr_tend
-    if 'qs' in state.tracers:
-        tracer_tend_dict['qs'] = micro_qs_tend
+    # Build fixed qc/qi tracer tendencies
+    tracer_tend_dict = {
+        'qc': micro_qc_tend,
+        'qi': micro_qi_tend
+    }
     
     # Create physics tendencies
     physics_tendencies = PhysicsTendency(
@@ -668,8 +625,6 @@ def apply_vertical_diffusion(
     pressure_half = physics_data.diagnostics.pressure_half
     height_levels = physics_data.diagnostics.height_full
     height_half = physics_data.diagnostics.height_half
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Initialize prognostic variables if not present
     tke = physics_data.vertical_diffusion.tke if hasattr(physics_data.vertical_diffusion, 'tke') else jnp.ones((nlev, ncols)) * 0.1
@@ -691,16 +646,9 @@ def apply_vertical_diffusion(
     ocean_u = jnp.zeros(ncols)
     ocean_v = jnp.zeros(ncols)
     
-    # Build tracer array (excluding specific humidity)
-    tracer_list = []
-    for name, tracer in state.tracers.items():
-        if name not in ['qc', 'qi']:  # These are handled separately
-            tracer_list.append(tracer)
-    
-    if tracer_list:
-        tracers = jnp.stack(tracer_list, axis=-1)
-    else:
-        tracers = None
+    # Extract fixed qc/qi tracers for vertical diffusion
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     # Define single column vertical diffusion function
     def apply_vdiff_to_column(col_idx):
@@ -711,8 +659,8 @@ def apply_vertical_diffusion(
             v=state.v_wind[:, col_idx],
             temperature=state.temperature[:, col_idx],
             qv=state.specific_humidity[:, col_idx],
-            qc=cloud_water[:, col_idx],
-            qi=cloud_ice[:, col_idx],
+            qc=qc[:, col_idx],
+            qi=qi[:, col_idx],
             pressure_full=pressure_levels[:, col_idx],
             pressure_half=pressure_half[:, col_idx],
             geopotential=state.geopotential[:, col_idx],
@@ -725,7 +673,6 @@ def apply_vertical_diffusion(
             ocean_v=ocean_v[col_idx],
             tke=tke[:, col_idx],
             thv_variance=thv_variance[:, col_idx],
-            tracers=tracers[:, col_idx, :] if tracers is not None else None
         )
         
         # Compute vertical diffusion

@@ -228,6 +228,23 @@ def calculate_tendencies(
     dudt = dudt / dt
     dvdt = dvdt / dt
     
+    # Calculate fixed qc/qi tendencies (simplified approach)
+    # These represent the tendency of cloud water and ice from convective transport
+    nlev = len(temperature)
+    dqc_dt = jnp.zeros(nlev)  # Cloud water tendency from convection
+    dqi_dt = jnp.zeros(nlev)  # Cloud ice tendency from convection
+    
+    # For levels with convective activity, add some tendency
+    # This is a simplified approach - more sophisticated transport would be needed
+    conv_levels = jnp.logical_and(
+        jnp.arange(nlev) >= kbase,
+        jnp.arange(nlev) <= ktop
+    )
+    
+    # Simple cloud water/ice production based on updraft liquid water
+    dqc_dt = jnp.where(conv_levels, qc_conv * 0.1 / dt, 0.0)
+    dqi_dt = jnp.where(conv_levels, qi_conv * 0.1 / dt, 0.0)
+    
     return ConvectionTendencies(
         dtedt=dtedt,
         dqdt=dqdt,
@@ -235,7 +252,9 @@ def calculate_tendencies(
         dvdt=dvdt,
         qc_conv=qc_conv,
         qi_conv=qi_conv,
-        precip_conv=precip_rate
+        precip_conv=precip_rate,
+        dqc_dt=dqc_dt,
+        dqi_dt=dqi_dt
     )
 
 

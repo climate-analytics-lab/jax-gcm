@@ -86,7 +86,7 @@ def test_planck_bands():
     band_limits = ((10, 350), (350, 500), (500, 2500))  # cm⁻¹
     n_bands = 3
     
-    planck_integrated = planck_bands(temperatures, band_limits, is_lw=True)
+    planck_integrated = planck_bands_lw(temperatures, band_limits)
     
     # Check output shape
     from jcm.physics.icon.radiation.constants import N_LW_BANDS
