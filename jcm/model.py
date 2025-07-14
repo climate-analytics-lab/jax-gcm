@@ -62,7 +62,7 @@ class Model:
             horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             coords: CoordinateSystem object describing model grid
             boundaries: BoundaryData object describing surface boundary conditions
-            initial_state: Initial state of the model (State object), optional
+            initial_state: Initial state of the model (PhysicsState object), optional
             physics: Physics object describing the model physics
         """
         from datetime import datetime
