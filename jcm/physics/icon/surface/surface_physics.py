@@ -174,60 +174,61 @@ def surface_physics_step(
     all_tendencies = []
     all_roughness = []
     
-    # Process each surface type
-    for isfc in range(nsfc_type):
-        surface_mask = surface_state.fraction[:, isfc] > 0.01
-        
-        if isfc == params.iwtr:
-            # Ocean physics
-            fluxes_isfc, tendencies_isfc, roughness_isfc = ocean_physics_step(
-                atmospheric_state,
-                surface_state.ocean_temp,
-                surface_state.ocean_u,
-                surface_state.ocean_v,
-                exchange_coeff_heat[:, isfc],
-                exchange_coeff_moisture[:, isfc],
-                exchange_coeff_momentum[:, isfc],
-                jnp.zeros(ncol),  # Solar zenith angle (simplified)
-                dt, params
-            )
-            
-        elif isfc == params.iice:
-            # Sea ice physics
-            fluxes_isfc, tendencies_isfc, roughness_isfc = sea_ice_physics_step(
-                atmospheric_state,
-                surface_state.ice_temp,
-                surface_state.ice_thickness,
-                surface_state.snow_depth,
-                surface_state.ocean_temp,
-                exchange_coeff_heat[:, isfc],
-                exchange_coeff_moisture[:, isfc],
-                exchange_coeff_momentum[:, isfc],
-                dt, params
-            )
-            
-        elif isfc == params.ilnd:
-            # Land physics
-            vegetation_fraction = jnp.full(ncol, 0.5)  # 50% vegetation
-            soil_depths = jnp.array([0.1, 0.3, 0.6, 1.0])  # Soil layer depths
-            
-            fluxes_isfc, tendencies_isfc, roughness_isfc = land_surface_physics_step(
-                atmospheric_state,
-                surface_state.soil_temp,
-                surface_state.soil_moisture,
-                surface_state.vegetation_temp,
-                surface_state.snow_depth,
-                exchange_coeff_heat[:, isfc],
-                exchange_coeff_moisture[:, isfc],
-                exchange_coeff_momentum[:, isfc],
-                vegetation_fraction,
-                soil_depths,
-                dt, params
-            )
-            
-        all_fluxes.append(fluxes_isfc)
-        all_tendencies.append(tendencies_isfc)
-        all_roughness.append(roughness_isfc)
+    # Process each surface type using explicit unrolled loop with JAX-compatible conditionals
+    # This avoids issues with jax.lax.switch requiring identical return types
+    
+    # Ocean surface (isfc = 0)
+    fluxes_ocean, tendencies_ocean, roughness_ocean = ocean_physics_step(
+        atmospheric_state,
+        surface_state.ocean_temp,
+        surface_state.ocean_u,
+        surface_state.ocean_v,
+        exchange_coeff_heat[:, params.iwtr],  # iwtr = 0
+        exchange_coeff_moisture[:, params.iwtr],
+        exchange_coeff_momentum[:, params.iwtr],
+        jnp.zeros(ncol),  # Solar zenith angle (simplified)
+        dt, params
+    )
+    all_fluxes.append(fluxes_ocean)
+    all_tendencies.append(tendencies_ocean)
+    all_roughness.append(roughness_ocean)
+    
+    # Ice surface (isfc = 1)
+    fluxes_ice, tendencies_ice, roughness_ice = sea_ice_physics_step(
+        atmospheric_state,
+        surface_state.ice_temp,
+        surface_state.ice_thickness,
+        surface_state.snow_depth,
+        surface_state.ocean_temp,
+        exchange_coeff_heat[:, params.iice],  # iice = 1
+        exchange_coeff_moisture[:, params.iice],
+        exchange_coeff_momentum[:, params.iice],
+        dt, params
+    )
+    all_fluxes.append(fluxes_ice)
+    all_tendencies.append(tendencies_ice)
+    all_roughness.append(roughness_ice)
+    
+    # Land surface (isfc = 2)
+    vegetation_fraction = jnp.full(ncol, 0.5)  # 50% vegetation
+    soil_depths = jnp.array([0.1, 0.3, 0.6, 1.0])  # Soil layer depths
+    
+    fluxes_land, tendencies_land, roughness_land = land_surface_physics_step(
+        atmospheric_state,
+        surface_state.soil_temp,
+        surface_state.soil_moisture,
+        surface_state.vegetation_temp,
+        surface_state.snow_depth,
+        exchange_coeff_heat[:, params.ilnd],  # ilnd = 2
+        exchange_coeff_moisture[:, params.ilnd],
+        exchange_coeff_momentum[:, params.ilnd],
+        vegetation_fraction,
+        soil_depths,
+        dt, params
+    )
+    all_fluxes.append(fluxes_land)
+    all_tendencies.append(tendencies_land)
+    all_roughness.append(roughness_land)
     
     # Combine fluxes from all surface types
     combined_fluxes = combine_surface_fluxes(all_fluxes, surface_state.fraction)
