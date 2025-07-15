@@ -133,9 +133,13 @@ class TestGasOptics:
         """Test CO2 absorption"""
         co2_vmr = 400e-6
         
-        # Band 1 should have absorption
-        k_co2_b1 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=1)
-        assert jnp.any(k_co2_b1 > 0)
+        # Band 2 should have main CO2 absorption (667 cm⁻¹)
+        k_co2_b2 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=2)
+        assert jnp.any(k_co2_b2 > 0)
+        
+        # Band 3 should have secondary CO2 absorption
+        k_co2_b3 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=3)
+        assert jnp.any(k_co2_b3 > 0)
         
         # Other bands should be zero
         k_co2_b0 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=0)
@@ -143,12 +147,12 @@ class TestGasOptics:
     
     def test_ozone_absorption(self):
         """Test O3 absorption"""
-        # SW absorption (UV/vis)
-        k_o3_sw = ozone_absorption_sw(self.o3_vmr, band=0)
+        # SW absorption (UV/vis) - now requires temperature
+        k_o3_sw = ozone_absorption_sw(self.o3_vmr, self.temperature, band=0)
         assert jnp.all(k_o3_sw > 0)
         
-        # LW absorption (9.6 micron)
-        k_o3_lw = ozone_absorption_lw(self.temperature, self.o3_vmr, band=2)
+        # LW absorption (9.6 micron) - now in band 6
+        k_o3_lw = ozone_absorption_lw(self.temperature, self.o3_vmr, band=6)
         assert jnp.all(k_o3_lw > 0)
     
     def test_gas_optical_depth(self):
@@ -163,9 +167,9 @@ class TestGasOptics:
         assert jnp.all(tau_lw >= 0)
         assert jnp.all(jnp.isfinite(tau_lw))
         
-        # Shortwave
+        # Shortwave - now requires temperature parameter
         tau_sw = gas_optical_depth_sw(
-            self.pressure, self.h2o_vmr, self.o3_vmr,
+            self.pressure, self.temperature, self.h2o_vmr, self.o3_vmr,
             self.thickness, self.density, cos_zenith=0.5
         )
         from jcm.physics.icon.radiation.constants import N_SW_BANDS

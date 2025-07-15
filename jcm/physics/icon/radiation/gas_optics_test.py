@@ -57,12 +57,14 @@ def test_co2_absorption():
         assert jnp.all(k_abs >= 0)
         assert not jnp.any(jnp.isnan(k_abs))
     
-    # Band 1 should have highest CO2 absorption (15 μm band)
+    # Band 2 should have highest CO2 absorption (15 μm band)
     k_band0 = co2_absorption(temperature, pressure, co2_vmr, 0)
     k_band1 = co2_absorption(temperature, pressure, co2_vmr, 1)
     k_band2 = co2_absorption(temperature, pressure, co2_vmr, 2)
-    assert jnp.all(k_band1 >= k_band0)
-    assert jnp.all(k_band1 >= k_band2)
+    k_band3 = co2_absorption(temperature, pressure, co2_vmr, 3)
+    assert jnp.all(k_band2 >= k_band0)
+    assert jnp.all(k_band2 >= k_band1)
+    assert jnp.all(k_band2 >= k_band3)
 
 
 def test_ozone_absorption_sw():
@@ -97,16 +99,21 @@ def test_ozone_absorption_lw():
     k_band1 = ozone_absorption_lw(temperature, o3_vmr, 1)
     k_band2 = ozone_absorption_lw(temperature, o3_vmr, 2)
     
-    # O3 9.6 μm band should be in band 2
+    # O3 9.6 μm band should be in band 6 (main) and band 5 (secondary)
+    k_band5 = ozone_absorption_lw(temperature, o3_vmr, 5)
+    k_band6 = ozone_absorption_lw(temperature, o3_vmr, 6)
+    
     assert jnp.all(k_band0 == 0)
     assert jnp.all(k_band1 == 0)
-    assert jnp.all(k_band2 > 0)
+    assert jnp.all(k_band2 == 0)
+    assert jnp.all(k_band5 > 0)  # Secondary band
+    assert jnp.all(k_band6 > 0)  # Main band
     
     # Should have temperature dependence
     temp_low = jnp.ones(nlev) * 200.0
     temp_high = jnp.ones(nlev) * 300.0
-    k_low = ozone_absorption_lw(temp_low, o3_vmr, 2)
-    k_high = ozone_absorption_lw(temp_high, o3_vmr, 2)
+    k_low = ozone_absorption_lw(temp_low, o3_vmr, 6)
+    k_high = ozone_absorption_lw(temp_high, o3_vmr, 6)
     assert not jnp.allclose(k_low, k_high)
 
 

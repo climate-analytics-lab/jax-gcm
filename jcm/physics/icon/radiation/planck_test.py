@@ -92,8 +92,8 @@ def test_planck_bands():
     from jcm.physics.icon.radiation.constants import N_LW_BANDS
     assert planck_integrated.shape == (nlev, N_LW_BANDS)
     
-    # All bands should have values for LW
-    assert jnp.all(planck_integrated > 0)
+    # First 3 bands should have values (only 3 band_limits provided)
+    assert jnp.all(planck_integrated[:, :3] > 0)
     
     # Should not have NaN values
     assert not jnp.any(jnp.isnan(planck_integrated))
@@ -114,8 +114,8 @@ def test_planck_bands_single_temperature():
     
     from jcm.physics.icon.radiation.constants import N_LW_BANDS
     assert planck_vals.shape == (N_LW_BANDS,)
-    # All bands should have values for LW
-    assert jnp.all(planck_vals > 0)
+    # First 3 bands should have values (only 3 band_limits provided)
+    assert jnp.all(planck_vals[:3] > 0)
     
 
 def test_planck_bands_array_input():
@@ -127,8 +127,8 @@ def test_planck_bands_array_input():
     
     from jcm.physics.icon.radiation.constants import N_LW_BANDS
     assert planck_vals.shape == (3, N_LW_BANDS)  # (n_temp, n_bands)
-    # All bands should have values for LW
-    assert jnp.all(planck_vals > 0)
+    # First 3 bands should have values (only 3 band_limits provided)
+    assert jnp.all(planck_vals[:, :3] > 0)
     assert not jnp.any(jnp.isnan(planck_vals))
     
     # Each temperature should give different results
