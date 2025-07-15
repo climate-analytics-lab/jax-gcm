@@ -340,9 +340,9 @@ class TestFullMicrophysics:
         
         tendencies, state = cloud_microphysics(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, rain_water, snow,
-            cloud_fraction, air_density, layer_thickness,
-            droplet_number, dt, config
+            cloud_water, cloud_ice, cloud_fraction,
+            air_density, layer_thickness, droplet_number,
+            dt, config
         )
         
         # Should produce rain from cloud water
@@ -380,9 +380,9 @@ class TestFullMicrophysics:
         
         tendencies, state = cloud_microphysics(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, rain_water, snow,
-            cloud_fraction, air_density, layer_thickness,
-            droplet_number, dt, config
+            cloud_water, cloud_ice, cloud_fraction,
+            air_density, layer_thickness, droplet_number,
+            dt, config
         )
         
         # Should produce snow from ice
@@ -427,9 +427,9 @@ class TestFullMicrophysics:
         
         tendencies, state = cloud_microphysics(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, rain_water, snow,
-            cloud_fraction, air_density, layer_thickness,
-            droplet_number, dt, config
+            cloud_water, cloud_ice, cloud_fraction,
+            air_density, layer_thickness, droplet_number,
+            dt, config
         )
         
         # Should have melting near freezing level
@@ -465,9 +465,9 @@ class TestFullMicrophysics:
         
         tendencies, state = cloud_microphysics(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, rain_water, snow,
-            cloud_fraction, air_density, layer_thickness,
-            droplet_number, dt, config
+            cloud_water, cloud_ice, cloud_fraction,
+            air_density, layer_thickness, droplet_number,
+            dt, config
         )
         
         # Total tendency (excluding sedimentation out)
@@ -499,8 +499,7 @@ class TestFullMicrophysics:
             layer_thickness = jnp.ones(nlev) * 100.0
             droplet_number = jnp.ones(nlev) * 100e6
             return (temperature, specific_humidity, pressure, cloud_water,
-                    cloud_ice, rain_water, snow, cloud_fraction,
-                    air_density, layer_thickness, droplet_number)
+                    cloud_ice, cloud_fraction, air_density, layer_thickness, droplet_number)
         
         # Test JIT compilation
         jitted_micro = jax.jit(cloud_microphysics)

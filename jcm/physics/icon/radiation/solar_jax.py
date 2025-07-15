@@ -21,8 +21,8 @@ import jax_datetime as jdt
 
 
 # Re-export jax-solar constants
-TOTAL_SOLAR_IRRADIANCE = jax_solar.TOTAL_SOLAR_IRRADIANCE  # ~1361 W/m²
-SOLAR_IRRADIANCE_VARIATION = jax_solar.SOLAR_IRRADIANCE_VARIATION  # ~3.4 W/m²
+TOTAL_SOLAR_IRRADIANCE = 1361  # W/m^2
+SOLAR_IRRADIANCE_VARIATION = 47  # W/m^2
 
 
 @jax.jit
