@@ -431,70 +431,34 @@ def apply_convection(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Define single column convection function with fixed qc/qi
-    def apply_tiedtke_to_column(temp_col, humid_col, pressure_col, height_col, u_col, v_col, qc_col, qi_col):
-        """Apply Tiedtke-Nordeng convection with fixed qc/qi transport to a single column"""
-        
-        conv_tendencies, conv_state = tiedtke_nordeng_convection(
-            temperature=temp_col,
-            humidity=humid_col,
-            pressure=pressure_col,
-            height=height_col,
-            u_wind=u_col,
-            v_wind=v_col,
-            qc=qc_col,
-            qi=qi_col,
-            dt=dt,
-            config=parameters.convection
-        )
-        
-        # Return tendencies and fixed qc/qi tendencies
-        return (
-            conv_tendencies.dtedt,      # Temperature tendency
-            conv_tendencies.dqdt,       # Humidity tendency  
-            conv_tendencies.dudt,       # U-wind tendency
-            conv_tendencies.dvdt,       # V-wind tendency
-            conv_tendencies.qc_conv,    # Convective cloud water
-            conv_tendencies.qi_conv,    # Convective cloud ice
-            conv_tendencies.precip_conv, # Convective precipitation
-            conv_tendencies.dqc_dt,     # Cloud water tendency
-            conv_tendencies.dqi_dt      # Cloud ice tendency
-        )
-    
-    # Apply convection with fixed qc/qi using vmap
-    results = jax.vmap(
-        apply_tiedtke_to_column, 
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1), 
-        out_axes=(1, 1, 1, 1, 1, 1, 0, 1, 1)  # Fixed qc/qi tendencies: out_axis=1 for [nlev, ncols]
+    # SIMPLIFIED: Direct vmap of tiedtke_nordeng_convection (no wrapper needed)
+    conv_results = jax.vmap(
+        tiedtke_nordeng_convection,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
+        out_axes=(0, 0)  # Returns (ConvectionTendencies, ConvectionState) per column
     )(state.temperature, state.specific_humidity, pressure_levels, height_levels, 
-        state.u_wind, state.v_wind, qc, qi)
+        state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
-    # Unpack results with fixed qc/qi tendencies
-    conv_temp_tend, conv_humid_tend, conv_u_tend, conv_v_tend, qc_conv, qi_conv, precip_conv, dqc_dt, dqi_dt = results
+    # Unpack structured results directly (no tuple unpacking needed)
+    conv_tendencies_all, conv_states_all = conv_results
     
-    # Create fixed qc/qi tracer tendencies dictionary
-    tracer_tend_dict = {
-        'qc': dqc_dt,
-        'qi': dqi_dt
-    }
-    
-    # Create physics tendencies (already in 2D format [nlev, ncols])
+    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
-        u_wind=conv_u_tend,
-        v_wind=conv_v_tend,
-        temperature=conv_temp_tend,
-        specific_humidity=conv_humid_tend,
-        tracers=tracer_tend_dict
+        u_wind=conv_tendencies_all.dudt.T,
+        v_wind=conv_tendencies_all.dvdt.T, 
+        temperature=conv_tendencies_all.dtedt.T,
+        specific_humidity=conv_tendencies_all.dqdt.T,
+        tracers={
+            'qc': conv_tendencies_all.dqc_dt.T,
+            'qi': conv_tendencies_all.dqi_dt.T
+        }
     )
     
-    # Note: tracer tendencies are already handled in tracer_tend_dict and don't need 3D reshaping
-    # They will be reshaped in compute_tendencies when going back to 3D
-    
-    # Update physics data with convection diagnostics
+    # Update physics data with convection diagnostics (transpose scalars)
     convection_data = physics_data.convection.copy(
-        qc_conv=qc_conv,
-        qi_conv=qi_conv,
-        precip_conv=precip_conv,
+        qc_conv=conv_tendencies_all.qc_conv.T,
+        qi_conv=conv_tendencies_all.qi_conv.T,
+        precip_conv=conv_tendencies_all.precip_conv,  # Already 1D per column
     )
     updated_physics_data = physics_data.copy(convection=convection_data)
     
@@ -520,68 +484,38 @@ def apply_clouds(
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
     
-    # Define single column cloud function
-    def apply_clouds_to_column(temp_col, humid_col, pressure_col, qc_col, qi_col, ps_col):
-        """Apply shallow cloud scheme to a single column"""
-        
-        cloud_tendencies, cloud_state = shallow_cloud_scheme(
-            temperature=temp_col,
-            specific_humidity=humid_col,
-            pressure=pressure_col,
-            cloud_water=qc_col,
-            cloud_ice=qi_col,
-            surface_pressure=ps_col,
-            dt=dt,
-            config=cloud_config
-        )
-        
-        # Return tendencies and diagnostic fields
-        return (
-            cloud_tendencies.dtedt,      # Temperature tendency
-            cloud_tendencies.dqdt,       # Humidity tendency
-            cloud_tendencies.dqcdt,      # Cloud water tendency
-            cloud_tendencies.dqidt,      # Cloud ice tendency
-            cloud_state.cloud_fraction,  # Cloud fraction
-            cloud_state.rel_humidity,    # Relative humidity
-            cloud_tendencies.rain_flux,  # Rain flux
-            cloud_tendencies.snow_flux   # Snow flux
-        )
-    
-    # Apply cloud scheme using vmap
-    results = jax.vmap(
-        apply_clouds_to_column,
-        in_axes=(1, 1, 1, 1, 1, 0),  # surface_pressure is 1D
-        out_axes=(1, 1, 1, 1, 1, 1, 0, 0)  # rain/snow fluxes are scalars per column
+    # SIMPLIFIED: Direct vmap of shallow_cloud_scheme (no wrapper needed)
+    cloud_results = jax.vmap(
+        shallow_cloud_scheme,
+        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
+        out_axes=(0, 0)  # Returns (CloudTendencies, CloudState) per column
     )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, surface_pressure)
+        qc, qi, surface_pressure, dt, cloud_config)
     
-    # Unpack results
-    cloud_temp_tend, cloud_humid_tend, cloud_qc_tend, cloud_qi_tend, \
-    cloud_fraction, rel_humidity, rain_flux, snow_flux = results
+    # Unpack structured results directly
+    cloud_tendencies_all, cloud_states_all = cloud_results
     
-    # Build tracer tendencies dictionary
-    tracer_tend_dict = {}
-    if 'qc' in state.tracers:
-        tracer_tend_dict['qc'] = cloud_qc_tend
-    if 'qi' in state.tracers:
-        tracer_tend_dict['qi'] = cloud_qi_tend
-    
-    # Create physics tendencies (already in 2D format [nlev, ncols])
+    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from clouds
         v_wind=jnp.zeros_like(state.v_wind),
-        temperature=cloud_temp_tend,
-        specific_humidity=cloud_humid_tend,
-        tracers=tracer_tend_dict
+        temperature=cloud_tendencies_all.dtedt.T,
+        specific_humidity=cloud_tendencies_all.dqdt.T,
+        tracers={
+            'qc': cloud_tendencies_all.dqcdt.T,
+            'qi': cloud_tendencies_all.dqidt.T
+        }
     )
     
     # Update physics data with cloud diagnostics
-    cloud_data = physics_data.clouds.copy(cloud_fraction=cloud_fraction,
-                                           precip_rain=rain_flux,
-                                           precip_snow=snow_flux)
+    cloud_data = physics_data.clouds.copy(
+        cloud_fraction=cloud_states_all.cloud_fraction.T,
+        precip_rain=cloud_tendencies_all.rain_flux,  # 1D per column
+        precip_snow=cloud_tendencies_all.snow_flux   # 1D per column
+    )
     
     diagnostics = physics_data.diagnostics.copy(
-        relative_humidity=rel_humidity,
+        relative_humidity=cloud_states_all.rel_humidity.T,
     )
 
     updated_physics_data = physics_data.copy(clouds=cloud_data, 
@@ -616,65 +550,33 @@ def apply_microphysics(
     # Get microphysics configuration
     micro_config = parameters.microphysics
     
-    # Define single column microphysics function
-    def apply_microphysics_to_column(temp_col, humid_col, pressure_col, 
-                                    qc_col, qi_col, cf_col, rho_col, dz_col, nc_col):
-        """Apply microphysics to a single column"""
-        
-        micro_tendencies, micro_state = cloud_microphysics(
-            temperature=temp_col,
-            specific_humidity=humid_col,
-            pressure=pressure_col,
-            cloud_water=qc_col,
-            cloud_ice=qi_col,
-            cloud_fraction=cf_col,
-            air_density=rho_col,
-            layer_thickness=dz_col,
-            droplet_number=nc_col,
-            dt=dt,
-            config=micro_config
-        )
-        
-        return (
-            micro_tendencies.dtedt,     # Temperature tendency
-            micro_tendencies.dqdt,      # Humidity tendency
-            micro_tendencies.dqcdt,     # Cloud water tendency
-            micro_tendencies.dqidt,     # Cloud ice tendency
-            micro_state.precip_rain,    # Rain precipitation
-            micro_state.precip_snow     # Snow precipitation
-        )
-    
-    # Apply microphysics using vmap
-    results = jax.vmap(
-        apply_microphysics_to_column,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1),
-        out_axes=(1, 1, 1, 1, 0, 0)
+    # SIMPLIFIED: Direct vmap of cloud_microphysics (no wrapper needed)
+    micro_results = jax.vmap(
+        cloud_microphysics,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
+        out_axes=(0, 0)  # Returns (MicrophysicsTendencies, MicrophysicsState) per column
     )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, cloud_fraction, air_density, dz, droplet_number)
+        qc, qi, cloud_fraction, air_density, dz, droplet_number, dt, micro_config)
     
-    # Unpack results
-    micro_temp_tend, micro_humid_tend, micro_qc_tend, micro_qi_tend, \
-    rain_flux, snow_flux = results
+    # Unpack structured results directly
+    micro_tendencies_all, micro_states_all = micro_results
     
-    # Build fixed qc/qi tracer tendencies
-    tracer_tend_dict = {
-        'qc': micro_qc_tend,
-        'qi': micro_qi_tend
-    }
-    
-    # Create physics tendencies
+    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),
         v_wind=jnp.zeros_like(state.v_wind),
-        temperature=micro_temp_tend,
-        specific_humidity=micro_humid_tend,
-        tracers=tracer_tend_dict
+        temperature=micro_tendencies_all.dtedt.T,
+        specific_humidity=micro_tendencies_all.dqdt.T,
+        tracers={
+            'qc': micro_tendencies_all.dqcdt.T,
+            'qi': micro_tendencies_all.dqidt.T
+        }
     )
     
     # Update physics data
     micro_data = physics_data.clouds.copy(
-        precip_rain=rain_flux,
-        precip_snow=snow_flux,
+        precip_rain=micro_states_all.precip_rain,  # 1D per column
+        precip_snow=micro_states_all.precip_snow,  # 1D per column
         droplet_number=droplet_number
     )
     
@@ -966,51 +868,29 @@ def apply_gravity_waves(
     # In a real implementation, this would come from boundary data
     h_std = jnp.ones(ncols) * 200.0  # 200m standard deviation
     
-    # Define single column GWD function
-    def apply_gwd_to_column(u_col, v_col, temp_col, pressure_col, height_col, h_std_scalar):
-        """Apply gravity wave drag to single column"""
-        
-        gwd_tendencies, gwd_state = gravity_wave_drag(
-            u_wind=u_col,
-            v_wind=v_col,
-            temperature=temp_col,
-            pressure=pressure_col,
-            height=height_col,
-            h_std=h_std_scalar,
-            dt=dt,
-            config=parameters.gravity_waves
-        )
-        
-        return (
-            gwd_tendencies.dudt,
-            gwd_tendencies.dvdt,
-            gwd_tendencies.dtedt,
-            gwd_state.wave_stress[-1]  # Surface stress
-        )
-    
-    # Apply GWD using vmap
-    results = jax.vmap(
-        apply_gwd_to_column,
-        in_axes=(1, 1, 1, 1, 1, 0),
-        out_axes=(1, 1, 1, 0)
+    # SIMPLIFIED: Direct vmap of gravity_wave_drag (no wrapper needed)
+    gwd_results = jax.vmap(
+        gravity_wave_drag,
+        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
+        out_axes=(0, 0)  # Returns (GWDTendencies, GWDState) per column
     )(state.u_wind, state.v_wind, state.temperature,
-        pressure_levels, height_levels, h_std)
+        pressure_levels, height_levels, h_std, dt, parameters.gravity_waves)
     
-    # Unpack results
-    gwd_u_tend, gwd_v_tend, gwd_temp_tend, surface_stress = results
+    # Unpack structured results directly
+    gwd_tendencies_all, gwd_states_all = gwd_results
     
-    # Create physics tendencies
+    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
-        u_wind=gwd_u_tend,
-        v_wind=gwd_v_tend,
-        temperature=gwd_temp_tend,
+        u_wind=gwd_tendencies_all.dudt.T,
+        v_wind=gwd_tendencies_all.dvdt.T,
+        temperature=gwd_tendencies_all.dtedt.T,
         specific_humidity=jnp.zeros_like(state.specific_humidity),
         tracers={}
     )
     
     # Update physics data
     gravity_wave_data = physics_data.gravity_waves.copy(
-        surface_stress=surface_stress,
+        surface_stress=gwd_states_all.wave_stress[:, -1],  # Surface stress (last level)
     )
     
     updated_physics_data = physics_data.copy(gravity_waves=gravity_wave_data)
