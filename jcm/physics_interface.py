@@ -7,18 +7,17 @@ to the specific physics being used.
 from collections import abc
 import jax
 import jax.numpy as jnp
+from jax import tree_util as jtu
 import tree_math
-from typing import Callable
-from jcm.physics_data import PhysicsData
 from jcm.geometry import Geometry
-from jcm.params import Parameters
+from jcm.date import DateData
+from jcm.boundaries import BoundaryData
 from dinosaur import scales
 from dinosaur.typing import ModelState
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
-from jax import tree_util as jtu
-from jcm.boundaries import BoundaryData
+from typing import Tuple, Dict, Any
 import dataclasses
 
 @dataclasses.dataclass
@@ -55,8 +54,8 @@ class PhysicsState:
     surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
 
     @classmethod
-    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
-        return PhysicsState(
+    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
@@ -66,8 +65,8 @@ class PhysicsState:
         )
 
     @classmethod
-    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
-        return PhysicsState(
+    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+        return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
@@ -100,8 +99,8 @@ class PhysicsTendency:
     specific_humidity: jnp.ndarray
 
     @classmethod
-    def zeros(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
-        return PhysicsTendency(
+    def zeros(cls,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
@@ -109,8 +108,8 @@ class PhysicsTendency:
         )
 
     @classmethod
-    def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
-        return PhysicsTendency(
+    def ones(cls,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None):
+        return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
@@ -124,6 +123,62 @@ class PhysicsTendency:
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
+
+class Physics:
+    write_output: bool
+    
+    def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+        """
+        Compute the physical tendencies given the current state and data structs.
+
+        Args:
+            state: Current state variables
+            boundaries: Boundary data
+            geometry: Geometry data
+            date: Date data
+
+        Returns:
+            Physical tendencies in PhysicsTendency format
+            Object containing physics data
+        """
+        raise NotImplementedError("Physics compute_tendencies method not implemented.")
+
+    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
+        """
+        Flattens a physics data struct into a dictionary.
+
+        Args:
+            struct: The struct to flatten.
+            geometry: Geometry object.
+            sep: Separator to use for constructing hierarchical keys.
+
+        Returns:
+            A dictionary representation of the struct, without nesting.
+        """
+        if struct is None:
+            return {}
+        
+        def _to_dict_recursive(obj, parent_key=""):
+            items = {}
+            for key, val in obj.__dict__.items():
+                new_key = f"{parent_key}{sep}{key}" if parent_key else key
+                if hasattr(val, "__dict__") and val.__dict__:
+                    items.update(_to_dict_recursive(val, parent_key=new_key))
+                else:
+                    items[new_key] = val
+            return items
+        
+        items = _to_dict_recursive(struct)
+
+        # replace multi-channel fields with a field for each channel
+        _original_keys = list(items.keys())
+        for k in _original_keys:
+            s = items[k].shape
+            if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+                items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})
+                del items[k]
+
+        return items
 
 def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
     """
@@ -247,9 +302,8 @@ def get_physical_tendencies(
     state: ModelState,
     dynamics: PrimitiveEquations,
     time_step: int,
-    physics_terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]],
+    physics: Physics,
     boundaries: BoundaryData,
-    parameters: Parameters,
     geometry: Geometry,
     data: PhysicsData = None
 ) -> ModelState:
@@ -259,21 +313,20 @@ def get_physical_tendencies(
     Args:
         state: Dynamic (dinosaur) State variables
         dynamics: PrimitiveEquations object
-        physics_terms: List of physics functions that take a PhysicsState and return a PhysicsTendency
+        time_step: Time step in seconds
+        physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
+        boundaries: BoundaryData object
+        geometry: Geometry object
+        date: DateData object
 
     Returns:
-        Physical tendencies
+        Physical tendencies in dinosaur.primitive_equations.State format
     """
     physics_state = dynamics_state_to_physics_state(state.state, dynamics)
 
-    # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
-    # and implicitly passed to the next physics_term. tendencies are summed
-    physics_tendency = PhysicsTendency.zeros(shape=physics_state.u_wind.shape)
-    
     clamped_physics_state = verify_state(physics_state)
-    for term in physics_terms:
-        tend, data = term(clamped_physics_state, data, parameters, boundaries, geometry)
-        physics_tendency += tend
+    physics_tendency, _ = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
+
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 

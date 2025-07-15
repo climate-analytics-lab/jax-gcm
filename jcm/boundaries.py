@@ -3,7 +3,7 @@ import tree_math
 from jax import tree_util
 from dinosaur.scales import units
 from dinosaur.coordinate_systems import HorizontalGridTypes
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 
 @tree_math.struct
 class BoundaryData:
@@ -30,11 +30,11 @@ class BoundaryData:
 
 
     @classmethod
-    def zeros(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
               fmask_s=None,lfluxland=None, land_coupling_flag=None):
-        return BoundaryData(
+        return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             orog=orog if orog is not None else jnp.zeros((nodal_shape)),
@@ -55,11 +55,11 @@ class BoundaryData:
         )
 
     @classmethod
-    def ones(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
              fmask_s=None,lfluxland=None, land_coupling_flag=None):
-        return BoundaryData(
+        return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
             orog=orog if orog is not None else jnp.ones((nodal_shape)),
@@ -132,9 +132,9 @@ def default_boundaries(
     """
     Initialize the boundary conditions
     """
-    from jcm.surface_flux import set_orog_land_sfc_drag
+    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
-    from jcm.physical_constants import grav
+    from jcm.physics.speedy.physical_constants import grav
 
     parameters = parameters or Parameters.default()
 
@@ -163,10 +163,10 @@ def initialize_boundaries(
     """
     Initialize the boundary conditions
     """
-    from jcm.physical_constants import grav
+    from jcm.physics.speedy.physical_constants import grav
     from jcm.utils import spectral_truncation
-    from jcm.land_model import land_model_init
-    from jcm.surface_flux import set_orog_land_sfc_drag
+    from jcm.physics.speedy.land_model import land_model_init
+    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
 
     parameters = parameters or Parameters.default()

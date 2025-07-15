@@ -10,14 +10,14 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
             parameters, geometry, BoundaryData
-        from jcm.physics_data import HumidityData, ConvectionData, PhysicsData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         geometry = Geometry.from_grid_shape((ix, il), kx)
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.vertical_diffusion import get_vertical_diffusion_tend
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
 
     def test_get_vertical_diffusion_tend(self):
         se = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(400,300,kx)[:, jnp.newaxis, jnp.newaxis]
