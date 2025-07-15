@@ -125,7 +125,7 @@ class PhysicsTendency:
         )
 
 class Physics:
-    write_output: bool
+    post_process: bool
     
     def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """

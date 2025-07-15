@@ -26,7 +26,7 @@ PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_S
 @tree_math.struct
 class Predictions:
     dynamics: PhysicsState
-    physics: PhysicsOutputData
+    physics: Any
 
 def trajectory_from_step(
     step_fn: TimeStepFn,
@@ -224,7 +224,7 @@ class Model:
         initial_physics_data = PhysicsData.zeros(
             self.coords.nodal_shape[1:],
             self.coords.nodal_shape[0],
-        )
+        ) # FIXME: not physics-agnostic
 
         return ModelState(
             state=initial_state,

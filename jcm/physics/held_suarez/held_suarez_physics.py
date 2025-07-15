@@ -13,7 +13,7 @@ from typing import Tuple
 Quantity = units.Quantity
 
 class HeldSuarezPhysics(Physics):
-    write_output: bool
+    post_process: bool
 
     def __init__(self,
         coords: coordinate_systems.CoordinateSystem = get_coords(),
@@ -41,7 +41,7 @@ class HeldSuarezPhysics(Physics):
             dTy: horizontal temperature variation of radiative equilibrium.
             dThz: vertical temperature variation of radiative equilibrium.
         """
-        self.write_output = False
+        self.post_process = False
         self.coords = coords
         self.p0 = PHYSICS_SPECS.nondimensionalize(p0)
         self.sigma_b = sigma_b
