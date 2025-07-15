@@ -114,56 +114,130 @@ class IconPhysics(Physics):
         nlev, nlat, nlon = state.temperature.shape
         ncols = nlat * nlon
         
-        # Create vectorized physics state for column-wise processing
-        # Reshape from [nlev, nlat, nlon] to [nlev, ncols]
-        # Also reshape tracers
-        vectorized_tracers = {}
-        for name, tracer in state.tracers.items():
-            vectorized_tracers[name] = tracer.reshape(nlev, ncols)
-            
-        vectorized_state = PhysicsState(
-            u_wind=state.u_wind.reshape(nlev, ncols),
-            v_wind=state.v_wind.reshape(nlev, ncols),
-            temperature=state.temperature.reshape(nlev, ncols),
-            specific_humidity=state.specific_humidity.reshape(nlev, ncols),
-            geopotential=state.geopotential.reshape(nlev, ncols),
-            surface_pressure=state.surface_pressure.reshape(ncols),
-            tracers=vectorized_tracers
-        )
+        # OPTIMIZATION: Single reshape operation using tree_map for TPU efficiency
+        vectorized_state = self._reshape_state_to_columns(state, nlev, ncols)
         
-        # Apply physics terms sequentially with vectorization
+        # OPTIMIZATION: Accumulate tendencies in column format for TPU efficiency
+        # Initialize column-format accumulators
+        accumulated_tendencies = self._initialize_column_tendencies(nlev, ncols, state.tracers)
+        
+        # Apply physics terms with column-based accumulation
         for term in self.terms:
             if self.checkpoint_terms:
                 term = jax.checkpoint(term)
             
-            # Apply term to vectorized state
+            # Apply term to vectorized state (returns column format)
             term_tendency, physics_data = term(
                 vectorized_state, physics_data, self.parameters, boundaries, geometry
             )
             
-            # Reshape tendencies back to 3D and accumulate
-            # Also reshape tracer tendencies, ensuring all tracers are present
-            reshaped_tracers = {}
-            # First, initialize with zeros for all tracers in the state
-            for name in state.tracers.keys():
-                if name in term_tendency.tracers:
-                    reshaped_tracers[name] = term_tendency.tracers[name].reshape(nlev, nlat, nlon)
-                else:
-                    # If this physics term doesn't have a tendency for this tracer, use zeros
-                    reshaped_tracers[name] = jnp.zeros((nlev, nlat, nlon))
-                
-            reshaped_tendency = PhysicsTendency(
-                u_wind=term_tendency.u_wind.reshape(nlev, nlat, nlon),
-                v_wind=term_tendency.v_wind.reshape(nlev, nlat, nlon),
-                temperature=term_tendency.temperature.reshape(nlev, nlat, nlon),
-                specific_humidity=term_tendency.specific_humidity.reshape(nlev, nlat, nlon),
-                tracers=reshaped_tracers
+            # OPTIMIZATION: Direct accumulation in column format (no reshape)
+            accumulated_tendencies = self._accumulate_column_tendencies(
+                accumulated_tendencies, term_tendency
             )
-            
-            tendencies = tendencies + reshaped_tendency
+        
+        # OPTIMIZATION: Single reshape to 3D only at the very end
+        tendencies = self._reshape_tendencies_to_3d(accumulated_tendencies, nlev, nlat, nlon)
         
         return tendencies, physics_data
     
+    def _reshape_state_to_columns(self, state: PhysicsState, nlev: int, ncols: int) -> PhysicsState:
+        """
+        TPU-optimized reshape using single tree_map operation
+        
+        This creates one XLA operation instead of multiple reshapes, 
+        which is crucial for TPUv4 performance at T85 resolution.
+        """
+        def reshape_field(field):
+            if field.ndim == 3:  # [nlev, nlat, nlon] → [nlev, ncols]
+                return field.reshape(nlev, ncols)
+            elif field.ndim == 2:  # [nlat, nlon] → [ncols]
+                return field.reshape(ncols)
+            else:
+                return field  # Leave scalars unchanged
+        
+        # Single tree_map operation handles all main fields efficiently
+        reshaped_fields = jax.tree_map(reshape_field, {
+            'u_wind': state.u_wind,
+            'v_wind': state.v_wind,
+            'temperature': state.temperature,
+            'specific_humidity': state.specific_humidity,
+            'geopotential': state.geopotential,
+            'surface_pressure': state.surface_pressure,
+        })
+        
+        # Handle tracers separately to maintain dict structure
+        vectorized_tracers = {
+            name: tracer.reshape(nlev, ncols) 
+            for name, tracer in state.tracers.items()
+        }
+        
+        return PhysicsState(
+            **reshaped_fields,
+            tracers=vectorized_tracers
+        )
+    
+    def _initialize_column_tendencies(self, nlev: int, ncols: int, tracers: dict) -> dict:
+        """
+        Initialize tendency accumulators in column format
+        
+        Using dict avoids repeated PhysicsTendency object creation during accumulation
+        """
+        return {
+            'u_wind': jnp.zeros((nlev, ncols)),
+            'v_wind': jnp.zeros((nlev, ncols)),
+            'temperature': jnp.zeros((nlev, ncols)),
+            'specific_humidity': jnp.zeros((nlev, ncols)),
+            'tracers': {name: jnp.zeros((nlev, ncols)) for name in tracers.keys()}
+        }
+    
+    def _accumulate_column_tendencies(self, accumulated: dict, new_tendency: PhysicsTendency) -> dict:
+        """
+        Efficiently accumulate tendencies in column format
+        
+        Avoids object creation and intermediate arrays for optimal TPU performance
+        """
+        return {
+            'u_wind': accumulated['u_wind'] + new_tendency.u_wind,
+            'v_wind': accumulated['v_wind'] + new_tendency.v_wind,
+            'temperature': accumulated['temperature'] + new_tendency.temperature,
+            'specific_humidity': accumulated['specific_humidity'] + new_tendency.specific_humidity,
+            'tracers': {
+                name: accumulated['tracers'][name] + new_tendency.tracers.get(name, 0.0)
+                for name in accumulated['tracers'].keys()
+            }
+        }
+    
+    def _reshape_tendencies_to_3d(self, tendencies: dict, nlev: int, nlat: int, nlon: int) -> PhysicsTendency:
+        """
+        Final reshape to 3D format - single operation at the end
+        
+        This is the only reshape back to 3D, done once at the very end
+        """
+        def reshape_to_3d(field):
+            if field.ndim == 2:  # [nlev, ncols] → [nlev, nlat, nlon]
+                return field.reshape(nlev, nlat, nlon)
+            else:
+                return field
+        
+        # Single tree_map for all main fields
+        reshaped_main = jax.tree_map(reshape_to_3d, {
+            'u_wind': tendencies['u_wind'],
+            'v_wind': tendencies['v_wind'],
+            'temperature': tendencies['temperature'],
+            'specific_humidity': tendencies['specific_humidity'],
+        })
+        
+        # Reshape tracers
+        reshaped_tracers = {
+            name: field.reshape(nlev, nlat, nlon)
+            for name, field in tendencies['tracers'].items()
+        }
+        
+        return PhysicsTendency(
+            **reshaped_main,
+            tracers=reshaped_tracers
+        )
 
 @jit
 def _prepare_common_physics_state(
