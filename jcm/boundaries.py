@@ -30,11 +30,11 @@ class BoundaryData:
 
 
     @classmethod
-    def zeros(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
               fmask_s=None,lfluxland=None, land_coupling_flag=None):
-        return BoundaryData(
+        return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             orog=orog if orog is not None else jnp.zeros((nodal_shape)),
@@ -55,11 +55,11 @@ class BoundaryData:
         )
 
     @classmethod
-    def ones(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
              fmask_s=None,lfluxland=None, land_coupling_flag=None):
-        return BoundaryData(
+        return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
             orog=orog if orog is not None else jnp.ones((nodal_shape)),

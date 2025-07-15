@@ -57,7 +57,7 @@ class Timedelta:
     seconds = values // np.timedelta64(1, 's')
     # no need to worry about overflow, because timedelta64 represents values
     # internally with int64 and normalization uses native array operations
-    return Timedelta(0, seconds)
+    return cls(0, seconds)
 
   def to_timedelta64(self) -> np.timedelta64 | np.ndarray:
     seconds = np.int64(self.days) * 24 * 60 * 60 + np.int64(self.seconds)
@@ -164,22 +164,22 @@ class DateData:
     model_step: jnp.int32
 
     @classmethod
-    def zeros(self, model_time=None, model_year=None, model_step=None):
-        return DateData(
+    def zeros(cls, model_time=None, model_year=None, model_step=None):
+        return cls(
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
-    def set_date(self, model_time, model_year=None, model_step=None):
-        return DateData(
+    def set_date(cls, model_time, model_year=None, model_step=None):
+        return cls(
           tyear=fraction_of_year_elapsed(model_time),
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
-    def ones(self, model_time=None, model_year=None, model_step=None):
-        return DateData(
+    def ones(cls, model_time=None, model_year=None, model_step=None):
+        return cls(
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
