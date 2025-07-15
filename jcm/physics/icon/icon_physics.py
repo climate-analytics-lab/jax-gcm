@@ -30,7 +30,7 @@ from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
 from jcm.physics.icon.surface.surface_types import SurfaceState, AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
-# from jcm.physics.icon.chemistry import chemistry_tendencies
+from jcm.physics.icon.chemistry import simple_chemistry, initialize_chemistry_tracers
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
 from jcm.physics.icon.icon_physics_data import PhysicsData
 
@@ -70,6 +70,7 @@ class IconPhysics(Physics):
         self.terms = [
             _prepare_common_physics_state,
             get_simple_aerosol,  # Aerosol before radiation
+            apply_chemistry,     # Chemistry for ozone, methane etc.
             apply_radiation,     # Radiation early for surface fluxes
             apply_convection, 
             apply_clouds,
@@ -111,8 +112,24 @@ class IconPhysics(Physics):
         tendencies = PhysicsTendency.zeros(state.temperature.shape, tracers=tracer_tends)
 
         # Get array dimensions for vectorization
-        nlev, nlat, nlon = state.temperature.shape
+        nlev, nlon, nlat = state.temperature.shape  # Note: geometry uses (nlev, nlon, nlat) convention
         ncols = nlat * nlon
+        
+        # Update boundaries with time-varying conditions before applying physics
+        from jcm.boundaries import compute_time_varying_boundaries
+        # Convert DateData to day_of_year and time_of_day format
+        day_of_year = date.tyear * 365.25  # Convert fractional year to day of year
+        time_of_day = (day_of_year % 1.0) * 24.0  # Extract time of day from fractional part
+        day_of_year = jnp.floor(day_of_year)  # Get integer day of year
+        year = date.model_year
+        
+        updated_boundaries = compute_time_varying_boundaries(
+            boundaries, 
+            geometry,
+            day_of_year=day_of_year,
+            time_of_day=time_of_day,
+            year=year
+        )
         
         # OPTIMIZATION: Single reshape operation using tree_map for TPU efficiency
         vectorized_state = self._reshape_state_to_columns(state, nlev, ncols)
@@ -128,7 +145,7 @@ class IconPhysics(Physics):
             
             # Apply term to vectorized state (returns column format)
             term_tendency, physics_data = term(
-                vectorized_state, physics_data, self.parameters, boundaries, geometry
+                vectorized_state, physics_data, self.parameters, updated_boundaries, geometry
             )
             
             # OPTIMIZATION: Direct accumulation in column format (no reshape)
@@ -256,7 +273,7 @@ def _prepare_common_physics_state(
     
     Args:
         state: Physics state variables (already in 2D format [nlev, ncols])
-        boundaries: Boundary conditions
+        boundaries: Boundary conditions (already updated with time-varying conditions)
         geometry: Model geometry
         
     Returns:
@@ -303,8 +320,36 @@ def _prepare_common_physics_state(
         layer_thickness=dz_full,
     )
 
+    # Initialize chemistry tracers if not already done
+    # Check if chemistry is initialized by checking if ozone maximum is reasonable
+    ozone_max = jnp.max(physics_data.chemistry.ozone_vmr)
+    should_initialize = ozone_max < 100.0  # If max ozone < 100 ppbv, initialize
+    
+    # Initialize chemistry tracers with reasonable distributions
+    chemistry_state = initialize_chemistry_tracers(
+        pressure_levels,
+        surface_pressure,
+        state.temperature,
+        config=None  # Use defaults
+    )
+    
+    # Use JAX where to conditionally update chemistry
+    chemistry_data = physics_data.chemistry.copy(
+        ozone_vmr=jnp.where(should_initialize, chemistry_state.ozone_vmr, physics_data.chemistry.ozone_vmr),
+        methane_vmr=jnp.where(should_initialize, chemistry_state.methane_vmr, physics_data.chemistry.methane_vmr),
+        co2_vmr=jnp.where(should_initialize, chemistry_state.co2_vmr, physics_data.chemistry.co2_vmr),
+        ozone_production=jnp.where(should_initialize, chemistry_state.ozone_production, physics_data.chemistry.ozone_production),
+        ozone_loss=jnp.where(should_initialize, chemistry_state.ozone_loss, physics_data.chemistry.ozone_loss),
+        methane_loss=jnp.where(should_initialize, chemistry_state.methane_loss, physics_data.chemistry.methane_loss)
+    )
+    
+    updated_physics_data = physics_data.copy(
+        diagnostics=diagnostic_data,
+        chemistry=chemistry_data
+    )
+
     zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
-    return zero_tendencies, physics_data.copy(diagnostics=diagnostic_data)
+    return zero_tendencies, updated_physics_data
 
 # Physics term methods
 @jit
@@ -326,10 +371,11 @@ def apply_radiation(state: PhysicsState,
     day_of_year = date.day_of_year if hasattr(date, 'day_of_year') else 172.0  # Default to summer
     seconds_since_midnight = date.seconds_since_midnight if hasattr(date, 'seconds_since_midnight') else 43200.0  # Default to noon
     
-    # Get lat/lon from geometry - for now use dummy values
-    # In real implementation, these would come from geometry for each column
-    latitudes = jnp.zeros(ncols)  # Equator for now
-    longitudes = jnp.linspace(-180, 180, ncols)  # Span globe
+    # Get lat/lon from geometry - reshape to column format
+    nlon, nlat = boundaries.surface_temperature.shape
+    latitudes = jnp.tile(geometry.radang, nlon)  # Repeat lats for each lon
+    longitudes_1d = jnp.linspace(-jnp.pi, jnp.pi, nlon, endpoint=False)  # radians
+    longitudes = jnp.repeat(longitudes_1d, nlat)  # Repeat lons for each lat
     
     # Get cloud properties from tracers and previous physics
     cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
@@ -341,13 +387,20 @@ def apply_radiation(state: PhysicsState,
         nlev_cf, nlat, nlon = cloud_fraction.shape
         cloud_fraction = cloud_fraction.reshape(nlev_cf, nlat * nlon)
 
+    # Get ozone from chemistry data (reshape to column format)
+    ozone_vmr = physics_data.chemistry.ozone_vmr * 1e-9  # Convert ppbv to VMR
+    
+    # Get CO2 from boundaries (reshape to column format)
+    co2_vmr = boundaries.co2_concentration.reshape(ncols) * 1e-6  # Convert ppmv to VMR
+    
     radiation_results = jax.vmap(
         radiation_scheme,
-        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None),  # day_of_year, seconds_since_midnight, parameters are scalars
+        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None, 1, 0),  # day_of_year, seconds_since_midnight, parameters are scalars
         out_axes=(0, 0)  # Returns (RadiationTendencies, RadiationData) per column
     )(state.temperature, state.specific_humidity, state.surface_pressure,
         state.geopotential, cloud_water, cloud_ice, cloud_fraction,
-        day_of_year, seconds_since_midnight, latitudes, longitudes, parameters.radiation)
+        day_of_year, seconds_since_midnight, latitudes, longitudes, parameters.radiation,
+        ozone_vmr, co2_vmr)
     
     # Unpack structured results directly
     tendencies_vmapped, diagnostics_vmapped = radiation_results
@@ -590,9 +643,10 @@ def apply_vertical_diffusion(
     surface_fraction = jnp.zeros((ncols, nsfc_type))
     surface_fraction = surface_fraction.at[:, 2].set(1.0)  # All land for now
     
-    # Get surface properties from boundaries
-    surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
-    roughness_length = boundaries.roughness_length if hasattr(boundaries, 'roughness_length') else jnp.full(ncols, 0.001)
+    # Get surface properties from boundaries (now guaranteed to be present)
+    # Reshape boundary fields to column format
+    surface_temp = boundaries.surface_temperature.reshape(ncols)
+    roughness_length = boundaries.roughness_length.reshape(ncols)
 
     surface_temperature = jnp.repeat(surface_temp[:, jnp.newaxis], nsfc_type, axis=1)
     roughness = jnp.repeat(roughness_length[:, jnp.newaxis], nsfc_type, axis=1)
@@ -712,8 +766,12 @@ def apply_surface(
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
-    # Get surface properties from boundaries
-    surface_temp = boundaries.surface_temperature if hasattr(boundaries, 'surface_temperature') else state.temperature[-1, :]
+    # Get surface properties from boundaries (now guaranteed to be present)
+    # Reshape boundary fields to column format
+    surface_temp = boundaries.surface_temperature.reshape(ncols)
+    surface_albedo_vis = boundaries.surface_albedo_vis.reshape(ncols)
+    surface_albedo_nir = boundaries.surface_albedo_nir.reshape(ncols)
+    surface_emissivity = boundaries.surface_emissivity.reshape(ncols)
 
     # Initialize surface state (simplified)
     # In reality, this should come from the model's surface state
@@ -745,6 +803,8 @@ def apply_surface(
     # Initialize exchange coefficients with dummy values for now
     nsfc_type = 3
     dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient
+    
+    # Surface properties are now extracted earlier in the function
     
     atm_forcing = AtmosphericForcing(
         temperature=atm_temp,
@@ -879,6 +939,53 @@ def apply_chemistry(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply chemistry tendencies"""
-    # Placeholder - will implement chemistry_tendencies function
-    return PhysicsTendency.zeros(state.temperature.shape), physics_data
+    """Apply chemistry tendencies
+    
+    Computes tendencies from simple chemistry including:
+    - Fixed ozone distribution with relaxation
+    - Methane chemistry with simple decay
+    - CO2 tracking (no chemistry)
+    """
+    # Extract state variables
+    nlev, ncols = state.temperature.shape
+    temperature = state.temperature.T  # (ncols, nlev)
+    pressure = physics_data.diagnostics.pressure_full.T  # (ncols, nlev)
+    surface_pressure = physics_data.diagnostics.surface_pressure
+    
+    # Get current chemistry tracers from physics data
+    current_ozone = physics_data.chemistry.ozone_vmr.T  # (ncols, nlev)
+    current_methane = physics_data.chemistry.methane_vmr.T  # (ncols, nlev)
+    
+    dt = parameters.convection.dt_conv  # Time step (from convection for now)
+    
+    # Call chemistry scheme
+    chemistry_tend, chemistry_state = simple_chemistry(
+        pressure=pressure.T,  # Back to (nlev, ncols)
+        surface_pressure=surface_pressure,
+        temperature=temperature.T,  # Back to (nlev, ncols)
+        current_ozone=current_ozone.T,  # Back to (nlev, ncols)
+        current_methane=current_methane.T,  # Back to (nlev, ncols)
+        dt=dt,
+        config=None  # Use default chemistry parameters
+    )
+    
+    # Update physics data with chemistry diagnostics
+    updated_chemistry_data = physics_data.chemistry.copy(
+        ozone_vmr=chemistry_state.ozone_vmr,
+        methane_vmr=chemistry_state.methane_vmr,
+        co2_vmr=chemistry_state.co2_vmr,
+        ozone_production=chemistry_state.ozone_production,
+        ozone_loss=chemistry_state.ozone_loss,
+        methane_loss=chemistry_state.methane_loss
+    )
+    
+    updated_physics_data = physics_data.copy(chemistry=updated_chemistry_data)
+    
+    # Currently chemistry doesn't directly affect temperature or dynamics
+    # In future could add:
+    # - Ozone heating rates in radiation
+    # - Methane oxidation heating
+    # For now, return zero tendencies
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    
+    return physics_tendencies, updated_physics_data

@@ -359,6 +359,64 @@ class AerosolData:
 
 
 @tree_math.struct
+class ChemistryData:
+    """Data for chemistry calculations"""
+    
+    # Gas concentrations (volume mixing ratios)
+    ozone_vmr: jnp.ndarray           # Ozone VMR [ppbv] (nlev, ncols)
+    methane_vmr: jnp.ndarray         # Methane VMR [ppbv] (nlev, ncols)
+    co2_vmr: jnp.ndarray            # CO2 VMR [ppmv] (nlev, ncols)
+    
+    # Production/loss rates
+    ozone_production: jnp.ndarray    # Ozone production rate [ppbv/s] (nlev, ncols)
+    ozone_loss: jnp.ndarray         # Ozone loss rate [ppbv/s] (nlev, ncols)
+    methane_loss: jnp.ndarray       # Methane loss rate [ppbv/s] (nlev, ncols)
+    
+    # Surface emissions/deposition
+    methane_surface_flux: jnp.ndarray  # Surface methane flux [ppbv m/s] (ncols,)
+    ozone_dry_deposition: jnp.ndarray  # Ozone dry deposition velocity [m/s] (ncols,)
+    
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        # Chemistry fields should be in column format (nlev, ncols)
+        # where ncols = nlat * nlon
+        if len(nodal_shape) == 2:
+            nlat, nlon = nodal_shape
+            ncols = nlat * nlon
+            column_shape = (nlev, ncols)
+            surface_shape = (ncols,)
+        else:
+            # If already in column format
+            column_shape = (nlev,) + nodal_shape
+            surface_shape = nodal_shape
+            
+        return cls(
+            ozone_vmr=jnp.zeros(column_shape),
+            methane_vmr=jnp.zeros(column_shape),
+            co2_vmr=jnp.zeros(column_shape),
+            ozone_production=jnp.zeros(column_shape),
+            ozone_loss=jnp.zeros(column_shape),
+            methane_loss=jnp.zeros(column_shape),
+            methane_surface_flux=jnp.zeros(surface_shape),
+            ozone_dry_deposition=jnp.zeros(surface_shape),
+        )
+    
+    def copy(self, **kwargs):
+        new_data = {
+            'ozone_vmr': self.ozone_vmr,
+            'methane_vmr': self.methane_vmr,
+            'co2_vmr': self.co2_vmr,
+            'ozone_production': self.ozone_production,
+            'ozone_loss': self.ozone_loss,
+            'methane_loss': self.methane_loss,
+            'methane_surface_flux': self.methane_surface_flux,
+            'ozone_dry_deposition': self.ozone_dry_deposition,
+        }
+        new_data.update(kwargs)
+        return ChemistryData(**new_data)
+
+
+@tree_math.struct
 class PhysicsData:
     """Main physics data container for ICON physics"""
     
@@ -370,6 +428,7 @@ class PhysicsData:
     vertical_diffusion: VerticalDiffusionData
     surface: SurfaceData
     aerosol: AerosolData
+    chemistry: ChemistryData
     
     @classmethod
     def zeros(cls, nodal_shape, nlev, date=None):
@@ -382,6 +441,7 @@ class PhysicsData:
             vertical_diffusion=VerticalDiffusionData.zeros(nodal_shape, nlev),
             surface=SurfaceData.zeros(nodal_shape, nlev),
             aerosol=AerosolData.zeros(nodal_shape, nlev),
+            chemistry=ChemistryData.zeros(nodal_shape, nlev),
         )
     
     def copy(self, **kwargs):
@@ -394,6 +454,7 @@ class PhysicsData:
             'vertical_diffusion': self.vertical_diffusion,
             'surface': self.surface,
             'aerosol': self.aerosol,
+            'chemistry': self.chemistry,
         }
         new_data.update(kwargs)
         return PhysicsData(**new_data)

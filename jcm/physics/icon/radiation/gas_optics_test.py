@@ -69,18 +69,20 @@ def test_ozone_absorption_sw():
     """Test ozone shortwave absorption"""
     nlev = 5
     o3_vmr = jnp.ones(nlev) * 1e-6
+    temperature = jnp.ones(nlev) * 273.15  # Standard temperature
     
     # Test visible band (band 0) vs near-IR (band 1)
-    k_vis = ozone_absorption_sw(o3_vmr, 0)
-    k_nir = ozone_absorption_sw(o3_vmr, 1)
+    k_vis = ozone_absorption_sw(o3_vmr, temperature, 0)
+    k_nir = ozone_absorption_sw(o3_vmr, temperature, 1)
     
-    # O3 should absorb in UV/visible but not in near-IR
+    # O3 should absorb in UV/visible more than near-IR
     assert jnp.all(k_vis > 0)
-    assert jnp.all(k_nir == 0)
+    assert jnp.all(k_nir > 0)  # NIR band still has some absorption
+    assert jnp.all(k_vis > k_nir)  # UV/visible should be stronger
     
     # Should be proportional to O3 VMR
     o3_vmr_double = o3_vmr * 2
-    k_vis_double = ozone_absorption_sw(o3_vmr_double, 0)
+    k_vis_double = ozone_absorption_sw(o3_vmr_double, temperature, 0)
     assert jnp.allclose(k_vis_double, k_vis * 2, rtol=1e-10)
 
 
@@ -155,7 +157,7 @@ def test_gas_optical_depth_sw():
     cos_zenith = 0.5
     
     tau = gas_optical_depth_sw(
-        pressure, h2o_vmr, o3_vmr, layer_thickness, 
+        pressure, temperature, h2o_vmr, o3_vmr, layer_thickness, 
         air_density, cos_zenith
     )
     
@@ -226,7 +228,7 @@ def test_gas_optical_depth_zero_vmr():
     )
     
     tau_sw = gas_optical_depth_sw(
-        pressure, h2o_vmr, o3_vmr, layer_thickness,
+        pressure, temperature, h2o_vmr, o3_vmr, layer_thickness,
         air_density, 0.5
     )
     

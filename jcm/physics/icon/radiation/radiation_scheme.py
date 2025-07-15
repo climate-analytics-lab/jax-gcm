@@ -223,6 +223,7 @@ def radiation_scheme(
     
     gas_tau_sw = gas_optical_depth_sw(
         pressure=pressure_levels,
+        temperature=temperature,
         h2o_vmr=rad_state.h2o_vmr,
         o3_vmr=rad_state.o3_vmr,
         layer_thickness=layer_properties['thickness'],
