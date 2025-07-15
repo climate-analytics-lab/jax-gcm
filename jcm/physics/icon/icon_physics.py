@@ -341,41 +341,16 @@ def apply_radiation(state: PhysicsState,
         nlev_cf, nlat, nlon = cloud_fraction.shape
         cloud_fraction = cloud_fraction.reshape(nlev_cf, nlat * nlon)
 
-    # Define single column radiation function
-    def apply_radiation_to_column(temp_col, humid_col, ps_col, geopot_col,
-                                qc_col, qi_col, cf_col, lat, lon):
-        """Apply radiation to single column"""
-        
-        tendencies, diagnostics = radiation_scheme(
-            temperature=temp_col,
-            specific_humidity=humid_col,
-            surface_pressure=ps_col,  # Already normalized
-            geopotential=geopot_col,
-            cloud_water=qc_col,
-            cloud_ice=qi_col,
-            cloud_fraction=cf_col,
-            day_of_year=day_of_year,
-            seconds_since_midnight=seconds_since_midnight,
-            latitude=lat,
-            longitude=lon,
-            parameters=parameters.radiation
-        )
-        
-        # Return temperature tendency and key diagnostics
-        return tendencies, diagnostics
-    
-    # Apply radiation using vmap
-    results = jax.vmap(
-        apply_radiation_to_column,
-        in_axes=(1, 1, 0, 1, 1, 1, 1, 0, 0),  # ps, lat, lon are 1D
-        out_axes=0  # Map over the first (column) dimension of outputs
+    radiation_results = jax.vmap(
+        radiation_scheme,
+        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None),  # day_of_year, seconds_since_midnight, parameters are scalars
+        out_axes=(0, 0)  # Returns (RadiationTendencies, RadiationData) per column
     )(state.temperature, state.specific_humidity, state.surface_pressure,
         state.geopotential, cloud_water, cloud_ice, cloud_fraction,
-        latitudes, longitudes)
+        day_of_year, seconds_since_midnight, latitudes, longitudes, parameters.radiation)
     
-    # Unpack the vmapped results
-    # results is a tuple of (RadiationTendencies, RadiationData) with column dimension first
-    tendencies_vmapped, diagnostics_vmapped = results
+    # Unpack structured results directly
+    tendencies_vmapped, diagnostics_vmapped = radiation_results
     
     # Extract temperature tendencies and transpose to [nlev, ncols]
     temperature_tendency = tendencies_vmapped.temperature_tendency.T
@@ -431,7 +406,6 @@ def apply_convection(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # SIMPLIFIED: Direct vmap of tiedtke_nordeng_convection (no wrapper needed)
     conv_results = jax.vmap(
         tiedtke_nordeng_convection,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
@@ -442,7 +416,6 @@ def apply_convection(
     # Unpack structured results directly (no tuple unpacking needed)
     conv_tendencies_all, conv_states_all = conv_results
     
-    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
         v_wind=conv_tendencies_all.dvdt.T, 
@@ -484,7 +457,6 @@ def apply_clouds(
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
     
-    # SIMPLIFIED: Direct vmap of shallow_cloud_scheme (no wrapper needed)
     cloud_results = jax.vmap(
         shallow_cloud_scheme,
         in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
@@ -495,7 +467,6 @@ def apply_clouds(
     # Unpack structured results directly
     cloud_tendencies_all, cloud_states_all = cloud_results
     
-    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from clouds
         v_wind=jnp.zeros_like(state.v_wind),
@@ -550,7 +521,6 @@ def apply_microphysics(
     # Get microphysics configuration
     micro_config = parameters.microphysics
     
-    # SIMPLIFIED: Direct vmap of cloud_microphysics (no wrapper needed)
     micro_results = jax.vmap(
         cloud_microphysics,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
@@ -561,7 +531,6 @@ def apply_microphysics(
     # Unpack structured results directly
     micro_tendencies_all, micro_states_all = micro_results
     
-    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),
         v_wind=jnp.zeros_like(state.v_wind),
@@ -626,29 +595,21 @@ def apply_vertical_diffusion(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Define single column vertical diffusion function
-    def apply_vdiff_to_column(col_idx):
-        """Apply vertical diffusion to a single column"""        
+    def apply_vdiff_to_column(u_col, v_col, temp_col, qv_col, qc_col, qi_col,
+                             pressure_full_col, pressure_half_col, geopot_col,
+                             height_full_col, height_half_col, surface_temp_col,
+                             surface_frac_col, roughness_col, ocean_u_scalar, ocean_v_scalar,
+                             tke_col, thv_var_col):
+        """Apply vertical diffusion to a single column with structured output"""
+        
         # Prepare state for this column
         vdiff_state = prepare_vertical_diffusion_state(
-            u=state.u_wind[:, col_idx],
-            v=state.v_wind[:, col_idx],
-            temperature=state.temperature[:, col_idx],
-            qv=state.specific_humidity[:, col_idx],
-            qc=qc[:, col_idx],
-            qi=qi[:, col_idx],
-            pressure_full=pressure_levels[:, col_idx],
-            pressure_half=pressure_half[:, col_idx],
-            geopotential=state.geopotential[:, col_idx],
-            height_full=height_levels[:, col_idx],
-            height_half=height_half[:, col_idx],
-            surface_temperature=surface_temperature[col_idx, :],
-            surface_fraction=surface_fraction[col_idx, :],
-            roughness_length=roughness[col_idx, :],
-            ocean_u=ocean_u[col_idx],
-            ocean_v=ocean_v[col_idx],
-            tke=tke[:, col_idx],
-            thv_variance=thv_variance[:, col_idx],
+            u=u_col, v=v_col, temperature=temp_col, qv=qv_col, qc=qc_col, qi=qi_col,
+            pressure_full=pressure_full_col, pressure_half=pressure_half_col,
+            geopotential=geopot_col, height_full=height_full_col, height_half=height_half_col,
+            surface_temperature=surface_temp_col, surface_fraction=surface_frac_col,
+            roughness_length=roughness_col, ocean_u=ocean_u_scalar, ocean_v=ocean_v_scalar,
+            tke=tke_col, thv_variance=thv_var_col
         )
         
         # Compute vertical diffusion
@@ -656,38 +617,35 @@ def apply_vertical_diffusion(
             vdiff_state, parameters.vertical_diffusion, dt
         )
         
-        return (
-            tendencies.u_tend,
-            tendencies.v_tend,
-            tendencies.temp_tend,
-            tendencies.qv_tend,
-            tendencies.qc_tend,
-            tendencies.qi_tend,
-            tendencies.tke_tend,
-            diagnostics.exchange_coeff_momentum,
-            diagnostics.exchange_coeff_heat,
-            diagnostics.pbl_height,
-            diagnostics.surface_friction_velocity,
-            diagnostics.surface_buoyancy_flux
-        )
+        # Return structured data directly
+        return tendencies, diagnostics
     
-    # Apply vertical diffusion using vmap
-    results = jax.vmap(apply_vdiff_to_column)(jnp.arange(ncols))
+    vdiff_results = jax.vmap(
+        apply_vdiff_to_column,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1),  # Most are [nlev, ncols], some are [ncols] or [ncols, nsfc]
+        out_axes=(0, 0)  # Returns (VDiffTendencies, VDiffDiagnostics) per column
+    )(state.u_wind, state.v_wind, state.temperature, state.specific_humidity, qc, qi,
+      pressure_levels, pressure_half, state.geopotential, height_levels, height_half,
+      surface_temperature, surface_fraction, roughness, ocean_u, ocean_v, tke, thv_variance)
     
-    # Unpack results
-    (u_tend, v_tend, temp_tend, qv_tend, qc_tend, qi_tend, tke_tend,
-        km, kh, pbl_height, u_star, b_flux) = results
+    # Unpack structured results from vmap
+    vdiff_tendencies, vdiff_diagnostics = vdiff_results
     
-    # Transpose results back to [nlev, ncols]
-    u_tend = u_tend.T
-    v_tend = v_tend.T
-    temp_tend = temp_tend.T
-    qv_tend = qv_tend.T
-    qc_tend = qc_tend.T
-    qi_tend = qi_tend.T
-    tke_tend = tke_tend.T
-    km = km.T
-    kh = kh.T
+    # Extract tendencies (already in correct shape [ncols, nlev] from vmap)
+    u_tend = vdiff_tendencies.u_tendency.T  # Transpose to [nlev, ncols]
+    v_tend = vdiff_tendencies.v_tendency.T
+    temp_tend = vdiff_tendencies.temperature_tendency.T
+    qv_tend = vdiff_tendencies.qv_tendency.T
+    qc_tend = vdiff_tendencies.qc_tendency.T
+    qi_tend = vdiff_tendencies.qi_tendency.T
+    tke_tend = vdiff_tendencies.tke_tendency.T
+    
+    # Extract diagnostics (already in correct shape from vmap)
+    km = vdiff_diagnostics.exchange_coeff_momentum.T  # Transpose to [nlev, ncols]
+    kh = vdiff_diagnostics.exchange_coeff_heat.T
+    pbl_height = vdiff_diagnostics.boundary_layer_height  # Shape [ncols]
+    u_star = vdiff_diagnostics.friction_velocity  # Shape [ncols]
+    b_flux = vdiff_diagnostics.surface_heat_flux  # Shape [ncols] (using heat flux as buoyancy proxy)
     
     # Update TKE
     new_tke = tke + dt * tke_tend
@@ -868,7 +826,6 @@ def apply_gravity_waves(
     # In a real implementation, this would come from boundary data
     h_std = jnp.ones(ncols) * 200.0  # 200m standard deviation
     
-    # SIMPLIFIED: Direct vmap of gravity_wave_drag (no wrapper needed)
     gwd_results = jax.vmap(
         gravity_wave_drag,
         in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
@@ -879,7 +836,6 @@ def apply_gravity_waves(
     # Unpack structured results directly
     gwd_tendencies_all, gwd_states_all = gwd_results
     
-    # SIMPLIFIED: Extract tendencies from structured result (transpose to [nlev, ncols])
     physics_tendencies = PhysicsTendency(
         u_wind=gwd_tendencies_all.dudt.T,
         v_wind=gwd_tendencies_all.dvdt.T,
