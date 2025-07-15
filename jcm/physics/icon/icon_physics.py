@@ -157,7 +157,7 @@ class IconPhysics(Physics):
                 return field  # Leave scalars unchanged
         
         # Single tree_map operation handles all main fields efficiently
-        reshaped_fields = jax.tree_map(reshape_field, {
+        reshaped_fields = jax.tree_util.tree_map(reshape_field, {
             'u_wind': state.u_wind,
             'v_wind': state.v_wind,
             'temperature': state.temperature,
@@ -221,7 +221,7 @@ class IconPhysics(Physics):
                 return field
         
         # Single tree_map for all main fields
-        reshaped_main = jax.tree_map(reshape_to_3d, {
+        reshaped_main = jax.tree_util.tree_map(reshape_to_3d, {
             'u_wind': tendencies['u_wind'],
             'v_wind': tendencies['v_wind'],
             'temperature': tendencies['temperature'],
@@ -445,8 +445,7 @@ def apply_clouds(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply shallow cloud scheme with microphysics"""
-    nlev, ncols = state.temperature.shape
+    """Apply shallow cloud scheme """
     
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
@@ -504,7 +503,6 @@ def apply_microphysics(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply cloud microphysics scheme"""
     
-    nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     cloud_fraction = physics_data.clouds.cloud_fraction
@@ -790,6 +788,13 @@ def apply_surface(
         specific_humidity=qv_tend,
         tracers={}
     )
+    
+    # Extract additional diagnostics from surface physics
+    # For now, use simplified values - these should come from surface_physics_step in future
+    surf_temp_tend = tendencies.temperature_tendency if hasattr(tendencies, 'temperature_tendency') else jnp.zeros(ncols)
+    ch = diagnostics.exchange_coeff_heat if hasattr(diagnostics, 'exchange_coeff_heat') else dummy_exchange[:, 0]  # Use first surface type
+    cm = diagnostics.exchange_coeff_momentum if hasattr(diagnostics, 'exchange_coeff_momentum') else dummy_exchange[:, 0]
+    resistance = diagnostics.surface_resistance if hasattr(diagnostics, 'surface_resistance') else jnp.ones(ncols) * 50.0  # Typical resistance value
     
     # Update physics data with surface diagnostics
     surface_data = physics_data.surface.copy(

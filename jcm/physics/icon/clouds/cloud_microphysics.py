@@ -509,8 +509,6 @@ def cloud_microphysics(
     pressure: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
-    rain_water: jnp.ndarray,
-    snow: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     air_density: jnp.ndarray,
     layer_thickness: jnp.ndarray,
@@ -533,8 +531,6 @@ def cloud_microphysics(
         pressure: Pressure (Pa) [nlev]
         cloud_water: Cloud liquid water (kg/kg) [nlev]
         cloud_ice: Cloud ice (kg/kg) [nlev]
-        rain_water: Rain water (kg/kg) [nlev]
-        snow: Snow (kg/kg) [nlev]
         cloud_fraction: Cloud fraction [nlev]
         air_density: Air density (kg/m³) [nlev]
         layer_thickness: Layer thickness (m) [nlev]
@@ -559,6 +555,8 @@ def cloud_microphysics(
     dqidt = jnp.zeros(nlev)
     dqrdt = jnp.zeros(nlev)
     dqsdt = jnp.zeros(nlev)
+    rain_water = jnp.zeros(nlev)  # Initialize rain water
+    snow = jnp.zeros(nlev)  # Initialize snow
     
     # Calculate in-cloud values
     qc_in_cloud = jnp.where(
