@@ -248,7 +248,7 @@ def compute_surface_exchange_coefficients(
         theta_air = temperature_air
         
         # Bulk Richardson number for surface layer
-        ri_surface = (PHYS_CONST.grav * z_ref[:, None] * 
+        ri_surface = (PHYS_CONST.grav * z_ref * 
                      (theta_air - theta_surface) / 
                      (0.5 * (theta_air + theta_surface) * 
                       jnp.maximum(wind_speed_surface**2, 0.01)))

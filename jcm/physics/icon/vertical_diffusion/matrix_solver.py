@@ -156,9 +156,11 @@ def setup_momentum_matrix(
             )
         
         # Diagonal (implicit time step + connections)
-        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(
-            1.0 - matrix_coeffs[:, k, 0, matrix_idx] - matrix_coeffs[:, k, 2, matrix_idx]
-        )
+        # For stability, diagonal must be positive and larger than off-diagonal elements
+        above_contrib = jnp.where(k > 0, k_scaled[:, k] * recip_air_mass[:, k], 0.0)
+        below_contrib = jnp.where(k < nlev - 1, k_scaled[:, k + 1] * recip_air_mass[:, k], 0.0)
+        diagonal_val = 1.0 + above_contrib + below_contrib
+        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(diagonal_val)
     
     return matrix_coeffs
 
@@ -228,9 +230,10 @@ def setup_hydrometeor_matrix(
             )
         
         # Diagonal
-        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(
-            1.0 - matrix_coeffs[:, k, 0, matrix_idx] - matrix_coeffs[:, k, 2, matrix_idx]
-        )
+        above_contrib = jnp.where(k > 0, k_scaled[:, k] * recip_dry_air_mass[:, k], 0.0)
+        below_contrib = jnp.where(k < nlev - 1, k_scaled[:, k + 1] * recip_dry_air_mass[:, k], 0.0)
+        diagonal_val = 1.0 + above_contrib + below_contrib
+        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(diagonal_val)
     
     return matrix_coeffs
 

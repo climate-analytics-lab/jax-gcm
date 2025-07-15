@@ -107,7 +107,9 @@ def prepare_vertical_diffusion_state(
         Complete vertical diffusion state
     """
     # Compute air masses
-    dp = jnp.diff(pressure_half, axis=1)
+    # dp should be positive (higher pressure - lower pressure)
+    dp = jnp.diff(pressure_half, axis=1)  # This gives p[k+1] - p[k], which is negative
+    dp = -dp  # Make it positive: p[k] - p[k+1] > 0
     air_mass = dp / PHYS_CONST.grav
     
     # Approximate dry air mass (could be more sophisticated)
