@@ -285,8 +285,12 @@ def ice_thickness_evolution(
     total_tendency = jnp.sum(thickness_tendency, axis=1)
     
     # Limit melting to available ice
+    # Expand condition to match thickness array shape [ncol, nice_layers]
+    melting_condition = (total_thickness + total_tendency * dt) < 0.0
+    melting_condition_expanded = melting_condition[:, jnp.newaxis]  # Shape [ncol, 1] for broadcasting
+    
     thickness_tendency = jnp.where(
-        (total_thickness + total_tendency * dt) < 0.0,
+        melting_condition_expanded,
         -ice_thickness / dt,
         thickness_tendency
     )

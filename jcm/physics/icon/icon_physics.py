@@ -397,7 +397,6 @@ def apply_convection(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
     
-    nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     height_levels = physics_data.diagnostics.height_full
@@ -569,9 +568,22 @@ def apply_vertical_diffusion(
     height_levels = physics_data.diagnostics.height_full
     height_half = physics_data.diagnostics.height_half
     
-    # Initialize prognostic variables if not present
-    tke = physics_data.vertical_diffusion.tke if hasattr(physics_data.vertical_diffusion, 'tke') else jnp.ones((nlev, ncols)) * 0.1
-    thv_variance = physics_data.vertical_diffusion.thv_variance if hasattr(physics_data.vertical_diffusion, 'thv_variance') else jnp.zeros((nlev, ncols))
+    # Initialize prognostic variables if not present (ensure proper column format)
+    if hasattr(physics_data.vertical_diffusion, 'tke'):
+        tke = physics_data.vertical_diffusion.tke
+        # Reshape TKE if it's in grid format [nlev, nlat, nlon] -> [nlev, ncols]
+        if tke.ndim == 3:
+            tke = tke.reshape(nlev, ncols)
+    else:
+        tke = jnp.ones((nlev, ncols)) * 0.1
+        
+    if hasattr(physics_data.vertical_diffusion, 'thv_variance'):
+        thv_variance = physics_data.vertical_diffusion.thv_variance
+        # Reshape if needed
+        if thv_variance.ndim == 3:
+            thv_variance = thv_variance.reshape(nlev, ncols)
+    else:
+        thv_variance = jnp.zeros((nlev, ncols))
     
     # Surface properties (simplified - should come from boundaries)
     nsfc_type = 3  # water, ice, land
@@ -600,14 +612,16 @@ def apply_vertical_diffusion(
                              tke_col, thv_var_col):
         """Apply vertical diffusion to a single column with structured output"""
         
-        # Prepare state for this column
+        # Prepare state for this column - reshape to expected 2D format (1, nlev) or (1, nlev+1)
         vdiff_state = prepare_vertical_diffusion_state(
-            u=u_col, v=v_col, temperature=temp_col, qv=qv_col, qc=qc_col, qi=qi_col,
-            pressure_full=pressure_full_col, pressure_half=pressure_half_col,
-            geopotential=geopot_col, height_full=height_full_col, height_half=height_half_col,
-            surface_temperature=surface_temp_col, surface_fraction=surface_frac_col,
-            roughness_length=roughness_col, ocean_u=ocean_u_scalar, ocean_v=ocean_v_scalar,
-            tke=tke_col, thv_variance=thv_var_col
+            u=u_col[None, :], v=v_col[None, :], temperature=temp_col[None, :], 
+            qv=qv_col[None, :], qc=qc_col[None, :], qi=qi_col[None, :],
+            pressure_full=pressure_full_col[None, :], pressure_half=pressure_half_col[None, :],
+            geopotential=geopot_col[None, :], height_full=height_full_col[None, :], 
+            height_half=height_half_col[None, :],
+            surface_temperature=surface_temp_col[None, :], surface_fraction=surface_frac_col[None, :],
+            roughness_length=roughness_col[None, :], ocean_u=ocean_u_scalar[None], ocean_v=ocean_v_scalar[None],
+            tke=tke_col[None, :], thv_variance=thv_var_col[None, :]
         )
         
         # Compute vertical diffusion
@@ -615,12 +629,19 @@ def apply_vertical_diffusion(
             vdiff_state, parameters.vertical_diffusion, dt
         )
         
+        # Squeeze outputs to remove the dummy column dimension (1, nlev) -> (nlev)
+        def squeeze_first_dim(x):
+            return jnp.squeeze(x, axis=0) if x.ndim > 1 else x
+        
+        tendencies = jax.tree_util.tree_map(squeeze_first_dim, tendencies)
+        diagnostics = jax.tree_util.tree_map(squeeze_first_dim, diagnostics)
+        
         # Return structured data directly
         return tendencies, diagnostics
     
     vdiff_results = jax.vmap(
         apply_vdiff_to_column,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1),  # Most are [nlev, ncols], some are [ncols] or [ncols, nsfc]
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1),  # Fix surface properties to axis 0 (column mapped)
         out_axes=(0, 0)  # Returns (VDiffTendencies, VDiffDiagnostics) per column
     )(state.u_wind, state.v_wind, state.temperature, state.specific_humidity, qc, qi,
       pressure_levels, pressure_half, state.geopotential, height_levels, height_half,
@@ -662,14 +683,14 @@ def apply_vertical_diffusion(
     )
     
     # Update physics data with vertical diffusion diagnostics
+    # Only update fields that actually exist in VerticalDiffusionData
     vdiff_data = physics_data.vertical_diffusion.copy(
         tke=new_tke,
-        thv_variance=thv_variance,  # Not updated yet
-        exchange_coeff_momentum=km,
-        exchange_coeff_heat=kh,
+        km=km,  # Use correct field name
+        kh=kh,  # Use correct field name
         pbl_height=pbl_height,
         surface_friction_velocity=u_star,
-        surface_buoyancy_flux=b_flux,
+        # Note: thv_variance and surface_buoyancy_flux don't exist in VerticalDiffusionData
     )
     
     updated_physics_data = physics_data.copy(vertical_diffusion=vdiff_data)
@@ -789,24 +810,19 @@ def apply_surface(
         tracers={}
     )
     
-    # Extract additional diagnostics from surface physics
-    # For now, use simplified values - these should come from surface_physics_step in future
-    surf_temp_tend = tendencies.temperature_tendency if hasattr(tendencies, 'temperature_tendency') else jnp.zeros(ncols)
-    ch = diagnostics.exchange_coeff_heat if hasattr(diagnostics, 'exchange_coeff_heat') else dummy_exchange[:, 0]  # Use first surface type
-    cm = diagnostics.exchange_coeff_momentum if hasattr(diagnostics, 'exchange_coeff_momentum') else dummy_exchange[:, 0]
-    resistance = diagnostics.surface_resistance if hasattr(diagnostics, 'surface_resistance') else jnp.ones(ncols) * 50.0  # Typical resistance value
-    
     # Update physics data with surface diagnostics
+    # Extract exchange coefficients from atmospheric forcing
+    ch = atm_forcing.exchange_coeff_heat[:, 0]  # Heat exchange coefficient
+    cm = atm_forcing.exchange_coeff_momentum[:, 0]  # Momentum exchange coefficient
+    
     surface_data = physics_data.surface.copy(
         sensible_heat_flux=sensible_heat,
         latent_heat_flux=latent_heat,
         momentum_flux_u=tau_u,
         momentum_flux_v=tau_v,
-        evaporation_flux=evaporation,
-        surface_temp_tendency=surf_temp_tend,
-        exchange_coeff_heat=ch,
-        exchange_coeff_momentum=cm,
-        surface_resistance=resistance,
+        evaporation=evaporation,  # Use 'evaporation' not 'evaporation_flux'
+        ch=ch,
+        cm=cm,
     )
     
     updated_physics_data = physics_data.copy(surface=surface_data)
@@ -850,11 +866,8 @@ def apply_gravity_waves(
     )
     
     # Update physics data
-    gravity_wave_data = physics_data.gravity_waves.copy(
-        surface_stress=gwd_states_all.wave_stress[:, -1],  # Surface stress (last level)
-    )
-    
-    updated_physics_data = physics_data.copy(gravity_waves=gravity_wave_data)
+    # Note: PhysicsData doesn't have a gravity_waves field, so no diagnostics storage for now
+    updated_physics_data = physics_data
     
     return physics_tendencies, updated_physics_data
 
