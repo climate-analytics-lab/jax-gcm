@@ -55,6 +55,10 @@ class AerosolParameters:
     # Natural background AOD
     background_aod: jnp.ndarray   # Background AOD at 550nm (scalar)
     
+    # Time variation parameters
+    ann_cycle: jnp.ndarray        # (nplumes,) Annual cycle weights
+    year_weight: jnp.ndarray      # (nplumes,) Year-specific weights
+    
     @classmethod
     def default(cls, background_aod=0.02) -> 'AerosolParameters':
         """
@@ -182,6 +186,10 @@ class AerosolParameters:
             [0.8, 0.2]     # Middle East
         ]).T
         
+        # Time variation parameters (simplified for now)
+        ann_cycle = jnp.ones(nplumes)  # No seasonal variation
+        year_weight = jnp.ones(nplumes)  # Present-day emissions
+        
         return cls(
             nplumes=nplumes,
             nfeatures=nfeatures,
@@ -200,7 +208,9 @@ class AerosolParameters:
             sig_lat_W=sig_lat_W,
             theta=theta,
             ftr_weight=ftr_weight,
-            background_aod=jnp.array(background_aod)
+            background_aod=jnp.array(background_aod),
+            ann_cycle=ann_cycle,
+            year_weight=year_weight
         )
     
     def isnan(self):
