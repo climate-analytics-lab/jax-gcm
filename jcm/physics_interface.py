@@ -50,8 +50,8 @@ class PhysicsState:
         self.tracers = tracers if tracers is not None else {}
 
     @classmethod
-    def zeros(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
-        return PhysicsState(
+    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
+        return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
@@ -62,8 +62,8 @@ class PhysicsState:
         )
 
     @classmethod
-    def ones(self, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
-        return PhysicsState(
+    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
+        return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
@@ -106,8 +106,8 @@ class PhysicsTendency:
         self.tracers = tracers if tracers is not None else {}
 
     @classmethod
-    def zeros(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,tracers=None):
-        return PhysicsTendency(
+    def zeros(cls,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,tracers=None):
+        return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
@@ -116,8 +116,8 @@ class PhysicsTendency:
         )
 
     @classmethod
-    def ones(self,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,tracers=None):
-        return PhysicsTendency(
+    def ones(cls,shape,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,tracers=None):
+        return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),

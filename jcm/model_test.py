@@ -27,7 +27,7 @@ class TestModelUnit(unittest.TestCase):
         nodal_tzxy = (model.outer_steps,) + nodal_zxy
 
         final_state, predictions = model.unroll(state)
-        dynamics_predictions = predictions['dynamics']
+        dynamics_predictions = predictions.dynamics
 
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
@@ -71,7 +71,7 @@ class TestModelUnit(unittest.TestCase):
         nodal_tzxy = (model.outer_steps,) + nodal_zxy
     
         final_state, predictions = model.unroll(state)
-        dynamics_predictions = predictions['dynamics']
+        dynamics_predictions = predictions.dynamics
 
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(dynamics_predictions)
@@ -232,8 +232,8 @@ class TestModelUnit(unittest.TestCase):
         params = Parameters.default()
         tangent = make_ones_parameters_object(params)
         y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
-        state = jvp_sum['dynamics']
-        physics_data = jvp_sum['physics']
+        state = jvp_sum.dynamics
+        physics_data = jvp_sum.physics
 
         # Check dinosaur states
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
