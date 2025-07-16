@@ -30,7 +30,9 @@ class BoundaryData:
     
     ocn_coupling_flag:  jnp.bool    # 0 or 1
     sst_clim:           jnp.ndarray # climatology for sea surface temperature (sst)
-    sic_clim:            jnp.ndarray # climatology for sea ice (si)
+    sic_clim:           jnp.ndarray # climatology for sea ice concentration (sic)
+    sst:                jnp.ndarray # total sst
+    sic:                jnp.ndarray # total sic
     ocn_d0:             jnp.ndarray # mixed layer depth for ocean model
 
 
@@ -39,7 +41,7 @@ class BoundaryData:
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
               fmask_s=None,lfluxland=None, land_coupling_flag=None, 
-              ocn_coupling_flag=None, sst_clim=None, sic_clim=None, ocn_d0=None):
+              ocn_coupling_flag=None, sst_clim=None, sic_clim=None, sst=None, sic=None, ocn_d0=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -61,6 +63,8 @@ class BoundaryData:
             ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.zeros((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.zeros((nodal_shape)+(365,)),
+            sst=sst if sst is not None else jnp.zeros((nodal_shape)),
+            sic=sic if sic is not None else jnp.zeros((nodal_shape)),
             ocn_d0=ocn_d0 if ocn_d0 is not None else jnp.zeros((nodal_shape)),
         )
 
@@ -72,6 +76,8 @@ class BoundaryData:
              ocn_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
+             sst = None,
+             sic = None,
              ocn_d0=None,
     ):
         return BoundaryData(
@@ -95,6 +101,8 @@ class BoundaryData:
             ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.ones((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.ones((nodal_shape)+(365,)),
+            sst=sst if sst is not None else jnp.ones((nodal_shape)),
+            sic=sic if sic is not None else jnp.ones((nodal_shape)),
             ocn_d0=ocn_d0 if ocn_d0 is not None else jnp.ones((nodal_shape)),
         )
 
@@ -105,6 +113,8 @@ class BoundaryData:
              ocn_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
+             sst = None,
+             sic = None,
              ocn_d0=None,
     ):
         return BoundaryData(
@@ -128,6 +138,8 @@ class BoundaryData:
             ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else self.ocn_coupling_flag,
             sst_clim=sst_clim if sst_clim is not None else self.sst_clim,
             sic_clim=sic_clim if sic_clim is not None else self.sic_clim,
+            sst=sst if sst is not None else self.sst,
+            sic=sic if sic is not None else self.sic,
             ocn_d0=ocn_d0 if ocn_d0 is not None else self.ocn_d0,
         )
 
@@ -194,12 +206,10 @@ def initialize_boundaries(
     from jcm.physical_constants import grav
     from jcm.utils import spectral_truncation
     from jcm.land_model import land_model_init
+    from jcm.slabocean_model import slabocean_model_init
     from jcm.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
     
-    #from jcm.slabocean_model.slabocean_model import SlaboceanModel
-    import jcm.slabocean_model as som
-
     parameters = parameters or Parameters.default()
     
     ds = xr.open_dataset(filename)
@@ -221,12 +231,17 @@ def initialize_boundaries(
     tsea = _fixed_ssts(grid) 
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
-        fmask=fmask, forog=forog, orog=orog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
+        fmask=fmask,
+        forog=forog,
+        orog=orog,
+        phi0=phi0,
+        phis0=phis0,
+        tsea=tsea,
+        alb0=alb0,
+    )
     
     boundaries = land_model_init(filename, parameters, boundaries)
-
-    # call ocean model init
-    boundaries = som.misc.initBoundaries(filename=filename, parameters=parameters, boundaries=boundaries)
+    boundaries = slabocean_model_init(filename, parameters, boundaries)
     
     # call ice model init
 
@@ -241,6 +256,7 @@ def update_boundaries_with_timestep(
     Update the boundary conditions with the new time step
     """
     parameters = parameters or Parameters.default()
+    
     # Update the land heat capacity and dissipation time
     if boundaries.land_coupling_flag:
         rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
