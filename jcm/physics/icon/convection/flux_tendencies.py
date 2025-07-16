@@ -186,17 +186,48 @@ def calculate_tendencies(
         
         dqdt_k = q_flux * factor
         
-        # Momentum tendencies (conditional on config)
-        dudt_k = lax.cond(
-            config.cmfctop > 0,
-            lambda: (u_wind[kbase] - u_wind[k]) * mf_div * factor * 0.5,
-            lambda: 0.0
-        )
+        # Enhanced momentum tendencies
+        def calculate_momentum_transport():
+            # Simplified momentum transport using environmental winds
+            # Updrafts and downdrafts carry momentum similar to their source levels
+            
+            # Updraft momentum transport (assumes updraft winds ~ cloud base winds)
+            u_cloud_base = u_wind[kbase]
+            v_cloud_base = v_wind[kbase]
+            u_updraft_flux = (u_cloud_base * updraft_state.mfu[k] -
+                             u_cloud_base * updraft_state.mfu[k+1])
+            v_updraft_flux = (v_cloud_base * updraft_state.mfu[k] -
+                             v_cloud_base * updraft_state.mfu[k+1])
+            
+            # Downdraft momentum transport (assumes downdraft winds ~ environmental winds)
+            u_downdraft_flux = (u_wind[k] * downdraft_state.mfd[k] -
+                               u_wind[k+1] * downdraft_state.mfd[k+1])
+            v_downdraft_flux = (v_wind[k] * downdraft_state.mfd[k] -
+                               v_wind[k+1] * downdraft_state.mfd[k+1])
+            
+            # Total momentum flux divergence
+            u_total_flux = u_updraft_flux + u_downdraft_flux
+            v_total_flux = v_updraft_flux + v_downdraft_flux
+            
+            # Momentum tendency from mass flux transport
+            dudt_transport = u_total_flux * factor
+            dvdt_transport = v_total_flux * factor
+            
+            # Add pressure gradient force effect (simplified)
+            # Vertical momentum mixing tends to accelerate flow toward cloud base winds
+            pgf_efficiency = 0.3  # Moderate coupling strength
+            dudt_pgf = pgf_efficiency * (u_wind[kbase] - u_wind[k]) * mf_div * factor
+            dvdt_pgf = pgf_efficiency * (v_wind[kbase] - v_wind[k]) * mf_div * factor
+            
+            return dudt_transport + dudt_pgf, dvdt_transport + dvdt_pgf
         
-        dvdt_k = lax.cond(
+        def no_momentum_transport():
+            return 0.0, 0.0
+        
+        dudt_k, dvdt_k = lax.cond(
             config.cmfctop > 0,
-            lambda: (v_wind[kbase] - v_wind[k]) * mf_div * factor * 0.5,
-            lambda: 0.0
+            calculate_momentum_transport,
+            no_momentum_transport
         )
         
         return dtedt_k, dqdt_k, dudt_k, dvdt_k

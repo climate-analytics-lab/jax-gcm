@@ -505,20 +505,11 @@ def tiedtke_nordeng_convection(
         # Calculate precipitation from updraft
         precip_rate = jnp.sum(updraft_state.lu * updraft_state.mfu) * config.cprcon
         
-        # Calculate downdraft (simplified for now to avoid dtype issues)
-        # downdraft_state = calculate_downdraft(
-        #     temperature, humidity, pressure, height, rho,
-        #     updraft_state, precip_rate, cloud_base, ktop, config
-        # )
-        
-        # Simplified downdraft state with correct dtypes
-        from .downdraft import DowndraftState
-        downdraft_state = DowndraftState(
-            td=jnp.array(temperature, dtype=jnp.float32),
-            qd=jnp.array(humidity, dtype=jnp.float32),
-            mfd=jnp.zeros_like(temperature, dtype=jnp.float32),
-            lfs=nlev - 1,   # Surface level
-            active=False    # No downdraft for now
+        # Calculate downdraft (now properly implemented)
+        from .downdraft import calculate_downdraft
+        downdraft_state = calculate_downdraft(
+            temperature, humidity, pressure, height, rho,
+            updraft_state, precip_rate, cloud_base, ktop, config
         )
         
         # Calculate final tendencies for basic variables

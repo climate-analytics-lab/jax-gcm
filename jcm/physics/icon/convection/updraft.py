@@ -46,10 +46,15 @@ def calculate_entrainment_detrainment(
     buoy: jnp.ndarray,
     dz: jnp.ndarray,
     rho: jnp.ndarray,
+    env_temp: jnp.ndarray,
+    env_humidity: jnp.ndarray,
+    updraft_temp: jnp.ndarray,
+    updraft_humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
     config: ConvectionParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Calculate entrainment and detrainment rates
+    Calculate enhanced entrainment and detrainment rates
     
     Args:
         k: Current level index
@@ -60,58 +65,82 @@ def calculate_entrainment_detrainment(
         buoy: Buoyancy at current level
         dz: Layer thickness (m)
         rho: Air density (kg/m³)
+        env_temp: Environmental temperature (K)
+        env_humidity: Environmental specific humidity (kg/kg)
+        updraft_temp: Updraft temperature (K)
+        updraft_humidity: Updraft specific humidity (kg/kg)
+        pressure: Pressure (Pa)
         config: Convection configuration
         
     Returns:
         Tuple of (entrainment_rate, detrainment_rate) in 1/m
     """
-    # Select entrainment rate based on convection type
-    entr_param = lax.select(
+    # Base entrainment rate based on convection type
+    entr_base = lax.select(
         ktype - 1,  # Index selector
         jnp.array([config.entrpen, config.entrscv, config.entrmid])
     )
     
-    # Basic turbulent entrainment
-    entr = entr_param
+    # Environmental humidity dependence (dry air increases entrainment)
+    from .tiedtke_nordeng import saturation_mixing_ratio
+    qs_env = saturation_mixing_ratio(pressure, env_temp)
+    relative_humidity = jnp.clip(env_humidity / qs_env, 0.0, 1.0)
     
-    # Turbulent detrainment equals entrainment for mass conservation
-    detr_turb = entr
+    # Entrainment increases as RH decreases (more dry air entrainment)
+    humidity_factor = 1.0 + 2.0 * (1.0 - relative_humidity)**2
     
-    # Organized detrainment for deep convection
-    # Applied in upper part of cloud
-    detr_org = 0.0
+    # Buoyancy dependence - enhanced entrainment for negative buoyancy
+    buoyancy_factor = lax.cond(
+        buoy < 0.0,
+        lambda: 1.0 + 3.0 * jnp.abs(buoy),  # Increase based on negative buoyancy magnitude
+        lambda: 1.0
+    )
     
-    # Calculate cloud depth for organized detrainment
+    # Thermal contrast dependence - more entrainment with larger temperature differences
+    temp_contrast = jnp.abs(updraft_temp - env_temp)
+    thermal_factor = 1.0 + 0.1 * temp_contrast  # Modest enhancement
+    
+    # Combined entrainment rate
+    entr = entr_base * humidity_factor * buoyancy_factor * thermal_factor
+    
+    # Limit maximum entrainment to prevent instability
+    entr = jnp.clip(entr, 0.0, 0.01)  # Max 1% per meter
+    
+    # Turbulent detrainment for mass conservation
+    detr_turb = entr * 0.5  # Partial compensation
+    
+    # Enhanced organized detrainment for deep convection
     cloud_depth = jnp.maximum(kbase - ktop, 1)
     
-    # For deep convection (ktype=1), add organized detrainment near cloud top
-    def organized_detrainment():
-        # Calculate relative position in cloud
-        relative_height = (k - ktop) / cloud_depth
+    def enhanced_organized_detrainment():
+        # Calculate relative position in cloud (0 = cloud top, 1 = cloud base)
+        relative_height = (kbase - k) / cloud_depth
         
-        # Smooth profile using hyperbolic tangent
-        # Maximum detrainment at cloud top, decreasing downward
-        org_profile = 0.5 * (1.0 + jnp.tanh(3.0 * (relative_height - 0.7)))
+        # Enhanced profile with stronger detrainment in upper levels
+        # Peak detrainment around 0.8-0.9 relative height (near cloud top)
+        peak_position = 0.85
+        width = 0.3
         
-        # Scale by mass flux and density
-        return 2.0e-3 * org_profile  # Organized detrainment rate
+        # Gaussian-like profile centered near cloud top
+        org_profile = jnp.exp(-0.5 * ((relative_height - peak_position) / width)**2)
+        
+        # Scale based on mass flux strength and cloud depth
+        detr_strength = 0.003 * jnp.sqrt(cloud_depth / 10.0)  # Stronger for deeper clouds
+        
+        return detr_strength * org_profile
     
-    # Apply organized detrainment only for deep convection in upper cloud
+    # Apply enhanced organized detrainment for deep convection
     detr_org = lax.cond(
-        jnp.logical_and(ktype == 1, k <= kbase - cloud_depth * 0.5),
-        organized_detrainment,
+        jnp.logical_and(ktype == 1, k <= kbase),  # Throughout deep cloud
+        enhanced_organized_detrainment,
         lambda: 0.0
     )
     
     # Total detrainment
     detr = detr_turb + detr_org
     
-    # Increase entrainment if losing buoyancy
-    entr = lax.cond(
-        buoy < 0.0,
-        lambda: entr * 2.0,  # Double entrainment for negative buoyancy
-        lambda: entr
-    )
+    # Minimum detrainment to ensure some mixing
+    detr = jnp.maximum(detr, 0.0001)
     
     return entr, detr
 
@@ -192,7 +221,8 @@ def updraft_step(
         # Get entrainment and detrainment rates
         entr, detr = calculate_entrainment_detrainment(
             k, kbase, ktop, ktype, carry.mfu[next_level], 
-            carry.buoy[next_level], dz, rho, config
+            carry.buoy[next_level], dz, rho,
+            env_temp, env_q, carry.tu[k], carry.qu[k], pressure, config
         )
         
         # Mass flux change due to entrainment/detrainment
