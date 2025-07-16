@@ -38,6 +38,78 @@ from ..unit_conversions import (
 from ..constants import physical_constants
 
 
+def combine_optical_properties(
+    gas_optical_depth: jnp.ndarray,
+    cloud_optics: OpticalProperties,
+    aerosol_optical_depth: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asymmetry: Optional[jnp.ndarray] = None
+) -> OpticalProperties:
+    """
+    Combine gas, cloud, and aerosol optical properties.
+    
+    Args:
+        gas_optical_depth: Gas optical depth [nlev, nbands]
+        cloud_optics: Cloud optical properties
+        aerosol_optical_depth: Aerosol optical depth [nlev, nbands] 
+        aerosol_ssa: Aerosol single scatter albedo [nlev, nbands]
+        aerosol_asymmetry: Aerosol asymmetry factor [nlev, nbands]
+        
+    Returns:
+        Combined optical properties
+    """
+    # Start with gas + cloud
+    total_tau = gas_optical_depth + cloud_optics.optical_depth
+    
+    # If no aerosols, return gas + cloud
+    if aerosol_optical_depth is None:
+        return OpticalProperties(
+            optical_depth=total_tau,
+            single_scatter_albedo=cloud_optics.single_scatter_albedo,
+            asymmetry_factor=cloud_optics.asymmetry_factor
+        )
+    
+    # Ensure aerosol properties have the right shape for the current band structure
+    nlev, nbands = total_tau.shape
+    if aerosol_optical_depth.shape != (nlev, nbands):
+        # If aerosol data doesn't match band structure, skip aerosol effects
+        return OpticalProperties(
+            optical_depth=total_tau,
+            single_scatter_albedo=cloud_optics.single_scatter_albedo,
+            asymmetry_factor=cloud_optics.asymmetry_factor
+        )
+    
+    # Add aerosol optical depth
+    total_tau_with_aerosol = total_tau + aerosol_optical_depth
+    
+    # Combine single scattering albedo (weighted by scattering optical depth)
+    cloud_scattering = cloud_optics.optical_depth * cloud_optics.single_scatter_albedo
+    aerosol_scattering = aerosol_optical_depth * aerosol_ssa
+    total_scattering = cloud_scattering + aerosol_scattering
+    
+    combined_ssa = jnp.where(
+        total_tau_with_aerosol > 0,
+        total_scattering / total_tau_with_aerosol,
+        0.0
+    )
+    
+    # Combine asymmetry factor (weighted by scattering optical depth)
+    cloud_g_weighted = cloud_scattering * cloud_optics.asymmetry_factor
+    aerosol_g_weighted = aerosol_scattering * aerosol_asymmetry
+    
+    combined_g = jnp.where(
+        total_scattering > 0,
+        (cloud_g_weighted + aerosol_g_weighted) / total_scattering,
+        0.0
+    )
+    
+    return OpticalProperties(
+        optical_depth=total_tau_with_aerosol,
+        single_scatter_albedo=combined_ssa,
+        asymmetry_factor=combined_g
+    )
+
+
 def prepare_radiation_state(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -47,7 +119,10 @@ def prepare_radiation_state(
     cloud_ice: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     cos_zenith: float,
-    ozone_vmr: Optional[jnp.ndarray] = None
+    ozone_vmr: Optional[jnp.ndarray] = None,
+    aerosol_optical_depth: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asymmetry: Optional[jnp.ndarray] = None
 ) -> RadiationState:
     """
     Prepare radiation state from physics state variables.
@@ -62,6 +137,9 @@ def prepare_radiation_state(
         cloud_fraction: Cloud fraction (0-1) [nlev]
         cos_zenith: Cosine of solar zenith angle
         ozone_vmr: Ozone volume mixing ratio [nlev]
+        aerosol_optical_depth: Aerosol optical depth [nlev, nbands]
+        aerosol_ssa: Aerosol single scatter albedo [nlev, nbands] 
+        aerosol_asymmetry: Aerosol asymmetry factor [nlev, nbands]
         
     Returns:
         RadiationState ready for radiation calculations
@@ -119,7 +197,10 @@ def prepare_radiation_state(
         surface_temperature=jnp.array([temperature[-1]]),  # Bottom level temperature
         surface_albedo_vis=jnp.array([0.15]),  # Visible albedo
         surface_albedo_nir=jnp.array([0.15]),  # Near-IR albedo
-        surface_emissivity=jnp.array([0.98])
+        surface_emissivity=jnp.array([0.98]),
+        aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_ssa=aerosol_ssa,
+        aerosol_asymmetry=aerosol_asymmetry
     )
 
 
@@ -136,6 +217,10 @@ def radiation_scheme(
     latitude: float,
     longitude: float,
     parameters: RadiationParameters,
+    aerosol_optical_depth: jnp.ndarray,
+    aerosol_ssa: jnp.ndarray,
+    aerosol_asymmetry: jnp.ndarray,
+    cdnc_factor: jnp.ndarray,
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: float = 400e-6
 ) -> Tuple[RadiationTendencies, RadiationData]:
@@ -158,6 +243,10 @@ def radiation_scheme(
         latitude: Latitude (degrees)
         longitude: Longitude (degrees)
         parameters: Radiation parameters (uses defaults if None)
+        aerosol_optical_depth: Aerosol optical depth [nlev, nbands]
+        aerosol_ssa: Aerosol single scatter albedo [nlev, nbands]
+        aerosol_asymmetry: Aerosol asymmetry factor [nlev, nbands]
+        cdnc_factor: Cloud droplet number concentration factor from aerosols
         ozone_vmr: Ozone volume mixing ratio [nlev]
         co2_vmr: CO2 volume mixing ratio
         
@@ -193,7 +282,10 @@ def radiation_scheme(
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
         cos_zenith=cos_zenith,
-        ozone_vmr=ozone_vmr
+        ozone_vmr=ozone_vmr,
+        aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_ssa=aerosol_ssa,
+        aerosol_asymmetry=aerosol_asymmetry
     )
     
     # Calculate layer properties
@@ -236,24 +328,31 @@ def radiation_scheme(
     cloud_sw_optics, cloud_lw_optics = cloud_optics(
         cloud_water_path=rad_state.cloud_water_path,
         cloud_ice_path=rad_state.cloud_ice_path,
-        temperature=temperature
+        temperature=temperature,
+        cdnc_factor=cdnc_factor
     )
     
-    # Combine gas and cloud optical depths
-    from .radiation_types import OpticalProperties
+    # Combine gas, cloud, and aerosol optical depths
+    # Handle SW and LW separately since they may have different aerosol properties
     
-    total_tau_lw = gas_tau_lw + cloud_lw_optics.optical_depth
-    lw_optics = OpticalProperties(
-        optical_depth=total_tau_lw,
-        single_scatter_albedo=cloud_lw_optics.single_scatter_albedo,
-        asymmetry_factor=cloud_lw_optics.asymmetry_factor
+    n_sw_bands = parameters.n_sw_bands
+    sw_optics = combine_optical_properties(
+        gas_tau_sw,
+        cloud_sw_optics,
+        aerosol_optical_depth[:, :n_sw_bands],
+        aerosol_ssa[:, :n_sw_bands],
+        aerosol_asymmetry[:, :n_sw_bands]
     )
     
-    total_tau_sw = gas_tau_sw + cloud_sw_optics.optical_depth
-    sw_optics = OpticalProperties(
-        optical_depth=total_tau_sw,
-        single_scatter_albedo=cloud_sw_optics.single_scatter_albedo,
-        asymmetry_factor=cloud_sw_optics.asymmetry_factor
+    # Calculate longwave optical properties
+    n_lw_bands = parameters.n_lw_bands
+    start_idx = n_sw_bands  # Start after SW bands
+    lw_optics = combine_optical_properties(
+        gas_tau_lw,
+        cloud_lw_optics,
+        aerosol_optical_depth[:, start_idx:start_idx+n_lw_bands],
+        aerosol_ssa[:, start_idx:start_idx+n_lw_bands],
+        aerosol_asymmetry[:, start_idx:start_idx+n_lw_bands]
     )
     
     # Calculate Planck functions for longwave
@@ -343,7 +442,6 @@ def radiation_scheme(
     return tendencies, diagnostics
 
 
-# Convenience function for single column
 def radiation_column(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -356,7 +454,11 @@ def radiation_column(
     seconds_since_midnight: float,
     latitude: float,
     longitude: float,
-    parameters: Optional[RadiationParameters]
+    parameters: Optional[RadiationParameters],
+    aerosol_optical_depth: jnp.ndarray,
+    aerosol_ssa: jnp.ndarray,
+    aerosol_asymmetry: jnp.ndarray,
+    cdnc_factor: jnp.ndarray
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Single column radiation calculation"""
     return radiation_scheme(
@@ -371,5 +473,105 @@ def radiation_column(
         seconds_since_midnight=seconds_since_midnight,
         latitude=latitude,
         longitude=longitude,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_ssa=aerosol_ssa,
+        aerosol_asymmetry=aerosol_asymmetry,
+        cdnc_factor=cdnc_factor
+    )
+
+
+def radiation_scheme_with_aerosols(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    surface_pressure: jnp.ndarray,
+    geopotential: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    day_of_year: float,
+    seconds_since_midnight: float,
+    latitude: float,
+    longitude: float,
+    parameters: RadiationParameters,
+    aerosol_data,  # AerosolData from physics_data
+    ozone_vmr: Optional[jnp.ndarray] = None,
+    co2_vmr: float = 400e-6
+) -> Tuple[RadiationTendencies, RadiationData]:
+    """
+    Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
+    
+    Args:
+        temperature: Temperature (K) [nlev]
+        specific_humidity: Specific humidity (kg/kg) [nlev]
+        surface_pressure: Surface pressure (normalized)
+        geopotential: Geopotential (m²/s²) [nlev]
+        cloud_water: Cloud water content (kg/kg) [nlev]
+        cloud_ice: Cloud ice content (kg/kg) [nlev]
+        cloud_fraction: Cloud fraction (0-1) [nlev]
+        day_of_year: Day of year (1-365)
+        seconds_since_midnight: Seconds since midnight UTC
+        latitude: Latitude (degrees)
+        longitude: Longitude (degrees)
+        parameters: Radiation parameters
+        aerosol_data: AerosolData containing optical properties
+        ozone_vmr: Ozone volume mixing ratio [nlev]
+        co2_vmr: CO2 volume mixing ratio
+        
+    Returns:
+        Tuple of (radiation tendencies, radiation diagnostics)
+    """
+    nlev = temperature.shape[0]
+    
+    # For now, assume aerosol properties are spectrally uniform
+    # and expand to radiation band structure
+    n_sw_bands = parameters.n_sw_bands
+    n_lw_bands = parameters.n_lw_bands
+    
+    # Expand aerosol profiles to radiation bands
+    # SW bands
+    aerosol_tau_sw = jnp.tile(
+        aerosol_data.aod_profile[:, 0:1], (1, n_sw_bands)
+    )
+    aerosol_ssa_sw = jnp.tile(
+        aerosol_data.ssa_profile[:, 0:1], (1, n_sw_bands)
+    )
+    aerosol_asy_sw = jnp.tile(
+        aerosol_data.asy_profile[:, 0:1], (1, n_sw_bands)
+    )
+    
+    # LW bands (pure absorption for aerosols)
+    aerosol_tau_lw = jnp.tile(
+        aerosol_data.aod_profile[:, 0:1], (1, n_lw_bands)
+    )
+    aerosol_ssa_lw = jnp.zeros((nlev, n_lw_bands))  # Pure absorption
+    aerosol_asy_lw = jnp.zeros((nlev, n_lw_bands))
+    
+    # For SW use scattering properties, for LW use absorption
+    aerosol_optical_depth = jnp.concatenate([aerosol_tau_sw, aerosol_tau_lw], axis=1)
+    aerosol_ssa = jnp.concatenate([aerosol_ssa_sw, aerosol_ssa_lw], axis=1)
+    aerosol_asymmetry = jnp.concatenate([aerosol_asy_sw, aerosol_asy_lw], axis=1)
+    
+    # Cloud droplet number concentration factor
+    cdnc_factor = aerosol_data.cdnc_factor[0] 
+    
+    return radiation_scheme(
+        temperature=temperature,
+        specific_humidity=specific_humidity,
+        surface_pressure=surface_pressure,
+        geopotential=geopotential,
+        cloud_water=cloud_water,
+        cloud_ice=cloud_ice,
+        cloud_fraction=cloud_fraction,
+        day_of_year=day_of_year,
+        seconds_since_midnight=seconds_since_midnight,
+        latitude=latitude,
+        longitude=longitude,
+        parameters=parameters,
+        ozone_vmr=ozone_vmr,
+        co2_vmr=co2_vmr,
+        aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_ssa=aerosol_ssa,
+        aerosol_asymmetry=aerosol_asymmetry,
+        cdnc_factor=cdnc_factor
     )

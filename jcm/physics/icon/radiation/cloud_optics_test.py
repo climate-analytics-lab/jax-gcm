@@ -18,29 +18,25 @@ from jcm.physics.icon.radiation.cloud_optics import (
 
 def test_effective_radius_liquid():
     """Test liquid cloud effective radius calculation"""
-    nlev = 10
-    temperature = jnp.linspace(288.0, 270.0, nlev)
     
+    cdnc_factor = jnp.array(1.0)  # No aerosol influence
     # Test over ocean
-    r_eff_ocean = effective_radius_liquid(temperature, land_fraction=0.0)
-    
+    r_eff_ocean = effective_radius_liquid(cdnc_factor, land_fraction=0.0)
+
     # Test over land
-    r_eff_land = effective_radius_liquid(temperature, land_fraction=1.0)
+    r_eff_land = effective_radius_liquid(cdnc_factor, land_fraction=1.0)
     
-    # Check shapes
-    assert r_eff_ocean.shape == (nlev,)
-    assert r_eff_land.shape == (nlev,)
+    # Check that we get scalar outputs
+    assert r_eff_ocean.shape == ()
+    assert r_eff_land.shape == ()
     
     # Should be positive
-    assert jnp.all(r_eff_ocean > 0)
-    assert jnp.all(r_eff_land > 0)
+    assert r_eff_ocean > 0
+    assert r_eff_land > 0
     
     # Ocean droplets should generally be larger
-    assert jnp.all(r_eff_ocean >= r_eff_land)
+    assert r_eff_ocean >= r_eff_land
     
-    # Should have temperature dependence
-    assert not jnp.allclose(r_eff_ocean[0], r_eff_ocean[-1])
-
 
 def test_effective_radius_ice():
     """Test ice cloud effective radius calculation"""
@@ -83,7 +79,7 @@ def test_cloud_optics_integration():
     
     # Calculate cloud optics
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Check output shapes - now using fixed bands
@@ -126,7 +122,7 @@ def test_cloud_optics_no_clouds():
     temperature = jnp.linspace(288.0, 220.0, nlev)
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Should have zero optical depth everywhere
@@ -148,7 +144,7 @@ def test_cloud_optics_extreme_values():
     cloud_ice_path = jnp.ones(nlev) * 1e-8
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Should handle small values without NaN
@@ -160,7 +156,7 @@ def test_cloud_optics_extreme_values():
     cloud_ice_path = jnp.ones(nlev) * 5.0
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Should handle large values
@@ -181,13 +177,13 @@ def test_cloud_optics_temperature_dependence():
     # Warm temperatures
     temp_warm = jnp.ones(nlev) * 290.0
     sw_warm, lw_warm = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_warm
+        cloud_water_path, cloud_ice_path, temp_warm, jnp.array(1.0)
     )
     
     # Cold temperatures  
     temp_cold = jnp.ones(nlev) * 230.0
     sw_cold, lw_cold = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_cold
+        cloud_water_path, cloud_ice_path, temp_cold, jnp.array(1.0)
     )
     
     # Temperature should affect optical properties
@@ -210,7 +206,7 @@ def test_cloud_optics_mixed_phase():
     cloud_ice_path = jnp.array([0.0, 0.0, 0.05, 0.1, 0.15, 0.1, 0.05, 0.0])
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Total optical depth should be combination of water and ice
@@ -235,7 +231,7 @@ def test_cloud_optics_band_variations():
     temperature = jnp.ones(nlev) * 280.0
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # Should have variations across bands
@@ -265,7 +261,7 @@ def test_cloud_optics_scattering_properties():
     temperature = jnp.ones(nlev) * 260.0
     
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature
+        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
     )
     
     # SW should have high single scattering albedo (clouds scatter well in visible) - only first 2 bands

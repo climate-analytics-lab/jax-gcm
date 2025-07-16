@@ -103,6 +103,11 @@ class RadiationState(NamedTuple):
     surface_albedo_vis: jnp.ndarray  # Visible surface albedo
     surface_albedo_nir: jnp.ndarray  # Near-IR surface albedo
     surface_emissivity: jnp.ndarray  # Surface emissivity
+    
+    # Aerosol properties (optional)
+    aerosol_optical_depth: jnp.ndarray     # Aerosol optical depth [nlev, nbands]
+    aerosol_ssa: jnp.ndarray               # Aerosol single scatter albedo [nlev, nbands]
+    aerosol_asymmetry: jnp.ndarray         # Aerosol asymmetry factor [nlev, nbands]
 
 
 class RadiationFluxes(NamedTuple):

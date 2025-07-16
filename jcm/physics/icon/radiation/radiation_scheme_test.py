@@ -17,6 +17,30 @@ from jcm.physics.icon.radiation.radiation_scheme import (
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters
 
 
+def create_default_aerosol_data(nlev=10, parameters=None):
+    """Create default aerosol data for testing"""
+    if parameters is None:
+        parameters = RadiationParameters.default()
+    
+    # Total number of bands (SW + LW)
+    total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
+    
+    # Default small aerosol loading
+    aerosol_optical_depth = jnp.ones((nlev, total_bands)) * 0.01  # Small background AOD
+    aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9              # Mostly scattering
+    # Set LW bands to pure absorption (SSA = 0)
+    aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
+    aerosol_asymmetry = jnp.ones((nlev, total_bands)) * 0.7       # Forward scattering
+    cdnc_factor = jnp.array(1.0)                                   # No aerosol-cloud interaction
+    
+    return {
+        'aerosol_optical_depth': aerosol_optical_depth,
+        'aerosol_ssa': aerosol_ssa,
+        'aerosol_asymmetry': aerosol_asymmetry,
+        'cdnc_factor': cdnc_factor
+    }
+
+
 def create_test_atmosphere(nlev=10):
     """Create a realistic test atmosphere"""
     # Realistic atmospheric profile - pressure decreases with height
@@ -125,6 +149,9 @@ def test_radiation_scheme_basic():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=8, parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -137,7 +164,11 @@ def test_radiation_scheme_basic():
         seconds_since_midnight=seconds_since_midnight,
         latitude=latitude,
         longitude=longitude,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Check output shapes
@@ -187,6 +218,9 @@ def test_radiation_scheme_nighttime():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=5, parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -199,7 +233,11 @@ def test_radiation_scheme_nighttime():
         seconds_since_midnight=seconds_since_midnight,
         latitude=latitude,
         longitude=longitude,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Should have minimal shortwave at night and valid longwave
@@ -233,6 +271,9 @@ def test_radiation_scheme_custom_parameters():
         co2_vmr=500e-6         # Higher CO2
     )
     
+    # Create aerosol data for custom parameters
+    aerosol_data = create_default_aerosol_data(nlev=6, parameters=custom_params)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -245,7 +286,11 @@ def test_radiation_scheme_custom_parameters():
         seconds_since_midnight=43200.0,
         latitude=0.0,
         longitude=0.0,
-        parameters=custom_params
+        parameters=custom_params,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Check output shapes - hardcoded to max_bands=10
@@ -272,6 +317,9 @@ def test_radiation_scheme_extreme_conditions():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=nlev, parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=temperature,
         specific_humidity=specific_humidity,
@@ -284,7 +332,11 @@ def test_radiation_scheme_extreme_conditions():
         seconds_since_midnight=43200.0,
         latitude=0.0,
         longitude=0.0,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Should handle extreme conditions without NaN
@@ -307,6 +359,9 @@ def test_radiation_scheme_very_cloudy():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -319,7 +374,11 @@ def test_radiation_scheme_very_cloudy():
         seconds_since_midnight=43200.0,
         latitude=0.0,
         longitude=0.0,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Should handle heavy clouds without NaN
@@ -343,6 +402,9 @@ def test_radiation_column():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=6, parameters=parameters)
+    
     tendencies, diagnostics = radiation_column(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -355,7 +417,11 @@ def test_radiation_column():
         seconds_since_midnight=43200.0,
         latitude=0.0,
         longitude=0.0,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Should produce same results as main function
@@ -372,6 +438,9 @@ def test_radiation_scheme_energy_conservation():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -384,7 +453,11 @@ def test_radiation_scheme_energy_conservation():
         seconds_since_midnight=43200.0,
         latitude=0.0,
         longitude=0.0,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Energy conservation checks
@@ -410,6 +483,9 @@ def test_radiation_scheme_realistic_values():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
@@ -422,7 +498,11 @@ def test_radiation_scheme_realistic_values():
         seconds_since_midnight=43200.0,
         latitude=30.0,  # Mid-latitude
         longitude=0.0,
-        parameters=parameters
+        parameters=parameters,
+        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+        aerosol_ssa=aerosol_data['aerosol_ssa'],
+        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+        cdnc_factor=aerosol_data['cdnc_factor']
     )
     
     # Check that computation completed and produced expected output shapes
@@ -457,6 +537,9 @@ def test_radiation_scheme_reproducibility():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    
     # Run twice with identical inputs
     for i in range(2):
         tendencies, diagnostics = radiation_scheme(
@@ -471,7 +554,11 @@ def test_radiation_scheme_reproducibility():
             seconds_since_midnight=43200.0,
             latitude=0.0,
             longitude=0.0,
-            parameters=parameters
+            parameters=parameters,
+            aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
+            aerosol_ssa=aerosol_data['aerosol_ssa'],
+            aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
+            cdnc_factor=aerosol_data['cdnc_factor']
         )
         
         if i == 0:

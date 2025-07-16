@@ -264,7 +264,7 @@ class TestCloudOptics:
     def test_effective_radius(self):
         """Test cloud particle effective radius"""
         # Liquid
-        r_liq = effective_radius_liquid(self.temperature[5], land_fraction=0.5)
+        r_liq = effective_radius_liquid(1.0, land_fraction=0.5)
         assert 5 < r_liq < 20  # Reasonable range in microns
         
         # Ice
@@ -300,7 +300,7 @@ class TestCloudOptics:
     def test_combined_cloud_optics(self):
         """Test combined cloud optics calculation"""
         sw_optics, lw_optics = cloud_optics(
-            self.cwp, self.cip, self.temperature
+            self.cwp, self.cip, self.temperature, jnp.array(1.0)
         )
         
         # Check shapes

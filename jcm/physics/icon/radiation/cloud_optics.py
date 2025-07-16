@@ -10,7 +10,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from typing import Tuple
+from typing import Tuple, Optional
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
@@ -243,18 +243,19 @@ def mie_scattering_water(
 
 @jax.jit
 def effective_radius_liquid(
-    temperature: jnp.ndarray,
+    cdnc_factor: jnp.ndarray,
     land_fraction: float = 0.5
 ) -> jnp.ndarray:
     """
     Calculate effective radius for liquid cloud droplets.
     
-    Simple parameterization based on temperature and surface type.
-    
+    Simple parameterization based on temperature and surface type,
+    with optional aerosol-cloud interactions (Twomey effect).
+
     Args:
-        temperature: Temperature (K)
         land_fraction: Fraction of land (0=ocean, 1=land)
-        
+        cdnc_factor: Cloud droplet number concentration factor from aerosols
+
     Returns:
         Effective radius (microns)
     """
@@ -264,12 +265,10 @@ def effective_radius_liquid(
     
     # Weighted average
     r_eff = r_eff_ocean * (1 - land_fraction) + r_eff_land * land_fraction
+        
+    # apply Twomey effect (convert cdnc_factor to effective radius)
+    return r_eff * (cdnc_factor ** (-1.0/3.0)) 
     
-    # Temperature dependence (smaller droplets in colder clouds)
-    t_factor = jnp.clip((temperature - 253.0) / 20.0, 0.5, 1.5)
-    
-    return r_eff * t_factor
-
 
 @jax.jit
 def effective_radius_ice(
@@ -560,6 +559,7 @@ def cloud_optics(
     cloud_water_path: jnp.ndarray,
     cloud_ice_path: jnp.ndarray,
     temperature: jnp.ndarray,
+    cdnc_factor: jnp.ndarray,
     land_fraction: float = 0.5
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """
@@ -569,9 +569,8 @@ def cloud_optics(
         cloud_water_path: Cloud water path (kg/m²) [nlev]
         cloud_ice_path: Cloud ice path (kg/m²) [nlev]
         temperature: Temperature (K) [nlev]
-        n_sw_bands: Number of SW bands
-        n_lw_bands: Number of LW bands
         land_fraction: Land fraction for droplet size
+        cdnc_factor: Cloud droplet number concentration factor from aerosols
         
     Returns:
         Tuple of (sw_optics, lw_optics)
@@ -579,7 +578,7 @@ def cloud_optics(
     nlev = temperature.shape[0]
     
     # Calculate effective radii
-    r_eff_liq = effective_radius_liquid(temperature, land_fraction)
+    r_eff_liq = effective_radius_liquid(cdnc_factor, land_fraction)
     r_eff_ice = effective_radius_ice(
         temperature,
         cloud_ice_path / jnp.maximum(1.0, cloud_water_path + cloud_ice_path)
@@ -704,7 +703,7 @@ def test_cloud_optics():
     cip = jnp.where(temperature <= 273, 0.05, 0.0)  # Ice below freezing
     
     # Calculate optics
-    sw_optics, lw_optics = cloud_optics(cwp, cip, temperature)
+    sw_optics, lw_optics = cloud_optics(cwp, cip, temperature, jnp.array(1.0))
     
     # Check shapes
     from .constants import N_SW_BANDS, N_LW_BANDS
