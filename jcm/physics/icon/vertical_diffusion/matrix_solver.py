@@ -25,7 +25,8 @@ def setup_matrix_system(
     exchange_coeff_momentum: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
-    dt: float
+    dt: float,
+    tke_exchange_coeff: jnp.ndarray = None
 ) -> VDiffMatrixSystem:
     """
     Set up the tridiagonal matrix system for vertical diffusion.
@@ -96,9 +97,9 @@ def setup_matrix_system(
         matrix_coeffs, exchange_coeff_heat, recip_dry_air_mass, dt_factor, 3
     )
     
-    # Setup TKE matrix
+    # Setup TKE matrix (use TKE exchange coefficient)
     matrix_coeffs = setup_tke_matrix(
-        matrix_coeffs, exchange_coeff_heat, recip_air_mass, dt_factor, 4
+        matrix_coeffs, tke_exchange_coeff, recip_air_mass, dt_factor, 4
     )
     
     # Setup theta_v variance matrix
@@ -247,8 +248,8 @@ def setup_tke_matrix(
     matrix_idx: int
 ) -> jnp.ndarray:
     """Set up tridiagonal matrix for TKE equation."""
-    # TKE is solved on half levels, so matrix is (nlev-1) x (nlev-1)
-    # For simplicity, we'll use the same structure as other variables
+    # TKE uses its own exchange coefficient (from TKE budget)
+    # but same matrix structure as other variables
     return setup_momentum_matrix(
         matrix_coeffs, exchange_coeff, recip_air_mass, dt_factor, matrix_idx
     )
@@ -439,7 +440,8 @@ def vertical_diffusion_step(
     exchange_coeff_momentum: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
-    dt: float
+    dt: float,
+    tke_exchange_coeff: jnp.ndarray = None
 ) -> VDiffTendencies:
     """
     Perform one vertical diffusion time step.
@@ -455,10 +457,14 @@ def vertical_diffusion_step(
     Returns:
         Tendencies for all variables
     """
+    # Default TKE exchange coefficient if not provided
+    if tke_exchange_coeff is None:
+        tke_exchange_coeff = exchange_coeff_momentum
+    
     # Set up matrix system
     matrix_system = setup_matrix_system(
         state, params, exchange_coeff_momentum, 
-        exchange_coeff_heat, exchange_coeff_moisture, dt
+        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
     )
     
     # Solve the system

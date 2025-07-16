@@ -214,11 +214,12 @@ class TestMatrixSolver:
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
+        tke_exchange_coeff = jnp.ones((ncol, nlev)) * 5.0
         dt = 300.0
         
         matrix_system = setup_matrix_system(
             state, params, exchange_coeff_momentum, 
-            exchange_coeff_heat, exchange_coeff_moisture, dt
+            exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
         )
         
         # Check matrix dimensions

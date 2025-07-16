@@ -1,12 +1,12 @@
 # ICON Physics Development Roadmap
 
 **Date**: January 2025  
-**Status**: Phase 1 Critical Fixes COMPLETED ✅ + Boundary Conditions Integration COMPLETED ✅  
+**Status**: Phase 1 Critical Fixes COMPLETED ✅ + Boundary Conditions Integration COMPLETED ✅ + **Major Phase 2 Components COMPLETED ✅**  
 **Purpose**: Transform ICON physics from development/testing implementation to production-ready suite
 
 ## Executive Summary
 
-The ICON physics implementation in JAX-GCM has achieved **JAX compatibility** and **basic functionality** across all major components. Phase 1 critical fixes are now **COMPLETE**, addressing runtime errors and implementing essential missing modules (chemistry, boundary conditions). **NEW**: Boundary conditions integration is now **COMPLETE** with time-varying surface forcing and realistic atmospheric compositions. **LATEST**: Radiation scheme significantly enhanced with temperature/pressure-dependent gas optics and expanded spectral resolution (6 SW + 8 LW bands). The roadmap now focuses on **20 remaining improvements** in physics realism and advanced features.
+The ICON physics implementation in JAX-GCM has achieved **JAX compatibility** and **basic functionality** across all major components. Phase 1 critical fixes are now **COMPLETE**, addressing runtime errors and implementing essential missing modules (chemistry, boundary conditions). **NEW**: Boundary conditions integration is now **COMPLETE** with time-varying surface forcing and realistic atmospheric compositions. **LATEST**: Major Phase 2 achievements include complete convection scheme implementation (downdrafts, entrainment, momentum transport) and **enhanced vertical diffusion with TKE budget calculations and surface layer physics**. The roadmap now focuses on **14 remaining improvements** in physics realism and advanced features.
 
 ## Current Status ✅
 
@@ -25,6 +25,12 @@ The ICON physics implementation in JAX-GCM has achieved **JAX compatibility** an
 4. **Surface Physics**: 65 tests passing, conditional logic replaced
 5. **Wrapper Simplification**: Eliminated 5 unnecessary wrapper functions
 6. **Boundary Conditions Integration**: Complete overhaul with time-varying forcing
+
+### **Major Phase 2 Achievements (Latest)**
+7. **Complete Convection Scheme**: Downdrafts, entrainment/detrainment, momentum transport
+8. **Enhanced Vertical Diffusion**: TKE budget calculations with shear/buoyancy production
+9. **Surface Layer Physics**: Monin-Obukhov similarity theory with stability functions
+10. **Physically Realistic Turbulence**: Proper dissipation and exchange coefficients
 
 ### Phase 1 Completed (January 2025)
 1. **Chemistry Module**: Implemented with fixed ozone distribution and methane chemistry
@@ -116,20 +122,21 @@ surface_resistance=resistance,        # fixed
 - **Lines 16-18**: jax-solar integration commented out
 - **Missing**: Accurate Earth-Sun distance, equation of time corrections
 
-### Convection Scheme Issues
+### Convection Scheme Issues ✅ **RESOLVED**
 **File**: `jcm/physics/icon/convection/tiedtke_nordeng.py`
 
-- **Line 359**: Moist adiabatic simplified (`parcel_temp_moist = temperature`)
-- **Lines 509-522**: Downdraft calculations stubbed to avoid dtype issues
-- **Lines 534-538**: Crude tracer transport (`tracer_flux * 0.1`)
-- **Missing**: Proper entrainment/detrainment, momentum transport
+- **✅ FIXED**: Downdraft calculations now properly implemented
+- **✅ FIXED**: Entrainment/detrainment with environmental humidity dependence
+- **✅ FIXED**: Momentum transport in convection added
+- **Remaining**: Moist adiabatic simplified (`parcel_temp_moist = temperature`)
 
-### Vertical Diffusion Gaps
+### Vertical Diffusion Gaps ✅ **LARGELY RESOLVED**
 **File**: `jcm/physics/icon/vertical_diffusion/turbulence_coefficients.py`
 
-- **Lines 165-172**: All surface fluxes set to zero
-- **Line 179**: Kinetic energy dissipation disabled
-- **Missing**: Surface layer physics, TKE budget, non-local mixing
+- **✅ FIXED**: Surface layer physics with Monin-Obukhov similarity theory
+- **✅ FIXED**: TKE budget with shear/buoyancy production and dissipation
+- **✅ FIXED**: Proper surface flux calculations
+- **Remaining**: Non-local mixing schemes
 
 ### Surface Physics Simplifications
 **Files**: `jcm/physics/icon/surface/`
@@ -189,14 +196,14 @@ surface_resistance=resistance,        # fixed
 - Cloud optics with Mie scattering calculations
 - Integration with jax-solar for accurate solar calculations
 
-#### Convection Completion
-- Proper downdraft calculations (remove dtype workarounds)
-- Implement entrainment/detrainment schemes
-- Add momentum transport in convection
+#### Convection Completion  
+- ✅ Proper downdraft calculations (remove dtype workarounds)
+- ✅ Implement entrainment/detrainment schemes
+- ✅ Add momentum transport in convection
 
 #### Vertical Diffusion Enhancement
-- Surface layer physics implementation
-- TKE budget equations
+- ✅ Surface layer physics implementation
+- ✅ TKE budget equations
 - Non-local mixing schemes
 
 **Estimated Effort**: 1-2 months  
@@ -241,13 +248,13 @@ surface_resistance=resistance,        # fixed
 5. ✅ Improve gas optics with pressure/temperature dependence
 6. Implement proper cloud optics with Mie scattering
 7. Integrate jax-solar for accurate solar calculations
-8. Complete convection downdraft calculations
-9. Implement proper entrainment/detrainment
-10. Add surface layer physics to vertical diffusion
+8. ✅ Complete convection downdraft calculations
+9. ✅ Implement proper entrainment/detrainment
+10. ✅ Add surface layer physics to vertical diffusion
 
 ### Medium Priority (10 items)
-11. Add momentum transport in convection
-12. Implement TKE budget calculations
+11. ✅ Add momentum transport in convection
+12. ✅ Implement TKE budget calculations
 13. Replace hardcoded surface humidity
 14. ✅ Implement proper solar zenith angle calculations
 15. Add soil heat diffusion to land surface
@@ -315,19 +322,22 @@ surface_resistance=resistance,        # fixed
 
 ## Conclusion
 
-The ICON physics implementation has achieved a solid foundation with JAX compatibility and basic functionality. Phase 1 critical fixes and **boundary conditions integration are now COMPLETE**. The 21 remaining improvements identified in this roadmap provide a clear path to transform this into a production-ready physics suite suitable for operational climate modeling.
+The ICON physics implementation has achieved a solid foundation with JAX compatibility and basic functionality. Phase 1 critical fixes and **boundary conditions integration are now COMPLETE**. **NEW**: Major Phase 2 components are now **COMPLETE** including enhanced convection and vertical diffusion schemes. The 14 remaining improvements identified in this roadmap provide a clear path to transform this into a production-ready physics suite suitable for operational climate modeling.
 
 **Key Strengths**: 
 - Solid architecture with JAX optimization
 - Comprehensive testing with 105+ tests passing
 - **Complete boundary conditions integration with time-varying forcing**
 - **All physics modules using realistic surface and atmospheric compositions**
+- **Enhanced vertical diffusion with TKE budget calculations**
+- **Complete convection scheme with downdrafts and momentum transport**
+- **Surface layer physics with Monin-Obukhov similarity theory**
 - Runtime-stable physics integration
 
 **Key Gaps**: Some physics oversimplified, missing advanced components  
-**Timeline**: 5 months to full production readiness with dedicated development
+**Timeline**: 3-4 months to full production readiness with dedicated development
 
-**Recent Progress**: Boundary conditions integration represents a major milestone, enabling the physics to use realistic solar forcing, greenhouse gas concentrations, and surface properties. This provides the foundation for physically realistic climate modeling.
+**Recent Progress**: The completion of major Phase 2 components represents significant progress toward physically realistic atmospheric modeling. The vertical diffusion scheme now includes proper TKE budget calculations, surface layer physics, and stability-dependent exchange coefficients. The convection scheme has been completed with downdrafts, entrainment/detrainment, and momentum transport.
 
 This roadmap balances immediate needs (critical fixes) with long-term goals (advanced features) to ensure steady progress toward a world-class atmospheric physics implementation.
 

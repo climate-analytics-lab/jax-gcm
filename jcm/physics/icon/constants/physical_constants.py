@@ -24,6 +24,7 @@ class PhysicalConstants(NamedTuple):
     cp: float = 1004.0            # Specific heat at constant pressure (J/K/kg)
     akap: float = 2.0/7.0         # 1 - 1/gamma (kappa = R/cp)
     rgas: float = 287.0           # Gas constant per unit mass for dry air (J/K/kg)
+    karman_const: float = 0.4     # von Kármán constant (dimensionless)
     
     # Latent heat constants (J/kg)
     alhc: float = 2.501e6         # Latent heat of condensation
@@ -66,6 +67,7 @@ p0 = physical_constants.p0
 cp = physical_constants.cp
 akap = physical_constants.akap
 rgas = physical_constants.rgas
+karman_const = physical_constants.karman_const
 alhc = physical_constants.alhc
 alhs = physical_constants.alhs
 alhf = physical_constants.alhf

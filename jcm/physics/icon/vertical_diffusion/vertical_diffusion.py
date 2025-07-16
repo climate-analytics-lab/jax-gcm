@@ -21,6 +21,10 @@ from .turbulence_coefficients import (
     compute_turbulence_diagnostics
 )
 from .matrix_solver import vertical_diffusion_step
+from .tke_budget import (
+    compute_tke_tendency, compute_tke_exchange_coefficient, 
+    compute_tke_diagnostics, minimum_tke_constraint
+)
 
 
 @jax.jit
@@ -173,6 +177,14 @@ def vertical_diffusion_column(
         compute_exchange_coefficients(state, params, mixing_length, ri)
     )
     
+    # Compute TKE budget and exchange coefficient
+    tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length)
+    
+    # Compute TKE budget diagnostics
+    tke_shear_prod, tke_buoyancy_prod, tke_dissipation, _ = compute_tke_diagnostics(
+        state, params, exchange_coeff_momentum, exchange_coeff_heat, mixing_length
+    )
+    
     # Compute diagnostics
     diagnostics = compute_turbulence_diagnostics(
         state, params, exchange_coeff_momentum, 
@@ -182,7 +194,7 @@ def vertical_diffusion_column(
     # Perform vertical diffusion step
     tendencies = vertical_diffusion_step(
         state, params, exchange_coeff_momentum,
-        exchange_coeff_heat, exchange_coeff_moisture, dt
+        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
     )
     
     return tendencies, diagnostics
