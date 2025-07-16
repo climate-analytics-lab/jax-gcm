@@ -1,38 +1,18 @@
 """
-Solar radiation interface with jax-solar compatibility
+Solar radiation interface using jax-solar
 
-This module provides a compatible interface with jax-solar package.
-When jax-solar is available, it uses the official implementation.
-Otherwise, it falls back to our JAX-based implementation.
+This module provides solar radiation calculations using the jax-solar package.
+jax-solar is now a required dependency.
 
-Date: 2025-01-10
+Date: 2025-01-16
 """
 
 import jax.numpy as jnp
 import jax
 from typing import Union, Optional, Tuple
-import warnings
 
-# Try to import jax-solar
-try:
-    import jax_solar
-    HAS_JAX_SOLAR = True
-except ImportError:
-    HAS_JAX_SOLAR = False
-    warnings.warn(
-        "jax-solar not available. Using fallback implementation. "
-        "Install jax-solar for the official implementation: "
-        "pip install jax-solar (requires Python 3.11+)"
-    )
-
-# Import our fallback implementation
-from .solar import (
-    solar_declination as _solar_declination,
-    hour_angle as _hour_angle,
-    cosine_solar_zenith_angle as _cosine_solar_zenith_angle,
-    earth_sun_distance_factor as _earth_sun_distance,
-    top_of_atmosphere_flux as _top_of_atmosphere_flux
-)
+# Import jax-solar (required dependency)
+import jax_solar
 
 
 # Constants
@@ -43,29 +23,15 @@ SECONDS_PER_DAY = 86400.0
 SOLAR_CONSTANT = TOTAL_SOLAR_IRRADIANCE  # Alias for compatibility
 
 
-class OrbitalTime:
-    """Compatible implementation of jax-solar OrbitalTime"""
-    
-    def __init__(self, orbital_phase: float, synodic_phase: float):
-        self.orbital_phase = orbital_phase
-        self.synodic_phase = synodic_phase
-    
-    @classmethod
-    def from_day_of_year_hour(cls, day_of_year: float, hour_utc: float):
-        """Create from day of year and hour"""
-        orbital_phase = 2 * jnp.pi * (day_of_year - 1) / DAYS_PER_YEAR
-        synodic_phase = 2 * jnp.pi * hour_utc / 24.0
-        return cls(orbital_phase, synodic_phase)
-    
-    @classmethod
-    def from_datetime(cls, when, origin='1970-01-01T00:00:00', days_per_year: float = DAYS_PER_YEAR):
-        """Create from datetime (simplified version)"""
-        # This is a simplified version - in practice would need proper datetime parsing
-        # For now, just raise NotImplementedError
-        raise NotImplementedError(
-            "datetime parsing not implemented in fallback. "
-            "Use from_day_of_year_hour instead."
-        )
+# Use jax-solar's OrbitalTime directly
+OrbitalTime = jax_solar.OrbitalTime
+
+# Helper function to create OrbitalTime from day/hour
+def orbital_time_from_day_hour(day_of_year: float, hour_utc: float):
+    """Create OrbitalTime from day of year and hour UTC"""
+    orbital_phase = 2 * jnp.pi * (day_of_year - 1) / 365.25
+    synodic_phase = 2 * jnp.pi * hour_utc / 24.0
+    return OrbitalTime(orbital_phase=orbital_phase, synodic_phase=synodic_phase)
 
 
 @jax.jit
@@ -79,12 +45,7 @@ def get_declination(orbital_phase: Union[float, jnp.ndarray]) -> jnp.ndarray:
     Returns:
         Solar declination (radians)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.get_declination(orbital_phase)
-    else:
-        # Convert orbital phase to day of year
-        day_of_year = orbital_phase * DAYS_PER_YEAR / (2 * jnp.pi) + 1
-        return _solar_declination(day_of_year)
+    return jax_solar.get_declination(orbital_phase)
 
 
 @jax.jit
@@ -102,12 +63,10 @@ def get_hour_angle(
     Returns:
         Hour angle (radians)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.get_hour_angle(synodic_phase, longitude)
-    else:
-        # Convert synodic phase to hour
-        hour_utc = synodic_phase * 24.0 / (2 * jnp.pi)
-        return _hour_angle(longitude, hour_utc)
+    # Create a minimal OrbitalTime object with just synodic_phase
+    # For simplicity, set orbital_phase to 0
+    orbital_time = jax_solar.OrbitalTime(orbital_phase=0.0, synodic_phase=synodic_phase)
+    return jax_solar.get_hour_angle(orbital_time, longitude)
 
 
 def get_solar_sin_altitude(
@@ -128,21 +87,7 @@ def get_solar_sin_altitude(
     Returns:
         Sine of solar altitude (= cosine of zenith angle)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.get_solar_sin_altitude(orbital_time, longitude, latitude)
-    else:
-        # Get declination and hour angle
-        declination = get_declination(orbital_time.orbital_phase)
-        ha = get_hour_angle(orbital_time.synodic_phase, longitude)
-        
-        # Convert latitude to radians
-        lat_rad = jnp.deg2rad(latitude)
-        
-        # Calculate sine of altitude (= cosine of zenith)
-        sin_alt = (jnp.sin(lat_rad) * jnp.sin(declination) +
-                   jnp.cos(lat_rad) * jnp.cos(declination) * jnp.cos(ha))
-        
-        return sin_alt
+    return jax_solar.get_solar_sin_altitude(orbital_time, longitude, latitude)
 
 
 @jax.jit
@@ -162,20 +107,7 @@ def direct_solar_irradiance(
     Returns:
         Direct solar irradiance (W/m^2)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.direct_solar_irradiance(orbital_phase, mean_irradiance, variation)
-    else:
-        # Convert orbital phase to day of year
-        day_of_year = orbital_phase * DAYS_PER_YEAR / (2 * jnp.pi) + 1
-        
-        # Get Earth-Sun distance factor
-        distance_factor = _earth_sun_distance(day_of_year)
-        
-        # Calculate direct irradiance
-        # The variation is approximately mean_irradiance * (1/0.983^2 - 1/1.017^2)
-        eccentricity_effect = distance_factor**2
-        
-        return mean_irradiance * eccentricity_effect
+    return jax_solar.direct_solar_irradiance(orbital_phase, mean_irradiance, variation)
 
 
 def radiation_flux(
@@ -198,26 +130,7 @@ def radiation_flux(
     Returns:
         TOA incident radiation flux (W/m^2)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.radiation_flux(time, longitude, latitude, mean_irradiance, variation)
-    else:
-        # Handle different time input formats
-        if isinstance(time, tuple):
-            day_of_year, hour_utc = time
-            orbital_time = OrbitalTime.from_day_of_year_hour(day_of_year, hour_utc)
-        else:
-            orbital_time = time
-        
-        # Get solar altitude sine (= zenith cosine)
-        sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
-        
-        # Get direct solar irradiance
-        irradiance = direct_solar_irradiance(orbital_time.orbital_phase, mean_irradiance, variation)
-        
-        # Calculate flux (set to zero when sun below horizon)
-        flux = jnp.where(sin_altitude > 0, irradiance * sin_altitude, 0.0)
-        
-        return flux
+    return jax_solar.radiation_flux(time, longitude, latitude, mean_irradiance, variation)
 
 
 def normalized_radiation_flux(
@@ -242,11 +155,7 @@ def normalized_radiation_flux(
     Returns:
         Normalized TOA incident radiation flux (0-1)
     """
-    if HAS_JAX_SOLAR:
-        return jax_solar.normalized_radiation_flux(time, longitude, latitude, mean_irradiance, variation)
-    else:
-        flux = radiation_flux(time, longitude, latitude, mean_irradiance, variation)
-        return flux / mean_irradiance
+    return jax_solar.normalized_radiation_flux(time, longitude, latitude, mean_irradiance, variation)
 
 
 # Convenience functions that match our original interface
@@ -271,7 +180,7 @@ def calculate_toa_radiation(
         Tuple of (flux, cos_zenith, hour_angle)
     """
     # Create orbital time
-    orbital_time = OrbitalTime.from_day_of_year_hour(day_of_year, hour_utc)
+    orbital_time = orbital_time_from_day_hour(day_of_year, hour_utc)
     
     # Get flux
     flux = radiation_flux(orbital_time, longitude, latitude, solar_constant)
@@ -288,10 +197,7 @@ def calculate_toa_radiation(
 # Export the appropriate implementation status
 def get_implementation_info():
     """Get information about which implementation is being used"""
-    if HAS_JAX_SOLAR:
-        return "Using jax-solar implementation"
-    else:
-        return "Using fallback JAX implementation (jax-solar not available)"
+    return "Using jax-solar implementation"
 
 
 # Test the implementation
@@ -315,7 +221,7 @@ def test_solar_interface():
     print(f"Hour angle: {hour_angle}")
     
     # Test using OrbitalTime interface
-    orbital_time = OrbitalTime.from_day_of_year_hour(day_of_year, hour_utc)
+    orbital_time = orbital_time_from_day_hour(day_of_year, hour_utc)
     flux2 = radiation_flux(orbital_time, longitude, latitude)
     normalized = normalized_radiation_flux(orbital_time, longitude, latitude)
     

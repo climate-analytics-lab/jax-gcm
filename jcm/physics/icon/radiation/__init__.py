@@ -13,44 +13,68 @@ For solar calculations, we support two implementations:
 Date: 2025-01-10
 """
 
-# Try to import the jax-solar based implementation
-try:
-    from .solar_jax import (
-        calculate_solar_radiation_gcm,
-        cosine_solar_zenith_angle,
-        top_of_atmosphere_flux,
-        daylight_fraction,
-        TOTAL_SOLAR_IRRADIANCE,
-        SOLAR_IRRADIANCE_VARIATION
+# Import solar interface using jax-solar
+from .solar_interface import (
+    calculate_toa_radiation,
+    radiation_flux,
+    normalized_radiation_flux,
+    TOTAL_SOLAR_IRRADIANCE,
+    SOLAR_IRRADIANCE_VARIATION,
+    get_implementation_info,
+    get_declination
+)
+
+_SOLAR_IMPLEMENTATION = get_implementation_info()
+
+# Create compatible functions for backward compatibility
+def calculate_solar_radiation_gcm(
+    day_of_year, seconds_since_midnight, longitude, latitude, solar_constant=TOTAL_SOLAR_IRRADIANCE
+):
+    """Calculate solar radiation for GCM (backward compatible interface)"""
+    hour_utc = seconds_since_midnight / 3600.0
+    flux, cos_zenith, _ = calculate_toa_radiation(
+        day_of_year, hour_utc, longitude, latitude, solar_constant
     )
-    _SOLAR_IMPLEMENTATION = "jax-solar"
-except ImportError:
-    # Fall back to our implementation via solar_interface
-    from .solar_interface import (
-        calculate_toa_radiation,
-        radiation_flux,
-        normalized_radiation_flux,
-        TOTAL_SOLAR_IRRADIANCE,
-        SOLAR_IRRADIANCE_VARIATION,
-        get_implementation_info
-    )
-    # Import directly from solar module for compatibility
-    from .solar import (
-        cosine_solar_zenith_angle,
-        daylight_fraction,
-        top_of_atmosphere_flux
-    )
-    _SOLAR_IMPLEMENTATION = get_implementation_info()
+    return flux, cos_zenith
+
+def cosine_solar_zenith_angle(day_of_year, seconds_since_midnight, longitude, latitude):
+    """Calculate cosine of solar zenith angle (backward compatible)"""
+    hour_utc = seconds_since_midnight / 3600.0
+    _, cos_zenith, _ = calculate_toa_radiation(day_of_year, hour_utc, longitude, latitude)
+    return cos_zenith
+
+def top_of_atmosphere_flux(day_of_year, seconds_since_midnight, longitude, latitude):
+    """Calculate top-of-atmosphere flux (backward compatible)"""
+    hour_utc = seconds_since_midnight / 3600.0
+    flux, _, _ = calculate_toa_radiation(day_of_year, hour_utc, longitude, latitude)
+    return flux
+
+def daylight_fraction(day_of_year, longitude, latitude):
+    """Calculate daylight fraction"""
+    import jax.numpy as jnp
     
-    # Create compatible calculate_solar_radiation_gcm
-    def calculate_solar_radiation_gcm(
-        day_of_year, seconds_since_midnight, longitude, latitude, solar_constant=TOTAL_SOLAR_IRRADIANCE
-    ):
-        hour_utc = seconds_since_midnight / 3600.0
-        flux, cos_zenith, _ = calculate_toa_radiation(
-            day_of_year, hour_utc, longitude, latitude, solar_constant
-        )
-        return flux, cos_zenith
+    # Calculate solar declination
+    orbital_phase = 2 * jnp.pi * (day_of_year - 1) / 365.25
+    declination = get_declination(orbital_phase)
+    
+    # Convert latitude to radians  
+    lat_rad = jnp.deg2rad(latitude)
+    
+    # Calculate hour angle at sunrise/sunset
+    # cos(hour_angle) = -tan(lat) * tan(declination)
+    cos_ha = -jnp.tan(lat_rad) * jnp.tan(declination)
+    
+    # Handle polar day/night cases
+    cos_ha = jnp.clip(cos_ha, -1.0, 1.0)
+    
+    # Hour angle at sunrise (radians)
+    ha_sunrise = jnp.arccos(cos_ha)
+    
+    # Daylight fraction = daylight hours / 24 hours
+    daylight_hours = 2 * ha_sunrise * 12 / jnp.pi  # Convert radians to hours
+    fraction = daylight_hours / 24.0
+    
+    return fraction
 
 # Import radiation types
 from .radiation_types import (
