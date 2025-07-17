@@ -232,8 +232,8 @@ class IconPhysics(Physics):
         This is the only reshape back to 3D, done once at the very end
         """
         def reshape_to_3d(field):
-            if field.ndim == 2:  # [nlev, ncols] → [nlev, nlat, nlon]
-                return field.reshape(nlev, nlat, nlon)
+            if field.ndim == 2:  # [nlev, ncols] → [nlev, nlon, nlat]
+                return field.reshape(nlev, nlon, nlat)
             else:
                 return field
         
@@ -247,7 +247,7 @@ class IconPhysics(Physics):
         
         # Reshape tracers
         reshaped_tracers = {
-            name: field.reshape(nlev, nlat, nlon)
+            name: field.reshape(nlev, nlon, nlat)
             for name, field in tendencies['tracers'].items()
         }
         
@@ -420,11 +420,12 @@ def apply_radiation(state: PhysicsState,
     temperature_tendency = tendencies_vmapped.temperature_tendency.T
     
     # Create physics tendencies
+    # Note: All tendencies should be in [nlev, ncols] format to match the reshaped state
     physics_tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from radiation
-        v_wind=jnp.zeros_like(state.v_wind),
+        u_wind=jnp.zeros((nlev, ncols)),  # No wind tendencies from radiation
+        v_wind=jnp.zeros((nlev, ncols)),
         temperature=temperature_tendency,
-        specific_humidity=jnp.zeros_like(state.specific_humidity),
+        specific_humidity=jnp.zeros((nlev, ncols)),  # Match the expected shape
         tracers={}
     )
     
