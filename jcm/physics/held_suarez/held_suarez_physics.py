@@ -17,7 +17,6 @@ class HeldSuarezPhysics(Physics):
 
     def __init__(self,
         coords: coordinate_systems.CoordinateSystem = get_coords(),
-        p0: Quantity = 1e5 * units.pascal,
         sigma_b: Quantity = 0.7,
         kf: Quantity = 1 / (1 * units.day),
         ka: Quantity = 1 / (40 * units.day),
@@ -31,7 +30,6 @@ class HeldSuarezPhysics(Physics):
 
         Args:
             coords: horizontal and vertical descritization
-            p0: reference surface pressure.
             sigma_b: sigma level of effective planetary boundary layer.
             kf: coefficient of friction for Rayleigh drag.
             ka: coefficient of thermal relaxation in upper atmosphere.
@@ -43,7 +41,6 @@ class HeldSuarezPhysics(Physics):
         """
         self.write_output = False
         self.coords = coords
-        self.p0 = PHYSICS_SPECS.nondimensionalize(p0)
         self.sigma_b = sigma_b
         self.kf = PHYSICS_SPECS.nondimensionalize(kf)
         self.ka = PHYSICS_SPECS.nondimensionalize(ka)
@@ -57,9 +54,9 @@ class HeldSuarezPhysics(Physics):
         _, sin_lat = self.coords.horizontal.nodal_mesh
         self.lat = jnp.arcsin(sin_lat)
 
-    def equilibrium_temperature(self, nodal_surface_pressure):
+    def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis] / self.p0
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
         )
         temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.maxT
