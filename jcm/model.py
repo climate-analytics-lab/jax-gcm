@@ -8,6 +8,7 @@ from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
+from dinosaur.vertical_interpolation import HybridCoordinates
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics.speedy.params import Parameters
@@ -15,6 +16,44 @@ from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.physics.speedy.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+import dataclasses
+
+class HybridCoordinatesWithCenters(HybridCoordinates):
+    """
+    Extension of Dinosaur's HybridCoordinates that adds sigma-like attributes.
+    
+    This enables compatibility with isothermal_rest_atmosphere calculations
+    that expect sigma-like coordinate systems with centers and layer_thickness.
+    """
+    
+    def __init__(self, a_boundaries, b_boundaries):
+        super().__init__(a_boundaries, b_boundaries)
+        # Pre-compute centers and layer_thickness as concrete numpy arrays to avoid tracer issues
+        import numpy as np
+        self.centers = np.asarray((self.b_boundaries[:-1] + self.b_boundaries[1:]) / 2)
+        self.layer_thickness = np.asarray(np.diff(self.b_boundaries))
+
+    # layer_thickness is now a pre-computed attribute, not a property
+    
+    @property
+    def boundaries(self) -> jnp.ndarray:
+        """
+        Return boundaries for sigma-like interface compatibility.
+        
+        Maps to b_boundaries which represent the sigma component of hybrid coordinates.
+        """
+        return self.b_boundaries
+    
+    @property
+    def center_to_center(self) -> jnp.ndarray:
+        """
+        Return distances between consecutive level centers.
+        
+        This is the difference between consecutive centers, used in some
+        vertical integration calculations.
+        """
+        import numpy as np
+        return np.diff(self.centers)
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -23,20 +62,43 @@ class Predictions:
     dynamics: PhysicsState
     physics: Any
 
-def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
+def _get_horizontal_grid(horizontal_resolution: int):
+    """Get horizontal grid for given resolution with validation."""
     try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+        return getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
     except AttributeError:
         raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    if layers not in sigma_layer_boundaries:
-        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+
+
+def get_coords(layers: int = 8, horizontal_resolution: int = 31, hybrid: bool = False) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given configuration.
+    
+    Args:
+        layers: Number of vertical layers
+        horizontal_resolution: Horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
+        hybrid: If True, use hybrid sigma-pressure coordinates; if False, use sigma coordinates
+        
+    Returns:
+        CoordinateSystem with specified coordinates
+    """
+    horizontal_grid = _get_horizontal_grid(horizontal_resolution)
+    
+    if hybrid:
+        from jcm.vertical.icon_levels import ICONLevels
+        hybrid_levels = ICONLevels.get_levels(layers)
+        vertical_coords = HybridCoordinatesWithCenters(
+            hybrid_levels.a_boundaries,
+            hybrid_levels.b_boundaries
+        )
+    else:
+        if layers not in sigma_layer_boundaries:
+            raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+        vertical_coords = dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
 
     return dinosaur.coordinate_systems.CoordinateSystem(
         horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+        vertical=vertical_coords
     )
 
 class Model:
@@ -49,7 +111,8 @@ class Model:
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
+                 initial_state: PhysicsState=None, physics: Physics=None,
+                 use_hybrid_coords: bool = None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -64,6 +127,8 @@ class Model:
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
             physics: Physics object describing the model physics
+            use_hybrid_coords: If True, use hybrid sigma-pressure coordinates; if False, use sigma; 
+                             if None, auto-detect based on physics type
         """
         from datetime import datetime
 
@@ -76,12 +141,19 @@ class Model:
 
         self.physics_specs = PHYSICS_SPECS
 
+        # Auto-detect coordinate system based on physics type
+        if use_hybrid_coords is None:
+            from jcm.physics.icon import IconPhysics
+            use_hybrid_coords = isinstance(physics, IconPhysics)
+        
         if coords is not None:
             self.coords = coords
             horizontal_resolution = coords.horizontal.total_wavenumbers - 2
         else:
-            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
-        self.geometry = Geometry.from_coords(self.coords)
+            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution, hybrid=use_hybrid_coords)
+        
+        # Set up geometry with appropriate coordinate system
+        self.geometry = Geometry.from_coords(self.coords, hybrid=use_hybrid_coords)
 
         self.inner_steps = int(self.save_interval.to(units.minute) / dt_si)
         self.outer_steps = int(self.total_time / self.save_interval)
