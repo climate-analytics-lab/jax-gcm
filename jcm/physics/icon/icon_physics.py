@@ -393,14 +393,25 @@ def apply_radiation(state: PhysicsState,
     # Get CO2 from boundaries (reshape to column format)
     co2_vmr = boundaries.co2_concentration.reshape(ncols) * 1e-6  # Convert ppmv to VMR
     
+    # Prepare aerosol data for vmap - reshape to have column as the mapped dimension
+    aerosol_data_for_vmap = physics_data.aerosol.copy(
+        aod_profile=physics_data.aerosol.aod_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+        ssa_profile=physics_data.aerosol.ssa_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+        asy_profile=physics_data.aerosol.asy_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+        cdnc_factor=physics_data.aerosol.cdnc_factor.reshape(ncols),  # (ncols,)
+        aod_total=physics_data.aerosol.aod_total.reshape(ncols),  # (ncols,)
+        aod_anthropogenic=physics_data.aerosol.aod_anthropogenic.reshape(ncols),  # (ncols,)
+        aod_background=physics_data.aerosol.aod_background.reshape(ncols),  # (ncols,)
+    )
+    
     radiation_results = jax.vmap(
         radiation_scheme,
-        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None, 1, 0),  # day_of_year, seconds_since_midnight, parameters are scalars
+        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None, 0, 1, 0),  # day_of_year, seconds_since_midnight, parameters are scalars, aerosol_data is per column
         out_axes=(0, 0)  # Returns (RadiationTendencies, RadiationData) per column
     )(state.temperature, state.specific_humidity, state.surface_pressure,
         state.geopotential, cloud_water, cloud_ice, cloud_fraction,
         day_of_year, seconds_since_midnight, latitudes, longitudes, parameters.radiation,
-        ozone_vmr, co2_vmr)
+        aerosol_data_for_vmap, ozone_vmr, co2_vmr)
     
     # Unpack structured results directly
     tendencies_vmapped, diagnostics_vmapped = radiation_results
