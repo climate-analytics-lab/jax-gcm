@@ -1,0 +1,215 @@
+&parallel_nml
+ nproma          = 1
+ p_test_run      = .FALSE.
+ num_io_procs    = 1
+ num_restart_procs = 0
+ num_prefetch_proc = 0
+/
+
+&grid_nml
+ dynamics_grid_filename = "scm_grid_subtropical.nc"
+ radiation_grid_filename = "scm_grid_subtropical.nc"
+ dynamics_parent_grid_id = 0
+ lredgrid_phys    = .FALSE.
+ lfeedback        = .FALSE.
+ l_limited_area   = .FALSE.
+ ifeedback_type   = 2
+ start_time       = 0.0
+/
+
+&run_nml
+ num_lev         = 47              ! 47 vertical levels
+ lvert_nest      = .FALSE.
+ dtime           = 600.0           ! 10-minute time step
+ ndays           = 10              ! 10-day simulation
+ ldynamics       = .TRUE.
+ ltestcase       = .TRUE.
+ ltransport      = .TRUE.
+ iforcing        = 3               ! NWP forcing
+ ltimer          = .FALSE.
+ timers_level    = 10
+ check_uuid_gracefully = .TRUE.
+ output          = "nml"
+/
+
+&dynamics_nml
+ iequations      = 3               ! NH equations
+ idiv_method     = 1
+ divavg_cntrwgt  = 0.50
+ lcoriolis       = .TRUE.
+/
+
+&transport_nml
+ ctracer_list    = "hus","clw","cli"
+ ivadv_tracer    = 3,3,3
+ itype_hlimit    = 3,4,4
+ ihadv_tracer    = 52,2,2
+/
+
+&nwp_phy_nml
+ inwp_gscp       = 1               ! Grid-scale precipitation
+ inwp_convection = 1               ! Tiedtke convection
+ inwp_radiation  = 1               ! ECHAM radiation
+ inwp_cldcover   = 1               ! Cloud cover
+ inwp_turb       = 1               ! Turbulence
+ inwp_satad      = 1               ! Saturation adjustment
+ inwp_sso        = 0               ! No SSO for single column
+ inwp_gwd        = 0               ! No GWD for single column
+ inwp_surface    = 1               ! Surface physics
+ latm_above_top  = .TRUE.
+ efdt_min_raylfric = 7200.0
+ itype_z0        = 2
+ icapdcycl       = 3
+ icpl_aero_conv  = 1
+ icpl_aero_gscp  = 1
+ icpl_o3_tp      = 1
+ dt_rad          = 3600.0          ! Radiation every hour
+ dt_conv         = 600.0           ! Convection every timestep
+ dt_sso          = 600.0
+ dt_gwd          = 600.0
+/
+
+&radiation_nml
+ irad_o3         = 3               ! Ozone climatology
+ irad_aero       = 2               ! Kinne aerosol
+ irad_co2        = 2               ! CO2 concentration
+ irad_ch4        = 2               ! CH4 concentration
+ irad_n2o        = 2               ! N2O concentration
+ irad_o2         = 2               ! O2 concentration
+ irad_cfc11      = 2               ! CFC11 concentration
+ irad_cfc12      = 2               ! CFC12 concentration
+ vmr_co2         = 407.8e-06       ! CO2 VMR
+ vmr_ch4         = 1.85e-06        ! CH4 VMR
+ vmr_n2o         = 323.0e-09       ! N2O VMR
+ vmr_o2          = 0.20946         ! O2 VMR
+ vmr_cfc11       = 232.0e-12       ! CFC11 VMR
+ vmr_cfc12       = 519.0e-12       ! CFC12 VMR
+ ecrad_data_path = ""
+/
+
+&ls_forcing_nml
+ is_subsidence_moment = .FALSE.
+ is_subsidence_heat   = .FALSE.
+ is_advection         = .FALSE.
+ is_geowind           = .FALSE.
+ is_rad_forcing       = .FALSE.
+ is_nudging           = .FALSE.
+/
+
+&scm_nml
+ i_scm_netcdf     = 1              ! NetCDF output
+ lscm_read_tke    = .FALSE.
+ lscm_read_z0     = .FALSE.
+ dt_relax         = 21600.0
+ scm_sfc_temp     = 295.0          ! Warm subtropical SST
+ scm_sfc_qv       = 0.010          ! Moderate surface humidity
+ scm_sfc_mom      = 0.08           ! Moderate surface momentum
+ scm_sfc_sensible = 0.0            ! Surface sensible heat flux
+ scm_sfc_latent   = 0.0            ! Surface latent heat flux
+/
+
+&extpar_nml
+ itopo            = 1              ! Topography
+ n_iter_smooth_topo = 1
+ hgtdiff_max_smooth_topo = 750.0
+ heightdiff_threshold = 3000.0
+ itype_vegetation_cycle = 1
+ itype_lwemiss    = 1
+/
+
+! Physics tendencies output
+&output_nml
+ output_filename  = "subtropical_clear_physics"
+ filename_format  = "<output_filename>_<datetime2>"
+ filetype         = 4              ! NetCDF
+ dom              = 1
+ output_bounds    = 0., 240., 3600. ! 0-10 days, hourly
+ steps_per_file   = 240            ! 10 days * 24 hours
+ mode             = 1              ! Forecast mode
+ include_last     = .TRUE.
+ output_grid      = .TRUE.
+ ml_varlist       = 'temp','u','v','w','pres','rho',
+                    'qv','qc','qi','qr','qs','qg',
+                    'tke','clc','clw','cli',
+                    'ddt_temp_radsw','ddt_temp_radlw','ddt_temp_turb',
+                    'ddt_temp_conv','ddt_temp_gscp','ddt_temp_sso',
+                    'ddt_u_turb','ddt_u_conv','ddt_u_sso',
+                    'ddt_v_turb','ddt_v_conv','ddt_v_sso',
+                    'ddt_qv_turb','ddt_qv_conv','ddt_qv_gscp',
+                    'ddt_qc_turb','ddt_qc_conv','ddt_qc_gscp',
+                    'ddt_qi_turb','ddt_qi_conv','ddt_qi_gscp'
+/
+
+! Radiation diagnostics
+&output_nml
+ output_filename  = "subtropical_clear_radiation"
+ filename_format  = "<output_filename>_<datetime2>"
+ filetype         = 4              ! NetCDF
+ dom              = 1
+ output_bounds    = 0., 240., 3600. ! 0-10 days, hourly
+ steps_per_file   = 240
+ mode             = 1
+ include_last     = .TRUE.
+ output_grid      = .TRUE.
+ ml_varlist       = 'lwflxall','lwflx_up','lwflx_dn',
+                    'swflxall','swflx_up','swflx_dn',
+                    'lwflx_up_sfc','lwflx_dn_sfc',
+                    'swflx_up_sfc','swflx_dn_sfc',
+                    'lwflx_up_toa','lwflx_dn_toa',
+                    'swflx_up_toa','swflx_dn_toa',
+                    'sod_t','sod_lwflx','sod_swflx'
+/
+
+! Surface fluxes
+&output_nml
+ output_filename  = "subtropical_clear_surface"
+ filename_format  = "<output_filename>_<datetime2>"
+ filetype         = 4              ! NetCDF
+ dom              = 1
+ output_bounds    = 0., 240., 3600. ! 0-10 days, hourly
+ steps_per_file   = 240
+ mode             = 1
+ include_last     = .TRUE.
+ output_grid      = .TRUE.
+ ml_varlist       = 'shfl_s','lhfl_s','umfl_s','vmfl_s',
+                    'sensiflx','latentflx','u_10m','v_10m',
+                    't_2m','td_2m','rh_2m','sp_10m',
+                    'runoff_s','runoff_g','rstom',
+                    'snow_melt','h_snow','w_snow',
+                    't_s','t_seasfc','fr_seaice'
+/
+
+! Convection diagnostics
+&output_nml
+ output_filename  = "subtropical_clear_convection"
+ filename_format  = "<output_filename>_<datetime2>"
+ filetype         = 4              ! NetCDF
+ dom              = 1
+ output_bounds    = 0., 240., 3600. ! 0-10 days, hourly
+ steps_per_file   = 240
+ mode             = 1
+ include_last     = .TRUE.
+ output_grid      = .TRUE.
+ ml_varlist       = 'rain_con','snow_con','prr_con','prs_con',
+                    'bas_con','top_con','mflx_con','cape_con',
+                    'cin_con','cape_ml','cin_ml','hbas_con',
+                    'htop_con','totte','qconv','ttend_conv',
+                    'qtend_conv','utend_conv','vtend_conv'
+/
+
+! Turbulence diagnostics
+&output_nml
+ output_filename  = "subtropical_clear_turbulence"
+ filename_format  = "<output_filename>_<datetime2>"
+ filetype         = 4              ! NetCDF
+ dom              = 1
+ output_bounds    = 0., 240., 3600. ! 0-10 days, hourly
+ steps_per_file   = 240
+ mode             = 1
+ include_last     = .TRUE.
+ output_grid      = .TRUE.
+ ml_varlist       = 'tke','tkvm','tkvh','rcld','edr',
+                    'bruvais','ri','mixlen','z0','gz0',
+                    'tcm','tch','tfm','tfh','tfv',
+                    'shfl_s','lhfl_s','umfl_s','vmfl_s'
+/
