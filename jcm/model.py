@@ -30,8 +30,36 @@ class HybridCoordinatesWithCenters(HybridCoordinates):
         super().__init__(a_boundaries, b_boundaries)
         # Pre-compute centers and layer_thickness as concrete numpy arrays to avoid tracer issues
         import numpy as np
-        self.centers = np.asarray((self.b_boundaries[:-1] + self.b_boundaries[1:]) / 2)
-        self.layer_thickness = np.asarray(np.diff(self.b_boundaries))
+        
+        # For hybrid coordinates, we need to handle pure pressure levels (b=0) and hybrid levels (b>0)
+        # Create a monotonic sigma-like coordinate that avoids zeros
+        n_levels = len(b_boundaries) - 1
+        centers = np.zeros(n_levels)
+        
+        # Find the first hybrid level (where b > 0)
+        first_hybrid_idx = np.where(b_boundaries > 0)[0][0] - 1  # -1 for level index
+        
+        # For pure pressure levels, assign small increasing values
+        if first_hybrid_idx > 0:
+            centers[:first_hybrid_idx] = np.linspace(1e-6, 1e-4, first_hybrid_idx)
+        
+        # For hybrid levels, use b-coordinate centers
+        for i in range(first_hybrid_idx, n_levels):
+            centers[i] = (b_boundaries[i] + b_boundaries[i+1]) / 2
+        
+        self.centers = np.asarray(centers)
+        
+        # For layer thickness, we need to handle pure pressure levels differently
+        # Use a small but non-zero thickness for pure pressure levels
+        layer_thickness = np.diff(b_boundaries)
+        
+        # For pure pressure levels (where diff is 0), assign small thicknesses
+        zero_thickness_mask = layer_thickness == 0
+        if np.any(zero_thickness_mask):
+            # Assign small, uniform thickness for pure pressure levels
+            layer_thickness[zero_thickness_mask] = 1e-6
+        
+        self.layer_thickness = np.asarray(layer_thickness)
 
     # layer_thickness is now a pre-computed attribute, not a property
     
