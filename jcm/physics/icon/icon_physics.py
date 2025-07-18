@@ -255,6 +255,202 @@ class IconPhysics(Physics):
             **reshaped_main,
             tracers=reshaped_tracers
         )
+    
+    def data_struct_to_dict(self, struct, geometry, sep="."):
+        """
+        Convert physics data struct to dictionary, reshaping column data to 3D.
+        
+        This overrides the base class method to handle ICON physics data which
+        contains fields in column format that need reshaping for xarray output.
+        """
+        if struct is None:
+            return {}
+        
+        # Get the base struct conversion or handle manually if needed
+        result = self._get_base_struct_dict(struct, geometry, sep)
+        
+        # Reshape all arrays to add time dimension and convert column format to spatial grid
+        result = self._reshape_arrays_for_xarray(result, geometry)
+        
+        # Handle multi-channel arrays and filter problematic fields
+        result = self._process_multi_channel_arrays(result, geometry)
+        
+        # Filter out non-array and scalar fields
+        return self._filter_xarray_compatible_fields(result)
+    
+    def _get_base_struct_dict(self, struct, geometry, sep):
+        """Get the base dictionary conversion, handling AttributeError gracefully."""
+        try:
+            return super().data_struct_to_dict(struct, geometry, sep)
+        except AttributeError:
+            # Handle case where some fields are not arrays
+            return self._manual_struct_to_dict(struct, geometry, sep)
+    
+    def _manual_struct_to_dict(self, struct, geometry, sep):
+        """Manual conversion when base class fails."""
+        def _to_dict_recursive(obj, parent_key=""):
+            items = {}
+            for key, val in obj.__dict__.items():
+                new_key = f"{parent_key}{sep}{key}" if parent_key else key
+                if hasattr(val, "__dict__") and val.__dict__:
+                    items.update(_to_dict_recursive(val, parent_key=new_key))
+                else:
+                    items[new_key] = val
+            return items
+        
+        result = _to_dict_recursive(struct)
+        
+        # Process array fields for multi-channel splitting (from base class)
+        _original_keys = list(result.keys())
+        for k in _original_keys:
+            val = result[k]
+            if hasattr(val, 'shape'):
+                s = val.shape
+                if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+                    result.update({f"{k}.{i}": result[k][..., i] for i in range(s[-1])})
+                    del result[k]
+        
+        return result
+    
+    def _reshape_arrays_for_xarray(self, result, geometry):
+        """Reshape arrays to add time dimension and handle column format."""
+        import numpy as np
+        
+        nlev = geometry.nlevels
+        nlon = geometry.nlon
+        nlat = geometry.nlat
+        ncols = nlon * nlat
+        
+        for key, value in list(result.items()):
+            if isinstance(value, (jnp.ndarray, np.ndarray)) and value.size > 1:
+                reshaped = self._reshape_single_array(value, nlev, nlon, nlat, ncols)
+                if reshaped is not None:
+                    result[key] = reshaped
+        
+        return result
+    
+    def _reshape_single_array(self, value, nlev, nlon, nlat, ncols):
+        """Reshape a single array based on its dimensions."""
+        # 1D arrays
+        if value.ndim == 1:
+            if value.shape[0] == ncols:
+                return value.reshape(1, nlon, nlat)
+            elif value.shape[0] != 1:
+                return value.reshape(1, *value.shape)
+        
+        # 2D arrays
+        elif value.ndim == 2:
+            return self._reshape_2d_array(value, nlev, nlon, nlat, ncols)
+        
+        # 3D arrays
+        elif value.ndim == 3:
+            return self._reshape_3d_array(value, nlev, nlon, nlat, ncols)
+        
+        # 4D arrays
+        elif value.ndim == 4:
+            return self._reshape_4d_array(value, nlev, nlon, nlat, ncols)
+        
+        return None
+    
+    def _reshape_2d_array(self, value, nlev, nlon, nlat, ncols):
+        """Reshape 2D arrays with various patterns."""
+        if value.shape[1] == 1 and value.shape[0] == ncols:
+            # [ncols, 1] -> [1, nlon, nlat]
+            return value.reshape(1, nlon, nlat)
+        elif value.shape == (nlev, ncols):
+            # [nlev, ncols] -> [1, nlev, nlon, nlat]
+            return value.reshape(1, nlev, nlon, nlat)
+        elif value.shape == (nlon, nlat):
+            # [nlon, nlat] -> [1, nlon, nlat]
+            return value.reshape(1, nlon, nlat)
+        elif value.shape[0] == nlev + 1 and value.shape[1] == ncols:
+            # [nlev+1, ncols] -> [1, nlev+1, nlon, nlat] (interfaces)
+            return value.reshape(1, nlev + 1, nlon, nlat)
+        elif value.shape[1] == ncols:
+            # [time, ncols] -> [time, nlon, nlat]
+            ntime = value.shape[0]
+            return value.reshape(ntime, nlon, nlat)
+        
+        return None
+    
+    def _reshape_3d_array(self, value, nlev, nlon, nlat, ncols):
+        """Reshape 3D arrays with various patterns."""
+        if value.shape == (nlev, ncols, value.shape[2]):
+            # [nlev, ncols, channels] -> [1, nlev, nlon, nlat, channels]
+            return value.reshape(1, nlev, nlon, nlat, value.shape[2])
+        elif value.shape == (nlev + 1, ncols, value.shape[2]):
+            # [nlev+1, ncols, channels] -> [1, nlev+1, nlon, nlat, channels]
+            return value.reshape(1, nlev + 1, nlon, nlat, value.shape[2])
+        elif value.shape[0] == nlev and value.shape[1] == nlon and value.shape[2] == nlat:
+            # [nlev, nlon, nlat] -> [1, nlev, nlon, nlat]
+            return value.reshape(1, nlev, nlon, nlat)
+        elif value.shape[1] == nlev and value.shape[2] == ncols:
+            # [time, nlev, ncols] -> [time, nlev, nlon, nlat]
+            ntime = value.shape[0]
+            return value.reshape(ntime, nlev, nlon, nlat)
+        elif value.shape[1] == nlev + 1 and value.shape[2] == ncols:
+            # [time, nlev+1, ncols] -> [time, nlev+1, nlon, nlat] (interfaces)
+            ntime = value.shape[0]
+            return value.reshape(ntime, nlev + 1, nlon, nlat)
+        
+        return None
+    
+    def _reshape_4d_array(self, value, nlev, nlon, nlat, ncols):
+        """Reshape 4D arrays with various patterns."""
+        if value.shape[1] == nlev and value.shape[2] == ncols:
+            # [time, nlev, ncols, channels] -> [time, nlev, nlon, nlat, channels]
+            ntime = value.shape[0]
+            nchannels = value.shape[3]
+            return value.reshape(ntime, nlev, nlon, nlat, nchannels)
+        elif value.shape[1] == nlev + 1 and value.shape[2] == ncols:
+            # [time, nlev+1, ncols, channels] -> [time, nlev+1, nlon, nlat, channels]
+            ntime = value.shape[0]
+            nchannels = value.shape[3]
+            return value.reshape(ntime, nlev + 1, nlon, nlat, nchannels)
+        
+        return None
+    
+    def _process_multi_channel_arrays(self, result, geometry):
+        """Handle multi-channel arrays and filter problematic fields."""
+        nlev = geometry.nlevels
+        nlon = geometry.nlon
+        nlat = geometry.nlat
+        
+        _original_keys = list(result.keys())
+        for k in _original_keys:
+            val = result[k]
+            if not hasattr(val, 'shape'):
+                continue
+                
+            s = val.shape
+            if len(s) == 5 and s[1:4] == (nlev, nlon, nlat):
+                # [time, nlev, nlon, nlat, channels] -> split into separate fields
+                result.update({f"{k}.{i}": result[k][..., i] for i in range(s[-1])})
+                del result[k]
+            elif len(s) == 5 and s[1:4] == (nlev + 1, nlon, nlat):
+                # Skip interface-level multi-channel arrays
+                print(f"Skipping interface-level multi-channel array: {k} with shape {s}")
+                del result[k]
+            elif len(s) == 4 and s[1:4] == (nlev + 1, nlon, nlat):
+                # Skip interface-level data
+                print(f"Skipping interface-level data: {k} with shape {s}")
+                del result[k]
+        
+        return result
+    
+    def _filter_xarray_compatible_fields(self, result):
+        """Filter out non-array and scalar fields that xarray doesn't handle well."""
+        filtered_result = {}
+        for key, value in result.items():
+            if not hasattr(value, 'shape'):
+                # Skip non-array fields
+                continue
+            if hasattr(value, 'shape') and value.shape == ():
+                # Skip scalar fields - they're not needed for xarray conversion
+                continue
+            filtered_result[key] = value
+        
+        return filtered_result
 
 @jit
 def _prepare_common_physics_state(
