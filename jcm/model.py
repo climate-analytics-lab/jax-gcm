@@ -232,7 +232,7 @@ class Model:
                 geometry=self.geometry,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
+                    model_step = jnp.int32((state.sim_time/60) / time_step)
                 )
             )
         )
@@ -281,7 +281,7 @@ class Model:
         if self.physics.write_output:
             date=DateData.set_date(
                 model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
+                model_step = jnp.int32((state.sim_time/60) / self.time_step)
             )
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
@@ -315,7 +315,15 @@ class Model:
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
         physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
         
-        pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
+        # Add time dimension to dynamics predictions
+        dynamics_dict = dynamics_predictions.asdict()
+        for key, value in dynamics_dict.items():
+            if hasattr(value, 'shape') and value.ndim >= 1:
+                # Add time dimension if not already present
+                if value.shape[0] != 1:
+                    dynamics_dict[key] = value.reshape(1, *value.shape)
+        
+        pred_ds = self.data_to_xarray(dynamics_dict | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))

@@ -166,5 +166,8 @@ notebooks/model_state.nc
 # NetCDF files
 *.nc
 
+# Docker remote setup
+startup.sh
+
 docs/build
 docs/source/generated
