@@ -19,9 +19,10 @@ class TestModelUnit(unittest.TestCase):
         model = SpeedyModel(
             time_step=720,
             save_interval=1,
-            total_time=2,
+            total_time=5,
             layers=layers,
-            parameters=Parameters.default()
+            parameters=Parameters.default(),
+            boundaries = "Tien-Yiao_test",
         )
         
         print("Done.")

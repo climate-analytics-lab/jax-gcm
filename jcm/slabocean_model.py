@@ -3,20 +3,33 @@ from jcm.params import Parameters
 from jcm.geometry import Geometry
 from jcm.physics import PhysicsState, PhysicsTendency
 from jcm.physics_data import PhysicsData
+from jcm import physical_constants
+
 import jax.numpy as jnp
 from jax import jit
+
+from dinosaur.scales import units
+
 
 # Questions: 
 # 1. PhysicsTendency includes sst and sic?
 # 2. Ocean model also includes sea ice?
 # 3. Does slabocean model (a) compute both sst and sst tendency, or (b) sst tendency?
-
+#
+# 4. Where to obtain length of time step
+# 5. Mask deterimination for land and sea
+# 6. Why it seems couple_sea_atm only run once?
+#
 
 def slabocean_model_init(
     surface_filename,
     parameters: Parameters,
     boundaries: BoundaryData,
+    grid,
+    time_step,
 ):
+
+    print("Called: slabocean_model_init")
 
     """
         surface_filename: filename storing boundary data
@@ -31,7 +44,7 @@ def slabocean_model_init(
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
-    bmask_l = jnp.where(fmask_l >= parameters.slabocean_model.thrsh, 0.0, 1.0)
+    bmask_l = jnp.where(fmask_l > 0, 0.0, 1.0) # ocean grid needs to be fully ocean
     
     # Update fmask_l based on the conditions
     fmask_l = jnp.where(
@@ -44,24 +57,39 @@ def slabocean_model_init(
     sst_clim = jnp.asarray(xr.open_dataset(surface_filename)["sst"])
     
     # =========================================================================
-    # Set heat capacities and dissipation times for soil and ice-sheet layers
+    # Set heat capacities and dissipation times for slab ocean model
     # =========================================================================
     
     # 2. Compute constant fields
     # Set domain mask (blank out sea points)
-    dmask = jnp.ones_like(fmask_l)
-    dmask = jnp.where(fmask_l < parameters.slabocean_model.flandmin, 0, dmask)
     
     # Set time_step/heat_capacity and dissipation fields
-    cdland = dmask*parameters.slabocean_model.tdland/(1.0+dmask*parameters.slabocean_model.tdland)
+
+    time_step_s = time_step.to(units.s).magnitude
+    print("time_step = ", time_step)
+    print("time_step in seconds = ", time_step_s)
+    
+    lat_rad = grid.latitudes
+    d_min = parameters.slabocean_model.d_min
+    d_max = parameters.slabocean_model.d_max
+    d_ocn = d_max + (d_min - d_max) * jnp.cos(lat_rad)**3.0
+
+    sst_init = sst_clim[:, :, 0].copy()
+
+    cd = physical_constants.cp_sw * d_ocn
+    tau = jnp.ones_like(cd) * parameters.slabocean_model.tau_ocn
+
+    ocn_time_factor = 1.0 + time_step_s / tau
+    ocn_cd_factor = time_step_s / cd
+    
+    #parameters.slabocean_model.c_0land/(1.0+dmask*parameters.slabocean_model.tdland)
 
     return boundaries.copy(
         fmask_l   = fmask_l,
         sst_clim  = sst_clim,
-        sic_clim  = sic_clim,
-        sst = sst,
-        sic = sic,
-        ocn_d0 = ocn_d0,
+        sst = sst_init,
+        ocn_time_factor = ocn_time_factor,
+        ocn_cd_factor = ocn_cd_factor,
     )
 
 
@@ -74,6 +102,8 @@ def couple_sea_atm(
     boundaries: BoundaryData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
+    
+    print("Called: couple_sea_atm")
 
     day = physics_data.date.model_day()
     """
@@ -95,23 +125,19 @@ def couple_sea_atm(
 
     """
 
-    dsstdt, dsicdt = run_slabocean_model(
+    sst_new = run_slabocean_model(
         physics_data.slabocean_model.sst,
-        physics_data.slabocean_model.sic,
-        physics_data.surface_flux.hfluxn,
-        physics_data.surface_flux.hfluxn,
-        boundaries.cd_ocn,
-        boundaries.cd_ice,
-        boundaries.tau_ocn,
-        boundaries.tau_ice,
+        physics_data.surface_flux.hfluxn[:, :, 0],
+        boundaries.ocn_time_factor,
+        boundaries.ocn_cd_factor,
         boundaries.sst_clim[:,:,day],
-        boundaries.sic_clim[:,:,day],
+        boundaries.sst_clim[:,:,day+1],
+        physics_data.surface_flux.hfluxn[:, :, 0] * 0,
     )
 
-
     # update land physics data
-    #slabocean_model_data = physics_data.slabocean_model.copy(sst=sst, sic=sic)
-    physics_data = physics_data.copy()
+    slabocean_model_data = physics_data.slabocean_model.copy(sst=sst_new)
+    physics_data = physics_data.copy(slabocean_model=slabocean_model_data)
     physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendency, physics_data
@@ -120,19 +146,21 @@ def couple_sea_atm(
 @jit
 def run_slabocean_model(
     sst,
-    sic,
-    hfluxn_ocn,
-    hfluxn_ice,
-    cd_ocn,
-    cd_ice,
-    tau_ocn,
-    tau_ice,
-    sst_clim,
-    sic_clim,
+    hfluxn,
+    time_factor,
+    cd_factor,
+    sst_clim_1,
+    sst_clim_2,
+    hfluxn_clim,
 ):
 
-    dsstdt = hfluxn_ocn[:, :, 0] / cd_ocn - ( sst - sst_clim ) / tau_ocn
-    dsicdt = hfluxn_ice[:, :, 0] / cd_ice - ( sic - sic_clim ) / tau_ice
+    sst_anom = sst - sst_clim_1
+    hfluxn_anom = hfluxn - hfluxn_clim
+    
+    new_sst_anom = time_factor * ( sst_anom + hfluxn_anom * cd_factor )
+
+    new_sst = new_sst_anom + sst_clim_2
+
  
-    return dsstdt, dsicdt
+    return new_sst
 

@@ -7,7 +7,7 @@ from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
-from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
+from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep, initialize_boundaries
 from jcm.date import Timestamp, Timedelta
 from jcm.params import Parameters
 from jcm.geometry import sigma_layer_boundaries, Geometry
@@ -225,11 +225,30 @@ class SpeedyModel:
         # this implicitly calls initialize_modules, must be before we set boundaries
         self.physics_terms = get_speedy_physics_terms(checkpoint_terms=checkpoint_terms)
         
+        print("I am here?")
         # TODO: make the truncation number a parameter consistent with the grid shape
         if boundaries is None:
+            print("boundaries is None")
             truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
             self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], self.parameters)
+        elif boundaries == "Tien-Yiao_test":
+
+            truncated_orography = primitive_equations.truncated_modal_orography(
+                aux_features[dinosaur.xarray_utils.OROGRAPHY],
+                self.coords,
+                wavenumbers_to_clip=2,
+            )
+
+            self.boundaries = initialize_boundaries(
+                filename          = "jcm/data/bc/t30/clim/boundaries_daily.nc",
+                grid              = self.coords.horizontal,
+                parameters        = self.parameters,
+                truncation_number = 2,
+                time_step = dt_si,
+            )
+
         else:
+
             self.boundaries = update_boundaries_with_timestep(boundaries, self.parameters, dt_si)
             truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
         
