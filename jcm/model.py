@@ -36,7 +36,7 @@ def set_physics_flags(state: PhysicsState,
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
     return physics_tendencies, physics_data
 
-def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
+def get_speedy_physics_terms(checkpoint_terms=True):
     """
     Returns a list of functions that compute physical tendencies for the model.
     """
@@ -49,6 +49,7 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
     from jcm.surface_flux import get_surface_fluxes
     from jcm.vertical_diffusion import get_vertical_diffusion_tend
     from jcm.land_model import couple_land_atm
+    from jcm.slabocean_model import couple_sea_atm
     from jcm.forcing import set_forcing
 
     physics_terms = [
@@ -63,10 +64,13 @@ def get_speedy_physics_terms(sea_coupling_flag=0, checkpoint_terms=True):
         get_surface_fluxes,
         get_upward_longwave_rad_fluxes,
         get_vertical_diffusion_tend,
-        couple_land_atm # eventually couple sea model and ice model here
+        couple_land_atm, # eventually couple sea model and ice model here
+        couple_sea_atm,  # order is arbitrary. Need further discussion.
     ]
-    if sea_coupling_flag > 0:
-        physics_terms.insert(-3, get_surface_fluxes)
+
+    #if sea_coupling_flag > 0:
+    #    physics_terms.insert(-4, get_surface_fluxes)
+    physics_terms.insert(-4, get_surface_fluxes)
 
     if not checkpoint_terms:
         return physics_terms

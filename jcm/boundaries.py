@@ -28,12 +28,15 @@ class BoundaryData:
 
     fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
     
-    ocn_coupling_flag:  jnp.bool    # 0 or 1
+    sea_coupling_flag:  jnp.bool    # 0 or 1
     sst_clim:           jnp.ndarray # climatology for sea surface temperature (sst)
     sic_clim:           jnp.ndarray # climatology for sea ice concentration (sic)
     sst:                jnp.ndarray # total sst
     sic:                jnp.ndarray # total sic
-    ocn_d0:             jnp.ndarray # mixed layer depth for ocean model
+    cd_ocn:             jnp.ndarray # heat capacity for ocean
+    cd_ice:             jnp.ndarray # heat capacity for seaice
+    tau_ocn:            jnp.ndarray # dissipation time for ocean
+    tau_ice:            jnp.ndarray # dissipation time for seaice
 
 
     @classmethod
@@ -41,7 +44,7 @@ class BoundaryData:
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
               fmask_s=None,lfluxland=None, land_coupling_flag=None, 
-              ocn_coupling_flag=None, sst_clim=None, sic_clim=None, sst=None, sic=None, ocn_d0=None):
+              sea_coupling_flag=None, sst_clim=None, sic_clim=None, sst=None, sic=None, cd_ocn=None, cd_ice=None, tau_ocn=None, tau_ice=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -60,12 +63,15 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
-            ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else False,
+            sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.zeros((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.zeros((nodal_shape)+(365,)),
             sst=sst if sst is not None else jnp.zeros((nodal_shape)),
             sic=sic if sic is not None else jnp.zeros((nodal_shape)),
-            ocn_d0=ocn_d0 if ocn_d0 is not None else jnp.zeros((nodal_shape)),
+            cd_ocn=cd_ocn if cd_ocn is not None else jnp.zeros((nodal_shape)),
+            cd_ice=cd_ice if cd_ice is not None else jnp.zeros((nodal_shape)),
+            tau_ocn=cd_ocn if tau_ocn is not None else jnp.zeros((nodal_shape)),
+            tau_ice=cd_ice if tau_ice is not None else jnp.zeros((nodal_shape)),
         )
 
     @classmethod
@@ -73,12 +79,15 @@ class BoundaryData:
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
              fmask_s=None,lfluxland=None, land_coupling_flag=None, 
-             ocn_coupling_flag=None,
+             sea_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
              sst = None,
              sic = None,
-             ocn_d0=None,
+             cd_ocn=None,
+             cd_ice=None,
+             tau_ocn=None,
+             tau_ice=None,
     ):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
@@ -98,24 +107,30 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
-            ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else False,
+            sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.ones((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.ones((nodal_shape)+(365,)),
             sst=sst if sst is not None else jnp.ones((nodal_shape)),
             sic=sic if sic is not None else jnp.ones((nodal_shape)),
-            ocn_d0=ocn_d0 if ocn_d0 is not None else jnp.ones((nodal_shape)),
+            cd_ocn=cd_ocn if cd_ocn is not None else jnp.ones((nodal_shape)),
+            cd_ice=cd_ice if cd_ice is not None else jnp.ones((nodal_shape)),
+            tau_ocn=tau_ocn if tau_ocn is not None else jnp.ones((nodal_shape)),
+            tau_ice=tau_ice if tau_ice is not None else jnp.ones((nodal_shape)),
         )
 
     def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
              snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
              land_coupling_flag=None,
-             ocn_coupling_flag=None,
+             sea_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
              sst = None,
              sic = None,
-             ocn_d0=None,
+             cd_ocn=None,
+             cd_ice=None,
+             tau_ocn=None,
+             tau_ice=None,
     ):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
@@ -135,12 +150,15 @@ class BoundaryData:
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
             fmask_s=fmask_s if fmask_s is not None else self.fmask_s,
-            ocn_coupling_flag=ocn_coupling_flag if ocn_coupling_flag is not None else self.ocn_coupling_flag,
+            sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else self.sea_coupling_flag,
             sst_clim=sst_clim if sst_clim is not None else self.sst_clim,
             sic_clim=sic_clim if sic_clim is not None else self.sic_clim,
             sst=sst if sst is not None else self.sst,
             sic=sic if sic is not None else self.sic,
-            ocn_d0=ocn_d0 if ocn_d0 is not None else self.ocn_d0,
+            cd_ocn=cd_ocn if cd_ocn is not None else self.cd_ocn,
+            cd_ice=cd_ice if cd_ice is not None else self.cd_ice,
+            tau_ocn=tau_ocn if tau_ocn is not None else self.tau_ocn,
+            tau_ice=tau_ice if tau_ice is not None else self.tau_ice,
         )
 
     def isnan(self):
@@ -250,16 +268,24 @@ def initialize_boundaries(
 def update_boundaries_with_timestep(
         boundaries: BoundaryData,
         parameters: Parameters=None,
-        time_step=30*units.minute
+        time_step=30*units.minute,
 ) -> BoundaryData:
     """
     Update the boundary conditions with the new time step
     """
     parameters = parameters or Parameters.default()
-    
+   
+     
     # Update the land heat capacity and dissipation time
     if boundaries.land_coupling_flag:
         rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
-        return boundaries.copy(rhcapl=rhcapl)
-    else:
-        return boundaries
+
+        boundaries = boundaries.copy(rhcapl=rhcapl)
+
+    if boundaries.sea_coupling_flag:
+       
+        pass 
+        
+ 
+
+    return boundaries
