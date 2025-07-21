@@ -110,7 +110,7 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
 
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
-        state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, surface_pressure=ps)
+        state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
         boundaries = BoundaryData.zeros((ix,il))
 
@@ -151,7 +151,7 @@ class TestConvectionUnit(unittest.TestCase):
         temp = se_broadcast
         
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast)
-        state = PhysicsState.zeros((kx, ix, il), temperature=temp, geopotential=phi, specific_humidity=qa_broadcast, surface_pressure=psa)
+        state = PhysicsState.zeros((kx, ix, il), temperature=temp, geopotential=phi, specific_humidity=qa_broadcast, normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
 
         boundaries = BoundaryData.zeros((ix,il))
@@ -183,7 +183,7 @@ class TestConvectionUnit(unittest.TestCase):
         temp = se_broadcast
 
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast*1000.)
-        state = PhysicsState.zeros(zxy, temperature=temp, geopotential=phi, specific_humidity=qa_broadcast*1000.,surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, temperature=temp, geopotential=phi, specific_humidity=qa_broadcast*1000.,normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
 
         boundaries = BoundaryData.zeros((ix,il))
@@ -195,7 +195,7 @@ class TestConvectionUnit(unittest.TestCase):
         test_dfse = jnp.array([  0., 0., 0., 0. ,-29.774475, 402.0166, 171.78418, 0.])
         test_dfqa = jnp.array([ 0., 0., 0., 0.01235308,  0.07379276, -0.15330768, -0.08423203, -0.05377656])
 
-        rhs = 1/state.surface_pressure
+        rhs = 1/state.normalized_surface_pressure
         test_ttend = test_dfse
         test_ttend = test_ttend.at[1:].set(test_dfse[1:] * rhs[0,0] * grdscp[1:])
 

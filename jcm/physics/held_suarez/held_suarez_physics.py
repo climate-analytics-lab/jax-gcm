@@ -1,14 +1,12 @@
-from dinosaur.scales import units
 import jax.numpy as jnp
-from jcm.boundaries import BoundaryData
+from typing import Tuple
+from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from dinosaur import primitive_equations
 from jcm.geometry import Geometry
-from jcm.physics.speedy.params import Parameters
+from jcm.boundaries import BoundaryData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import get_coords, PHYSICS_SPECS
 from jcm.date import DateData
-from typing import Tuple
 
 Quantity = units.Quantity
 
@@ -29,7 +27,7 @@ class HeldSuarezPhysics(Physics):
         """Initialize Held-Suarez.
 
         Args:
-            coords: horizontal and vertical descritization
+            coords: horizontal and vertical discretization
             sigma_b: sigma level of effective planetary boundary layer.
             kf: coefficient of friction for Rayleigh drag.
             ka: coefficient of thermal relaxation in upper atmosphere.
@@ -51,8 +49,7 @@ class HeldSuarezPhysics(Physics):
         self.dThz = PHYSICS_SPECS.nondimensionalize(dThz)
         # Coordinates
         self.sigma = self.coords.vertical.centers
-        _, sin_lat = self.coords.horizontal.nodal_mesh
-        self.lat = jnp.arcsin(sin_lat)
+        self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
 
     def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
@@ -97,7 +94,7 @@ class HeldSuarezPhysics(Physics):
             Physical tendencies in PhysicsTendency format
             Object containing physics data (unused)
         """
-        Teq = self.equilibrium_temperature(state.surface_pressure)
+        Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
         d_v_wind = -self.kv() * state.v_wind
