@@ -8,13 +8,13 @@ from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
+from jcm.constants import p0
+from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.physics.speedy.params import Parameters
-from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.physics.speedy.physical_constants import p0
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+from jcm.physics.speedy.params import Parameters
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -96,8 +96,7 @@ class Model:
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self.physics_specs,
-            p0=p0 * units.pascal,
-            p1=.05 * p0 * units.pascal,
+            p0=p0*units.pascal,
         )
         
         self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
@@ -152,17 +151,16 @@ class Model:
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
 
-        # Either use the designated initial state, or generate one. The initial state to the model is in dynamics form, but the
-        # optional initial state from the user is in physics form
+        # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
+        # but the optional initial state from the user is a nodal PhysicsState
         if self.initial_state is not None:
-            self.initial_state.surface_pressure = self.initial_state.surface_pressure / p0 # convert to normalized surface pressure
             state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
             state.log_surface_pressure = self.coords.horizontal.to_modal(
-                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(p0)
+                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(self.physics_specs.nondimensionalize(p0 * units.pascal)) # Makes this robust to different physics_specs, which will change default_state_fn behavior
             )
 
             # need to add specific humidity as a tracer
@@ -186,10 +184,7 @@ class Model:
             )
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
-        
-        # convert back to SI to match convention for user-defined initial PhysicsStates
-        physics_state.surface_pressure = physics_state.surface_pressure * p0
-        
+
         return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:

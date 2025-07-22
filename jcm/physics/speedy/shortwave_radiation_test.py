@@ -138,7 +138,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
         _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
@@ -308,7 +308,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
 
         # Calculate gradient
         _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries, geometry)
@@ -375,7 +375,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask=fmask)
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
