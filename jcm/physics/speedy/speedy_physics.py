@@ -59,6 +59,7 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
         from jcm.physics.speedy.land_model import couple_land_atm
         from jcm.physics.speedy.forcing import set_forcing
+        from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
 
         physics_terms = [
             set_physics_flags,
@@ -72,7 +73,8 @@ class SpeedyPhysics(Physics):
             get_surface_fluxes,
             get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend,
-            couple_land_atm # eventually couple sea model and ice model here
+            couple_land_atm, # eventually couple sea model and ice model here
+            get_orographic_correction_tendencies # orographic corrections applied last
         ]
         if sea_coupling_flag > 0:
             physics_terms.insert(-3, get_surface_fluxes)
