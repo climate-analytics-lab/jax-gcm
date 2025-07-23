@@ -35,15 +35,18 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
     # SPEEDY constants from physical_constants.py
     rgam = rgas * gamma / (1000.0 * grav)
     
-    # Get sigma levels (fsg in SPEEDY)
-    sigma_levels = geometry.sigma_levels  # These are the full sigma levels
+    # Get sigma levels (fsg in SPEEDY) - use layer midpoints
+    sigma_levels = geometry.fsg  # These are the full sigma levels
+    
+    # Get number of layers from nodal_shape
+    layers = geometry.nodal_shape[0]
     
     # Initialize vertical profile
-    tcorv = jnp.zeros(geometry.layers)
+    tcorv = jnp.zeros(layers)
     
     # tcorv(1) = 0 (first level), tcorv(k) = sigma^rgam for k >= 2
     tcorv = jnp.where(
-        jnp.arange(geometry.layers) == 0,
+        jnp.arange(layers) == 0,
         0.0,
         sigma_levels ** rgam
     )
@@ -70,15 +73,18 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
     # SPEEDY constants from physical_constants.py
     qexp = hscale / hshum
     
-    # Get sigma levels (fsg in SPEEDY)
-    sigma_levels = geometry.sigma_levels
+    # Get sigma levels (fsg in SPEEDY) - use layer midpoints
+    sigma_levels = geometry.fsg
+    
+    # Get number of layers from nodal_shape
+    layers = geometry.nodal_shape[0]
     
     # Initialize vertical profile
-    qcorv = jnp.zeros(geometry.layers)
+    qcorv = jnp.zeros(layers)
     
     # qcorv(1) = qcorv(2) = 0, qcorv(k) = sigma^qexp for k >= 3
     qcorv = jnp.where(
-        jnp.arange(geometry.layers) < 2,  # First two levels (indices 0, 1)
+        jnp.arange(layers) < 2,  # First two levels (indices 0, 1)
         0.0,
         sigma_levels ** qexp
     )
