@@ -140,11 +140,11 @@ class Model:
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
-        # step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
-        step_fn = dinosaur.time_integration.semi_implicit_leapfrog(self.primitive_with_speedy, self.dt)
+        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
-            # dinosaur.time_integration.exponential_step_filter(self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),
-            dinosaur.time_integration.robert_asselin_leapfrog_filter(0.05),
+            dinosaur.time_integration.exponential_step_filter(
+                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
+            ),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
@@ -173,14 +173,13 @@ class Model:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
-        current_state, _ = state
-        physics_state = dynamics_state_to_physics_state(current_state, self.primitive)
+        physics_state = dynamics_state_to_physics_state(state, self.primitive)
         
         physics_data = None
         if self.physics.write_output:
             date=DateData.set_date(
-                model_time = self.start_date + Timedelta(seconds=current_state.sim_time),
-                model_step = ((current_state.sim_time/60) / self.time_step).astype(jnp.int32)
+                model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
             )
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
@@ -195,7 +194,7 @@ class Model:
             start_with_input=True,
             post_process_fn=self.post_process,
         ))
-        return integrate_fn((state,state))
+        return integrate_fn(state)
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
