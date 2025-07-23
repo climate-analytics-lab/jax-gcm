@@ -347,7 +347,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
 
-    def test_clouds_gradients_isnan_with_realistic_values(self):
+    def test_clouds_gradients_isnan_with_realistic_values(self):   
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat

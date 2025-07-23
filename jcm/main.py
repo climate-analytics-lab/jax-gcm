@@ -32,7 +32,7 @@ def main(cfg: DictConfig):
         output_dir = base_dir
     
     
-    filename = f"model_state.nc"
+    filename = "model_state.nc"
     output_path = output_dir / filename
     
     output_dir.mkdir(parents=True, exist_ok=True)
