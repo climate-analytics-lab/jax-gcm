@@ -140,10 +140,72 @@ class Model:
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
-        # step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         step_fn = dinosaur.time_integration.semi_implicit_leapfrog(self.primitive_with_speedy, self.dt)
+        
+        # SPEEDY-style horizontal diffusion: two separate filters
+        # Filter 1: del^8 diffusion with 2.4h timescales on all levels  
+        # Filter 2: del^2 diffusion with 12h timescales ONLY on stratosphere
+        layers = self.coords.vertical.layers
+        
+        # Main diffusion: del^8 with level-specific timescales
+        # All levels get del^8 diffusion but with different timescales
+        main_timescale_troposphere = 2.4 * 3600.0  # 2.4 hours for tropospheric levels
+        main_timescale_stratosphere = 2.4 * 3600.0  # Could be different for stratosphere if needed
+        
+        # Assume first 2 levels are stratospheric
+        strat_levels = 2
+        main_level_timescales = jnp.array([main_timescale_stratosphere] * strat_levels + 
+                                          [main_timescale_troposphere] * (layers - strat_levels))
+        main_level_orders = jnp.array([4] * layers)  # del^8 (order 4) for all levels
+        
+        main_timescales = {
+            'vorticity': main_level_timescales,
+            'divergence': main_level_timescales,
+            'temperature_variation': main_level_timescales,
+            'tracers': main_level_timescales,
+        }
+        
+        main_orders = {
+            'vorticity': main_level_orders,
+            'divergence': main_level_orders,
+            'temperature_variation': main_level_orders,
+            'tracers': main_level_orders,
+        }
+        
+        # Stratospheric diffusion: del^2 ONLY on stratosphere, NO diffusion elsewhere
+        strat_timescale = 12.0 * 3600.0  # 12.0 hours for stratospheric del^2 diffusion
+        no_diffusion_timescale = 1e12    # Effectively infinite timescale = no diffusion
+        
+        # Only stratosphere gets del^2 diffusion, troposphere gets no additional diffusion
+        strat_only_timescales = jnp.array([strat_timescale] * strat_levels + 
+                                          [no_diffusion_timescale] * (layers - strat_levels))
+        strat_only_orders = jnp.array([1] * strat_levels + [1] * (layers - strat_levels))  # del^2 everywhere, but only strat has reasonable timescale
+        
+        # IMPORTANT: In SPEEDY, only vorticity, divergence, and temperature get stratospheric diffusion
+        # Tracers (including humidity) do NOT get stratospheric diffusion
+        stratospheric_timescales = {
+            'vorticity': strat_only_timescales,
+            'divergence': strat_only_timescales,
+            'temperature_variation': strat_only_timescales,
+            # 'tracers': NOT included - no stratospheric diffusion for tracers in SPEEDY
+        }
+        
+        stratospheric_orders = {
+            'vorticity': strat_only_orders,
+            'divergence': strat_only_orders,
+            'temperature_variation': strat_only_orders,
+            # 'tracers': NOT included - no stratospheric diffusion for tracers in SPEEDY
+        }
+        
         filters = [
-            # dinosaur.time_integration.exponential_step_filter(self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8),
+            # Filter 1: del^8 diffusion on all levels with 2.4h timescales
+            dinosaur.time_integration.multi_timescale_horizontal_diffusion_step_filter(
+                self.coords.horizontal, self.dt * self.physics_specs.time, main_timescales, main_orders
+            ),
+            # Filter 2: del^2 diffusion ONLY on stratosphere with 12h timescales
+            dinosaur.time_integration.multi_timescale_horizontal_diffusion_step_filter(
+                self.coords.horizontal, self.dt * self.physics_specs.time, stratospheric_timescales, stratospheric_orders
+            ),
             dinosaur.time_integration.robert_asselin_leapfrog_filter(0.05),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
@@ -173,7 +235,8 @@ class Model:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
-        current_state, _ = state
+        # current_state, _ = state
+        current_state = state
         physics_state = dynamics_state_to_physics_state(current_state, self.primitive)
         
         physics_data = None
@@ -195,7 +258,8 @@ class Model:
             start_with_input=True,
             post_process_fn=self.post_process,
         ))
-        return integrate_fn((state,state))
+        # return integrate_fn((state,state))
+        return integrate_fn(state)
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
