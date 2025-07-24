@@ -239,8 +239,12 @@ class SpeedyModel:
                 wavenumbers_to_clip=2,
             )
 
+            import os.path
+
+            script_dir = os.path.dirname(__file__)
+
             self.boundaries = initialize_boundaries(
-                filename          = "jcm/data/bc/t30/clim/boundaries_daily.nc",
+                filename          = "%s/data/bc/t30/clim/boundaries_daily.nc" % script_dir,
                 grid              = self.coords.horizontal,
                 parameters        = self.parameters,
                 truncation_number = 2,

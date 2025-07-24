@@ -38,6 +38,10 @@ class TestModelUnit(unittest.TestCase):
         final_state, predictions = model.unroll(state)
         dynamics_predictions = predictions['dynamics']
 
+        print(dir(dynamics_predictions))
+        print(dynamics_predictions)
+        print(dynamics_predictions.shape)
+        
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(dynamics_predictions)
 

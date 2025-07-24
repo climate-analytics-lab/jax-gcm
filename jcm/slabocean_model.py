@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import jit
 
 from dinosaur.scales import units
-
+import numpy as np
 
 # Questions: 
 # 1. PhysicsTendency includes sst and sic?
@@ -44,7 +44,8 @@ def slabocean_model_init(
 
     # Fractional and binary land masks
     fmask_l = boundaries.fmask
-    bmask_l = jnp.where(fmask_l > 0, 0.0, 1.0) # ocean grid needs to be fully ocean
+    #bmask_l = jnp.where(fmask_l > 0, 0.0, 1.0) # ocean grid needs to be fully ocean
+    bmask_l = jnp.where(fmask_l < parameters.land_model.thrsh, 1.0, 0.0)
     
     # Update fmask_l based on the conditions
     fmask_l = jnp.where(
@@ -75,6 +76,13 @@ def slabocean_model_init(
     d_ocn = d_max + (d_min - d_max) * jnp.cos(lat_rad)**3.0
 
     sst_init = sst_clim[:, :, 0].copy()
+
+    print("sst_init: ")
+    sst_i = np.array(sst_init)
+    sst_i[sst_i > 1e3] = np.nan
+    print("mean: ", np.nanmean(sst_i))
+    print(sst_i)
+
 
     cd = physical_constants.cp_sw * d_ocn
     tau = jnp.ones_like(cd) * parameters.slabocean_model.tau_ocn
@@ -124,9 +132,11 @@ def couple_sea_atm(
         sic = boundaries.sic_clim[:,:,day]
 
     """
+    #if boundaries.sea_coupling_flag == True:
+    #    pass
 
     sst_new = run_slabocean_model(
-        physics_data.slabocean_model.sst,
+        boundaries.sst,
         physics_data.surface_flux.hfluxn[:, :, 0],
         boundaries.ocn_time_factor,
         boundaries.ocn_cd_factor,
@@ -134,7 +144,10 @@ def couple_sea_atm(
         boundaries.sst_clim[:,:,day+1],
         physics_data.surface_flux.hfluxn[:, :, 0] * 0,
     )
-
+    
+    #print("New SST?")
+    #sst_new = boundaries.sst.copy()
+    #print(np.sum(sst_new))#array(sst_new).sum())
     # update land physics data
     slabocean_model_data = physics_data.slabocean_model.copy(sst=sst_new)
     physics_data = physics_data.copy(slabocean_model=slabocean_model_data)
