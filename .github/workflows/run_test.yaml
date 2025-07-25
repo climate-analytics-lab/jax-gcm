@@ -1,4 +1,4 @@
-name: Run Unit Tests via Pytest
+name: Run Unit Tests and Linters
 
 on: [push]
 
@@ -24,10 +24,14 @@ jobs:
           pip install ruff
           ruff --format=github --target-version=py311 .
         continue-on-error: true
+      - name: Lint with Sphinx-lint
+        run: |
+          pip install sphinx-lint
+          sphinx-lint ../../docs/
+        continue-on-error: true
       - name: Test with pytest
         run: |
           coverage run -m pytest  -v -s --cov-fail-under=90
       - name: Generate Coverage Report
         run: |
           coverage report -m
-      
