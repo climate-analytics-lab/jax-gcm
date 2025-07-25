@@ -16,8 +16,8 @@ class ConvectionParameters:
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
 
     @classmethod
-    def default(self):
-        return ConvectionParameters(
+    def default(cls):
+        return cls(
             psmin = jnp.array(0.8),
             trcnv = jnp.array(6.0),
             rhil = jnp.array(0.7),
@@ -35,8 +35,8 @@ class ForcingParameters:
     co2_year_ref: jnp.int32 # Time of relaxation (in hours) towards reference state
 
     @classmethod
-    def default(self):
-        return ForcingParameters(
+    def default(cls):
+        return cls(
             increase_co2 = True,
             co2_year_ref = 1950,
         )
@@ -54,8 +54,8 @@ class CondensationParameters:
     rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
 
     @classmethod
-    def default(self):
-        return CondensationParameters(
+    def default(cls):
+        return cls(
             trlsc = jnp.array(4.0),
             rhlsc = jnp.array(0.9),
             drhlsc = jnp.array(0.1),
@@ -99,8 +99,8 @@ class ShortwaveRadiationParameters:
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
 
     @classmethod
-    def default(self):
-        return ShortwaveRadiationParameters(
+    def default(cls):
+        return cls(
             albcl = jnp.array(0.43),
             albcls = jnp.array(0.50),
             absdry = jnp.array(0.033),
@@ -140,8 +140,8 @@ class ModRadConParameters:
     emisfc: jnp.ndarray  # Longwave surface emissivity
 
     @classmethod
-    def default(self):
-        return ModRadConParameters(
+    def default(cls):
+        return cls(
             albsea = jnp.array(0.07),
             albice = jnp.array(0.60),
             albsn = jnp.array(0.60),
@@ -183,8 +183,8 @@ class SurfaceFluxParameters:
     hdrag: jnp.ndarray # Height scale for orographic correction
 
     @classmethod
-    def default(self):
-        return SurfaceFluxParameters(
+    def default(cls):
+        return cls(
             fwind0 = jnp.array(0.95),
             ftemp0 = jnp.array(1.0),
             fhum0 = jnp.array(0.0),
@@ -218,8 +218,8 @@ class VerticalDiffusionParameters:
     segrad: jnp.ndarray  # Minimum gradient of dry static energy (d_DSE/d_phi)
 
     @classmethod
-    def default(self):
-        return VerticalDiffusionParameters(
+    def default(cls):
+        return cls(
             trshc = jnp.array(6.0),
             trvdi = jnp.array(24.0),
             trvds = jnp.array(6.0),
@@ -247,8 +247,8 @@ class LandModelParameters:
     hcapli: jnp.ndarray
 
     @classmethod
-    def default(self):
-        return LandModelParameters(
+    def default(cls):
+        return cls(
             sd2sc = jnp.array(60.0),
             swcap = jnp.array(0.30),
             swwil = jnp.array(0.17),
@@ -276,8 +276,8 @@ class Parameters:
     forcing: ForcingParameters
 
     @classmethod
-    def default(self):
-        return Parameters(
+    def default(cls):
+        return cls(
             convection = ConvectionParameters.default(),
             condensation = CondensationParameters.default(),
             shortwave_radiation = ShortwaveRadiationParameters.default(),

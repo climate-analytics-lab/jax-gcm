@@ -6,7 +6,7 @@ import jax
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
     ta = jnp.zeros((kx, ix, il))
-    fsfcd = jnp.zeros((ix, il))
+    rlds = jnp.zeros((ix, il))
     st4a = jnp.zeros((kx, ix, il, 2))     # Blackbody emission from full and half atmospheric levels
     flux = jnp.zeros((ix, il, 4))         # Radiative flux in different spectral bands
 
@@ -20,7 +20,7 @@ def initialize_arrays(ix, il, kx):
 
     ta = min_val + step_size*jnp.arange(total_elements).reshape((kx, il, ix)).transpose((0, 2, 1))
     
-    return ta, fsfcd, st4a, flux
+    return ta, rlds, st4a, flux
 
 class TestLongwave(unittest.TestCase):
     
@@ -29,22 +29,22 @@ class TestLongwave(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, geometry, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
-        from jcm.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
-        from jcm.params import Parameters
-        from jcm.physics import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)
-        from jcm.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
-    def test_downward_longwave_rad_fluxes(self):        
+    def test_downward_longwave_rad_fluxes(self):
 
-        #FIXME: This array doens't need to be this big once we fix the interfaces
-        # -> We only test teh first 5x5 elements
+        # FIXME: This array doesn't need to be this big once we fix the interfaces
+        # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
         xy = (ix, il)
-        ta, fsfcd, st4a, flux = initialize_arrays(ix, il, kx)
+        ta, rlds, st4a, flux = initialize_arrays(ix, il, kx)
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
         boundaries = BoundaryData.ones(xy)
@@ -54,14 +54,14 @@ class TestLongwave(unittest.TestCase):
         _, physics_data = get_downward_longwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
 
         # fortran values
-        # print(fsfcd[:5, :5])
+        # print(rlds[:5, :5])
         f90_rlds = [[186.6984  , 187.670515, 188.646319, 189.625957, 190.609469],
                     [186.708473, 187.680627, 188.656572, 189.636231, 190.6197  ],
                     [186.718628, 187.69074 , 188.666658, 189.646441, 190.630014],
                     [186.728719, 187.700953, 188.676876, 189.656632, 190.640263],
                     [186.738793, 187.711066, 188.687129, 189.666908, 190.650495]]
         
-        # print(dfabs[0, 0, :])   
+        # print(dfabs[0, 0, :])
         f90_dfabs = [ -3.799531,
                      -20.11071 ,
                      -17.83563 ,
@@ -105,8 +105,8 @@ class TestLongwave(unittest.TestCase):
     def test_upward_longwave_rad_fluxes(self):
         ta = jnp.ones((kx, ix, il)) * 300
         ts = jnp.ones((ix, il)) * 300
-        fsfcd = jnp.ones((ix, il))
-        fsfcu = jnp.ones((ix, il))
+        rlds = jnp.ones((ix, il))
+        rlus = jnp.ones((ix, il))
         dfabs = jnp.ones((kx, ix, il))
         st4a = jnp.ones((kx, ix, il, 2))
         flux = jnp.ones((ix, il, 4))
@@ -117,7 +117,7 @@ class TestLongwave(unittest.TestCase):
         input_physics_data = PhysicsData.zeros((ix, il), kx).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
-            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(fsfcu), rlds=fsfcd, tsfc=ts),
+            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
         )
 
         # skip testing ttend since we have access to dfabs
@@ -138,7 +138,7 @@ class TestLongwave(unittest.TestCase):
         self.assertTrue(jnp.allclose(dfabs[:, 0, 0], dfabs_f90, atol=1e-5))
         self.assertTrue(jnp.allclose(flux[0, 0, :], flux_f90, atol=1e-5))
 
-    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+    def test_get_downward_longwave_rad_fluxes_gradients_isnan_ones(self):
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -146,9 +146,9 @@ class TestLongwave(unittest.TestCase):
         state = PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_downward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
@@ -158,7 +158,7 @@ class TestLongwave(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
        
 
-    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):    
+    def test_get_upward_longwave_rad_fluxes_gradients_isnan_ones(self):
         """Test that we can calculate gradients of longwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -167,9 +167,9 @@ class TestLongwave(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_upward_longwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 

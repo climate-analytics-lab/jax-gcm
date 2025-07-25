@@ -1,8 +1,8 @@
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
+from jcm.physics.speedy.params import Parameters
 from jcm.geometry import Geometry
-from jcm.physics import PhysicsState, PhysicsTendency
-from jcm.physics_data import PhysicsData
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics.speedy.physics_data import PhysicsData
 import jax.numpy as jnp
 from jax import jit
 
@@ -107,7 +107,7 @@ def couple_land_atm(
 
     return physics_tendency, physics_data
 
-#Integrates slab land-surface model for one day.
+# Integrates slab land-surface model for one day.
 @jit
 def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
     # Land-surface (soil/ice-sheet) layer

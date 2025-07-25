@@ -10,11 +10,11 @@ class TestHumidityUnit(unittest.TestCase):
 
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg, PhysicsTendency, \
         SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData, geometry
-        from jcm.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
+        from jcm.physics.speedy.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
         from jcm.boundaries import BoundaryData
-        from jcm.params import Parameters
+        from jcm.physics.speedy.params import Parameters
         parameters = Parameters.default()
         from jcm.geometry import Geometry
         geometry = Geometry.from_grid_shape((ix, il), kx)
@@ -97,19 +97,19 @@ class TestHumidityUnit(unittest.TestCase):
 
         # Edge case: Zero Specific Humidity
         qg = jnp.ones((kx,ix,il))*0
-        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg, surface_pressure=pressure)
+        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries, geometry=geometry)
         self.assertTrue((physics_data.humidity.rh == 0).all(), "Relative humidity should be 0 when specific humidity is 0")
 
         # Edge case: Very High Temperature
         temp = jnp.ones((kx,ix,il))*400
-        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg, surface_pressure=pressure)
+        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries, geometry=geometry)
         self.assertTrue(((physics_data.humidity.rh >= 0) & (physics_data.humidity.rh <= 1)).all(), "Relative humidity should be between 0 and 1 at very high temperatures")
 
         # Edge case: Extremely High Pressure
         pressure = jnp.ones((ix,il))*10
-        state.surface_pressure = pressure
+        state.normalized_surface_pressure = pressure
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries, geometry=geometry)
         self.assertTrue(((physics_data.humidity.rh >= 0) & (physics_data.humidity.rh <= 1)).all(), "Relative humidity should be between 0 and 1 at very high pressures")
 
@@ -131,7 +131,7 @@ class TestHumidityUnit(unittest.TestCase):
 
         convection_data = ConvectionData.zeros((ix,il), kx)
         physics_data = PhysicsData.zeros((ix,il), kx, convection=convection_data)
-        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg,surface_pressure=pressure)
+        state = PhysicsState.zeros(zxy,temperature=temp, specific_humidity=qg,normalized_surface_pressure=pressure)
 
         _, physics_data = spec_hum_to_rel_hum(physics_data=physics_data, state=state, parameters=parameters, boundaries=boundaries, geometry=geometry)
         qa, qsat = rel_hum_to_spec_hum(temp[0], pressure, geometry.fsg[0], physics_data.humidity.rh[0])

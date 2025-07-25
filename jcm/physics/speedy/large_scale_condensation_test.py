@@ -10,14 +10,14 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         ix, il, kx = 1, 1, 8
 
         global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies
-        from jcm.physics_data import ConvectionData, HumidityData, PhysicsData
-        from jcm.physics import PhysicsState, PhysicsTendency
-        from jcm.params import Parameters
+        from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         geometry = Geometry.from_grid_shape((ix, il), kx)
         from jcm.boundaries import BoundaryData
-        from jcm.large_scale_condensation import get_large_scale_condensation_tendencies
+        from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
 
     def test_get_large_scale_condensation_tendencies(self):
         xy = (ix,il)
@@ -29,7 +29,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
-        state = state = PhysicsState.zeros(zxy, specific_humidity=qa, surface_pressure=psa)
+        state = state = PhysicsState.zeros(zxy, specific_humidity=qa, normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
@@ -52,7 +52,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
-        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],surface_pressure=psa)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
@@ -65,7 +65,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
         self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
 
-    def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):    
+    def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):
         """Test that we can calculate gradients of large-scale condensation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -74,9 +74,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         boundaries = BoundaryData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, boundaries, geometry) 
+        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx) 
+        datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 

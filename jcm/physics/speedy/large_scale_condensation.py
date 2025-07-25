@@ -6,10 +6,10 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, cp, alhc, grav
+from jcm.physics.speedy.params import Parameters
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physical_constants import p0, cp, alhc, grav
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -23,7 +23,7 @@ def get_large_scale_condensation_tendencies(
     Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
-        psa: Normalized surface pressure 
+        psa: Normalized surface pressure
         qa: Specific humidity [g/kg] - state.specific_humidity
         qsat: Saturation specific humidity [g/kg] - humidity.qsat
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop
@@ -49,7 +49,7 @@ def get_large_scale_condensation_tendencies(
     tfact = alhc / cp
     prg = p0 / grav
 
-    psa2 = state.surface_pressure ** 2.0
+    psa2 = state.normalized_surface_pressure ** 2.0
 
     # Tendencies of temperature and moisture
     # NB. A maximum heating rate is imposed to avoid grid-point-storm 
@@ -76,7 +76,7 @@ def get_large_scale_condensation_tendencies(
     # Large-scale precipitation
     pfact = geometry.dhs * prg
     precls = 0. - jnp.sum(pfact[1:, jnp.newaxis, jnp.newaxis] * dqlsc[1:], axis=0)
-    precls *= state.surface_pressure
+    precls *= state.normalized_surface_pressure
 
     condensation_out = physics_data.condensation.copy(precls=precls)
     convection_out = physics_data.convection.copy(iptop=iptop)

@@ -1,16 +1,16 @@
+import jax
 import jax.numpy as jnp
 from jax import jit
 
 # importing custom functions from library
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, rgas, cp, alhc, sbc, grav
-from jcm.humidity import get_qsat, rel_hum_to_spec_hum
+from jcm.physics.speedy.params import Parameters
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physical_constants import p0, rgas, cp, alhc, sbc, grav
+from jcm.physics.speedy.humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.utils import pass_fn
-import jax
 
 @jit
 def get_surface_fluxes(
@@ -24,7 +24,7 @@ def get_surface_fluxes(
     Parameters
     ----------
     psa : 2D array
-        - Normalised surface pressure, state.surface_pressure
+        - Normalised surface pressure, state.normalized_surface_pressure
     ua : 3D array
         - u-wind, state.u_wind
     va : 3D array
@@ -54,7 +54,7 @@ def get_surface_fluxes(
     soilw_am = boundaries.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
 
-    psa = state.surface_pressure
+    psa = state.normalized_surface_pressure
     ua = state.u_wind
     va = state.v_wind
     ta = state.temperature
@@ -294,7 +294,7 @@ def get_surface_fluxes(
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
 
     # Compute tendencies due to surface fluxes (physics.f90:197-205)
-    rps = 1.0 / state.surface_pressure
+    rps = 1.0 / state.normalized_surface_pressure
     utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*geometry.grdsig[-1])
     vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*geometry.grdsig[-1])
     ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*geometry.grdscp[-1])

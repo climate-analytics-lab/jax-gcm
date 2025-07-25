@@ -7,10 +7,10 @@ from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
 from jcm.boundaries import BoundaryData
-from jcm.params import Parameters
-from jcm.physics import PhysicsTendency, PhysicsState
-from jcm.physics_data import PhysicsData
-from jcm.physical_constants import p0, alhc, grav, cp
+from jcm.physics.speedy.params import Parameters
+from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physical_constants import p0, alhc, grav, cp
 
 @jit
 def diagnose_convection(
@@ -42,8 +42,8 @@ def diagnose_convection(
     qdif: Excess humidity in convective gridboxes
     """
     kx, ix, il = se.shape
-    iptop = jnp.full((ix, il), kx + 1, dtype=int)  # Initialize iptop with nlp
-    qdif = jnp.zeros((ix, il), dtype=float)
+    iptop = jnp.full((ix, il), kx + 1)  # Initialize iptop with nlp
+    qdif = jnp.zeros((ix, il))
 
     # Saturation moist static energy
     mss = se + alhc * qsat
@@ -69,11 +69,11 @@ def diagnose_convection(
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
     # Note ktop1 and ktop2 are 1-indexed to match icltop convention
-    possible_cltop_levels = jnp.arange(2, kx-3, dtype=int)
+    possible_cltop_levels = jnp.arange(2, kx-3)
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
         (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
-        jnp.array(kx, dtype=int)
+        jnp.array(kx)
     )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
@@ -120,18 +120,18 @@ def get_convection_tendencies(
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
     """
-    se = cp * state.temperature + state.geopotential 
+    se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
     _zeros_3d = lambda: jnp.zeros((kx,ix,il))
-    psa = state.surface_pressure
+    psa = state.normalized_surface_pressure
     
     # 1. Initialization of output and workspace arrays
 
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
-    #keep indexing consistent with original Speedy
+    # keep indexing consistent with original Speedy
     nl1 = kx - 1
     nlp = kx + 1
 
@@ -190,7 +190,7 @@ def get_convection_tendencies(
         for base_flux, tracer in ((fmass, 1), (fus, se), (fuq, qa))
     )
 
-    #Downward fluxes
+    # Downward fluxes
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
     # Calculate flux convergence

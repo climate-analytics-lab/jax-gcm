@@ -1,4 +1,4 @@
-Welcome to Jax-GCM’s documentation!
+Welcome to Jax-GCM's documentation!
 ====================================
 
 Jax-GCM is a Python library for climate modeling. It uses a `Dinosaur <https://github.com/neuralgcm/dinosaur?tab=readme-ov-file>`_ dycore and physics based on `Speedy <https://github.com/samhatfield/speedy.f90>`_.
