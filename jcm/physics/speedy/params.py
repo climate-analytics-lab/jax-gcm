@@ -8,12 +8,22 @@ from jax import tree_util
 
 @tree_math.struct
 class ConvectionParameters:
-    psmin: jnp.ndarray # Minimum (normalised) surface pressure for the occurrence of convection
-    trcnv: jnp.ndarray # Time of relaxation (in hours) towards reference state
-    rhil: jnp.ndarray # Relative humidity threshold in intermeduate layers for secondary mass flux
-    rhbl: jnp.ndarray # Relative humidity threshold in the boundary layer
-    entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
-    smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
+    """Stores parameters for the convection scheme.
+
+    Attributes:
+        psmin: Minimum (normalised) surface pressure for the occurrence of convection
+        trcnv: Time of relaxation (in hours) towards reference state
+        rhil: Relative humidity threshold in intermeduate layers for secondary mass flux
+        rhbl: Relative humidity threshold in the boundary layer
+        entmax: Maximum entrainment as a fraction of cloud-base mass flux
+        smf: Ratio between secondary and primary mass flux at cloud-base
+    """
+    psmin: jnp.ndarray  
+    trcnv: jnp.ndarray  
+    rhil: jnp.ndarray 
+    rhbl: jnp.ndarray  
+    entmax: jnp.ndarray  
+    smf: jnp.ndarray  
 
     @classmethod
     def default(cls):
@@ -27,12 +37,19 @@ class ConvectionParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ForcingParameters:
-    increase_co2: jnp.bool # Minimum (normalised) surface pressure for the occurrence of convection
-    co2_year_ref: jnp.int32 # Time of relaxation (in hours) towards reference state
+    """Stores parameters for external model forcings.
+
+    Attributes:
+        increase_co2: Minimum (normalised) surface pressure for the occurrence of convection
+        co2_year_ref: Time of relaxation (in hours) towards reference state
+    """
+    increase_co2: jnp.bool 
+    co2_year_ref: jnp.int32  
 
     @classmethod
     def default(cls):
@@ -42,16 +59,25 @@ class ForcingParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         self.increase_co2 = 0
         self.co2_year_ref = 0
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class CondensationParameters:
-    trlsc: jnp.ndarray   # Relaxation time (in hours) for specific humidity
-    rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
-    drhlsc: jnp.ndarray  # Vertical range of relative humidity threshold
-    rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
+    """Stores parameters for the large-scale condensation scheme.
+
+    Attributes:
+        trlsc: Relaxation time (in hours) for specific humidity.
+        rhlsc: Maximum relative humidity threshold (at sigma=1).
+        drhlsc: Vertical range of the relative humidity threshold.
+        rhblsc: Relative humidity threshold for the boundary layer.
+    """
+    trlsc: jnp.ndarray   
+    rhlsc: jnp.ndarray  
+    drhlsc: jnp.ndarray  
+    rhblsc: jnp.ndarray 
 
     @classmethod
     def default(cls):
@@ -63,40 +89,63 @@ class CondensationParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ShortwaveRadiationParameters:
-    # parameters for `get_zonal_average_fields`
+    """Stores parameters for radiation and cloud schemes (get_zonal_average_fields).
 
-    albcl:  jnp.ndarray # Cloud albedo (for cloud cover = 1)
-    albcls: jnp.ndarray # Stratiform cloud albedo (for st. cloud cover = 1)
-
+    Attributes:
+        albcl: Cloud albedo (for cloud cover = 1).
+        albcls: Stratiform cloud albedo (for stratiform cloud cover = 1).
+        absdry: Absorptivity of dry air (visible band).
+        absaer: Absorptivity of aerosols (visible band).
+        abswv1: Absorptivity of water vapour (weak band).
+        abswv2: Absorptivity of water vapour (strong band).
+        abscl1: Absorptivity of clouds (visible band, maximum value).
+        abscl2: Absorptivity of clouds.
+        ablwin: Absorptivity of air in the "window" band.
+        ablwv1: Absorptivity of water vapour in H2O band 1 (weak).
+        ablwv2: Absorptivity of water vapour in H2O band 2 (strong).
+        ablcl1: Absorptivity of "thick" clouds in window band (below cloud top).
+        ablcl2: Absorptivity of "thin" upper clouds in window and H2O bands.
+        rhcl1: Relative humidity threshold for cloud cover = 0.
+        rhcl2: Relative humidity threshold for cloud cover = 1.
+        qacl: Specific humidity threshold for cloud cover.
+        wpcl: Cloud cover weight for the square-root of precipitation.
+        pmaxcl: Maximum precipitation (mm/day) contributing to cloud cover.
+        clsmax: Maximum stratiform cloud cover.
+        clsminl: Minimum stratiform cloud cover over land (for RH = 1).
+        gse_s0: Gradient of dry static energy for stratiform cloud cover = 0.
+        gse_s1: Gradient of dry static energy for stratiform cloud cover = 1.
+    """
+    # Cloud albedo
+    albcl:  jnp.ndarray 
+    albcls: jnp.ndarray 
     # Shortwave absorptivities (for dp = 10^5 Pa)
-    absdry: jnp.ndarray # Absorptivity of dry air (visible band)
-    absaer: jnp.ndarray # Absorptivity of aerosols (visible band)
-    abswv1: jnp.ndarray # Absorptivity of water vapour
-    abswv2: jnp.ndarray # Absorptivity of water vapour
-    abscl1: jnp.ndarray # Absorptivity of clouds (visible band, maximum value)
-    abscl2: jnp.ndarray # Absorptivity of clouds
-
+    absdry: jnp.ndarray 
+    absaer: jnp.ndarray 
+    abswv1: jnp.ndarray 
+    abswv2: jnp.ndarray 
+    abscl1: jnp.ndarray 
+    abscl2: jnp.ndarray
     # Longwave absorptivities (for dp = 10^5 Pa)
-    ablwin: jnp.ndarray # Absorptivity of air in "window" band
-    ablwv1: jnp.ndarray # Absorptivity of water vapour in H2O band 1 (weak) (for dq = 1 g/kg)
-    ablwv2: jnp.ndarray # Absorptivity of water vapour in H2O band 2 (strong) (for dq = 1 g/kg)
-    ablcl1: jnp.ndarray # Absorptivity of "thick" clouds in window band (below cloud top)
-    ablcl2: jnp.ndarray # Absorptivity of "thin" upper clouds in window and H2O bands
-
+    ablwin: jnp.ndarray 
+    ablwv1: jnp.ndarray 
+    ablwv2: jnp.ndarray 
+    ablcl1: jnp.ndarray 
+    ablcl2: jnp.ndarray 
     # parameters for `clouds`
-    rhcl1: jnp.ndarray  # Relative humidity threshold corresponding to cloud cover = 0
-    rhcl2: jnp.ndarray  # Relative humidity correponding to cloud cover = 1
-    qacl: jnp.ndarray  # Specific humidity threshold for cloud cover
-    wpcl: jnp.ndarray   # Cloud cover weight for the square-root of precipitation (for p = 1 mm/day)
-    pmaxcl: jnp.ndarray  # Maximum value of precipitation (mm/day) contributing to cloud cover
-    clsmax: jnp.ndarray  # Maximum stratiform cloud cover
-    clsminl: jnp.ndarray  # Minimum stratiform cloud cover over land (for RH = 1)
-    gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
-    gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
+    rhcl1: jnp.ndarray  
+    rhcl2: jnp.ndarray  
+    qacl: jnp.ndarray  
+    wpcl: jnp.ndarray   
+    pmaxcl: jnp.ndarray  
+    clsmax: jnp.ndarray  
+    clsminl: jnp.ndarray  
+    gse_s0: jnp.ndarray 
+    gse_s1: jnp.ndarray  
 
     @classmethod
     def default(cls):
@@ -126,18 +175,27 @@ class ShortwaveRadiationParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ModRadConParameters:
-    # Albedo values
-    albsea: jnp.ndarray  # Albedo over sea
-    albice: jnp.ndarray  # Albedo over sea ice (for ice fraction = 1)
-    albsn: jnp.ndarray # Albedo over snow (for snow cover = 1)
+    """Stores parameters for modifying radiation and convection.
 
+    Attributes:
+        albsea: Albedo over sea.
+        albice: Albedo over sea ice (for ice fraction = 1).
+        albsn: Albedo over snow (for snow cover = 1).
+        epslw: Fraction of blackbody spectrum absorbed/emitted by PBL only.
+        emisfc: Longwave surface emissivity.
+    """
+    # Albedo values
+    albsea: jnp.ndarray  
+    albice: jnp.ndarray  
+    albsn: jnp.ndarray 
     # Longwave parameters
-    epslw: jnp.ndarray  # Fraction of blackbody spectrum absorbed/emitted by PBL only
-    emisfc: jnp.ndarray  # Longwave surface emissivity
+    epslw: jnp.ndarray  
+    emisfc: jnp.ndarray  
 
     @classmethod
     def default(cls):
@@ -150,37 +208,49 @@ class ModRadConParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class SurfaceFluxParameters:
-    fwind0: jnp.ndarray # Ratio of near-sfc wind to lowest-level wind
+    """Stores parameters for the surface flux scheme.
 
-    # Weight for near-sfc temperature extrapolation (0-1) :
-    # 1 : linear extrapolation from two lowest levels
-    # 0 : constant potential temperature ( = lowest level)
+    Attributes:
+        fwind0: Ratio of near-surface wind to lowest-level wind.
+        ftemp0: Weight for near-surface temperature extrapolation (0-1). If 1, linear extrapolation from 
+        two lowest levels. If 0, constant potential temperature ( = lowest level)
+        fhum0: Weight for near-surface specific humidity extrapolation (0-1). If 1, extrap. with constant 
+        relative hum. ( = lowest level). If 0, constant specific hum. ( = lowest level). 
+        cdl: Drag coefficient for momentum over land.
+        cds: Drag coefficient for momentum over sea.
+        chl: Heat exchange coefficient over land.
+        chs: Heat exchange coefficient over sea.
+        vgust: Wind speed for sub-grid-scale gusts.
+        ctday: Daily-cycle correction (dTskin/dSSRad).
+        dtheta: Potential temperature gradient for stability correction.
+        fstab: Amplitude of stability correction (fraction).
+        clambda: Heat conductivity in skin-to-root soil layer.
+        clambsn: Heat conductivity in soil for snow cover = 1.
+        lscasym: If True, use an asymmetric stability coefficient.
+        lskineb: If True, redefine skin temp. from energy balance.
+        hdrag: Height scale for orographic correction.
+    """
+    fwind0: jnp.ndarray 
     ftemp0: jnp.ndarray
-
-    # Weight for near-sfc specific humidity extrapolation (0-1) :
-    # 1 : extrap. with constant relative hum. ( = lowest level)
-    # 0 : constant specific hum. ( = lowest level)
     fhum0: jnp.ndarray
-
-    cdl: jnp.ndarray   # Drag coefficient for momentum over land
-    cds: jnp.ndarray   # Drag coefficient for momentum over sea
-    chl: jnp.ndarray  # Heat exchange coefficient over land
-    chs: jnp.ndarray   # Heat exchange coefficient over sea
-    vgust: jnp.ndarray   # Wind speed for sub-grid-scale gusts
-    ctday: jnp.ndarray # Daily-cycle correction (dTskin/dSSRad)
-    dtheta: jnp.ndarray   # Potential temp. gradient for stability correction
-    fstab: jnp.ndarray   # Amplitude of stability correction (fraction)
-    clambda: jnp.ndarray  # Heat conductivity in skin-to-root soil layer
-    clambsn: jnp.ndarray # Heat conductivity in soil for snow cover = 1
-
-    lscasym: jnp.bool   # true : use an asymmetric stability coefficient
-    lskineb: jnp.bool   # true : redefine skin temp. from energy balance
-
-    hdrag: jnp.ndarray # Height scale for orographic correction
+    cdl: jnp.ndarray   
+    cds: jnp.ndarray   
+    chl: jnp.ndarray  
+    chs: jnp.ndarray  
+    vgust: jnp.ndarray   
+    ctday: jnp.ndarray 
+    dtheta: jnp.ndarray  
+    fstab: jnp.ndarray  
+    clambda: jnp.ndarray  
+    clambsn: jnp.ndarray
+    lscasym: jnp.bool   
+    lskineb: jnp.bool   
+    hdrag: jnp.ndarray 
 
     @classmethod
     def default(cls):
@@ -204,19 +274,30 @@ class SurfaceFluxParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         self.lscasym = 0
         self.lskineb = 0
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class VerticalDiffusionParameters:
-    trshc: jnp.ndarray  # Relaxation time (in hours) for shallow convection
-    trvdi: jnp.ndarray  # Relaxation time (in hours) for moisture diffusion
-    trvds: jnp.ndarray  # Relaxation time (in hours) for super-adiabatic conditions
-    redshc: jnp.ndarray  # Reduction factor of shallow convection in areas of deep convection
-    rhgrad: jnp.ndarray  # Maximum gradient of relative humidity (d_RH/d_sigma)
-    segrad: jnp.ndarray  # Minimum gradient of dry static energy (d_DSE/d_phi)
+    """Stores parameters for the vertical diffusion scheme.
 
+    Attributes:
+        trshc: Relaxation time (in hours) for shallow convection.
+        trvdi: Relaxation time (in hours) for moisture diffusion.
+        trvds: Relaxation time (in hours) for super-adiabatic conditions.
+        redshc: Reduction factor of shallow convection in deep convection areas.
+        rhgrad: Maximum gradient of relative humidity (d_RH/d_sigma).
+        segrad: Minimum gradient of dry static energy (d_DSE/d_phi).
+    """
+    trshc: jnp.ndarray
+    trvdi: jnp.ndarray
+    trvds: jnp.ndarray
+    redshc: jnp.ndarray
+    rhgrad: jnp.ndarray
+    segrad: jnp.ndarray
+    
     @classmethod
     def default(cls):
         return cls(
@@ -229,21 +310,36 @@ class VerticalDiffusionParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class LandModelParameters:
-    sd2sc: jnp.ndarray # Snow depth (mm water) corresponding to snow cover = 1
+    """Stores parameters for the land surface model.
+
+    Attributes:
+        sd2sc: Snow depth (mm water) corresponding to snow cover = 1.
+        swcap: Soil wetness at field capacity (volume fraction).
+        swwil: Soil wetness at wilting point (volume fraction).
+        thrsh: Threshold for land-sea mask definition. (i.e. minimum fraction of either land or sea)
+        depth_soil: Soil layer depth (m).
+        depth_lice: Land-ice depth (m).
+        tdland: Dissipation time (days) for land-surface temp. anomalies.
+        flandmin: Minimum fraction of land for defining anomalies.
+        hcapl: Heat capacity per m^2 for land.
+        hcapli: Heat capacity per m^2 for land-ice.
+    """
+    sd2sc: jnp.ndarray 
     # Soil moisture parameters
-    swcap: jnp.ndarray # Soil wetness at field capacity (volume fraction)
-    swwil: jnp.ndarray # Soil wetness at wilting point  (volume fraction)
-    thrsh: jnp.ndarray# Threshold for land-sea mask definition (i.e. minimum fraction of either land or sea)
+    swcap: jnp.ndarray 
+    swwil: jnp.ndarray
+    thrsh: jnp.ndarray
     # Model parameters (default values)
-    depth_soil: jnp.ndarray # Soil layer depth (m)
-    depth_lice: jnp.ndarray # Land-ice depth (m)
-    tdland: jnp.ndarray # Dissipation time (days) for land-surface temp. anomalies
-    flandmin: jnp.ndarray # Minimum fraction of land for the definition of anomalies
-    hcapl: jnp.ndarray # Heat capacities per m^2 (depth*heat_cap/m^3)
+    depth_soil: jnp.ndarray 
+    depth_lice: jnp.ndarray 
+    tdland: jnp.ndarray 
+    flandmin: jnp.ndarray 
+    hcapl: jnp.ndarray 
     hcapli: jnp.ndarray
 
     @classmethod
@@ -262,10 +358,26 @@ class LandModelParameters:
         )
 
     def isnan(self):
+        """Checks if any parameter is NaN."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class Parameters:
+    """A container for all physical parameter structures.
+
+    This class aggregates all the individual parameter structs into a single
+    pytree, making it easy to pass all model parameters around.
+
+    Attributes:
+        convection: Parameters for the convection scheme.
+        condensation: Parameters for the condensation scheme.
+        shortwave_radiation: Parameters for the radiation scheme.
+        mod_radcon: Parameters for modifying radiation and convection.
+        surface_flux: Parameters for the surface flux scheme.
+        vertical_diffusion: Parameters for the vertical diffusion scheme.
+        land_model: Parameters for the land model.
+        forcing: Parameters for external forcings.
+    """
     convection: ConvectionParameters
     condensation: CondensationParameters
     shortwave_radiation: ShortwaveRadiationParameters
@@ -289,6 +401,7 @@ class Parameters:
         )
 
     def isnan(self):
+        """Checks for NaN values across all nested parameter structures."""
         return Parameters(
             convection=self.convection.isnan(),
             condensation=self.condensation.isnan(),
@@ -301,4 +414,5 @@ class Parameters:
         )
 
     def any_true(self):
+        """Checks if any boolean-like value in the entire parameter tree is True."""
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))

@@ -34,11 +34,16 @@ class Timedelta:
   Using integer days and seconds is recommended to avoid loss of precision. With
   int32 days, Timedelta can exactly represent durations over 5 million years.
 
-  The easiest way to create a Timedelta is to use `from_timedelta64`, which
-  supports `np.timedelta64` objects and NumPy arrays with a timedelta64 dtype:
+  Attributes:
+      days (Numeric): The number of whole days in the duration.
+      seconds (Numeric): The number of seconds, normalized to be less than one day.
 
-    >>> Timedelta.from_timedelta64(np.timedelta64(1, 's'))
-    Timedelta(days=0, seconds=1)
+  Example:
+      The easiest way to create a Timedelta is to use `from_timedelta64`, which
+      supports `np.timedelta64` objects and NumPy arrays with a timedelta64 dtype:
+
+      >>> Timedelta.from_timedelta64(np.timedelta64(1, 's'))
+      Timedelta(days=0, seconds=1)
   """
 
   days: Numeric = 0
@@ -53,12 +58,14 @@ class Timedelta:
 
   @classmethod
   def from_timedelta64(cls, values: np.timedelta64 | np.ndarray) -> Timedelta:
+    """Creates a Timedelta instance from a NumPy timedelta64 object."""
     seconds = values // np.timedelta64(1, 's')
     # no need to worry about overflow, because timedelta64 represents values
     # internally with int64 and normalization uses native array operations
     return cls(0, seconds)
 
   def to_timedelta64(self) -> np.timedelta64 | np.ndarray:
+    """Converts the Timedelta instance back to a NumPy timedelta64."""
     seconds = np.int64(self.days) * 24 * 60 * 60 + np.int64(self.seconds)
     return seconds * np.timedelta64(1, 's')
 
@@ -87,12 +94,14 @@ class Timedelta:
   # TODO(shoyer): consider adding other methods supported by datetime.timedelta.
 
   def tree_flatten(self):
+    """Specifies how to flatten the object for JAX PyTree operations."""
     leaves = (self.days, self.seconds)
     aux_data = None
     return leaves, aux_data
 
   @classmethod
   def tree_unflatten(cls, aux_data, leaves):
+    """Specifies how to unflatten the object for JAX PyTree operations."""
     assert aux_data is None
     # JAX uses non-numeric values for pytree leaves inside transformations, so
     # we skip __post_init__ by constructing the object directly:
@@ -109,24 +118,31 @@ _UNIX_EPOCH = np.datetime64('1970-01-01T00:00:00', 's')
 class Timestamp:
   """JAX compatible timestamp, stored as a delta from the Unix epoch.
 
-  The easiest way to create a Timestamp is to use `from_datetime64`, which
-  supports `np.datetime64` objects and NumPy arrays with a datetime64 dtype:
+  Attributes:
+      delta (Timedelta): The duration between the timestamp and the Unix epoch.
 
-    >>> Timestamp.from_datetime64(np.datetime64('1970-01-02'))
-    Timestamp(delta=Timedelta(days=1, seconds=0))
+  Example: 
+      The easiest way to create a Timestamp is to use `from_datetime64`, which
+      supports `np.datetime64` objects and NumPy arrays with a datetime64 dtype:
+
+      >>> Timestamp.from_datetime64(np.datetime64('1970-01-02'))
+      Timestamp(delta=Timedelta(days=1, seconds=0))
   """
 
   delta: Timedelta
 
   @classmethod
   def from_datetime64(cls, values: np.datetime64 | np.ndarray) -> Timestamp:
+    """Creates a Timestamp from a NumPy datetime64 object."""
     return cls(Timedelta.from_timedelta64(values - _UNIX_EPOCH))
 
   @classmethod
   def from_datetime(cls, datetime) -> Timestamp:
+    """Creates a Timestamp from a Python datetime object."""
     return cls.from_datetime64(np.datetime64(datetime))
 
   def to_datetime64(self) -> np.timedelta64 | np.ndarray:
+    """Converts the Timestamp back to a NumPy datetime64 object."""
     return self.delta.to_timedelta64() + _UNIX_EPOCH
 
   def __add__(self, other):
@@ -145,12 +161,14 @@ class Timestamp:
       return NotImplemented
 
   def tree_flatten(self):
+    """Specifies how to flatten the object for JAX PyTree operations."""
     leaves = (self.delta,)
     aux_data = None
     return leaves, aux_data
 
   @classmethod
   def tree_unflatten(cls, aux_data, leaves):
+    """Specifies how to unflatten the object for JAX PyTree operations."""
     assert aux_data is None
     return cls(*leaves)
 
@@ -158,35 +176,66 @@ class Timestamp:
 
 @tree_math.struct
 class DateData:
-    tyear: jnp.float32 # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    """A container for model-specific date and time information.
+
+    This class holds data related to the simulation's calendar, such as the
+    fractional time of year, the current model year, and the simulation step.
+    It is registered as a JAX PyTree via `@tree_math.struct`.
+
+    Attributes:
+        tyear (jnp.float32): Fractional time of year (0.0 to 1.0), should possibly be part of the model itself (i.e. not in physics_data)
+        model_year (jnp.int32): The calendar year of the simulation.
+        model_step (jnp.int32): The current step number of the simulation.
+    """
+    tyear: jnp.float32
     model_year: jnp.int32
     model_step: jnp.int32
 
     @classmethod
+<<<<<<< HEAD
     def zeros(cls, model_time=None, model_year=None, model_step=None):
         return cls(
+=======
+    def zeros(self, model_time=None, model_year=None, model_step=None):
+        """Creates a `DateData` instance initialized to a default (zero) time."""
+        return DateData(
+>>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
+<<<<<<< HEAD
     def set_date(cls, model_time, model_year=None, model_step=None):
         return cls(
+=======
+    def set_date(self, model_time, model_year=None, model_step=None):
+        """Creates a `DateData` instance for a specific model time."""
+        return DateData(
+>>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time),
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
+<<<<<<< HEAD
     def ones(cls, model_time=None, model_year=None, model_step=None):
         return cls(
+=======
+    def ones(self, model_time=None, model_year=None, model_step=None):
+        """Creates a `DateData` instance representing the end of a year (`tyear=1.0`)."""
+        return DateData(
+>>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     def model_day(self):
+        """Calculates the integer day of the year (0-365)."""
         return jnp.round(self.tyear*days_year).astype(jnp.int32)
 
     def copy(self, tyear=None, model_year=None, model_step=None):
+        """Creates a copy of the instance, optionally overriding attributes."""
         return DateData(
           tyear=tyear if tyear is not None else self.tyear,
           model_year=model_year if model_year is not None else self.model_year,
@@ -201,7 +250,10 @@ def fraction_of_year_elapsed(dt):
     enough for most purposes (especially just e.g. annually varying solar radiation calculations). Speedy does something similar.
 
     Args:
-        dt: A Timestamp JAX object
+        dt: A `Timestamp` JAX object representing the current model time.
+
+    Returns:
+        The fraction of the year elapsed as a `jnp.float32`.
     """
 
     # Get the year without using the `to_datetime64` method to avoid the need for a JAX transformation

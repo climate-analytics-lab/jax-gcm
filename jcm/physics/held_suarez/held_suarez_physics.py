@@ -13,9 +13,13 @@ from jcm.date import DateData
 
 Quantity = units.Quantity
 
-class HeldSuarezPhysics(Physics):
-    write_output: bool
+class HeldSuarezForcing:
+    """Implements the Held-Suarez forcing for an atmospheric model.
 
+    This class defines the idealized forcing terms described by Held and Suarez
+    (1994), which consist of a thermal relaxation to a prescribed equilibrium
+    temperature profile and a Rayleigh drag on the low-level winds.
+    """
     def __init__(self,
         coords: coordinate_systems.CoordinateSystem = get_coords(),
         sigma_b: Quantity = 0.7,
@@ -54,7 +58,17 @@ class HeldSuarezPhysics(Physics):
         self.sigma = self.coords.vertical.centers
         self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
 
-    def equilibrium_temperature(self, normalized_surface_pressure):
+    def equilibrium_temperature(self, nodal_surface_pressure):
+        """Computes the Held-Suarez equilibrium temperature profile.
+
+        This profile depends on latitude and pressure.
+
+        Args:
+            nodal_surface_pressure: The surface pressure at each horizontal grid point.
+
+        Returns:
+            The equilibrium temperature `T_eq` on the 3D model grid.
+        """
         p_over_p0 = (
             self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
         )
@@ -66,12 +80,27 @@ class HeldSuarezPhysics(Physics):
         return jnp.maximum(self.minT, temperature)
 
     def kv(self):
+        """Computes the vertically varying Rayleigh drag coefficient.
+
+        The drag is applied in the lower part of the atmosphere, determined by
+        `sigma_b`.
+
+        Returns:
+            The drag coefficient `k_v` on the 3D model grid.
+        """
         kv_coeff = self.kf * (
             jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         )
         return kv_coeff[:, jnp.newaxis, jnp.newaxis]
 
     def kt(self):
+        """Computes the thermal relaxation coefficient.
+
+        This coefficient varies with both latitude and pressure.
+
+        Returns:
+            The thermal relaxation coefficient `k_T` on the 3D model grid.
+        """
         cutoff = jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         return self.ka + (self.ks - self.ka) * (
             cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat[jnp.newaxis]) ** 4
@@ -81,23 +110,27 @@ class HeldSuarezPhysics(Physics):
         self,
         state: PhysicsState,
         boundaries: BoundaryData,
-        geometry: Geometry,
-        date: DateData,
-    ) -> Tuple[PhysicsTendency, None]:
-        """
-        Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
+        geometry: Geometry
+    ) -> tuple[PhysicsTendency, PhysicsData]:
+        """Computes the tendencies due to Held-Suarez forcing.
+
+        This method calculates the thermal relaxation and Rayleigh drag terms
+        that are added to the dynamical tendencies.
 
         Args:
-            state: Current state variables
-            boundaries: Boundary data (unused)
-            geometry: Geometry data (unused)
-            date: Date data (unused)
+            state: The current physical state of the model (winds, temperature, etc.).
+            physics_data: Auxiliary data from the physics parameterizations.
+            parameters: Physical parameters of the model.
+            boundaries: Boundary conditions for the model.
+            geometry: Geometric information about the model grid.
 
         Returns:
-            Physical tendencies in PhysicsTendency format
-            Object containing physics data (unused)
+            A tuple containing:
+                - A `PhysicsTendency` object with the computed forcing tendencies
+                  for winds and temperature.
+                - The unmodified `physics_data`.
         """
-        Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
+        Teq = self.equilibrium_temperature(state.surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
         d_v_wind = -self.kv() * state.v_wind

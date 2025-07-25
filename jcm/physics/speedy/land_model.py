@@ -7,11 +7,22 @@ import jax.numpy as jnp
 from jax import jit
 
 def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
-    """
+    """Initializes land-surface boundary conditions from a data file.
+
+    This function reads and processes various land-surface fields from a
+    specified NetCDF file. It sets up land masks, applies sanity checks to
+    climatological data (surface temperature, snow depth, soil moisture),
+    and computes time-independent parameters for the land model.
+
+    Args:
         surface_filename: filename storing boundary data
         parameters: initialized model parameters
         boundaries: partially initialized boundary data
         time_step: time step - model timestep in minutes
+    
+    Returns:
+        An updated `BoundaryData` object containing the initialized land-surface
+        fields (`cdland`, `fmask_l`, `stlcl_ob`, `snowd_am`, `soilw_am`).
     """
     import xarray as xr
     # =========================================================================
@@ -88,7 +99,21 @@ def couple_land_atm(
     boundaries: BoundaryData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
+    """Couples the land-surface model with the atmosphere for one time step.
 
+    Args:
+        state: The current physical state of the atmosphere.
+        physics_data: Data container for physics-related fields.
+        parameters: Model configuration parameters.
+        boundaries: Static boundary condition data.
+        geometry: Grid and geometric data.
+
+    Returns:
+        A tuple containing:
+        - `physics_tendency`: A zero tendency object (for API consistency).
+        - `physics_data`: The updated `PhysicsData` object with the new
+          land-surface temperature.
+    """
     day = physics_data.date.model_day()
     stl_lm=None
     # Run the land model if the land model flags is switched on
@@ -110,6 +135,23 @@ def couple_land_atm(
 # Integrates slab land-surface model for one day.
 @jit
 def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
+    """Integrates the slab land-surface model for one time step.
+
+    This function implements a simple one-layer "slab" model for the land
+    surface (soil or ice sheet). It calculates the new surface temperature
+    by evolving the temperature anomaly based on the net surface heat flux
+    from the atmosphere.
+
+    Args:
+        hfluxn: Net surface heat flux into the land [W/m^2].
+        stl_lm: Land-surface temperature from the previous time step [K].
+        stlcl_ob: Climatological land-surface temperature for the current day [K].
+        cdland: Non-dimensional dissipation factor for the land layer.
+        rhcapl: Time step divided by the heat capacity of the land layer [K m^2/J].
+
+    Returns:
+        The updated land-surface temperature for the current time step [K].
+    """
     # Land-surface (soil/ice-sheet) layer
     # Anomaly w.r.t. final-time climatological temperature
     tanom = stl_lm - stlcl_ob

@@ -7,26 +7,50 @@ from jcm.physics.speedy.params import Parameters
 
 @tree_math.struct
 class BoundaryData:
-    fmask: jnp.ndarray # fractional land-sea mask (ix,il)
-    forog: jnp.ndarray # orographic factor for land surface drag
-    orog: jnp.ndarray # orography in meters
-    phi0: jnp.ndarray  # surface geopotential (ix, il)
-    phis0: jnp.ndarray # spectrally-filtered surface geopotential
-    alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
+    """This class defines the lower boundary of the atmosphere, such as orography, 
+    land-sea masks, and sea surface temperatures. 
 
-    fmask: jnp.ndarray
+    Attributes:
+        fmask (jnp.ndarray): Fractional land-sea mask. Values range from 0 (sea)
+            to 1 (land). Shape: (ix, il).
+        forog (jnp.ndarray): Orographic factor for land surface drag.
+        orog (jnp.ndarray): Orography (surface height) in meters.
+        phi0 (jnp.ndarray): Surface geopotential (g * orog).
+        phis0 (jnp.ndarray): Spectrally-filtered surface geopotential.
+        alb0 (jnp.ndarray): Bare-land annual mean albedo. Shape: (ix, il).
+        sice_am (jnp.ndarray): Annual mean sea ice concentration climatology.
+        fmask_l (jnp.ndarray): Binary land mask (1 for land, 0 for sea).
+        rhcapl (jnp.ndarray): Inverse of land heat capacity, scaled by the time step.
+        cdland (jnp.ndarray): Inverse of dissipation time for land.
+        stlcl_ob (jnp.ndarray): Climatology for land surface temperature.
+        snowd_am (jnp.ndarray): Annual mean snow depth climatology.
+        soilw_am (jnp.ndarray): Annual mean soil water climatology.
+        lfluxland (jnp.bool): Flag to enable computation of land skin temperature
+            and latent heat fluxes.
+        land_coupling_flag (jnp.bool): Flag to enable/disable coupling with the
+            land model.
+        tsea (jnp.ndarray): Sea Surface Temperature (SST).
+        fmask_s (jnp.ndarray): Binary sea mask (1 for sea, 0 for land).
+    """
+    fmask: jnp.ndarray 
+    forog: jnp.ndarray 
+    orog: jnp.ndarray 
+    phi0: jnp.ndarray  
+    phis0: jnp.ndarray 
+    alb0: jnp.ndarray 
+
     sice_am: jnp.ndarray
-    fmask_l: jnp.ndarray # land mask - set by land_model_init()
-    rhcapl: jnp.ndarray # 1/heat capacity (land)
-    cdland: jnp.ndarray # 1/dissipation time (land)
-    stlcl_ob: jnp.ndarray # climatology for land temperature - might not need this and stl_lm
-    snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
-    soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
-    lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
-    land_coupling_flag: jnp.bool # 0 or 1
-    tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
+    fmask_l: jnp.ndarray 
+    rhcapl: jnp.ndarray 
+    cdland: jnp.ndarray 
+    stlcl_ob: jnp.ndarray 
+    snowd_am: jnp.ndarray 
+    soilw_am: jnp.ndarray 
+    lfluxland: jnp.bool 
+    land_coupling_flag: jnp.bool 
+    tsea: jnp.ndarray 
 
-    fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
+    fmask_s: jnp.ndarray 
 
 
     @classmethod
@@ -83,6 +107,14 @@ class BoundaryData:
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
              snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
              land_coupling_flag=None):
+        """Creates a copy of the `BoundaryData` instance with specified modifications.
+
+        Args:
+            **kwargs: Fields to override in the new copy.
+
+        Returns:
+            BoundaryData: A new `BoundaryData` instance.
+        """
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             forog=forog if forog is not None else self.forog,
@@ -104,20 +136,40 @@ class BoundaryData:
         )
 
     def isnan(self):
+        """Checks for NaN values in all numerical arrays of the instance.
+
+        Returns:
+            A PyTree with the same structure as `BoundaryData`, where each leaf
+            is a boolean array indicating the presence of NaNs.
+        """
         self.lfluxland = 0
         self.land_coupling_flag = 0
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
+        """Checks if any value in any array is True or non-zero.
+
+        Returns:
+            bool: True if any element in any field is True or non-zero.
+        """
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
 
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
     Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
-    Obtained from Neale, R.B. and Hoskins, B.J. (2000),
-    "A standard test for AGCMs including their physical parametrizations: I: the proposal."
-    Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
+   
+    Args:
+        grid: A `HorizontalGrid` object containing grid information, including
+            latitudes.
+
+    Returns:
+        A 2D JAX array of SSTs with shape (grid.nodal_shape).
+
+    References:
+        Neale, R.B. and Hoskins, B.J. (2000), "A standard test for AGCMs
+        including their physical parametrizations: I: the proposal."
+        Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
     """
     radang = grid.latitudes
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
@@ -130,7 +182,17 @@ def default_boundaries(
     truncation_number=None
 ) -> BoundaryData:
     """
-    Initialize the boundary conditions
+    Initializes default boundary conditions for an aqua-planet scenario.
+
+    Args:
+        grid: The model's horizontal grid.
+        orography: A 2D array of surface orography in meters.
+        parameters: An optional `Parameters` object. If not provided, defaults
+            are used.
+        truncation_number: The spectral truncation number for filtering.
+
+    Returns:
+        A `BoundaryData` object configured for an aqua-planet simulation.
     """
     from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
@@ -161,7 +223,16 @@ def initialize_boundaries(
     truncation_number=None
 ) -> BoundaryData:
     """
-    Initialize the boundary conditions
+    Initializes realistic boundary conditions from a data file.
+
+    Args:
+        filename: Path to the input NetCDF file containing boundary data.
+        grid: The model's horizontal grid.
+        parameters: An optional `Parameters` object.
+        truncation_number: The spectral truncation number for filtering.
+
+    Returns:
+        A `BoundaryData` object with realistic, file-based boundary conditions.
     """
     from jcm.physics.speedy.physical_constants import grav
     from jcm.utils import spectral_truncation
@@ -206,6 +277,14 @@ def update_boundaries_with_timestep(
 ) -> BoundaryData:
     """
     Update the boundary conditions with the new time step
+
+    Args:
+        boundaries: The current `BoundaryData` object.
+        parameters: An optional `Parameters` object.
+        time_step: The model time step as a `dinosaur.scales.units.Quantity`.
+
+    Returns:
+        A new `BoundaryData` object with updated time-step dependent fields.
     """
     parameters = parameters or Parameters.default()
     # Update the land heat capacity and dissipation time

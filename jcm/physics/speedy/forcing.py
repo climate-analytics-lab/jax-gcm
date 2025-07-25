@@ -15,6 +15,37 @@ def set_forcing(
     boundaries: BoundaryData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
+    """Calculates and sets time-dependent radiative forcings for the model.
+
+    This function updates the physical state of the model by calculating
+    key radiative forcing components that vary with time. It performs two main tasks:
+
+    1.  **Surface Albedo Calculation**: It computes the total surface albedo by
+        combining contributions from bare land, snow cover, and sea ice. The
+        snow and sea ice amounts are determined from the daily climatology
+        stored in the `BoundaryData`.
+    2.  **CO2 Concentration Update**: If enabled via the `increase_co2` parameter,
+        it updates the CO2 absorptivity based on an exponential growth trend
+        from a reference year.
+
+
+    Args:
+        state: The current physical state of the atmosphere (e.g., temperature).
+        physics_data: A container for various physical parameters and data fields
+            that are passed between physics routines.
+        parameters: A container for the model's configurable parameters.
+        boundaries: A container for static boundary conditions like orography,
+            land-sea masks, and climatological data.
+        geometry: A container for grid and geometric information.
+
+    Returns:
+        A tuple containing:
+        - `physics_tendencies`: A zero tendency object, returned for API
+          consistency with other physics parameterizations. This function
+          only updates `PhysicsData`, it does not compute tendencies directly.
+        - `physics_data`: The updated `PhysicsData` object containing the newly
+          calculated forcing values.
+    """
     # 2. daily-mean radiative forcing
     physics_data = get_zonal_average_fields(state, physics_data, boundaries=boundaries, geometry=geometry)
     tyear = physics_data.date.tyear

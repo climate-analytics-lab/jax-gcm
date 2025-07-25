@@ -5,8 +5,19 @@ from dinosaur.coordinate_systems import HorizontalGridTypes
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
     """
-        grid_field: field in grid space
-        trunc: truncation level, # of wavenumbers to keep
+    Truncates a field in grid space by filtering in spectral space.
+        
+
+    Args:
+        grid: A `HorizontalGrid` object that defines the grid and provides
+            the transformation functions (`to_modal`, `to_nodal`).
+        grid_field: A JAX numpy array representing the field on the grid.
+        truncation_number: The total wavenumber to truncate at. Coefficients
+            corresponding to wavenumbers greater than this value will be set
+            to zero. If None, it defaults to the grid's total wavenumbers minus 2.
+
+    Returns:
+        A JAX numpy array representing the truncated field in grid space.   
     """
     spectral_field = grid.to_modal(grid_field)
     nx,mx = spectral_field.shape
@@ -24,6 +35,15 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
 
 @jit
 def pass_fn(operand):
+    """
+    Identity function
+
+    Args:
+        operand: The input to be returned.
+
+    Returns:
+        The unchanged operand.
+    """
     return operand
 
 def ones_like(x):

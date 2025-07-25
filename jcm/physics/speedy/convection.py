@@ -32,14 +32,14 @@ def diagnose_convection(
     level exceed a set threshold (rhbl).
 
     Args:
-    psa: Normalised surface pressure [p/p0]
-    se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg]
-    qsat: Saturation specific humidity [g/kg]
+        psa: Normalised surface pressure [p/p0]
+        se: Dry static energy [c_p.T + g.z]
+        qa: Specific humidity [g/kg]
+        qsat: Saturation specific humidity [g/kg]
 
     Returns:
-    iptop: Top of convection (layer index)
-    qdif: Excess humidity in convective gridboxes
+        iptop: Top of convection (layer index)
+        qdif: Excess humidity in convective gridboxes
     """
     kx, ix, il = se.shape
     iptop = jnp.full((ix, il), kx + 1)  # Initialize iptop with nlp
@@ -108,17 +108,17 @@ def get_convection_tendencies(
     Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
     Args:
-    psa: Normalised surface pressure [p/p0]
-    se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg] - state.specific_humidity
-    qsat: Saturation specific humidity [g/kg] - humidity.qsat
+        psa: Normalised surface pressure [p/p0]
+        se: Dry static energy [c_p.T + g.z]
+        qa: Specific humidity [g/kg] - state.specific_humidity
+        qsat: Saturation specific humidity [g/kg] - humidity.qsat
 
     Returns:
-    iptop: Top of convection (layer index)
-    cbmf: Cloud-base mass flux
-    precnv: Convective precipitation [g/(m^2 s)]
-    dfse:  Net flux of dry static energy into each atmospheric layer
-    dfqa: Net flux of specific humidity into each atmospheric layer
+        iptop: Top of convection (layer index)
+        cbmf: Cloud-base mass flux
+        precnv: Convective precipitation [g/(m^2 s)]
+        dfse:  Net flux of dry static energy into each atmospheric layer
+        dfqa: Net flux of specific humidity into each atmospheric layer
     """
     se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity

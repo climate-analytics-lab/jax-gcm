@@ -18,7 +18,26 @@ def get_shortwave_rad_fluxes(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
+    """
+    Acts as a conditional wrapper for the shortwave radiation flux calculation.
 
+    This function checks the `compute_shortwave` flag in `physics_data`. If True,
+    it calls `shortwave_rad_fluxes` to compute the fluxes and their resulting
+    tendencies. Otherwise, it returns zero tendencies and the unchanged
+    `physics_data`.
+
+    Args:
+        state: The current physical state of the model.
+        physics_data: A container for all physical data, including radiation fields.
+        parameters: A container for model parameters.
+        boundaries: A container for boundary conditions like land-sea masks.
+        geometry: A container for grid and geometric information.
+
+    Returns:
+        A tuple containing:
+        - The computed temperature tendencies due to shortwave radiation.
+        - The updated `PhysicsData` object with new radiation flux values.
+    """
     # if compute_shortwave is true, then compute shortwave radiation
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
@@ -34,6 +53,8 @@ def get_shortwave_rad_fluxes(
 @jit
 def shortwave_rad_fluxes(operand):
     """
+    Computes shortwave radiation fluxes through the atmosphere and the resulting tendencies.
+
     psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
     icltop(ix,il)    # Cloud top level
@@ -43,6 +64,19 @@ def shortwave_rad_fluxes(operand):
     rsns(ix,il)     # Net downward flux of short-wave radiation at the surface
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
+    
+    Args:
+        operand: A tuple containing the following arguments passed from `lax.cond`:
+            - state (PhysicsState): The current physical state of the model.
+            - physics_data (PhysicsData): The physics data container.
+            - parameters (Parameters): The model parameters.
+            - boundaries (BoundaryData): The boundary conditions.
+            - geometry (Geometry): The grid and geometric information.
+            - tendencies (PhysicsTendency): The initial tendencies (all zeros).
+
+    Returns:
+        A tuple containing the updated state, physics_data, parameters,
+        boundaries, geometry, and the computed physics_tendencies.
     """
 
     state, physics_data, parameters, boundaries, geometry, tendencies = operand
@@ -235,21 +269,21 @@ def get_zonal_average_fields(
     Calculate zonal average fields including solar radiation, ozone depth, 
     and polar night cooling in the stratosphere using JAX.
     
-    Parameters:
-    tyear : float - physics_data.date.tyear
-        Time as fraction of year (0-1, 0 = 1 Jan)
+    tyear (float): physics_data.date.tyear, Time as fraction of year (0-1, 0 = 1 Jan)
+    fsol (jnp.ndarray):  Solar radiation at the top
+    ozupp (jnp.ndarray): Ozone depth in upper stratosphere
+    ozone (jnp.ndarray): Ozone concentration in lower stratosphere
+    stratz (jnp.ndarray): Polar night cooling in the stratosphere
+    zenit (jnp.ndarray): The Zenit angle
+    
+    Args:
+        state: The current physical state of the model.
+        physics_data: The physics data container, which includes date information.
+        boundaries: The boundary conditions.
+        geometry: Grid and geometric information, including sine and cosine of latitude.
 
     Returns:
-    fsol : jnp.ndarray
-        Solar radiation at the top
-    ozupp : jnp.ndarray
-        Ozone depth in upper stratosphere
-    ozone : jnp.ndarray
-        Ozone concentration in lower stratosphere
-    stratz : jnp.ndarray
-        Polar night cooling in the stratosphere
-    zenit : jnp.ndarray
-        The zenith angle
+        The updated `PhysicsData` object with the new zonally-averaged fields.
     """
     kx, ix, il = state.temperature.shape
 
@@ -310,7 +344,25 @@ def get_clouds(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
+    """
+    Acts as a conditional wrapper for the cloud scheme calculation.
 
+    This function checks the `compute_shortwave` flag in `physics_data`. If True,
+    it calls the `clouds` function to determine cloud properties. Otherwise,
+    it returns zero tendencies and the unchanged `physics_data`.
+
+    Args:
+        state: The current physical state of the model.
+        physics_data: A container for all physical data.
+        parameters: A container for model parameters.
+        boundaries: A container for boundary conditions.
+        geometry: A container for grid and geometric information.
+
+    Returns:
+        A tuple containing:
+        - Zero tendencies, as this function only calculates cloud properties.
+        - The updated `PhysicsData` object with new cloud fields.
+    """
     # if compute_shortwave is true, then clouds
     # otherwise return the same physics_data and empty tendencies
     tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
@@ -328,19 +380,29 @@ def clouds(operand):
     """
     Simplified cloud cover scheme based on relative humidity and precipitation.
 
+    qa: Specific humidity [g/kg] - PhysicsState.specific_humidity
+    rh: Relative humidity - PhysicsData.Humidity
+    precnv: Convection precipitation - PhysicsData.Convection
+    precls: Large-scale condensational precipitation - PhysicsData.Condensation
+    iptop: Cloud top level - PhysicsData.Convection
+    gse: Vertical gradient of dry static energy - 
+    fmask: Fraction land-sea mask
+    icltop: Cloud top level
+    cloudc: Total cloud cover
+    clstr: Stratiform cloud cover
+
     Args:
-        qa: Specific humidity [g/kg] - PhysicsState.specific_humidity
-        rh: Relative humidity - PhysicsData.Humidity
-        precnv: Convection precipitation - PhysicsData.Convection
-        precls: Large-scale condensational precipitation - PhysicsData.Condensation
-        iptop: Cloud top level - PhysicsData.Convection
-        gse: Vertical gradient of dry static energy - 
-        fmask: Fraction land-sea mask
+        operand: A tuple containing the following arguments passed from `lax.cond`:
+            - state (PhysicsState): The current physical state of the model.
+            - physics_data (PhysicsData): The physics data container.
+            - parameters (Parameters): The model parameters.
+            - boundaries (BoundaryData): The boundary conditions.
+            - geometry (Geometry): The grid and geometric information.
+            - tendencies (PhysicsTendency): The initial tendencies.
 
     Returns:
-        icltop: Cloud top level
-        cloudc: Total cloud cover
-        clstr: Stratiform cloud cover
+        A tuple containing the updated state, physics_data, parameters,
+        boundaries, geometry, and unchanged physics_tendencies.
     """
 
     state, physics_data, parameters, boundaries, geometry, tendencies = operand

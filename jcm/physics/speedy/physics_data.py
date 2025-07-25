@@ -7,7 +7,14 @@ ablco2_ref = 6.0
 
 @tree_math.struct
 class LWRadiationData:
-    dfabs: jnp.ndarray # Flux of long-wave radiation absorbed in each atmospheric layer
+    """
+    Data related to long-wave radiation processes.
+
+    Attributes:
+        dfabs (jnp.ndarray): Flux of long-wave radiation absorbed in each atmospheric layer.
+        ftop (jnp.ndarray): Net upward flux of long-wave radiation at the top of the atmosphere.
+    """
+    dfabs: jnp.ndarray 
     ftop: jnp.ndarray
 
     @classmethod
@@ -25,30 +32,52 @@ class LWRadiationData:
         )
 
     def copy(self, dfabs=None, ftop=None):
+        """Creates a copy of the LWRadiationData instance, with optional new values."""
         return LWRadiationData(
             dfabs=dfabs if dfabs is not None else self.dfabs,
             ftop=ftop if ftop is not None else self.ftop,
         )
     
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class SWRadiationData:
-    qcloud: jnp.ndarray # Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
-    fsol: jnp.ndarray # Solar radiation at the top
-    rsds: jnp.ndarray # Total downward flux of short-wave radiation at the surface
-    rsns: jnp.ndarray # Net downward flux of short-wave radiation at the surface
-    ozone: jnp.ndarray # Ozone concentration in lower stratosphere
-    ozupp: jnp.ndarray# Ozone depth in upper stratosphere
-    zenit: jnp.ndarray # The zenith angle
-    stratz: jnp.ndarray # Polar night cooling in the stratosphere
-    gse: jnp.ndarray # Vertical gradient of dry static energy
-    icltop: jnp.ndarray # Cloud top level
-    cloudc: jnp.ndarray # Total cloud cover
-    cloudstr: jnp.ndarray # Stratiform cloud cover
-    ftop: jnp.ndarray # Net downward flux of short-wave radiation at the top of the atmosphere
-    dfabs: jnp.ndarray # Flux of short-wave radiation absorbed in each atmospheric layer
+    """
+    Data for short-wave radiation processes.
+
+    Attributes:
+        qcloud (jnp.ndarray): Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
+        fsol (jnp.ndarray): Solar radiation at the top of the atmosphere.
+        rsds (jnp.ndarray): Total downward flux of short-wave radiation at the surface.
+        rsns (jnp.ndarray): Net downward flux of short-wave radiation at the surface.
+        ozone (jnp.ndarray): Ozone concentration in the lower stratosphere.
+        ozupp (jnp.ndarray): Ozone depth in the upper stratosphere.
+        zenit (jnp.ndarray): The zenith angle.
+        stratz (jnp.ndarray): Polar night cooling in the stratosphere.
+        gse (jnp.ndarray): Vertical gradient of dry static energy.
+        icltop (jnp.ndarray): Cloud top level index.
+        cloudc (jnp.ndarray): Total cloud cover fraction.
+        cloudstr (jnp.ndarray): Stratiform cloud cover fraction.
+        ftop (jnp.ndarray): Net downward flux of short-wave radiation at the top of the atmosphere.
+        dfabs (jnp.ndarray): Flux of short-wave radiation absorbed in each atmospheric layer.
+        compute_shortwave (jnp.bool): Flag to indicate if shortwave radiation should be computed.
+    """
+    qcloud: jnp.ndarray 
+    fsol: jnp.ndarray 
+    rsds: jnp.ndarray 
+    rsns: jnp.ndarray 
+    ozone: jnp.ndarray 
+    ozupp: jnp.ndarray
+    zenit: jnp.ndarray 
+    stratz: jnp.ndarray 
+    gse: jnp.ndarray 
+    icltop: jnp.ndarray 
+    cloudc: jnp.ndarray 
+    cloudstr: jnp.ndarray 
+    ftop: jnp.ndarray 
+    dfabs: jnp.ndarray 
     compute_shortwave: jnp.bool
 
     @classmethod
@@ -92,6 +121,7 @@ class SWRadiationData:
         )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
+        """Creates a copy of the SWRadiationData instance, with optional new values."""
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -117,19 +147,33 @@ class SWRadiationData:
     
 @tree_math.struct
 class ModRadConData:
+    """
+    Data for the modified radiation-convection scheme.
+
+    Attributes:
+        ablco2 (jnp.float32): CO2 absorptivity.
+        alb_l (jnp.ndarray): Daily-mean albedo over land (bare-land + snow).
+        alb_s (jnp.ndarray): Daily-mean albedo over sea (open sea + sea ice).
+        albsfc (jnp.ndarray): Combined surface albedo (land + sea).
+        snowc (jnp.ndarray): Effective snow cover fraction.
+        tau2 (jnp.ndarray): Transmissivity of atmospheric layers.
+        st4a (jnp.ndarray): Blackbody emission from full and half atmospheric levels.
+        stratc (jnp.ndarray): Stratospheric correction term.
+        flux (jnp.ndarray): Radiative flux in different spectral bands.
+    """
     # Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intiailizd/held somewhere else?
     # Radiative properties of the surface (updated in fordate)
     # Albedo and snow cover arrays
-    ablco2: jnp.float32 # CO2 absorptivity
-    alb_l: jnp.ndarray  # Daily-mean albedo over land (bare-land + snow)
-    alb_s: jnp.ndarray  # Daily-mean albedo over sea (open sea + sea ice)
-    albsfc: jnp.ndarray # Combined surface albedo (land + sea)
-    snowc: jnp.ndarray  # Effective snow cover (fraction)
+    ablco2: jnp.float32
+    alb_l: jnp.ndarray
+    alb_s: jnp.ndarray
+    albsfc: jnp.ndarray
+    snowc: jnp.ndarray
     # Transmissivity and blackbody radiation (updated in radsw/radlw)
-    tau2: jnp.ndarray    # Transmissivity of atmospheric layers
-    st4a: jnp.ndarray     # Blackbody emission from full and half atmospheric levels
-    stratc: jnp.ndarray      # Stratospheric correction term
-    flux: jnp.ndarray         # Radiative flux in different spectral bands
+    tau2: jnp.ndarray
+    st4a: jnp.ndarray
+    stratc: jnp.ndarray
+    flux: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, node_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
@@ -160,6 +204,7 @@ class ModRadConData:
         )
 
     def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+        """Creates a copy of the ModRadConData instance, with optional new values."""
         return ModRadConData(
             ablco2=ablco2 if ablco2 is not None else self.ablco2,
             alb_l=alb_l if alb_l is not None else self.alb_l,
@@ -173,11 +218,20 @@ class ModRadConData:
         )
     
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class CondensationData:
-    precls: jnp.ndarray # Precipitation due to large-scale condensation
+    """
+    Data related to large-scale condensation processes.
+
+    Attributes:
+        precls (jnp.ndarray): Precipitation due to large-scale condensation.
+        dtlsc (jnp.ndarray): Temperature tendency due to large-scale condensation.
+        dqlsc (jnp.ndarray): Specific humidity tendency due to large-scale condensation.
+    """
+    precls: jnp.ndarray
     dtlsc: jnp.ndarray
     dqlsc: jnp.ndarray
 
@@ -198,6 +252,7 @@ class CondensationData:
         )
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
+        """Creates a copy of the CondensationData instance, with optional new values."""
         return CondensationData(
             precls=precls if precls is not None else self.precls,
             dtlsc=dtlsc if dtlsc is not None else self.dtlsc,
@@ -205,14 +260,24 @@ class CondensationData:
         )
     
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class ConvectionData:
-    se: jnp.ndarray # dry static energy
-    iptop: jnp.ndarray # Top of convection (layer index)
-    cbmf: jnp.ndarray # Cloud-base mass flux
-    precnv: jnp.ndarray # Convective precipitation [g/(m^2 s)]
+    """
+    Holds data related to convective processes.
+
+    Attributes:
+        se (jnp.ndarray): Dry static energy.
+        iptop (jnp.ndarray): Top of convection (layer index).
+        cbmf (jnp.ndarray): Cloud-base mass flux.
+        precnv (jnp.ndarray): Convective precipitation [g/(m^2 s)].
+    """
+    se: jnp.ndarray
+    iptop: jnp.ndarray
+    cbmf: jnp.ndarray
+    precnv: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
@@ -233,6 +298,7 @@ class ConvectionData:
         )
     
     def copy(self, se=None, iptop=None, cbmf=None, precnv=None):
+        """Creates a copy of the ConvectionData instance, with optional new values."""
         return ConvectionData(
             se=se if se is not None else self.se,
             iptop= iptop if iptop is not None else self.iptop,
@@ -240,17 +306,21 @@ class ConvectionData:
             precnv=precnv if precnv is not None else self.precnv
         )
     
-    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to
-    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
-    # or intended to be used.
     def isnan(self):
         self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float32)
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class HumidityData:
-    rh: jnp.ndarray # relative humidity
-    qsat: jnp.ndarray # saturation specific humidity
+    """
+    Data related to atmospheric humidity.
+
+    Attributes:
+        rh (jnp.ndarray): Relative humidity.
+        qsat (jnp.ndarray): Saturation specific humidity.
+    """
+    rh: jnp.ndarray
+    qsat: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, node_levels, rh=None, qsat=None):
@@ -267,29 +337,49 @@ class HumidityData:
         )
 
     def copy(self, rh=None, qsat=None):
+        """Creates a copy of the HumidityData instance, with optional new values."""
         return HumidityData(
             rh=rh if rh is not None else self.rh,
             qsat=qsat if qsat is not None else self.qsat
         )
     
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class SurfaceFluxData:
-    ustr: jnp.ndarray # u-stress
-    vstr: jnp.ndarray # v-stress
-    shf: jnp.ndarray # Sensible heat flux
-    evap: jnp.ndarray # Evaporation
-    rlus: jnp.ndarray # Upward flux of long-wave radiation at the surface
-    rlds: jnp.ndarray # Downward flux of long-wave radiation at the surface
-    rlns: jnp.ndarray # Net upward flux of long-wave radiation at the surface
-    hfluxn: jnp.ndarray # Net downward heat flux
-    tsfc: jnp.ndarray # Surface temperature
-    tskin: jnp.ndarray # Skin surface temperature
-    u0: jnp.ndarray # Near-surface u-wind
-    v0: jnp.ndarray # Near-surface v-wind
-    t0: jnp.ndarray # Near-surface temperature
+    """
+    Data for surface fluxes and related surface properties.
+
+    Attributes:
+        ustr (jnp.ndarray): u-component of wind stress.
+        vstr (jnp.ndarray): v-component of wind stress.
+        shf (jnp.ndarray): Sensible heat flux.
+        evap (jnp.ndarray): Evaporation flux.
+        rlus (jnp.ndarray): Upward flux of long-wave radiation at the surface.
+        rlds (jnp.ndarray): Downward flux of long-wave radiation at the surface.
+        rlns (jnp.ndarray): Net upward flux of long-wave radiation at the surface.
+        hfluxn (jnp.ndarray): Net downward heat flux into the surface.
+        tsfc (jnp.ndarray): Surface temperature.
+        tskin (jnp.ndarray): Skin surface temperature.
+        u0 (jnp.ndarray): Near-surface u-wind component.
+        v0 (jnp.ndarray): Near-surface v-wind component.
+        t0 (jnp.ndarray): Near-surface temperature.
+    """
+    ustr: jnp.ndarray
+    vstr: jnp.ndarray
+    shf: jnp.ndarray
+    evap: jnp.ndarray
+    rlus: jnp.ndarray
+    rlds: jnp.ndarray
+    rlns: jnp.ndarray
+    hfluxn: jnp.ndarray
+    tsfc: jnp.ndarray
+    tskin: jnp.ndarray
+    u0: jnp.ndarray
+    v0: jnp.ndarray
+    t0: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
@@ -328,6 +418,7 @@ class SurfaceFluxData:
         )
 
     def copy(self, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+        """Creates a copy of the SurfaceFluxData instance, with optional new values."""
         return SurfaceFluxData(
             ustr=ustr if ustr is not None else self.ustr,
             vstr=vstr if vstr is not None else self.vstr,
@@ -345,10 +436,18 @@ class SurfaceFluxData:
         )
     
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
 class LandModelData:
+    """
+    Data related to the land model.
+
+    Attributes:
+        stl_lm (jnp.ndarray): Soil temperature from the land model.
+        stl_am (jnp.ndarray): Soil temperature from the atmospheric model.
+    """
     stl_lm: jnp.ndarray
     stl_am: jnp.ndarray
     
@@ -367,17 +466,36 @@ class LandModelData:
         )
 
     def copy(self, stl_lm=None, stl_am=None):
+        """Creates a copy of the LandModelData instance, with optional new values."""
         return LandModelData(
             stl_am = stl_am if stl_am is not None else self.stl_am,
             stl_lm = stl_lm if stl_lm is not None else self.stl_lm
         )
 
     def isnan(self):
+        """Checks for NaN values in all fields of the instance."""
         return tree_util.tree_map(jnp.isnan, self)
 
 #TODO: Make an abstract PhysicsData class that just describes the interface (not all the fields will be needed for all models)
 @tree_math.struct
 class PhysicsData:
+    """
+    A container for all physics-related data structures.
+
+    This class aggregates data from various physical parameterization schemes
+    used within the climate model.
+
+    Attributes:
+        shortwave_rad (SWRadiationData): Data for short-wave radiation.
+        longwave_rad (LWRadiationData): Data for long-wave radiation.
+        convection (ConvectionData): Data for convection processes.
+        mod_radcon (ModRadConData): Data for the modified radiation-convection scheme.
+        humidity (HumidityData): Data for atmospheric humidity.
+        condensation (CondensationData): Data for large-scale condensation.
+        surface_flux (SurfaceFluxData): Data for surface fluxes.
+        date (DateData): Date and time information.
+        land_model (LandModelData): Data from the land model.
+    """
     shortwave_rad: SWRadiationData
     longwave_rad: LWRadiationData
     convection: ConvectionData
@@ -416,6 +534,7 @@ class PhysicsData:
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
 
     def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+        """Creates a copy of the PhysicsData instance, with optional new values."""
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -428,10 +547,12 @@ class PhysicsData:
             land_model=land_model if land_model is not None else self.land_model
         )
 
-    # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
-    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in 
-    # valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
     def isnan(self):
+        """
+        Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
+        a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in 
+        valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
+        """
         return PhysicsData(
             shortwave_rad=self.shortwave_rad.isnan(),
             longwave_rad=self.longwave_rad.isnan(),
@@ -445,4 +566,5 @@ class PhysicsData:
         )
     
     def any_true(self):
+        """Checks if any value in the entire PyTree is True."""
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
