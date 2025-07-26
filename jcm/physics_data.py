@@ -9,22 +9,31 @@ from jax import tree_util
 class SlaboceanModelData:
     
     sst : jnp.ndarray
+    hfluxn : jnp.ndarray
+    mld : jnp.ndarray
     
     @classmethod 
-    def zeros(cls, nodal_shape, sst=None):
+    def zeros(cls, nodal_shape, sst=None, mld=None, hfluxn=None):
         return SlaboceanModelData(
             sst = sst if sst is not None else jnp.zeros(nodal_shape),
+            mld = mld if mld is not None else jnp.zeros(nodal_shape),
+            hfluxn = hfluxn if hfluxn is not None else jnp.zeros(nodal_shape),
         )
 
     @classmethod 
-    def ones(cls, nodal_shape, sst=None):
+    def ones(cls, nodal_shape, sst=None, mld=None):
         return SlaboceanModelData(
             sst = sst if sst is not None else jnp.ones(nodal_shape),
+            mld = mld if mld is not None else jnp.ones(nodal_shape),
+            hfluxn = hfluxn if hfluxn is not None else jnp.ones(nodal_shape),
         )
 
-    def copy(self, sst=None):
+    def copy(self, sst=None, mld=None, hfluxn=None):
         return SlaboceanModelData(
             sst = sst if sst is not None else self.sst,
+            mld = mld if mld is not None else self.mld,
+            hfluxn = hfluxn if hfluxn is not None else self.hfluxn,
+            
         )
     
     def isnan(self):

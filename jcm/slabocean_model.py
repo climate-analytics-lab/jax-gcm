@@ -54,6 +54,8 @@ def slabocean_model_init(
         0.0,
     )
 
+    fmask_ocn = 1.0 - fmask_l
+    
     # Sea surface temperature
     sst_clim = jnp.asarray(xr.open_dataset(surface_filename)["sst"])
     
@@ -71,31 +73,41 @@ def slabocean_model_init(
     print("time_step in seconds = ", time_step_s)
     
     lat_rad = grid.latitudes
+    lon_rad = grid.longitudes
+
+    llon_rad, llat_rad = jnp.meshgrid(lon_rad, lat_rad, indexing="ij")
+    
     d_min = parameters.slabocean_model.d_min
     d_max = parameters.slabocean_model.d_max
-    d_ocn = d_max + (d_min - d_max) * jnp.cos(lat_rad)**3.0
+    d_ocn = d_max + (d_min - d_max) * jnp.cos(llat_rad)**3.0
+    d_ocn = d_ocn * 0 + 50
+    
+    d_ocn = d_ocn.at[fmask_ocn == 0].set(jnp.nan)
+    sst_init = sst_clim[:, :, 0].copy().at[fmask_ocn == 0].set(jnp.nan)
+    
+    if jnp.any( jnp.isnan(sst_init) == (fmask_ocn == 0) ):
+        print("fmask_ocn and sst_init do share the same mask.")
+    else:
+        raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
+    
 
-    sst_init = sst_clim[:, :, 0].copy()
-
-    print("sst_init: ")
-    sst_i = np.array(sst_init)
-    sst_i[sst_i > 1e3] = np.nan
-    print("mean: ", np.nanmean(sst_i))
-    print(sst_i)
-
-
-    cd = physical_constants.cp_sw * d_ocn
-    tau = jnp.ones_like(cd) * parameters.slabocean_model.tau_ocn
+    cd = physical_constants.rho_sw * physical_constants.cp_sw * d_ocn 
+    tau = jnp.ones_like(cd) * parameters.slabocean_model.tau_ocn * jnp.inf
 
     ocn_time_factor = 1.0 + time_step_s / tau
     ocn_cd_factor = time_step_s / cd
+
+    print("ocn_time_factor: ", ocn_time_factor)
+    print("ocn_cd_factor: ", ocn_cd_factor)
     
     #parameters.slabocean_model.c_0land/(1.0+dmask*parameters.slabocean_model.tdland)
 
     return boundaries.copy(
         fmask_l   = fmask_l,
+        fmask_ocn = fmask_ocn,
         sst_clim  = sst_clim,
         sst = sst_init,
+        ocn_mld = d_ocn,
         ocn_time_factor = ocn_time_factor,
         ocn_cd_factor = ocn_cd_factor,
     )
@@ -135,23 +147,30 @@ def couple_sea_atm(
     #if boundaries.sea_coupling_flag == True:
     #    pass
 
+
+    hfluxn = physics_data.surface_flux.hfluxn[:, :, 1] * 0 + physical_constants.rho_sw * physical_constants.cp_sw * boundaries.ocn_mld * 0.1 / 3600.0
+    
     sst_new = run_slabocean_model(
-        boundaries.sst,
-        physics_data.surface_flux.hfluxn[:, :, 0],
+        #boundaries.sst,
+        physics_data.slabocean_model.sst,
+        hfluxn,
         boundaries.ocn_time_factor,
         boundaries.ocn_cd_factor,
         boundaries.sst_clim[:,:,day],
-        boundaries.sst_clim[:,:,day+1],
-        physics_data.surface_flux.hfluxn[:, :, 0] * 0,
+        boundaries.sst_clim[:,:,day],
+        physics_data.surface_flux.hfluxn[:, :, 1] * 0,
     )
+
+    sst_new = sst_new * 0 + day
     
     #print("New SST?")
     #sst_new = boundaries.sst.copy()
     #print(np.sum(sst_new))#array(sst_new).sum())
     # update land physics data
-    slabocean_model_data = physics_data.slabocean_model.copy(sst=sst_new)
+    slabocean_model_data = physics_data.slabocean_model.copy(sst=sst_new, mld=boundaries.ocn_mld, hfluxn=hfluxn)
     physics_data = physics_data.copy(slabocean_model=slabocean_model_data)
     physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
+    
 
     return physics_tendency, physics_data
 
@@ -168,12 +187,9 @@ def run_slabocean_model(
 ):
 
     sst_anom = sst - sst_clim_1
-    hfluxn_anom = hfluxn - hfluxn_clim
-    
+    hfluxn_anom = hfluxn - hfluxn_clim    
     new_sst_anom = time_factor * ( sst_anom + hfluxn_anom * cd_factor )
-
     new_sst = new_sst_anom + sst_clim_2
-
  
     return new_sst
 

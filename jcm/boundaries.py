@@ -26,13 +26,13 @@ class BoundaryData:
     land_coupling_flag: jnp.bool # 0 or 1
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
-    fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
-    
+    fmask_ocn: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
     sea_coupling_flag:  jnp.bool    # 0 or 1
     sst_clim:           jnp.ndarray # climatology for sea surface temperature (sst)
     sic_clim:           jnp.ndarray # climatology for sea ice concentration (sic)
     sst:                jnp.ndarray # total sst
     sic:                jnp.ndarray # total sic
+    ocn_mld:            jnp.ndarray # mixed layer depth
     ocn_time_factor:             jnp.ndarray # heat capacity for ocean
     ocn_cd_factor:            jnp.ndarray # dissipation time for ocean
 
@@ -41,8 +41,9 @@ class BoundaryData:
     def zeros(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-              fmask_s=None,lfluxland=None, land_coupling_flag=None, 
-              sea_coupling_flag=None, sst_clim=None, sic_clim=None, sst=None, sic=None, ocn_time_factor=None, ocn_cd_factor=None):
+              fmask_ocn=None,lfluxland=None, land_coupling_flag=None, 
+              sea_coupling_flag=None, sst_clim=None, sic_clim=None, sst=None, sic=None,
+              ocn_mld=None, ocn_time_factor=None, ocn_cd_factor=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -60,12 +61,13 @@ class BoundaryData:
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
+            fmask_ocn=fmask_ocn if fmask_ocn is not None else jnp.zeros((nodal_shape)),
             sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.zeros((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.zeros((nodal_shape)+(365,)),
             sst=sst if sst is not None else jnp.zeros((nodal_shape)),
             sic=sic if sic is not None else jnp.zeros((nodal_shape)),
+            ocn_mld=ocn_mld if ocn_mld is not None else jnp.zeros((nodal_shape)),
             ocn_time_factor=ocn_time_factor if ocn_time_factor is not None else jnp.zeros((nodal_shape)),
             ocn_cd_factor=ocn_time_factor if ocn_cd_factor is not None else jnp.zeros((nodal_shape)),
         )
@@ -74,12 +76,13 @@ class BoundaryData:
     def ones(self,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-             fmask_s=None,lfluxland=None, land_coupling_flag=None, 
+             fmask_ocn=None,lfluxland=None, land_coupling_flag=None, 
              sea_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
              sst = None,
              sic = None,
+             ocn_mld = None,
              ocn_time_factor=None,
              ocn_cd_factor=None,
     ):
@@ -100,25 +103,27 @@ class BoundaryData:
             land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
+            fmask_ocn=fmask_ocn if fmask_ocn is not None else jnp.ones((nodal_shape)),
             sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else False,
             sst_clim=sst_clim if sst_clim is not None else jnp.ones((nodal_shape)+(365,)),
             sic_clim=sic_clim if sic_clim is not None else jnp.ones((nodal_shape)+(365,)),
             sst=sst if sst is not None else jnp.ones((nodal_shape)),
             sic=sic if sic is not None else jnp.ones((nodal_shape)),
+            ocn_mld=ocn_mld if ocn_mld is not None else jnp.ones((nodal_shape)),
             ocn_time_factor=ocn_time_factor if ocn_time_factor is not None else jnp.ones((nodal_shape)),
             ocn_cd_factor=ocn_cd_factor if ocn_cd_factor is not None else jnp.ones((nodal_shape)),
         )
 
     def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
-             snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
+             snowd_am=None,soilw_am=None,tsea=None,fmask_ocn=None,lfluxland=None,
              land_coupling_flag=None,
              sea_coupling_flag=None,
              sst_clim=None,
              sic_clim=None,
              sst = None,
              sic = None,
+             ocn_mld = None,
              ocn_time_factor=None,
              ocn_cd_factor=None,
     ):
@@ -139,12 +144,13 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
-            fmask_s=fmask_s if fmask_s is not None else self.fmask_s,
+            fmask_ocn=fmask_ocn if fmask_ocn is not None else self.fmask_ocn,
             sea_coupling_flag=sea_coupling_flag if sea_coupling_flag is not None else self.sea_coupling_flag,
             sst_clim=sst_clim if sst_clim is not None else self.sst_clim,
             sic_clim=sic_clim if sic_clim is not None else self.sic_clim,
             sst=sst if sst is not None else self.sst,
             sic=sic if sic is not None else self.sic,
+            ocn_mld=ocn_mld if ocn_mld is not None else self.ocn_mld,
             ocn_time_factor=ocn_time_factor if ocn_time_factor is not None else self.ocn_time_factor,
             ocn_cd_factor=ocn_cd_factor if ocn_cd_factor is not None else self.ocn_cd_factor,
         )
