@@ -20,7 +20,7 @@ sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
 epssw = 0.020 # Fraction of incoming solar radiation absorbed by ozone
 
-gamma  = 6.5       # Reference temperature lapse rate (-dT/dz in deg/km)
+gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
 hscale = 7.5       # Reference scale height for pressure (in km)
 hshum  = 2.5       # Reference scale height for specific humidity (in km)
 refrh1 = 0.7       # Reference relative humidity of near-surface air
