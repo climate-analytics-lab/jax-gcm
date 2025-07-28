@@ -36,8 +36,7 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
     rgam = rgas * gamma / (1000.0 * grav)
     
     # Get sigma levels (fsg in SPEEDY) - use layer midpoints
-    # Make a copy to ensure it's differentiable
-    sigma_levels = jnp.array(geometry.fsg)  # These are the full sigma levels
+    sigma_levels = geometry.fsg  # These are the full sigma levels
     
     # Get number of layers - use shape of sigma_levels to avoid accessing nodal_shape
     layers = sigma_levels.shape[0]
@@ -71,12 +70,10 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
     Returns:
         Vertical profile array of shape (layers,)
     """
-    # SPEEDY constants from physical_constants.py
     qexp = hscale / hshum
     
-    # Get sigma levels (fsg in SPEEDY) - use layer midpoints
-    # Make a copy to ensure it's differentiable
-    sigma_levels = jnp.array(geometry.fsg)
+    # Get sigma levels - use layer midpoints
+    sigma_levels = geometry.fsg
     
     # Get number of layers - use shape of sigma_levels to avoid accessing nodal_shape
     layers = sigma_levels.shape[0]
@@ -109,12 +106,10 @@ def compute_temperature_correction_horizontal(boundaries: BoundaryData, geometry
     Returns:
         Horizontal correction array of shape (lon, lat)
     """
-    # SPEEDY constants from physical_constants.py
     gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
     
-    # Apply correction: gamlat * orography
-    # Ensure orography is a JAX array for gradients
-    corh = gamlat * jnp.array(boundaries.orog)
+    # Apply correction: gamlat * phis0 (spectrally-filtered surface geopotential)
+    corh = gamlat * boundaries.phis0
     
     return corh
 
@@ -122,28 +117,62 @@ def compute_temperature_correction_horizontal(boundaries: BoundaryData, geometry
 def compute_humidity_correction_horizontal(
     boundaries: BoundaryData, 
     geometry: Geometry,
-    surface_temperature: jnp.ndarray
+    temperature_correction: jnp.ndarray,
+    land_temperature: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Compute horizontal humidity correction in grid space.
     
-    This is a simplified version of the SPEEDY humidity correction.
-    The full SPEEDY implementation involves complex saturation calculations.
+    This replicates the full SPEEDY humidity correction from forcing.f90:
+    1. Calculate surface temperature (land/sea mixture)
+    2. Calculate reference temperature with orographic correction
+    3. Calculate pressure adjustment
+    4. Calculate saturation specific humidity at both conditions
+    5. Apply humidity correction: corh = refrh1 * (qref - qsfc)
     
     Args:
         boundaries: Boundary data containing orography and masks
         geometry: Model geometry
-        surface_temperature: Surface temperature field
+        temperature_correction: Horizontal temperature correction (tcorh)
+        land_temperature: Land surface temperature from land model
         
     Returns:
         Horizontal correction array of shape (lon, lat)
     """
-    # For now, implement a simplified correction proportional to orography
-    # This can be enhanced later with the full saturation calculation
-    # Simplified correction: proportional to orography and temperature gradients
-    # In the full implementation, this would involve saturation mixing ratio calculations
-    # Ensure orography is a JAX array for gradients
-    corh = refrh1 * 0.001 * jnp.array(boundaries.orog)  # Simplified scaling
+    from jcm.physics.speedy.humidity import get_qsat
+    
+    # 1. Calculate surface temperature (land/sea mixture)
+    # tsfc = fmask_l * stl_am + fmask_s * sst_am
+    tsfc = boundaries.fmask_l * land_temperature + boundaries.fmask_s * boundaries.tsea
+    
+    # 2. Calculate reference temperature with orographic correction
+    # tref = tsfc + corh (where corh is the temperature correction)
+    tref = tsfc + temperature_correction
+    
+    # 3. Calculate pressure adjustment due to temperature difference
+    # In SPEEDY: pexp = 1./(rgas * gamlat(j)), but gamlat is constant = gamma/(1000*grav)
+    # So pexp = 1000*grav/(rgas*gamma)
+    pexp = 1000.0 * grav / (rgas * gamma)
+    
+    # psfc = (tsfc/tref)^pexp
+    psfc = (tsfc / tref) ** pexp
+    
+    # 4. Calculate saturation specific humidity at reference and surface conditions
+    # Note: get_qsat expects (temperature, normalized_pressure, sigma_level)
+    # For surface calculations, we use sigma=-1.0 and 1.0 as in SPEEDY
+    
+    # Create dummy normalized pressure (psfc/psfc = 1.0 everywhere)
+    normalized_pressure = jnp.ones_like(psfc)
+    
+    # qref = get_qsat(tref, psfc/psfc, -1.0) - reference conditions
+    qref = get_qsat(tref, normalized_pressure, -1.0)
+    
+    # qsfc = get_qsat(tsfc, psfc, 1.0) - surface conditions  
+    qsfc = get_qsat(tsfc, psfc, 1.0)
+    
+    # 5. Calculate humidity correction
+    # corh = refrh1 * (qref - qsfc)
+    corh = refrh1 * (qref - qsfc)
     
     return corh
 
@@ -183,11 +212,10 @@ def get_orographic_correction_tendencies(
     # Compute horizontal corrections
     tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
     
-    # For humidity correction, we need surface temperature
-    # Use safer indexing for gradients
-    layers = state.temperature.shape[0]
-    surface_temp = state.temperature[layers-1, :, :]  # Bottom level
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, surface_temp)
+    # For humidity correction, we need the temperature correction and land temperature
+    # Get land temperature from physics data (land model)
+    land_temperature = physics_data.land_model.stl_am
+    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
@@ -197,7 +225,7 @@ def get_orographic_correction_tendencies(
     # To replicate this in JAX-GCM's tendency framework, we convert the instantaneous
     # correction to an equivalent tendency by dividing by the model timestep.
     # This ensures the same total correction is applied over one integration step.
-    #
+    
     # Use the actual model timestep from the physics_data for faithful reproduction of SPEEDY
     model_timestep_seconds = physics_data.date.dt_seconds
     temp_tendency = temp_correction / model_timestep_seconds
@@ -221,7 +249,8 @@ def apply_orographic_corrections_to_state(
     state: PhysicsState,
     boundaries: BoundaryData,
     geometry: Geometry,
-    parameters: Parameters
+    parameters: Parameters,
+    land_temperature: jnp.ndarray = None
 ) -> PhysicsState:
     """
     Apply orographic corrections directly to a physics state (for testing).
@@ -234,6 +263,7 @@ def apply_orographic_corrections_to_state(
         boundaries: Boundary data containing orography
         geometry: Model geometry
         parameters: SPEEDY parameters
+        land_temperature: Land surface temperature (if None, uses a default value)
         
     Returns:
         Corrected physics state
@@ -244,10 +274,13 @@ def apply_orographic_corrections_to_state(
     
     # Compute horizontal corrections
     tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
-    # Use safer indexing for gradients
-    layers = state.temperature.shape[0]
-    surface_temp = state.temperature[layers-1, :, :]
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, surface_temp)
+    
+    # For humidity correction, use provided land temperature or default value
+    if land_temperature is None:
+        # Use a default land temperature (288K) for testing
+        land_temperature = jnp.full(boundaries.orog.shape, 288.0)
+    
+    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
     
     # Apply corrections
     temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
