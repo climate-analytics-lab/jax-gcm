@@ -198,10 +198,8 @@ def get_orographic_correction_tendencies(
     # correction to an equivalent tendency by dividing by the model timestep.
     # This ensures the same total correction is applied over one integration step.
     #
-    # Since we don't have direct access to the actual timestep here, we use JAX-GCM's
-    # default timestep (30 minutes = 1800 seconds). This is much more faithful to
-    # SPEEDY's behavior than using an arbitrary timescale.
-    model_timestep_seconds = 30.0 * 60.0  # 30 minutes in seconds (JAX-GCM default)
+    # Use the actual model timestep from the physics_data for faithful reproduction of SPEEDY
+    model_timestep_seconds = physics_data.date.dt_seconds
     temp_tendency = temp_correction / model_timestep_seconds
     humidity_tendency = humidity_correction / model_timestep_seconds
     
