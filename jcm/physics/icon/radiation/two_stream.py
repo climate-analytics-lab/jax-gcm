@@ -88,8 +88,8 @@ def layer_reflectance_transmittance(
     # Use 88 as threshold since exp(90) = inf, so be conservative
     large_tau = lambda_tau >= 88
     
-    exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
-    exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
+    # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
+    # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
     # Helper terms
     term1 = 1.0 / (lambda_val + gamma1)
@@ -97,8 +97,8 @@ def layer_reflectance_transmittance(
     
     # For large optical depths, avoid NaN by using safe values
     # Use finite values instead of inf for subsequent calculations
-    exp_plus_safe = jnp.where(large_tau, 1.0, exp_plus)
-    exp_minus_safe = jnp.where(large_tau, 0.0, exp_minus)
+    exp_plus_safe = jnp.where(large_tau, 1.0, jnp.exp(lambda_tau))
+    exp_minus_safe = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
     denom = exp_plus_safe - gamma2**2 / gamma1**2 * exp_minus_safe
     # Ensure denominator is never zero

@@ -431,7 +431,7 @@ def radiation_scheme(
     )
     
     # Ensure SW heating is zero when no sunlight
-    sw_heating_rate = jnp.where(cos_zenith > 0, sw_heating_rate, 0.0)
+    sw_heating_rate = 0 * jnp.where(cos_zenith > 0, sw_heating_rate, 0.0)
     
     total_heating = lw_heating_rate + sw_heating_rate
     

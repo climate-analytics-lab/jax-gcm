@@ -11,7 +11,7 @@ Date: 2025-01-09
 import jax
 from jax import jit
 import jax.numpy as jnp
-import tree_math
+import jax.tree_util as jtu
 from collections import abc
 from typing import Callable, Tuple, Optional
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -69,14 +69,14 @@ class IconPhysics(Physics):
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
-            get_simple_aerosol,  # Aerosol before radiation
+            get_simple_aerosol,  # Aerosol before radiation FIXME: get_CDNC issue
             apply_chemistry,     # Chemistry for ozone, methane etc.
-            apply_radiation,     # Radiation early for surface fluxes
-            apply_convection, 
+            apply_radiation,     # Radiation early for surface fluxes FIXME: shortwave is blowing up temperature in bottom two layers (cooling bottom layer heating up next layer - weird because the heating rate is large and positive for the bottom layer and negative for the next layer)
+            apply_convection,
             apply_clouds,
             apply_microphysics,
-            apply_surface,       # Surface after radiation
-            apply_vertical_diffusion, 
+            # apply_surface,       # Surface after radiation FIXME: blowing up the second lowest layer if convection is on
+            # apply_vertical_diffusion, # FIXME: takes a really long time (~6m for one step not jitted, ~1m15s jitted. For comparison, the rest of the physics runs in ~10s jitted)
             apply_gravity_waves
         ]
     
@@ -106,6 +106,11 @@ class IconPhysics(Physics):
             geometry.nodal_shape[0],
             date=date
         )
+
+        def flip_vertical(x):
+            return (x.reshape((1,) * (3 - x.ndim) + x.shape)[::-1]).reshape(x.shape)
+        
+        state = jtu.tree_map(flip_vertical, state)
 
         # Initialize zero tendencies with tracer tendencies
         tracer_tends = {name: jnp.zeros_like(tracer) for name, tracer in state.tracers.items()}
@@ -155,6 +160,8 @@ class IconPhysics(Physics):
         
         # OPTIMIZATION: Single reshape to 3D only at the very end
         tendencies = self._reshape_tendencies_to_3d(accumulated_tendencies, nlev, nlat, nlon)
+
+        tendencies = jtu.tree_map(flip_vertical, tendencies)
         
         return tendencies, physics_data
     
