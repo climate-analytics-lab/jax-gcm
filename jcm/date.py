@@ -192,40 +192,22 @@ class DateData:
     model_step: jnp.int32
 
     @classmethod
-<<<<<<< HEAD
     def zeros(cls, model_time=None, model_year=None, model_step=None):
         return cls(
-=======
-    def zeros(self, model_time=None, model_year=None, model_step=None):
-        """Creates a `DateData` instance initialized to a default (zero) time."""
-        return DateData(
->>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 0.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
-<<<<<<< HEAD
     def set_date(cls, model_time, model_year=None, model_step=None):
         return cls(
-=======
-    def set_date(self, model_time, model_year=None, model_step=None):
-        """Creates a `DateData` instance for a specific model time."""
-        return DateData(
->>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time),
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
 
     @classmethod
-<<<<<<< HEAD
     def ones(cls, model_time=None, model_year=None, model_step=None):
         return cls(
-=======
-    def ones(self, model_time=None, model_year=None, model_step=None):
-        """Creates a `DateData` instance representing the end of a year (`tyear=1.0`)."""
-        return DateData(
->>>>>>> f61441e (Updated all files to keep them up to date with the docstring requirements)
           tyear=fraction_of_year_elapsed(model_time) if model_time is not None else 1.0,
           model_year=model_year if model_year is not None else 1950,
           model_step=model_step if model_step is not None else jnp.int32(0))
