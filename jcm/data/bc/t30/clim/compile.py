@@ -1,5 +1,4 @@
 import xarray as xr
-import os
 from pathlib import Path
 
 # Set the input directory path
