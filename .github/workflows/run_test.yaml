@@ -27,7 +27,7 @@ jobs:
       - name: Lint with Sphinx-lint
         run: |
           pip install sphinx-lint
-          sphinx-lint ../../docs/
+          sphinx-lint docs
         continue-on-error: true
       - name: Test with pytest
         run: |
