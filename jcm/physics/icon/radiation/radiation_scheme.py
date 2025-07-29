@@ -114,7 +114,8 @@ def prepare_radiation_state(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
     pressure_levels: jnp.ndarray,
-    height_levels: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    air_density: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
@@ -131,7 +132,8 @@ def prepare_radiation_state(
         temperature: Temperature (K) [nlev]
         specific_humidity: Specific humidity (kg/kg) [nlev]
         pressure_levels: Pressure (Pa) [nlev]
-        height_levels: Height (m) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
+        air_density: Air density (kg/m³) [nlev]
         cloud_water: Cloud water content (kg/kg) [nlev]
         cloud_ice: Cloud ice content (kg/kg) [nlev]
         cloud_fraction: Cloud fraction (0-1) [nlev]
@@ -160,14 +162,6 @@ def prepare_radiation_state(
             1e-6  # Troposphere
         )
     
-    # Calculate air density
-    air_density = pressure_levels / (physical_constants.rd * temperature)
-    
-    # Layer thickness from height levels
-    layer_thickness = jnp.zeros(nlev)
-    layer_thickness = layer_thickness.at[:-1].set(height_levels[1:] - height_levels[:-1])  # Positive thickness
-    layer_thickness = layer_thickness.at[-1].set(layer_thickness[-2])  # Assume same as layer above
-    
     # Convert cloud water/ice from kg/kg to kg/m²
     # cloud_path = mixing_ratio * air_density * layer_thickness
     cloud_water_path = cloud_water * air_density * layer_thickness
@@ -184,8 +178,8 @@ def prepare_radiation_state(
     pressure_interfaces = pressure_interfaces.at[-1].set(pressure_levels[-1] * 1.1)  # Slight increase for surface
     
     return RadiationState(
-        cos_zenith=jnp.array([cos_zenith]),
-        daylight_fraction=jnp.array([jnp.where(cos_zenith > 0, 1.0, 0.0)]),
+        cos_zenith=cos_zenith[jnp.newaxis],
+        daylight_fraction=jnp.where(cos_zenith > 0, 1.0, 0.0)[jnp.newaxis],
         temperature=temperature,
         pressure=pressure_levels,
         pressure_interfaces=pressure_interfaces,
@@ -194,7 +188,7 @@ def prepare_radiation_state(
         cloud_fraction=cloud_fraction,
         cloud_water_path=cloud_water_path,
         cloud_ice_path=cloud_ice_path,
-        surface_temperature=jnp.array([temperature[-1]]),  # Bottom level temperature
+        surface_temperature=temperature[-1:],  # Bottom level temperature
         surface_albedo_vis=jnp.array([0.15]),  # Visible albedo
         surface_albedo_nir=jnp.array([0.15]),  # Near-IR albedo
         surface_emissivity=jnp.array([0.98]),
@@ -208,8 +202,9 @@ def prepare_radiation_state(
 def radiation_scheme(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
-    surface_pressure: jnp.ndarray,
-    geopotential: jnp.ndarray,
+    pressure_levels: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    air_density: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
@@ -228,8 +223,9 @@ def radiation_scheme(
     Args:
         temperature: Temperature (K) [nlev]
         specific_humidity: Specific humidity (kg/kg) [nlev]
-        surface_pressure: Surface pressure (normalized)
-        geopotential: Geopotential (m²/s²) [nlev]
+        pressure_levels: Pressure (Pa) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
+        air_density: Air density (kg/m³) [nlev]
         cloud_water: Cloud water content (kg/kg) [nlev]
         cloud_ice: Cloud ice content (kg/kg) [nlev]
         cloud_fraction: Cloud fraction (0-1) [nlev]
@@ -294,13 +290,6 @@ def radiation_scheme(
         cdnc_factor = aerosol_data.cdnc_factor[0] 
     
     # Now perform the actual radiation calculation
-    nlev = temperature.shape[0]
-    
-    # Create simple sigma levels for pressure calculation
-    sigma_levels = jnp.linspace(0.0, 1.0, nlev)
-    surface_pressure_array = jnp.array([surface_pressure])
-    pressure_levels = calculate_pressure_levels(surface_pressure_array, sigma_levels)[:, 0]
-    height_levels = geopotential_to_height(geopotential)
     
     # Solar radiation calculations
     toa_flux, cos_zenith = calculate_solar_radiation_gcm(
@@ -316,7 +305,8 @@ def radiation_scheme(
         temperature=temperature,
         specific_humidity=specific_humidity,
         pressure_levels=pressure_levels,
-        height_levels=height_levels,
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
@@ -326,18 +316,7 @@ def radiation_scheme(
         aerosol_ssa=aerosol_ssa,
         aerosol_asymmetry=aerosol_asymmetry
     )
-    
-    # Calculate layer properties
-    air_density = pressure_levels / (physical_constants.rd * temperature)
-    layer_thickness = jnp.zeros(nlev)
-    layer_thickness = layer_thickness.at[:-1].set(height_levels[1:] - height_levels[:-1])
-    layer_thickness = layer_thickness.at[-1].set(layer_thickness[-2])
-    
-    layer_properties = {
-        'thickness': layer_thickness,
-        'density': air_density
-    }
-    
+        
     # Calculate gas optical depths
     gas_tau_lw = gas_optical_depth_lw(
         temperature=temperature,
@@ -345,17 +324,17 @@ def radiation_scheme(
         h2o_vmr=rad_state.h2o_vmr,
         o3_vmr=rad_state.o3_vmr,
         co2_vmr=co2_vmr,
-        layer_thickness=layer_properties['thickness'],
-        air_density=layer_properties['density']
+        layer_thickness=layer_thickness,
+        air_density=air_density,
     )
     
     gas_tau_sw = gas_optical_depth_sw(
-        pressure=pressure_levels,
         temperature=temperature,
+        pressure=pressure_levels,
         h2o_vmr=rad_state.h2o_vmr,
         o3_vmr=rad_state.o3_vmr,
-        layer_thickness=layer_properties['thickness'],
-        air_density=layer_properties['density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cos_zenith=cos_zenith
     )
     
@@ -393,8 +372,7 @@ def radiation_scheme(
     )
     
     # Surface properties
-    surface_temp = temperature[-1]
-    surface_planck = planck_bands_lw(jnp.array([surface_temp]), lw_band_limits)[0]
+    surface_planck = planck_bands_lw(temperature[-1:], lw_band_limits)[0]
     
     # Calculate longwave fluxes
     flux_up_lw, flux_down_lw = longwave_fluxes(
@@ -431,7 +409,7 @@ def radiation_scheme(
     )
     
     # Ensure SW heating is zero when no sunlight
-    sw_heating_rate = 0 * jnp.where(cos_zenith > 0, sw_heating_rate, 0.0)
+    sw_heating_rate = jnp.where(cos_zenith > 0, sw_heating_rate, 0.0)
     
     total_heating = lw_heating_rate + sw_heating_rate
     
@@ -440,7 +418,9 @@ def radiation_scheme(
     toa_sw_down = jnp.sum(flux_down_sw[0, :])
     toa_sw_up = jnp.sum(flux_up_sw[0, :])
     surface_sw_down = jnp.sum(flux_down_sw[-1, :])
+    surface_sw_up = jnp.sum(flux_up_sw[-1, :])
     surface_lw_down = jnp.sum(flux_down_lw[-1, :])
+    surface_lw_up = jnp.sum(flux_up_lw[-1, :])
     
     # Create output structures
     tendencies = RadiationTendencies(
@@ -450,7 +430,7 @@ def radiation_scheme(
     )
     
     diagnostics = RadiationData(
-        cos_zenith=jnp.array([cos_zenith]),
+        cos_zenith=cos_zenith[jnp.newaxis],
         sw_flux_up=flux_up_sw,
         sw_flux_down=flux_down_sw,
         lw_flux_up=flux_up_lw,
@@ -461,9 +441,9 @@ def radiation_scheme(
         toa_sw_up=toa_sw_up,
         toa_lw_up=olr,
         surface_sw_down=surface_sw_down,
-        surface_sw_up=jnp.sum(flux_up_sw[-1, :]),
+        surface_sw_up=surface_sw_up,
         surface_lw_down=surface_lw_down,
-        surface_lw_up=jnp.sum(flux_up_lw[-1, :]),
+        surface_lw_up=surface_lw_up,
     )
     
     return tendencies, diagnostics

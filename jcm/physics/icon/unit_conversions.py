@@ -121,7 +121,7 @@ def calculate_layer_thickness(
     # Use hydrostatic approximation: dz = dp/(rho*g)
     # Since pressure increases downward, dp is positive and gives positive dz
     # For levels 1 to nlev-1
-    dp = pressure_levels[1:] - pressure_levels[:-1]
+    dp = jnp.diff(pressure_levels, axis=0)
     rho_mid = 0.5 * (air_density[1:] + air_density[:-1])
     dz = dz.at[1:].set(dp / (rho_mid * grav))
     

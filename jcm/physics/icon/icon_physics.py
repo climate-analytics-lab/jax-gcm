@@ -11,9 +11,8 @@ Date: 2025-01-09
 import jax
 from jax import jit
 import jax.numpy as jnp
-import jax.tree_util as jtu
 from collections import abc
-from typing import Callable, Tuple, Optional
+from typing import Tuple, Optional
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
@@ -69,14 +68,14 @@ class IconPhysics(Physics):
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
-            get_simple_aerosol,  # Aerosol before radiation FIXME: get_CDNC issue
-            apply_chemistry,     # Chemistry for ozone, methane etc.
-            apply_radiation,     # Radiation early for surface fluxes FIXME: shortwave is blowing up temperature in bottom two layers (cooling bottom layer heating up next layer - weird because the heating rate is large and positive for the bottom layer and negative for the next layer)
+            get_simple_aerosol,            # Aerosol before radiation FIXME: get_CDNC issue
+            apply_chemistry,               # Chemistry for ozone, methane etc.
+            apply_radiation,               # Radiation early for surface fluxes. FIXME: revisit two-stream coefficients--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere.
             apply_convection,
             apply_clouds,
             apply_microphysics,
-            # apply_surface,       # Surface after radiation FIXME: blowing up the second lowest layer if convection is on
-            # apply_vertical_diffusion, # FIXME: takes a really long time (~6m for one step not jitted, ~1m15s jitted. For comparison, the rest of the physics runs in ~10s jitted)
+            apply_surface,                 # Surface after radiation
+            apply_vertical_diffusion,      # FIXME: check for vertical ordering issues # FIXME: takes a really long time (~6m for one step not jitted, ~1m15s jitted. For comparison, the rest of the physics runs in ~10s jitted)
             apply_gravity_waves
         ]
     
@@ -88,7 +87,7 @@ class IconPhysics(Physics):
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
         """
-        Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
+        Compute the physical tendencies given the current state and data structs. Loops through the ICON physics terms, accumulating the tendencies.
 
         Args:
             state: Current state variables
@@ -106,11 +105,6 @@ class IconPhysics(Physics):
             geometry.nodal_shape[0],
             date=date
         )
-
-        def flip_vertical(x):
-            return (x.reshape((1,) * (3 - x.ndim) + x.shape)[::-1]).reshape(x.shape)
-        
-        state = jtu.tree_map(flip_vertical, state)
 
         # Initialize zero tendencies with tracer tendencies
         tracer_tends = {name: jnp.zeros_like(tracer) for name, tracer in state.tracers.items()}
@@ -161,8 +155,6 @@ class IconPhysics(Physics):
         # OPTIMIZATION: Single reshape to 3D only at the very end
         tendencies = self._reshape_tendencies_to_3d(accumulated_tendencies, nlev, nlat, nlon)
 
-        tendencies = jtu.tree_map(flip_vertical, tendencies)
-        
         return tendencies, physics_data
     
     def _reshape_state_to_columns(self, state: PhysicsState, nlev: int, ncols: int) -> PhysicsState:
@@ -467,7 +459,6 @@ def _prepare_common_physics_state(
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-
     """
     Prepare common physics variables that are used by multiple physics modules.
     
@@ -497,15 +488,17 @@ def _prepare_common_physics_state(
     height_levels = state.geopotential / physical_constants.grav
     
     # Calculate height at interfaces (approximate using hydrostatic)
-    dz = jnp.diff(height_levels, axis=0, prepend=height_levels[0:1, :] + 1000.0)
-    height_half = jnp.cumsum(dz, axis=0) - dz
-    
+    height_half = jnp.concatenate((
+        height_levels[:1] + 1000.0, # FIXME: choice of offset
+        (height_levels[1:] + height_levels[:-1]) / 2,
+        0 * height_levels[-1:]), axis=0)
+
     # Calculate air density
     rho = pressure_levels / (physical_constants.rd * state.temperature)
     
     # Calculate layer thickness
     dp = jnp.diff(pressure_half, axis=0)
-    dz_full = -dp / (rho * physical_constants.grav)
+    dz_full = dp / (rho * physical_constants.grav)
     
     # Calculate relative humidity
     es = 611.2 * jnp.exp(17.67 * (state.temperature - 273.15) / (state.temperature - 29.65))
@@ -562,9 +555,7 @@ def apply_radiation(state: PhysicsState,
     boundaries: BoundaryData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-
     """Apply radiation heating rates"""
-    p0 = physical_constants.p0
     
     # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
     nlev, ncols = state.temperature.shape
@@ -609,12 +600,15 @@ def apply_radiation(state: PhysicsState,
     
     radiation_results = jax.vmap(
         radiation_scheme,
-        in_axes=(1, 1, 0, 1, 1, 1, 1, None, None, 0, 0, None, 0, 1, 0),  # day_of_year, seconds_since_midnight, parameters are scalars, aerosol_data is per column
+        in_axes=(1, 1, 1, 1,
+                 1, 1, 1, 1,
+                 None, None, 0, 0,
+                 None, 0, 1, 0),  # day_of_year, seconds_since_midnight, parameters are scalars, aerosol_data is per column
         out_axes=(0, 0)  # Returns (RadiationTendencies, RadiationData) per column
-    )(state.temperature, state.specific_humidity, state.surface_pressure,
-        state.geopotential, cloud_water, cloud_ice, cloud_fraction,
-        day_of_year, seconds_since_midnight, latitudes, longitudes, parameters.radiation,
-        aerosol_data_for_vmap, ozone_vmr, co2_vmr)
+    )(state.temperature, state.specific_humidity, physics_data.diagnostics.pressure_full, physics_data.diagnostics.layer_thickness,
+      physics_data.diagnostics.air_density, cloud_water, cloud_ice, cloud_fraction,
+      day_of_year, seconds_since_midnight, latitudes, longitudes,
+      parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr)
     
     # Unpack structured results directly
     tendencies_vmapped, diagnostics_vmapped = radiation_results
@@ -667,18 +661,19 @@ def apply_convection(
     
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
-    height_levels = physics_data.diagnostics.height_full
-    
+    layer_thickness = physics_data.diagnostics.layer_thickness
+    air_density = physics_data.diagnostics.air_density
+
     # Extract fixed qc/qi tracers (with defaults if not present)
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
     conv_results = jax.vmap(
         tiedtke_nordeng_convection,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
         out_axes=(0, 0)  # Returns (ConvectionTendencies, ConvectionState) per column
-    )(state.temperature, state.specific_humidity, pressure_levels, height_levels, 
-        state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
+    )(state.temperature, state.specific_humidity, pressure_levels, layer_thickness, 
+      air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
     # Unpack structured results directly (no tuple unpacking needed)
     conv_tendencies_all, conv_states_all = conv_results
@@ -732,7 +727,7 @@ def apply_clouds(
     
     # Unpack structured results directly
     cloud_tendencies_all, cloud_states_all = cloud_results
-    
+
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from clouds
         v_wind=jnp.zeros_like(state.v_wind),
@@ -992,8 +987,10 @@ def apply_surface(
     # In reality, this should come from the model's surface state
     nsfc_type = 3  # Fixed value: water, ice, land
     surface_fractions = jnp.zeros((ncols, nsfc_type))
-    surface_fractions = surface_fractions.at[:, 2].set(1.0)  # All land for now (index 2)
-    
+    land_fraction = boundaries.fmask.reshape((ncols,))
+    surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
+    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME
+
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
     soil_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 4, axis=1)  # 4 soil layers
@@ -1117,6 +1114,7 @@ def apply_gravity_waves(
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     height_levels = physics_data.diagnostics.height_full
+    air_density = physics_data.diagnostics.air_density
     
     # Need orography standard deviation - use a placeholder for now
     # In a real implementation, this would come from boundary data
@@ -1124,10 +1122,13 @@ def apply_gravity_waves(
     
     gwd_results = jax.vmap(
         gravity_wave_drag,
-        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
+        in_axes=(1, 1, 1,
+                 1, 1, 1,
+                 0, None, None),  # dt and config are scalars
         out_axes=(0, 0)  # Returns (GWDTendencies, GWDState) per column
     )(state.u_wind, state.v_wind, state.temperature,
-        pressure_levels, height_levels, h_std, dt, parameters.gravity_waves)
+        pressure_levels, height_levels, air_density,
+        h_std, dt, parameters.gravity_waves)
     
     # Unpack structured results directly
     gwd_tendencies_all, gwd_states_all = gwd_results

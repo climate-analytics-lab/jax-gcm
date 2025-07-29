@@ -231,34 +231,18 @@ def ozone_absorption_sw(
     sigma_ref_nir = 4.5e-21  # cm²/molecule (much weaker than UV)
     temp_factor_nir = 1.0 + 1.5e-4 * (temperature - T_ref)
     k_o3_nir = sigma_ref_nir * N_A / M_O3 * temp_factor_nir
-    
-    # Use JAX where for band selection across 6 shortwave bands
-    k_o3 = jnp.where(
-        band == 0,
+
+    k_o3_by_band = jnp.array([
         k_o3_uv * 1.5,  # UV-C/B - highest O3 absorption
-        jnp.where(
-            band == 1,
-            k_o3_uv,        # UV-A - strong O3 absorption
-            jnp.where(
-                band == 2,
-                k_o3_uv * 0.8,  # Blue - moderate O3 absorption
-                jnp.where(
-                    band == 3,
-                    k_o3_uv * 0.3,  # Green-Red - weak O3 absorption
-                    jnp.where(
-                        band == 4,
-                        k_o3_nir,       # Near-IR 1 - very weak
-                        jnp.where(
-                            band == 5,
-                            k_o3_nir * 0.5,  # Near-IR 2 - minimal
-                            0.0
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+        k_o3_uv,        # UV-A - strong O3 absorption
+        k_o3_uv * 0.8,  # Blue - moderate O3 absorption
+        k_o3_uv * 0.3,  # Green-Red - weak O3 absorption
+        k_o3_nir,       # Near-IR 1 - very weak
+        k_o3_nir * 0.5  # Near-IR 2 - minimal
+    ])
+
+    k_o3 = k_o3_by_band[band]
+
     # Convert VMR to mass mixing ratio
     o3_mmr = o3_vmr * (48.0 / 29.0)  # M_O3 / M_air
     
@@ -359,8 +343,8 @@ def gas_optical_depth_lw(
 
 @jax.jit
 def gas_optical_depth_sw(
-    pressure: jnp.ndarray,
     temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
     h2o_vmr: jnp.ndarray,
     o3_vmr: jnp.ndarray,
     layer_thickness: jnp.ndarray,
@@ -371,8 +355,8 @@ def gas_optical_depth_sw(
     Calculate shortwave gas optical depths with enhanced temperature dependence.
     
     Args:
-        pressure: Pressure (Pa) [nlev]
         temperature: Temperature (K) [nlev]
+        pressure: Pressure (Pa) [nlev]
         h2o_vmr: Water vapor VMR [nlev]
         o3_vmr: Ozone VMR [nlev]
         layer_thickness: Layer thickness (m) [nlev]
@@ -448,55 +432,63 @@ def rayleigh_optical_depth(
 
 
 def create_gas_optics(
-    state,
-    layer_properties,
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    h2o_vmr: jnp.ndarray,
+    o3_vmr: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    air_density: jnp.ndarray,
+    cos_zenith,
     config,
-    cos_zenith
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """
     Create gas optical properties for SW and LW.
     
     Args:
-        state: Atmospheric state
-        layer_properties: Layer thickness and density
-        config: Radiation configuration
+        temperature: Temperature (K) [nlev]
+        pressure: Pressure (Pa) [nlev]
+        h2o_vmr: Water vapor volume mixing ratio [nlev]
+        o3_vmr: Ozone volume mixing ratio [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
+        air_density: Air density (kg/m³) [nlev]
         cos_zenith: Cosine solar zenith angle
+        config: Radiation configuration
         
     Returns:
         Tuple of (sw_optics, lw_optics)
     """
     # Longwave optical depths
     tau_lw = gas_optical_depth_lw(
-        state.temperature,
-        state.pressure,
-        state.h2o_vmr,
-        state.o3_vmr,
+        temperature,
+        pressure,
+        h2o_vmr,
+        o3_vmr,
         config.co2_vmr,
-        layer_properties['thickness'],
-        layer_properties['density']
+        layer_thickness,
+        air_density,
     )
     
     # Shortwave optical depths
     tau_sw = gas_optical_depth_sw(
-        state.pressure,
-        state.temperature,
-        state.h2o_vmr,
-        state.o3_vmr,
-        layer_properties['thickness'],
-        layer_properties['density'],
+        pressure,
+        temperature,
+        h2o_vmr,
+        o3_vmr,
+        layer_thickness,
+        air_density,
         cos_zenith
     )
     
     # Add Rayleigh scattering to visible band
     tau_rayleigh = rayleigh_optical_depth(
-        state.pressure,
-        layer_properties['thickness'],
+        pressure,
+        layer_thickness,
         0.55  # Visible wavelength
     )
     tau_sw = tau_sw.at[:, 0].add(tau_rayleigh)
     
     # Gas absorption has no scattering (ssa=0) except Rayleigh
-    nlev = state.temperature.shape[0]
+    nlev = temperature.shape[0]
     
     # Longwave: pure absorption
     # Create fixed-size arrays for JAX compatibility
@@ -507,8 +499,8 @@ def create_gas_optics(
     
     lw_optics = OpticalProperties(
         optical_depth=tau_lw,
-        single_scatter_albedo=jnp.where(lw_band_mask[None, :], lw_ssa_all, 0.0),
-        asymmetry_factor=jnp.where(lw_band_mask[None, :], lw_g_all, 0.0)
+        single_scatter_albedo=jnp.where(lw_band_mask[jnp.newaxis], lw_ssa_all, 0.0),
+        asymmetry_factor=jnp.where(lw_band_mask[jnp.newaxis], lw_g_all, 0.0)
     )
     
     # Shortwave: Rayleigh scattering in visible
@@ -521,8 +513,8 @@ def create_gas_optics(
     
     sw_optics = OpticalProperties(
         optical_depth=tau_sw,
-        single_scatter_albedo=jnp.where(sw_band_mask[None, :], sw_ssa_all, 0.0),
-        asymmetry_factor=jnp.where(sw_band_mask[None, :], sw_g_all, 0.0)  # Rayleigh: g=0
+        single_scatter_albedo=jnp.where(sw_band_mask[jnp.newaxis], sw_ssa_all, 0.0),
+        asymmetry_factor=jnp.where(sw_band_mask[jnp.newaxis], sw_g_all, 0.0)  # Rayleigh: g=0
     )
     
     return sw_optics, lw_optics

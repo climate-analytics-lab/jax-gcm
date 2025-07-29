@@ -308,19 +308,16 @@ def shortwave_fluxes_single_band(
     
     # Calculate layer properties with solar angle
     R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(tau, ssa, g, cos_zenith)
+
+    # FIXME: debugging
+    # T_dir = jnp.ones_like(T_dir) * 0.997  # Set to constant for testing
+    # R_dir = 0.5 * (1 - T_dir)
+    # T_dif = jnp.ones_like(T_dif) * 0.997
+    # R_dif = 0.5 * (1 - T_dif)
     
     # Direct beam transmission through atmosphere
     # Calculate cumulative direct transmission from TOA
-    def direct_transmission(carry, T):
-        trans_above = carry
-        trans_below = trans_above * T
-        return trans_below, trans_below
-    
-    _, direct_trans = jax.lax.scan(
-        direct_transmission,
-        1.0,  # Full transmission at TOA
-        T_dir
-    )
+    direct_trans = jnp.cumprod(T_dir, axis=0)
     
     # Add TOA transmission
     direct_trans_full = jnp.concatenate([jnp.array([1.0]), direct_trans])
@@ -343,7 +340,7 @@ def shortwave_fluxes_single_band(
     def upward_diffuse_step(carry, x):
         flux_below = carry
         R, T, S = x
-        flux_above = R * flux_below + S
+        flux_above = T * flux_below + S
         return flux_above, flux_above
     
     _, flux_up_levels = jax.lax.scan(
@@ -433,6 +430,7 @@ def flux_to_heating_rate(
     flux_up: jnp.ndarray,
     flux_down: jnp.ndarray,
     pressure_interfaces: jnp.ndarray,
+    g: float = 9.81,  # m/s^2
     cp: float = 1004.0  # J/kg/K
 ) -> jnp.ndarray:
     """
@@ -450,17 +448,16 @@ def flux_to_heating_rate(
         Heating rate (K/s) [nlev]
     """
     # Net flux at interfaces
-    net_flux = flux_up - flux_down
+    net_flux_down = flux_down - flux_up
     
     # Flux divergence in layers
-    flux_div = net_flux[1:] - net_flux[:-1]
+    flux_div = jnp.diff(net_flux_down, axis=0)
     
     # Pressure thickness
-    dp = pressure_interfaces[1:] - pressure_interfaces[:-1]
+    dp = jnp.diff(pressure_interfaces, axis=0)
     
     # Heating rate
-    g = 9.81
-    heating = -g / cp * flux_div / dp
+    heating = (g / cp) * (-flux_div) / dp
     
     return heating
 

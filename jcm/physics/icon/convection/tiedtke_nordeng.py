@@ -207,7 +207,6 @@ def moist_static_energy(temperature: jnp.ndarray,
 def initialize_convection(temperature: jnp.ndarray,
                          humidity: jnp.ndarray,
                          pressure: jnp.ndarray,
-                         height: jnp.ndarray,
                          u_wind: jnp.ndarray,
                          v_wind: jnp.ndarray,
                          config: ConvectionParameters) -> ConvectionState:
@@ -218,7 +217,6 @@ def initialize_convection(temperature: jnp.ndarray,
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental specific humidity (kg/kg) [nlev]
         pressure: Environmental pressure (Pa) [nlev]
-        height: Geopotential height (m) [nlev]
         u_wind: Zonal wind (m/s) [nlev]
         v_wind: Meridional wind (m/s) [nlev]
         config: Convection configuration
@@ -319,7 +317,7 @@ def find_cloud_base(temperature: jnp.ndarray,
 def calculate_cape_cin(temperature: jnp.ndarray,
                       humidity: jnp.ndarray,
                       pressure: jnp.ndarray,
-                      height: jnp.ndarray,
+                      layer_thickness: jnp.ndarray,
                       cloud_base: int,
                       config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
@@ -329,7 +327,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental specific humidity (kg/kg) [nlev]  
         pressure: Environmental pressure (Pa) [nlev]
-        height: Geopotential height (m) [nlev]
+        layer_thickness: Layer thickness (m) [nlev-1]
         cloud_base: Cloud base level index
         config: Convection configuration
         
@@ -378,14 +376,10 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     # Buoyancy
     buoyancy = grav * (parcel_tv - env_tv) / env_tv
     
-    # Layer thickness (avoid last level)
-    dz = jnp.concatenate([jnp.diff(height), jnp.array([0.0])])
-    dz = jnp.abs(dz)  # Ensure positive
-    
     # Calculate CAPE and CIN contributions at each level
-    cape_contrib = jnp.where(buoyancy > 0, buoyancy * dz, 0.0)
-    cin_contrib = jnp.where(buoyancy <= 0, -buoyancy * dz, 0.0)
-    
+    cape_contrib = jnp.where(buoyancy > 0, buoyancy * layer_thickness, 0.0)
+    cin_contrib = jnp.where(buoyancy <= 0, -buoyancy * layer_thickness, 0.0)
+
     # Sum over levels (exclude surface level)
     cape = jnp.sum(cape_contrib[:-1])
     cin = jnp.sum(cin_contrib[:-1])
@@ -397,7 +391,8 @@ def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray, 
     pressure: jnp.ndarray,
-    height: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    rho: jnp.ndarray,
     u_wind: jnp.ndarray,
     v_wind: jnp.ndarray,
     qc: jnp.ndarray,
@@ -412,7 +407,8 @@ def tiedtke_nordeng_convection(
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental specific humidity (kg/kg) [nlev]
         pressure: Environmental pressure (Pa) [nlev]
-        height: Geopotential height (m) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
+        rho: Air density (kg/m³) [nlev]
         u_wind: Zonal wind (m/s) [nlev]
         v_wind: Meridional wind (m/s) [nlev]
         qc: Cloud water mixing ratio (kg/kg) [nlev]
@@ -430,7 +426,7 @@ def tiedtke_nordeng_convection(
     
     # Initialize state
     state = initialize_convection(
-        temperature, humidity, pressure, height, 
+        temperature, humidity, pressure, 
         u_wind, v_wind, config
     )
     
@@ -442,7 +438,7 @@ def tiedtke_nordeng_convection(
     # Calculate CAPE and CIN if cloud base exists
     cape, cin = lax.cond(
         has_cloud_base,
-        lambda: calculate_cape_cin(temperature, humidity, pressure, height, 
+        lambda: calculate_cape_cin(temperature, humidity, pressure, layer_thickness, 
                                  cloud_base, config),
         lambda: (jnp.array(0.0), jnp.array(0.0))
     )
@@ -472,9 +468,6 @@ def tiedtke_nordeng_convection(
         calculate_tendencies, mass_flux_closure
     )
     
-    # Calculate air density
-    rho = pressure / (rd * temperature)
-    
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
         # Determine cloud top based on CAPE profile  
@@ -482,10 +475,10 @@ def tiedtke_nordeng_convection(
         cloud_depth = lax.cond(conv_type == 2, lambda: 3, lambda: 6)  # Shallow vs deep
         
         # Handle level ordering properly
-        pressure_decreasing = pressure[0] < pressure[-1]
+        pressure_increasing = pressure[0] < pressure[-1]
         
         ktop = lax.cond(
-            pressure_decreasing,
+            pressure_increasing,
             lambda: jnp.maximum(cloud_base - cloud_depth, 0),      # Standard: top = lower index
             lambda: jnp.minimum(cloud_base + cloud_depth, nlev-1)  # Reverse: top = higher index
         )
@@ -498,7 +491,7 @@ def tiedtke_nordeng_convection(
         
         # Calculate updraft
         updraft_state = calculate_updraft(
-            temperature, humidity, pressure, height, rho,
+            temperature, humidity, pressure, layer_thickness, rho,
             cloud_base, ktop, conv_type, mass_flux_base, config
         )
         
@@ -506,9 +499,8 @@ def tiedtke_nordeng_convection(
         precip_rate = jnp.sum(updraft_state.lu * updraft_state.mfu) * config.cprcon
         
         # Calculate downdraft (now properly implemented)
-        from .downdraft import calculate_downdraft
         downdraft_state = calculate_downdraft(
-            temperature, humidity, pressure, height, rho,
+            temperature, humidity, pressure, layer_thickness, rho,
             updraft_state, precip_rate, cloud_base, ktop, config
         )
         
@@ -535,7 +527,7 @@ def tiedtke_nordeng_convection(
         # Enhanced cloud water/ice production from condensation
         qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu * 0.1, 0.0)
         qi_conv = jnp.where(
-            jnp.logical_and(updraft_state.mfu > 0, temperature < tmelt),
+            (updraft_state.mfu > 0) & (temperature < tmelt),
             updraft_state.lu * 0.05, 0.0
         )
         

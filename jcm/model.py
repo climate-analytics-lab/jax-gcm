@@ -292,8 +292,8 @@ class Model:
         return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
-        # integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-        integrate_fn = (dinosaur.time_integration.trajectory_from_step(
+        # integrate_fn = (dinosaur.time_integration.trajectory_from_step( # FIXME: for debugging
+        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
