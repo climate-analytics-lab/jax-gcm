@@ -2,6 +2,8 @@ import jax
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import functools
+
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def setUp(self):
@@ -65,3 +67,25 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
+
+    def test_get_vertical_diffusion_gradient_check(self):
+        """Test that we get correct gradient values"""
+        from jax.test_util import check_vjp, check_jvp
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(zxy)
+        boundaries = BoundaryData.ones(xy)
+
+        def f(state):
+            return get_vertical_diffusion_tend(state, physics_data, parameters, boundaries, geometry)
+
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)
+
+        # check_jvp(f, f_jvp, args = (state, ), 
+        #                         atol=1e-4, rtol=1e-4, eps=0.0001)
+        check_vjp(f, f_vjp, args = (state, ), 
+                                atol=1e-4, rtol=1e-4, eps=0.0001)
+        
