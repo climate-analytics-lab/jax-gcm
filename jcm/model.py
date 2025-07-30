@@ -9,6 +9,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.leapfrog_filters import multi_timescale_horizontal_diffusion_step_filter
+from dinosaur.time_integration import leapfrog_step_filter
 from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
@@ -200,13 +201,13 @@ class Model:
         
         filters = [
             # Filter 1: del^8 diffusion on all levels with 2.4h timescales
-            multi_timescale_horizontal_diffusion_step_filter(
+            leapfrog_step_filter(multi_timescale_horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, main_timescales, main_orders
-            ),
+            )),
             # Filter 2: del^2 diffusion ONLY on stratosphere with 12h timescales
-            multi_timescale_horizontal_diffusion_step_filter(
+            leapfrog_step_filter(multi_timescale_horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, stratospheric_timescales, stratospheric_orders
-            ),
+            )),
             dinosaur.time_integration.robert_asselin_leapfrog_filter(0.05),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
@@ -236,8 +237,7 @@ class Model:
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
-        # current_state, _ = state
-        current_state = state
+        current_state, _ = state
         physics_state = dynamics_state_to_physics_state(current_state, self.primitive)
         
         physics_data = None
@@ -259,8 +259,9 @@ class Model:
             start_with_input=True,
             post_process_fn=self.post_process,
         ))
-        # return integrate_fn((state,state))
-        return integrate_fn(state)
+        final_tuple, predictions = integrate_fn((state, state))
+        final_state, _ = final_tuple  # Extract current state from leapfrog tuple
+        return final_state, predictions
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
