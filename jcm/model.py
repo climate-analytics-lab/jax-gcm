@@ -201,11 +201,11 @@ class Model:
         filters = [
             # Filter 1: del^8 diffusion on all levels with 2.4h timescales
             multi_timescale_horizontal_diffusion_step_filter(
-                self.coords.horizontal, self.dt * self.physics_specs.time, main_timescales, main_orders
+                self.coords.horizontal, self.dt, main_timescales, main_orders
             ),
             # Filter 2: del^2 diffusion ONLY on stratosphere with 12h timescales
             multi_timescale_horizontal_diffusion_step_filter(
-                self.coords.horizontal, self.dt * self.physics_specs.time, stratospheric_timescales, stratospheric_orders
+                self.coords.horizontal, self.dt, stratospheric_timescales, stratospheric_orders
             ),
             dinosaur.time_integration.robert_asselin_leapfrog_filter(0.05),
         ]
