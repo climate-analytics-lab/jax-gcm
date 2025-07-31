@@ -9,7 +9,19 @@ from pathlib import Path
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig):
     """
-    Allows you to run Speedy Model with adjustable parameters
+    Allows you to run Speedy Model with configurable parameters
+
+    Example:
+        python main.py
+        python main.py model.time_step=20
+        python main.py -m model.time_step=10,20,30
+        python main.py -m model.time_step=10,20 model.layers=4,8
+
+    Available Parameters:
+        time_step: Model time step in minutes (default: 10)
+        save_interval: Save interval in days (default: 10)
+        total_time: Total simulation time in days (default: 10)
+        layers: Number of vertical layers (default: 8)
     """
     model = Model(
         time_step=cfg.model.time_step,

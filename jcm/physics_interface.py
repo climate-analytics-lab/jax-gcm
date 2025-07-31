@@ -18,12 +18,26 @@ from typing import Tuple, Dict, Any
 
 @tree_math.struct
 class PhysicsState:
+    """
+    Represents the state of the atmosphere in physical (nodal) space.
+
+    This structure holds the atmospheric variables on a grid, which are used as
+    inputs for the physics parameterizations.
+
+    Attributes:
+        u_wind (jnp.ndarray): Zonal (east-west) component of wind.
+        v_wind (jnp.ndarray): Meridional (north-south) component of wind.
+        temperature (jnp.ndarray): Atmospheric temperature.
+        specific_humidity (jnp.ndarray): The mass of water vapor per unit mass of moist air.
+        geopotential (jnp.ndarray): The gravitational potential energy per unit mass at a given height.
+        surface_pressure (jnp.ndarray): Surface pressure normalized by a reference pressure p0.
+    """
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    normalized_surface_pressure: jnp.ndarray # Normalized by global mean sea level pressure
+    normalized_surface_pressure: jnp.ndarray 
 
     @classmethod
     def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
@@ -65,6 +79,18 @@ class PhysicsState:
 
 @tree_math.struct
 class PhysicsTendency:
+    """
+    Represents the tendencies (rates of change) of physical variables.
+
+    These tendencies are computed by the physics parameterizations and are used
+    to update the model state over a time step.
+
+    Attributes:
+        u_wind (jnp.ndarray): Tendency of the zonal wind component.
+        v_wind (jnp.ndarray): Tendency of the meridional wind component.
+        temperature (jnp.ndarray): Tendency of temperature.
+        specific_humidity (jnp.ndarray): Tendency of specific humidity.
+    """
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
@@ -191,7 +217,19 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
 
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
+    """
+    Converts state variables from the physics (nodal space) back to the dynamical core (spectral space).
 
+    This is the inverse of `dynamics_state_to_physics_state`. It is currently not used in the main
+    time-stepping loop but can be useful for diagnostics or model initialization.
+
+    Args:
+        physics_state: The `PhysicsState` object containing the atmospheric state on the model grid.
+        dynamics: The `PrimitiveEquations` object containing model configuration.
+
+    Returns:
+        A `State` object for the dynamical core.
+    """
     # Calculate vorticity and divergence from u and v
     modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
 
@@ -251,6 +289,15 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     return dynamics_tendency
 
 def verify_state(state: PhysicsState) -> PhysicsState:
+    """
+    Ensures the physical validity of the state variables.
+
+    Args:
+        state: The `PhysicsState` object.
+
+    Returns:
+        The verified and potentially corrected `PhysicsState` object.
+    """
     # set specific humidity to 0.0 if it became negative during the dynamics evaluation
     qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     updated_state = state.copy(specific_humidity=qa)
@@ -258,6 +305,17 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     return updated_state
 
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
+    """
+    Adjusts tendencies to prevent the state from becoming physically invalid in the next time step.
+
+    Args:
+        state: The current `PhysicsState`.
+        tendencies: The computed `PhysicsTendency`.
+        time_step: The model time step in seconds.
+
+    Returns:
+        The verified and potentially corrected `PhysicsTendency` object.
+    """
     # set specific humidity tendency such that the resulting specific humidity is non-negative
     dt_seconds = 60 * time_step
     updated_tendencies = tendencies.copy(

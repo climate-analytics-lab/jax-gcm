@@ -14,6 +14,21 @@ sigma_layer_boundaries = {
 }
 
 def _initialize_vertical(kx):
+    """Computes vertical grid parameters from the number of levels.
+
+    Args:
+        kx: The number of vertical levels.
+
+    Returns:
+        A tuple containing:
+        - `hsg`: Sigma layer boundaries.
+        - `fsg`: Sigma layer midpoints.
+        - `dhs`: Sigma layer thicknesses.
+        - `sigl`: Log of sigma layer midpoints.
+        - `grdsig`: Factor for converting momentum/moisture fluxes to tendencies.
+        - `grdscp`: Factor for converting energy fluxes to temperature tendencies.
+        - `wvi`: Weights for vertical interpolation.
+    """
     # Definition of model levels
     # Layer thicknesses and full (u,v,T) levels
     if kx not in sigma_layer_boundaries:
@@ -40,20 +55,38 @@ def _initialize_vertical(kx):
 
 @tree_math.struct
 class Geometry:
-    nodal_shape: tuple[int, int, int] # (kx, ix, il)
+    """Container for all static grid and geometric data.
 
-    radang: jnp.ndarray # latitude in radians
-    sia: jnp.ndarray # sin of latitude
-    coa: jnp.ndarray # cos of latitude
+    Attributes:
+        nodal_shape (tuple[int, int, int]): A tuple representing the shape of the nodal grid
+            as (number_of_vertical_levels, number_of_longitudes, number_of_latitudes).
+        radang (jnp.ndarray): Latitude at each grid row, in radians.
+        sia (jnp.ndarray): Sine of latitude at each grid row.
+        coa (jnp.ndarray): Cosine of latitude at each grid row.
+        hsg (jnp.ndarray): Sigma coordinate values at layer boundaries.
+        fsg (jnp.ndarray): Sigma coordinate values at layer midpoints.
+        dhs (jnp.ndarray): Thickness of each sigma layer (delta sigma).
+        sigl (jnp.ndarray): Logarithm of sigma at layer midpoints.
+        grdsig (jnp.ndarray): Conversion factor g / (d_sigma * p0) used to
+            convert momentum and moisture fluxes into tendencies -> u,v,q into d(u,v,q)/dt.
+        grdscp (jnp.ndarray): Conversion factor g / (d_sigma * p0 * c_p) used
+            to convert energy fluxes into temperature tendencies (dT/dt).
+        wvi (jnp.ndarray): Weights for vertical interpolation between layers.
+    """
+    nodal_shape: tuple[int, int, int] 
 
-    hsg: jnp.ndarray # sigma layer boundaries
-    fsg: jnp.ndarray # sigma layer midpoints
-    dhs: jnp.ndarray # sigma layer thicknesses
-    sigl: jnp.ndarray # log of sigma layer midpoints
+    radang: jnp.ndarray 
+    sia: jnp.ndarray 
+    coa: jnp.ndarray 
 
-    grdsig: jnp.ndarray # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
-    grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
-    wvi: jnp.ndarray # Weights for vertical interpolation
+    hsg: jnp.ndarray 
+    fsg: jnp.ndarray 
+    dhs: jnp.ndarray 
+    sigl: jnp.ndarray 
+
+    grdsig: jnp.ndarray 
+    grdscp: jnp.ndarray 
+    wvi: jnp.ndarray 
 
     @classmethod
     def from_coords(cls, coords: CoordinateSystem=None):

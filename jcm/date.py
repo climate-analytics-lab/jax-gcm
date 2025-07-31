@@ -35,11 +35,16 @@ class Timedelta:
   Using integer days and seconds is recommended to avoid loss of precision. With
   int32 days, Timedelta can exactly represent durations over 5 million years.
 
-  The easiest way to create a Timedelta is to use `from_timedelta64`, which
-  supports `np.timedelta64` objects and NumPy arrays with a timedelta64 dtype:
+  Attributes:
+      days (Numeric): The number of whole days in the duration.
+      seconds (Numeric): The number of seconds, normalized to be less than one day.
 
-    >>> Timedelta.from_timedelta64(np.timedelta64(1, 's'))
-    Timedelta(days=0, seconds=1)
+  Example:
+      The easiest way to create a Timedelta is to use `from_timedelta64`, which
+      supports `np.timedelta64` objects and NumPy arrays with a timedelta64 dtype:
+
+      >>> Timedelta.from_timedelta64(np.timedelta64(1, 's'))
+      Timedelta(days=0, seconds=1)
   """
 
   days: Numeric = 0
@@ -110,11 +115,15 @@ _UNIX_EPOCH = np.datetime64('1970-01-01T00:00:00', 's')
 class Timestamp:
   """JAX compatible timestamp, stored as a delta from the Unix epoch.
 
-  The easiest way to create a Timestamp is to use `from_datetime64`, which
-  supports `np.datetime64` objects and NumPy arrays with a datetime64 dtype:
+  Attributes:
+      delta (Timedelta): The duration between the timestamp and the Unix epoch.
 
-    >>> Timestamp.from_datetime64(np.datetime64('1970-01-02'))
-    Timestamp(delta=Timedelta(days=1, seconds=0))
+  Example: 
+      The easiest way to create a Timestamp is to use `from_datetime64`, which
+      supports `np.datetime64` objects and NumPy arrays with a datetime64 dtype:
+
+      >>> Timestamp.from_datetime64(np.datetime64('1970-01-02'))
+      Timestamp(delta=Timedelta(days=1, seconds=0))
   """
 
   delta: Timedelta
@@ -159,7 +168,14 @@ class Timestamp:
 
 @tree_math.struct
 class DateData:
-    tyear: jnp.float32 # Fractional time of year, should possibly be part of the model itself (i.e. not in physics_data)
+    """A container for model-specific date and time information.
+
+    Attributes:
+        tyear (jnp.float32): Fractional time of year (0.0 to 1.0), should possibly be part of the model itself (i.e. not in physics_data)
+        model_year (jnp.int32): The calendar year of the simulation.
+        model_step (jnp.int32): The current step number of the simulation.
+    """
+    tyear: jnp.float32 
     model_year: jnp.int32
     model_step: jnp.int32
 
