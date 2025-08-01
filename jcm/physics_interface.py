@@ -18,20 +18,6 @@ from typing import Tuple, Dict, Any
 
 @tree_math.struct
 class PhysicsState:
-    """
-    Represents the state of the atmosphere in physical (nodal) space.
-
-    This structure holds the atmospheric variables on a grid, which are used as
-    inputs for the physics parameterizations.
-
-    Attributes:
-        u_wind (jnp.ndarray): Zonal (east-west) component of wind.
-        v_wind (jnp.ndarray): Meridional (north-south) component of wind.
-        temperature (jnp.ndarray): Atmospheric temperature.
-        specific_humidity (jnp.ndarray): The mass of water vapor per unit mass of moist air.
-        geopotential (jnp.ndarray): The gravitational potential energy per unit mass at a given height.
-        surface_pressure (jnp.ndarray): Surface pressure normalized by a reference pressure p0.
-    """
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
@@ -76,21 +62,29 @@ class PhysicsState:
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+    
+PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
+
+This structure holds the atmospheric variables on a grid, which are used as
+inputs for the physics parameterizations.
+
+Attributes:
+    u_wind : jnp.ndarray
+        Zonal (east-west) component of wind.
+    v_wind : jnp.ndarray
+        Meridional (north-south) component of wind.
+    temperature : jnp.ndarray
+        Atmospheric temperature.
+    specific_humidity : jnp.ndarray
+        The mass of water vapor per unit mass of moist air.
+    geopotential : jnp.ndarray
+        The gravitational potential energy per unit mass at a given height.
+    normalized_surface_pressure : jnp.ndarray
+        Surface pressure normalized by a reference pressure p0.
+"""
 
 @tree_math.struct
 class PhysicsTendency:
-    """
-    Represents the tendencies (rates of change) of physical variables.
-
-    These tendencies are computed by the physics parameterizations and are used
-    to update the model state over a time step.
-
-    Attributes:
-        u_wind (jnp.ndarray): Tendency of the zonal wind component.
-        v_wind (jnp.ndarray): Tendency of the meridional wind component.
-        temperature (jnp.ndarray): Tendency of temperature.
-        specific_humidity (jnp.ndarray): Tendency of specific humidity.
-    """
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
@@ -121,6 +115,22 @@ class PhysicsTendency:
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity
         )
+
+PhysicsTendency.__doc__ = """Represents the tendencies (rates of change) of physical variables.
+
+These tendencies are computed by the physics parameterizations and are used
+to update the model state over a time step.
+
+Attributes:
+    u_wind : jnp.ndarray
+        Tendency of the zonal wind component.
+    v_wind : jnp.ndarray
+        Tendency of the meridional wind component.
+    temperature : jnp.ndarray
+        Tendency of temperature.
+    specific_humidity : jnp.ndarray
+        Tendency of specific humidity.
+"""
 
 class Physics:
     write_output: bool

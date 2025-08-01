@@ -23,6 +23,14 @@ class Predictions:
     dynamics: PhysicsState
     physics: Any
 
+Predictions.__doc__ = """Container for model prediction outputs from a single timestep.
+
+Attributes:
+    dynamics (PhysicsState): The physical state variables converted from the
+        dynamical state.
+    physics (Any): Diagnostic physics data computed by the physics package.
+"""
+
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -54,10 +62,8 @@ def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
 class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
-
-    #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
-
+    #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
@@ -66,16 +72,26 @@ class Model:
         Initialize the model with the given time step, save interval, and total time.
         
         Args:
-            time_step: Model time step in minutes
-            save_interval: Save interval in days
-            total_time: Total integration time in days
-            start_date: Start date of the simulation
-            layers: Number of vertical layers
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
-            coords: CoordinateSystem object describing model grid
-            boundaries: BoundaryData object describing surface boundary conditions
-            initial_state: Initial state of the model (PhysicsState object), optional
-            physics: Physics object describing the model physics
+            time_step: 
+                Model time step in minutes
+            save_interval: 
+                Save interval in days
+            total_time: 
+                Total integration time in days
+            start_date: 
+                Start date of the simulation
+            layers: 
+                Number of vertical layers
+            horizontal_resolution: 
+                Horizontal resolution of the model (31, 42, 85, or 213)
+            coords: 
+                CoordinateSystem object describing model grid
+            boundaries: 
+                BoundaryData object describing surface boundary conditions
+            initial_state: 
+                Initial state of the model (PhysicsState object), optional
+            physics: 
+                Physics object describing the model physics
         """
         from datetime import datetime
 
@@ -167,7 +183,7 @@ class Model:
             random_seed: Seed for the JAX random number generator.
             sim_time: The starting simulation time for the state.
             humidity_perturbation: If True and using the default state, adds a
-                small amount of specific humidity.
+            small amount of specific humidity.
 
         Returns:
             A `primitive_equations.State` object ready for integration.
