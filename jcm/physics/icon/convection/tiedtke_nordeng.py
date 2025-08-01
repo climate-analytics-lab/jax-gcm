@@ -71,7 +71,7 @@ class ConvectionParameters:
     cmfctop: float           # Mass flux fraction at cloud top
 
     @classmethod
-    def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+    def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4, # FIXME: validate dt_conv
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=1.4e-3,
                  cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
                  cmfctop=0.33) -> 'ConvectionParameters':

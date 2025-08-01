@@ -25,7 +25,7 @@ from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
-from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme
+from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme # FIXME: would be good to use this
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
 from jcm.physics.icon.surface.surface_types import SurfaceState, AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
@@ -70,12 +70,12 @@ class IconPhysics(Physics):
             _prepare_common_physics_state,
             get_simple_aerosol,            # Aerosol before radiation FIXME: get_CDNC issue
             apply_chemistry,               # Chemistry for ozone, methane etc.
-            apply_radiation,               # Radiation early for surface fluxes. FIXME: revisit two-stream coefficients--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere.
-            apply_convection,
+            apply_radiation,               # Radiation early for surface fluxes. FIXME: revisit shortwave flux--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere. Problem seems to be ozone optical depth
+            apply_convection,              # FIXME: surface evaporation drives strong updraft causing temperature blowup in layer 1 in 4-5 hours of model time (or in 1 step if vertical_diffusion is on)
             apply_clouds,
             apply_microphysics,
             apply_surface,                 # Surface after radiation
-            apply_vertical_diffusion,      # FIXME: check for vertical ordering issues # FIXME: takes a really long time (~6m for one step not jitted, ~1m15s jitted. For comparison, the rest of the physics runs in ~10s jitted)
+            apply_vertical_diffusion,      # FIXME: With convection off, causes all layer temperatures to exponentially decay to 0. With convection on, blows up in one step. Also, it seems to be doing a bunch of redundant calculations and possibly double counting surface fluxes?
             apply_gravity_waves
         ]
     
@@ -489,7 +489,7 @@ def _prepare_common_physics_state(
     
     # Calculate height at interfaces (approximate using hydrostatic)
     height_half = jnp.concatenate((
-        height_levels[:1] + 1000.0, # FIXME: choice of offset
+        height_levels[:1] + 1000.0, # FIXME: validate choice of offset
         (height_levels[1:] + height_levels[:-1]) / 2,
         0 * height_levels[-1:]), axis=0)
 
@@ -676,7 +676,7 @@ def apply_convection(
       air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
     # Unpack structured results directly (no tuple unpacking needed)
-    conv_tendencies_all, conv_states_all = conv_results
+    conv_tendencies_all, conv_states_all = conv_results # FIXME: investigate updraft states (conv_states_all.tu and .mfu)
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
@@ -904,7 +904,7 @@ def apply_vertical_diffusion(
         return tendencies, diagnostics
     
     vdiff_results = jax.vmap(
-        apply_vdiff_to_column,
+        apply_vdiff_to_column, # FIXME: this should call vertical_diffusion_scheme
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1),  # Fix surface properties to axis 0 (column mapped)
         out_axes=(0, 0)  # Returns (VDiffTendencies, VDiffDiagnostics) per column
     )(state.u_wind, state.v_wind, state.temperature, state.specific_humidity, qc, qi,
@@ -989,7 +989,7 @@ def apply_surface(
     surface_fractions = jnp.zeros((ncols, nsfc_type))
     land_fraction = boundaries.fmask.reshape((ncols,))
     surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
-    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME
+    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME: verify/improve this setup
 
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
@@ -1014,7 +1014,7 @@ def apply_surface(
     # Create atmospheric forcing for all columns
     # Initialize exchange coefficients with dummy values for now
     nsfc_type = 3
-    dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient
+    dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient FIXME: replace with real values
     
     # Surface properties are now extracted earlier in the function
     
@@ -1057,7 +1057,7 @@ def apply_surface(
     
     # Surface flux tendencies (applied to lowest level only)
     temp_tend_sfc = sensible_heat / (rho_sfc * physical_constants.cp * dz_sfc)
-    qv_tend_sfc = (evaporation / 2.45e6) / (rho_sfc * dz_sfc)  # Latent heat = 2.45 MJ/kg
+    qv_tend_sfc = evaporation / (rho_sfc * dz_sfc)
     u_tend_sfc = -tau_u / (rho_sfc * dz_sfc)
     v_tend_sfc = -tau_v / (rho_sfc * dz_sfc)
     

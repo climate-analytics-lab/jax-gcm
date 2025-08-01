@@ -20,7 +20,7 @@ from .radiation_types import OpticalProperties
 
 @jax.jit
 def two_stream_coefficients(
-    tau: jnp.ndarray,
+    tau: jnp.ndarray, # FIXME: remove this if unused
     ssa: jnp.ndarray,
     g: jnp.ndarray,
     mu0: Optional[float] = None
@@ -308,12 +308,6 @@ def shortwave_fluxes_single_band(
     
     # Calculate layer properties with solar angle
     R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(tau, ssa, g, cos_zenith)
-
-    # FIXME: debugging
-    # T_dir = jnp.ones_like(T_dir) * 0.997  # Set to constant for testing
-    # R_dir = 0.5 * (1 - T_dir)
-    # T_dif = jnp.ones_like(T_dif) * 0.997
-    # R_dif = 0.5 * (1 - T_dif)
     
     # Direct beam transmission through atmosphere
     # Calculate cumulative direct transmission from TOA
@@ -354,7 +348,7 @@ def shortwave_fluxes_single_band(
     def downward_diffuse_step(carry, x):
         flux_above = carry
         R, T, S, flux_up = x
-        flux_below = T * flux_above + R * flux_up + S
+        flux_below = T * flux_above + R * flux_up + S # FIXME: verify this logic
         return flux_below, flux_below
     
     _, flux_down_levels = jax.lax.scan(

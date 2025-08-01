@@ -30,7 +30,7 @@ PHYS_CONST = PhysicalConstants()
 def compute_shear_production(
     u: jnp.ndarray,
     v: jnp.ndarray,
-    height_full: jnp.ndarray,
+    dz: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray
 ) -> jnp.ndarray:
     """
@@ -41,15 +41,15 @@ def compute_shear_production(
     Args:
         u: Zonal wind [m/s] (ncol, nlev)
         v: Meridional wind [m/s] (ncol, nlev)
-        height_full: Full level heights [m] (ncol, nlev)
+        dz: Increments between full level heights [m] (ncol, nlev-1)
         exchange_coeff_momentum: Momentum exchange coefficient [m²/s] (ncol, nlev)
         
     Returns:
         Shear production [m²/s³] (ncol, nlev)
     """
     # Compute vertical wind shear
-    du_dz = jnp.diff(u, axis=1) / jnp.diff(height_full, axis=1)
-    dv_dz = jnp.diff(v, axis=1) / jnp.diff(height_full, axis=1)
+    du_dz = jnp.diff(u, axis=1) / dz
+    dv_dz = jnp.diff(v, axis=1) / dz
     
     # Extend to full levels (nlev) by padding with boundary values
     du_dz_extended = jnp.concatenate([
@@ -75,7 +75,7 @@ def compute_shear_production(
 @jax.jit
 def compute_buoyancy_production(
     temperature: jnp.ndarray,
-    height_full: jnp.ndarray,
+    dz: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
     gravity: float = PHYS_CONST.grav
 ) -> jnp.ndarray:
@@ -86,7 +86,7 @@ def compute_buoyancy_production(
     
     Args:
         temperature: Temperature [K] (ncol, nlev)
-        height_full: Full level heights [m] (ncol, nlev)
+        dz: Increments between full level heights [m] (ncol, nlev-1)
         exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
         gravity: Gravitational acceleration [m/s²]
         
@@ -94,7 +94,7 @@ def compute_buoyancy_production(
         Buoyancy production [m²/s³] (ncol, nlev)
     """
     # Compute vertical temperature gradient
-    dt_dz = jnp.diff(temperature, axis=1) / jnp.diff(height_full, axis=1)
+    dt_dz = jnp.diff(temperature, axis=1) / dz
     
     # Extend to full levels (nlev) by padding with boundary values
     dt_dz_extended = jnp.concatenate([
@@ -210,12 +210,12 @@ def compute_tke_tendency(
     dissipation = compute_dissipation(state.tke, mixing_length)
     
     # TKE exchange coefficient for transport term
-    tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length)
+    tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length) # FIXME: unused - also calculated in tke diagnostics?
     
     # Transport term: ∂/∂z(K_e ∂e/∂z)
     # For now, we'll compute this as part of the matrix solver
     # Here we just sum the source terms
-    transport_term = jnp.zeros_like(state.tke)  # Will be handled by matrix solver
+    transport_term = jnp.zeros_like(state.tke)  # Will be handled by matrix solver FIXME: check that is is being handled
     
     # Total TKE tendency
     tke_tendency = (shear_production + buoyancy_production - dissipation + transport_term)
@@ -248,12 +248,14 @@ def compute_tke_diagnostics(
         - Dissipation [m²/s³] (ncol, nlev)
         - TKE exchange coefficient [m²/s] (ncol, nlev)
     """
+    dz = jnp.diff(state.height_full, axis=1)
+
     shear_production = compute_shear_production(
-        state.u, state.v, state.height_full, exchange_coeff_momentum
+        state.u, state.v, dz, exchange_coeff_momentum
     )
     
     buoyancy_production = compute_buoyancy_production(
-        state.temperature, state.height_full, exchange_coeff_heat
+        state.temperature, dz, exchange_coeff_heat
     )
     
     dissipation = compute_dissipation(state.tke, mixing_length)

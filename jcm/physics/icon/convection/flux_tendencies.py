@@ -145,103 +145,68 @@ def calculate_tendencies(
     """
     nlev = len(temperature)
     
-    # Initialize tendencies
-    dtedt = jnp.zeros(nlev)
-    dqdt = jnp.zeros(nlev)
-    dudt = jnp.zeros(nlev)
-    dvdt = jnp.zeros(nlev)
-    
     # Calculate mass flux divergence at each level using JAX-compatible operations
-    k_indices = jnp.arange(nlev - 1)
     
-    # Vectorized calculations for all levels at once
-    def calculate_level_tendencies(k):
-        # Layer thickness (pressure)
-        dp = pressure[k+1] - pressure[k]
-        
-        # Mass flux divergence (updraft + downdraft)
-        mf_div = (updraft_state.mfu[k] - updraft_state.mfu[k+1] +
-                  downdraft_state.mfd[k] - downdraft_state.mfd[k+1])
-        
-        # Factor for tendency calculation
-        factor = mf_div / (rho[k] * dp) * grav
-        
-        # Temperature tendency
-        t_flux = (updraft_state.tu[k] * updraft_state.mfu[k] -
-                  updraft_state.tu[k+1] * updraft_state.mfu[k+1] +
-                  downdraft_state.td[k] * downdraft_state.mfd[k] -
-                  downdraft_state.td[k+1] * downdraft_state.mfd[k+1])
-        
-        # Include latent heat from condensation/evaporation
-        lh_source = alhc * (updraft_state.lu[k] * updraft_state.mfu[k] -
-                           updraft_state.lu[k+1] * updraft_state.mfu[k+1])
-        
-        dtedt_k = (t_flux + lh_source/cp) * factor
-        
-        # Moisture tendency
-        q_flux = (updraft_state.qu[k] * updraft_state.mfu[k] -
-                  updraft_state.qu[k+1] * updraft_state.mfu[k+1] +
-                  downdraft_state.qd[k] * downdraft_state.mfd[k] -
-                  downdraft_state.qd[k+1] * downdraft_state.mfd[k+1])
-        
-        dqdt_k = q_flux * factor
-        
-        # Enhanced momentum tendencies
-        def calculate_momentum_transport():
-            # Simplified momentum transport using environmental winds
-            # Updrafts and downdrafts carry momentum similar to their source levels
-            
-            # Updraft momentum transport (assumes updraft winds ~ cloud base winds)
-            u_cloud_base = u_wind[kbase]
-            v_cloud_base = v_wind[kbase]
-            u_updraft_flux = (u_cloud_base * updraft_state.mfu[k] -
-                             u_cloud_base * updraft_state.mfu[k+1])
-            v_updraft_flux = (v_cloud_base * updraft_state.mfu[k] -
-                             v_cloud_base * updraft_state.mfu[k+1])
-            
-            # Downdraft momentum transport (assumes downdraft winds ~ environmental winds)
-            u_downdraft_flux = (u_wind[k] * downdraft_state.mfd[k] -
-                               u_wind[k+1] * downdraft_state.mfd[k+1])
-            v_downdraft_flux = (v_wind[k] * downdraft_state.mfd[k] -
-                               v_wind[k+1] * downdraft_state.mfd[k+1])
-            
-            # Total momentum flux divergence
-            u_total_flux = u_updraft_flux + u_downdraft_flux
-            v_total_flux = v_updraft_flux + v_downdraft_flux
-            
-            # Momentum tendency from mass flux transport
-            dudt_transport = u_total_flux * factor
-            dvdt_transport = v_total_flux * factor
-            
-            # Add pressure gradient force effect (simplified)
-            # Vertical momentum mixing tends to accelerate flow toward cloud base winds
-            pgf_efficiency = 0.3  # Moderate coupling strength
-            dudt_pgf = pgf_efficiency * (u_wind[kbase] - u_wind[k]) * mf_div * factor
-            dvdt_pgf = pgf_efficiency * (v_wind[kbase] - v_wind[k]) * mf_div * factor
-            
-            return dudt_transport + dudt_pgf, dvdt_transport + dvdt_pgf
-        
-        def no_momentum_transport():
-            return 0.0, 0.0
-        
-        dudt_k, dvdt_k = lax.cond(
-            config.cmfctop > 0,
-            calculate_momentum_transport,
-            no_momentum_transport
-        )
-        
-        return dtedt_k, dqdt_k, dudt_k, dvdt_k
+    # Layer thickness (pressure)
+    dp = jnp.diff(pressure, axis=0)
     
-    # Apply to all levels using vmap
-    level_tendencies = jax.vmap(calculate_level_tendencies)(k_indices)
-    dtedt_levels, dqdt_levels, dudt_levels, dvdt_levels = level_tendencies
+    diff_updraft = jnp.diff(updraft_state.mfu, axis=0)
+    diff_downdraft = jnp.diff(downdraft_state.mfd, axis=0)
+
+    # FIXME: check signs (downdraft)
+    mass_flux_div = - diff_updraft - diff_downdraft
+    factor = mass_flux_div / (rho[:-1] * dp) * grav # Factor for tendency calculation
     
-    # Update arrays with computed tendencies
-    dtedt = dtedt.at[:nlev-1].set(dtedt_levels)
-    dqdt = dqdt.at[:nlev-1].set(dqdt_levels)  
-    dudt = dudt.at[:nlev-1].set(dudt_levels)
-    dvdt = dvdt.at[:nlev-1].set(dvdt_levels)
+    temp_flux_div = - jnp.diff(updraft_state.tu * updraft_state.mfu + downdraft_state.td * downdraft_state.mfd, axis=0) # FIXME this is blowing up level 1
+    q_flux_div = - jnp.diff(updraft_state.qu * updraft_state.mfu + downdraft_state.qd * downdraft_state.mfd, axis=0)
+    lh_source = - alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0) # Include latent heat from condensation/evaporation
+
+    dtedt_k_levels = (temp_flux_div + lh_source/cp) * factor
+    dqdt_k_levels = q_flux_div * factor
+
+    # Downdraft momentum transport (assumes downdraft winds ~ environmental winds)
+    u_downdraft_flux = - jnp.diff(u_wind * downdraft_state.mfd, axis=0)
+    v_downdraft_flux = - jnp.diff(v_wind * downdraft_state.mfd, axis=0)
+
+    # Enhanced momentum tendencies
+    def calculate_momentum_transport():
+        # Simplified momentum transport using environmental winds
+        # Updrafts and downdrafts carry momentum similar to their source levels
+        
+        # Updraft momentum transport (assumes updraft winds ~ cloud base winds)
+        u_cloud_base = u_wind[kbase, None]
+        v_cloud_base = v_wind[kbase, None]
+        u_updraft_flux = - diff_updraft * u_cloud_base
+        v_updraft_flux = - diff_updraft * v_cloud_base
+        
+        # Total momentum flux divergence
+        u_total_flux = u_updraft_flux + u_downdraft_flux
+        v_total_flux = v_updraft_flux + v_downdraft_flux
+        
+        # Momentum tendency from mass flux transport
+        dudt_transport = u_total_flux * factor
+        dvdt_transport = v_total_flux * factor
+
+        # Add pressure gradient force effect (simplified)
+        # Vertical momentum mixing tends to accelerate flow toward cloud base winds
+        pgf_efficiency = 0.3  # Moderate coupling strength
+        dudt_pgf = pgf_efficiency * (u_cloud_base - u_wind[:-1]) * mass_flux_div * factor
+        dvdt_pgf = pgf_efficiency * (v_cloud_base - v_wind[:-1]) * mass_flux_div * factor
+
+        return dudt_transport + dudt_pgf, dvdt_transport + dvdt_pgf
     
+    dudt_k_levels, dvdt_k_levels = lax.cond(
+        config.cmfctop > 0,
+        calculate_momentum_transport,
+        lambda: (jnp.zeros(nlev-1), jnp.zeros(nlev-1)),
+    )
+    
+    # Make tendency arrays
+    dtedt = jnp.zeros(nlev).at[:-1].set(dtedt_k_levels)
+    dqdt = jnp.zeros(nlev).at[:-1].set(dqdt_k_levels)
+    dudt = jnp.zeros(nlev).at[:-1].set(dudt_k_levels)
+    dvdt = jnp.zeros(nlev).at[:-1].set(dvdt_k_levels)
+
     # Calculate precipitation rate
     precip_rate = calculate_precipitation_rate(
         updraft_state, kbase, dt, config
@@ -267,11 +232,8 @@ def calculate_tendencies(
     
     # For levels with convective activity, add some tendency
     # This is a simplified approach - more sophisticated transport would be needed
-    conv_levels = jnp.logical_and(
-        jnp.arange(nlev) >= kbase,
-        jnp.arange(nlev) <= ktop
-    )
-    
+    conv_levels = (jnp.arange(nlev) >= kbase) & (jnp.arange(nlev) <= ktop)
+
     # Simple cloud water/ice production based on updraft liquid water
     dqc_dt = jnp.where(conv_levels, qc_conv * 0.1 / dt, 0.0)
     dqi_dt = jnp.where(conv_levels, qi_conv * 0.1 / dt, 0.0)

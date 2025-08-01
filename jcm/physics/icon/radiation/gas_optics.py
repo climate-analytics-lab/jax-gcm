@@ -385,7 +385,7 @@ def gas_optical_depth_sw(
         k_o3 = ozone_absorption_sw(o3_vmr, temperature, band)
         
         # Total absorption
-        k_total = k_h2o + k_o3
+        k_total = k_h2o + k_o3 # FIXME - ozone optical depth too large - disable k_o3 here if necessary
         
         # Optical depth with slant path correction
         return k_total * air_density * layer_thickness * sec_zenith

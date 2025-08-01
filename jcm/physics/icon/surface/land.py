@@ -189,19 +189,15 @@ def soil_temperature_step(
     
     # Simple heat diffusion between layers
     thermal_diffusivity = 1e-6  # m²/s (typical soil)
-    
-    for i in range(1, nsoil_layers):
-        # Heat exchange with layer above
-        layer_spacing = 0.5 * (soil_depths[i] + soil_depths[i-1])
-        heat_exchange = (thermal_diffusivity * 
-                        (soil_temp[:, i-1] - soil_temp[:, i]) / layer_spacing)
-        
-        temp_tendency = temp_tendency.at[:, i].add(
-            heat_exchange / heat_capacity[:, i]
-        )
-        temp_tendency = temp_tendency.at[:, i-1].add(
-            -heat_exchange / heat_capacity[:, i-1]
-        )
+
+    layer_spacing = 0.5 * (soil_depths[1:] + soil_depths[:-1])
+    heat_exchange = thermal_diffusivity * (soil_temp[:, :-1] - soil_temp[:, 1:]) / layer_spacing
+    temp_tendency = temp_tendency.at[:, 1:].add(
+        heat_exchange / heat_capacity[:, 1:]
+    )
+    temp_tendency = temp_tendency.at[:, :-1].add(
+        -heat_exchange / heat_capacity[:, :-1]
+    )
     
     return temp_tendency
 
@@ -313,18 +309,17 @@ def soil_moisture_step(
     
     # Simple infiltration between layers
     infiltration_rate = 1e-6  # m/s (hydraulic conductivity)
-    
-    for i in range(1, nsoil_layers):
-        # Water movement from layer above (if saturated)
-        excess_water = jnp.maximum(soil_moisture[:, i-1] - 1.0, 0.0)
-        infiltration = infiltration_rate * excess_water
+
+    # Water movement from layer above (if saturated)
+    excess_water = jnp.maximum(soil_moisture[:, :-1] - 1.0, 0.0)
+    infiltration = infiltration_rate * excess_water
         
-        moisture_tendency = moisture_tendency.at[:, i].add(
-            infiltration / water_capacity[:, i]
-        )
-        moisture_tendency = moisture_tendency.at[:, i-1].add(
-            -infiltration / water_capacity[:, i-1]
-        )
+    moisture_tendency = moisture_tendency.at[:, 1:].add(
+        infiltration / water_capacity[:, 1:]
+    )
+    moisture_tendency = moisture_tendency.at[:, :-1].add(
+        -infiltration / water_capacity[:, :-1]
+    )
     
     # Ensure moisture stays within bounds [0, 1]
     moisture_tendency = jnp.where(
