@@ -292,15 +292,14 @@ class Model:
         return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
-        # integrate_fn = (dinosaur.time_integration.trajectory_from_step( # FIXME: for debugging
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+        integrate_fn = dinosaur.time_integration.trajectory_from_step( # FIXME: for debugging
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
             post_process_fn=self.post_process,
-        ))
-        return integrate_fn(state)
+        )
+        return integrate_fn(state) if jax.config.jax_disable_jit else jax.jit(integrate_fn)(state)
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
