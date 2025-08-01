@@ -15,6 +15,7 @@ from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
+import pandas as pd
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -211,6 +212,14 @@ class Model:
         physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
         
         pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
+
+        # Import units attribute associated with each xarray output from units_table.csv
+        units_df = pd.read_csv("units_table.csv")
+        units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
+
+        for var, unit in units_from_csv.items():
+            if var in pred_ds:
+                pred_ds[var].attrs["units"] = unit
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
