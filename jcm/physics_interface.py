@@ -301,4 +301,9 @@ def get_physical_tendencies(
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
+
+    dynamics_tendency.log_surface_pressure = dynamics_tendency.log_surface_pressure.at[0, 0].set(
+        - jnp.squeeze(state.log_surface_pressure)[0, 0] / (60 * time_step)
+    )
+
     return dynamics_tendency
