@@ -38,6 +38,14 @@
          ~{{ name }}.{{ item }}
       {%- endfor %}
       {%- endif %}
+      {%- if attributes %}
+      .. rubric:: {{ _('Attributes') }}
+
+      .. autosummary::
+      {% for item in attributes %}
+         ~{{ name }}.{{ item }}
+      {%- endfor %}
+      {%- endif %}
    {%- else %}
       .. automethod:: __init__
 
