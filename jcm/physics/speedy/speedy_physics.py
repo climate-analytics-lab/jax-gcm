@@ -74,7 +74,7 @@ class SpeedyPhysics(Physics):
             get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend,
             couple_land_atm, # eventually couple sea model and ice model here
-            get_orographic_correction_tendencies # orographic corrections applied last
+            # get_orographic_correction_tendencies # orographic corrections applied last
         ]
         if sea_coupling_flag > 0:
             physics_terms.insert(-3, get_surface_fluxes)
