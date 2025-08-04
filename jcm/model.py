@@ -133,7 +133,8 @@ class Model:
                 geometry=self.geometry,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
+                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
+                    dt_seconds = jnp.float32(time_step * 60.0)
                 )
             )
         )
@@ -244,7 +245,8 @@ class Model:
         if self.physics.write_output:
             date=DateData.set_date(
                 model_time = self.start_date + Timedelta(seconds=current_state.sim_time),
-                model_step = ((current_state.sim_time/60) / self.time_step).astype(jnp.int32)
+                model_step = ((current_state.sim_time/60) / self.time_step).astype(jnp.int32),
+                dt_seconds = jnp.float32(self.time_step * 60.0)
             )
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
