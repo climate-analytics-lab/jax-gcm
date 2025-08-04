@@ -56,7 +56,9 @@ def multi_timescale_horizontal_diffusion_step_filter(
     timescales: Dict[str, Union[float, Array]],
     orders: Dict[str, Union[int, Array]] = None,
 ) -> Callable:
-  """Returns a JIT-compatible horizontal diffusion step filter with field and level-specific timescales and orders.
+  """Returns a JIT-compatible horizontal diffusion step filter with field and level-specific timescales and orders. 
+  Any non-JAX or JIT compatible operations (like if statements and for loops) are contained in the set up.
+  The returned function is jitted and can be differentiated.
   
   Args:
     grid: the `spherical_harmonic.Grid` to use for the computation.
