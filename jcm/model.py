@@ -142,6 +142,10 @@ class Model:
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
+            dinosaur.time_integration.runge_kutta_step_filter(
+                # prevent global mean surface pressure drift
+                lambda state: state.replace(log_surface_pressure=state.log_surface_pressure.at[0,0,0].set(0.))
+            ),
             dinosaur.time_integration.exponential_step_filter(
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
