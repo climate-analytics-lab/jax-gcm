@@ -359,13 +359,39 @@ class TestOrographicCorrection:
         geometry = create_test_geometry()
         parameters = Parameters.default()
         
-        # Test with zero orography
-        boundaries_flat = create_test_boundaries()
-        boundaries_flat.orog = jnp.zeros_like(boundaries_flat.orog)
-        boundaries_flat.phis0 = jnp.zeros_like(boundaries_flat.phis0)  # Also zero phis0
+        # Test with zero orography using proper model boundary initialization
+        from jcm.boundaries import default_boundaries
+        from dinosaur import spherical_harmonic
+        
+        # Create grid and flat orography
+        grid = spherical_harmonic.Grid.T31()
+        flat_orography = jnp.zeros(grid.nodal_shape)
+        
+        # Use the actual model boundary initialization (now fixed)
+        boundaries_flat = default_boundaries(grid, flat_orography, parameters)
         
         tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
         assert jnp.all(tcorh_flat == 0.0)
+        
+        # Humidity correction should also be zero when orography is zero
+        land_temp_flat = jnp.full(boundaries_flat.orog.shape, 288.0)
+        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry, tcorh_flat, land_temp_flat)
+        assert jnp.all(qcorh_flat == 0.0)
+        
+        # test that total corrections are zero for flat orography
+        test_state = create_test_physics_state(lon_points=grid.nodal_shape[0], 
+                                             lat_points=grid.nodal_shape[1])
+        
+        # Apply corrections to state with flat orography
+        corrected_state_flat = apply_orographic_corrections_to_state(
+            test_state, boundaries_flat, geometry, parameters, land_temp_flat
+        )
+        
+        # State should be completely unchanged when orography is flat
+        np.testing.assert_array_equal(corrected_state_flat.temperature, test_state.temperature,
+                                    err_msg="Temperature should be unchanged with flat orography")
+        np.testing.assert_array_equal(corrected_state_flat.specific_humidity, test_state.specific_humidity,
+                                    err_msg="Specific humidity should be unchanged with flat orography")
         
         # Test with minimum supported layers (5)
         geometry_5layer = create_test_geometry(layers=5)
