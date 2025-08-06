@@ -150,15 +150,12 @@ class Model:
         # Filter 2: del^2 diffusion with 12h timescales ONLY on stratosphere
         layers = self.coords.vertical.layers
         
-        # Main diffusion: del^8 with level-specific timescales
-        # All levels get del^8 diffusion but with different timescales
-        main_timescale_troposphere = 2.4 * 3600.0  # 2.4 hours for tropospheric levels
-        main_timescale_stratosphere = 2.4 * 3600.0  # Could be different for stratosphere if needed
+        # Main diffusion: del^8 with SPEEDY timescales (matching thd and thdd)
+        # SPEEDY uses same 2.4h timescale for both temperature/vorticity and divergence
+        main_timescale = 2.4 * 3600.0  # 2.4 hours - exact SPEEDY value from thd/thdd
         
-        # Assume first 2 levels are stratospheric
-        strat_levels = 2
-        main_level_timescales = jnp.array([main_timescale_stratosphere] * strat_levels + 
-                                          [main_timescale_troposphere] * (layers - strat_levels))
+        # All levels get the same main diffusion timescale (like SPEEDY)
+        main_level_timescales = jnp.array([main_timescale] * layers)
         main_level_orders = jnp.array([4] * layers)  # del^8 (order 4) for all levels
         
         main_timescales = {
@@ -175,11 +172,12 @@ class Model:
             'tracers': main_level_orders,
         }
         
-        # Stratospheric diffusion: del^2 ONLY on stratosphere, NO diffusion elsewhere
-        strat_timescale = 12.0 * 3600.0  # 12.0 hours for stratospheric del^2 diffusion
+        # Stratospheric diffusion: del^2 ONLY on stratosphere, matching SPEEDY thds
+        strat_timescale = 12.0 * 3600.0  # 12.0 hours - exact SPEEDY value from thds
         no_diffusion_timescale = 1e12    # Effectively infinite timescale = no diffusion
         
-        # Only stratosphere gets del^2 diffusion, troposphere gets no additional diffusion
+        # Assume first 2 levels are stratospheric (like SPEEDY)
+        strat_levels = 2
         strat_only_timescales = jnp.array([strat_timescale] * strat_levels + 
                                           [no_diffusion_timescale] * (layers - strat_levels))
         strat_only_orders = jnp.array([1] * strat_levels + [1] * (layers - strat_levels))  # del^2 everywhere, but only strat has reasonable timescale
@@ -209,7 +207,7 @@ class Model:
             leapfrog_step_filter(multi_timescale_horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, stratospheric_timescales, stratospheric_orders
             )),
-            dinosaur.time_integration.robert_asselin_leapfrog_filter(0.05),
+            dinosaur.time_integration.robert_asselin_leapfrog_filter(0.2),  # Required for stability with explicit diffusion
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
