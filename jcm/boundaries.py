@@ -14,7 +14,6 @@ class BoundaryData:
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
-    fmask: jnp.ndarray
     sice_am: jnp.ndarray
     fmask_l: jnp.ndarray # land mask - set by land_model_init()
     rhcapl: jnp.ndarray # 1/heat capacity (land)

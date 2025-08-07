@@ -157,7 +157,8 @@ class TestModelUnit(unittest.TestCase):
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
         if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess, sys
+            import subprocess
+            import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
@@ -207,7 +208,8 @@ class TestModelUnit(unittest.TestCase):
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
         if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess, sys
+            import subprocess
+            import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
