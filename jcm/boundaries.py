@@ -146,10 +146,14 @@ def default_boundaries(
     alb0 = jnp.zeros_like(orography)
     tsea = _fixed_ssts(grid)
     
-    # No land_model_init, but should be fine because fmask = 0
+    # Default to all sea when no land-sea mask provided
+    fmask_l = jnp.zeros_like(orography)  # No land
+    fmask_s = jnp.ones_like(orography)   # All sea
+    
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
+        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0,
+        fmask_l=fmask_l, fmask_s=fmask_s)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
