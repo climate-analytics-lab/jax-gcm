@@ -142,7 +142,15 @@ class Model:
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
+        
+        def conserve_global_mean_surface_pressure(u, u_next):
+            return u_next.replace(
+                # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
+                log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
+            )
+        
         filters = [
+            conserve_global_mean_surface_pressure,
             dinosaur.time_integration.exponential_step_filter(
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
