@@ -275,7 +275,7 @@ def calculate_updraft(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
     pressure: jnp.ndarray,
-    height: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
     rho: jnp.ndarray,
     kbase: int,
     ktop: int, 
@@ -290,7 +290,7 @@ def calculate_updraft(
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental humidity (kg/kg) [nlev]
         pressure: Pressure (Pa) [nlev] 
-        height: Height (m) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
         rho: Air density (kg/m³) [nlev]
         kbase: Cloud base level index
         ktop: Cloud top level index
@@ -327,14 +327,10 @@ def calculate_updraft(
         buoy=buoy_init
     )
     
-    # Calculate layer thicknesses
-    dz = jnp.diff(height)
-    dz = jnp.concatenate([dz, jnp.array([dz[-1]])])  # Repeat last value
-    
     # Prepare inputs for scan (extract config parameters to avoid passing object)
     k_levels = jnp.arange(nlev)
     level_inputs = (
-        k_levels, temperature, humidity, pressure, dz, rho,
+        k_levels, temperature, humidity, pressure, layer_thickness, rho,
         jnp.full(nlev, kbase), jnp.full(nlev, ktop), 
         jnp.full(nlev, ktype), 
         jnp.full(nlev, config.entrpen), jnp.full(nlev, config.entrscv),

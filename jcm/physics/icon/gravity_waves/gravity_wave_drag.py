@@ -286,6 +286,7 @@ def gravity_wave_drag(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
     height: jnp.ndarray,
+    air_density: jnp.ndarray,
     h_std: jnp.ndarray,
     dt: float,
     config: Optional[GravityWaveParameters] = None
@@ -299,6 +300,7 @@ def gravity_wave_drag(
         temperature: Temperature (K) [nlev]
         pressure: Pressure (Pa) [nlev]
         height: Geopotential height (m) [nlev]
+        air_density: Air density (kg/m³) [nlev]
         h_std: Standard deviation of sub-grid orography (m)
         dt: Time step (s)
         config: GW parameters
@@ -316,7 +318,7 @@ def gravity_wave_drag(
     n_bv = jnp.sqrt(n2)
     
     # Air density
-    rho = pressure / (rd * temperature)
+    rho = air_density
     
     # Initialize momentum fluxes
     tau_x = jnp.zeros(nlev)
@@ -413,9 +415,10 @@ def test_gravity_wave_drag():
     """Simple test of gravity wave drag"""
     # Create test profile
     nlev = 30
-    height = jnp.linspace(0, 30000, nlev)
+    height = jnp.linspace(0, 30000, nlev)[::-1]
     pressure = 100000 * jnp.exp(-height / 8000)  # Exponential atmosphere
     temperature = 288 - 0.0065 * height  # Standard lapse rate
+    air_density = pressure / (rd * temperature)  # Ideal gas law
     
     # Westerly jet with shear
     u_wind = 20.0 * jnp.exp(-(height - 10000)**2 / 5000**2)
@@ -428,7 +431,7 @@ def test_gravity_wave_drag():
     
     # Calculate GWD
     tendencies, state = gravity_wave_drag(
-        u_wind, v_wind, temperature, pressure, height, h_std, dt
+        u_wind, v_wind, temperature, pressure, height, air_density, h_std, dt
     )
     
     print(f"Max u-tendency: {jnp.abs(tendencies.dudt).max()*86400:.2f} m/s/day")

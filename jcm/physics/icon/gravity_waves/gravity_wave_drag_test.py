@@ -22,7 +22,7 @@ class TestBruntVaisalaFrequency:
         """Test N² in stably stratified atmosphere"""
         # Create stable profile
         nlev = 20
-        height = jnp.linspace(0, 20000, nlev)
+        height = jnp.linspace(20000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         
         # Stable temperature profile (decreasing with height)
@@ -40,7 +40,7 @@ class TestBruntVaisalaFrequency:
     def test_isothermal_atmosphere(self):
         """Test N² in isothermal atmosphere"""
         nlev = 10
-        height = jnp.linspace(0, 10000, nlev)
+        height = jnp.linspace(10000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         temperature = jnp.ones(nlev) * 273.0
         
@@ -143,8 +143,8 @@ class TestWaveBreaking:
         nlev = 10
         
         # Create profile with strong shear
-        height = jnp.linspace(0, 10000, nlev)
-        u = jnp.linspace(0, 50, nlev)  # Linear shear
+        height = jnp.linspace(10000, 0, nlev)
+        u = jnp.linspace(50, 0, nlev)  # Linear shear
         v = jnp.zeros(nlev)
         
         # Stable stratification
@@ -172,7 +172,7 @@ class TestWaveBreaking:
         config = GravityWaveParameters.default()
         nlev = 10
         
-        height = jnp.linspace(0, 20000, nlev)
+        height = jnp.linspace(20000, 0, nlev)
         u = jnp.ones(nlev) * 10.0
         v = jnp.zeros(nlev)
         n2 = jnp.ones(nlev) * 1e-4
@@ -201,7 +201,7 @@ class TestGravityWaveDrag:
         
         # Create westerly jet
         nlev = 30
-        height = jnp.linspace(0, 30000, nlev)
+        height = jnp.linspace(20000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         temperature = 288 - 0.0065 * height
         
@@ -229,7 +229,7 @@ class TestGravityWaveDrag:
         config = GravityWaveParameters.default()
         
         nlev = 20
-        height = jnp.linspace(0, 20000, nlev)
+        height = jnp.linspace(20000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         temperature = 288 - 0.0065 * height
         
@@ -254,7 +254,7 @@ class TestGravityWaveDrag:
         config = GravityWaveParameters.default(zmin=5000.0, zmax=25000.0)
         
         nlev = 40
-        height = jnp.linspace(0, 40000, nlev)
+        height = jnp.linspace(40000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         temperature = 288 - 0.0065 * height
         
@@ -281,7 +281,7 @@ class TestGravityWaveDrag:
         config = GravityWaveParameters.default()
         
         nlev = 20
-        height = jnp.linspace(0, 20000, nlev)
+        height = jnp.linspace(20000, 0, nlev)
         pressure = 100000 * jnp.exp(-height / 8000)
         temperature = 288 - 0.0065 * height
         
@@ -324,7 +324,7 @@ class TestGravityWaveDrag:
         
         def gwd_loss(u_wind):
             nlev = len(u_wind)
-            height = jnp.linspace(0, 20000, nlev)
+            height = jnp.linspace(20000, 0, nlev)
             pressure = 100000 * jnp.exp(-height / 8000)
             temperature = 288 - 0.0065 * height
             v_wind = jnp.zeros(nlev)

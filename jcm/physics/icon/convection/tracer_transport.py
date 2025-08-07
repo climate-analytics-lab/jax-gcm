@@ -118,43 +118,26 @@ def transport_tracers(
         # Simple approach: tracers follow air parcels
         for itrac in range(indices.iqt, ntrac):
             # In updraft: mix with environmental air based on entrainment
-            for k in range(nlev):
-                if updraft_state.mfu[k] > 0:
-                    # Entrainment dilutes tracer concentration
-                    tracer_u = tracer_u.at[k, itrac].set(tracers[k, itrac])
-                    
+            # Entrainment dilutes tracer concentration
+            tracer_u = tracer_u.at[:, itrac].set(jnp.where(updraft_state.mfu > 0, tracers[:, itrac], tracer_u[:, itrac]))
             # In downdraft: similar mixing
-            for k in range(nlev):
-                if downdraft_state.mfd[k] < 0:
-                    tracer_d = tracer_d.at[k, itrac].set(tracers[k, itrac])
-    
+            tracer_d = tracer_d.at[:, itrac].set(jnp.where(downdraft_state.mfd < 0, tracers[:, itrac], tracer_d[:, itrac]))
+
     # Calculate mass fluxes for all tracers
-    for itrac in range(ntrac):
-        mfuxt = mfuxt.at[:, itrac].set(updraft_state.mfu * tracer_u[:, itrac])
-        mfdxt = mfdxt.at[:, itrac].set(downdraft_state.mfd * tracer_d[:, itrac])
-    
+    mfuxt = mfuxt.at[:, :ntrac].set(updraft_state.mfu[:, None] * tracer_u[:, :ntrac])
+    mfdxt = mfdxt.at[:, :ntrac].set(downdraft_state.mfd[:, None] * tracer_d[:, :ntrac])
+
     # Calculate tendencies from mass flux divergence
-    for k in range(nlev-1):
-        dp = pressure[k+1] - pressure[k]
-        factor = 1.0 / (rho[k] * dp) * 9.81
-        
-        for itrac in range(indices.iqt, ntrac):
-            # Mass flux divergence
-            flux_div = (mfuxt[k, itrac] - mfuxt[k+1, itrac] +
-                       mfdxt[k, itrac] - mfdxt[k+1, itrac])
-            
-            dtracer_dt = dtracer_dt.at[k, itrac].set(flux_div * factor / dt)
+    dp = jnp.diff(pressure, axis=0)
+    factor = 1.0 / (rho[:-1] * dp) * 9.81
+    for itrac in range(indices.iqt, ntrac):
+        # Mass flux divergence
+        flux_div = -jnp.diff(mfuxt + mfdxt, axis=0)[:, itrac]
+        dtracer_dt = dtracer_dt.at[:-1, itrac].set(flux_div * factor / dt)
     
     # Handle cloud water and ice detrainment
     # Calculate detrainment from updraft liquid water
-    detrain_total = jnp.zeros(nlev)
-    for k in range(nlev):
-        if updraft_state.mfu[k] > 0 and updraft_state.detr[k] > 0:
-            # Detrain fraction of cloud water
-            detrain_total = detrain_total.at[k].set(
-                updraft_state.lu[k] * updraft_state.detr[k] * 
-                updraft_state.mfu[k] / rho[k]
-            )
+    detrain_total = jnp.where(updraft_state.mfu > 0 & updraft_state.detr > 0, updraft_state.lu * updraft_state.detr * updraft_state.mfu / rho, 0)
     
     # Partition into liquid and ice
     detrain_qc, detrain_qi = partition_cloud_detrainment(temperature, detrain_total)

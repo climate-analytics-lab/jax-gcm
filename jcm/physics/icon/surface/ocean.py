@@ -164,9 +164,9 @@ def compute_ocean_surface_fluxes(
     q_sat_ocean = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
     
     # Temperature and humidity differences
-    delta_temp = atmospheric_state.temperature - ocean_temp
-    delta_humidity = atmospheric_state.humidity - q_sat_ocean
-    
+    delta_temp = ocean_temp - atmospheric_state.temperature
+    delta_humidity = q_sat_ocean - atmospheric_state.humidity
+
     # Wind relative to ocean surface
     wind_rel_u = atmospheric_state.u_wind - ocean_u
     wind_rel_v = atmospheric_state.v_wind - ocean_v
@@ -175,15 +175,15 @@ def compute_ocean_surface_fluxes(
     # Sensible heat flux [W/m²]
     sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
     
-    # Latent heat flux [W/m²]
-    latent_heat = air_density * PHYS_CONST.alhc * exchange_coeff_moisture * delta_humidity
-    
     # Momentum fluxes [N/m²]
     momentum_u = air_density * exchange_coeff_momentum * wind_rel_u
     momentum_v = air_density * exchange_coeff_momentum * wind_rel_v
     
     # Evaporation rate [kg/m²/s]
     evaporation = air_density * exchange_coeff_moisture * delta_humidity
+
+    # Latent heat flux [W/m²]
+    latent_heat = PHYS_CONST.alhc * evaporation
     
     # Ocean albedo
     albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif = compute_ocean_albedo(
@@ -191,7 +191,7 @@ def compute_ocean_surface_fluxes(
     )
     
     # Shortwave absorption (simplified - assume 50% visible, 50% NIR)
-    albedo_mean = 0.5 * (albedo_vis_dir + albedo_vis_dif + albedo_nir_dir + albedo_nir_dif) / 2.0
+    albedo_mean = (albedo_vis_dir + albedo_vis_dif + albedo_nir_dir + albedo_nir_dif) / 4.0
     shortwave_net = atmospheric_state.sw_downward * (1.0 - albedo_mean)
     
     # Longwave flux

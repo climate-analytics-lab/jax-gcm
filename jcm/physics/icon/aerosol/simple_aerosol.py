@@ -341,5 +341,5 @@ def get_CDNC(AOD, A=60, B=20):
         MODIS original: A=16 B=1000
         AEROCOM P1 original: A=60, B=20
     """
-    return A * jnp.log(B * AOD + 1)
+    return 1 + A * jnp.log(B * AOD + 1) #FIXME: the rest of the code expects a strictly positive factor, so the logarithmic formula is not appropriate here.
 

@@ -143,26 +143,29 @@ def setup_momentum_matrix(
     k_scaled = k_half * dt_factor
     
     # Build tridiagonal matrix
-    for k in range(nlev):
-        # Sub-diagonal (connection to level below)
-        if k < nlev - 1:
-            matrix_coeffs = matrix_coeffs.at[:, k, 0, matrix_idx].set(
-                -k_scaled[:, k + 1] * recip_air_mass[:, k]
-            )
-        
-        # Super-diagonal (connection to level above)
-        if k > 0:
-            matrix_coeffs = matrix_coeffs.at[:, k, 2, matrix_idx].set(
-                -k_scaled[:, k] * recip_air_mass[:, k]
-            )
-        
-        # Diagonal (implicit time step + connections)
-        # For stability, diagonal must be positive and larger than off-diagonal elements
-        above_contrib = jnp.where(k > 0, k_scaled[:, k] * recip_air_mass[:, k], 0.0)
-        below_contrib = jnp.where(k < nlev - 1, k_scaled[:, k + 1] * recip_air_mass[:, k], 0.0)
-        diagonal_val = 1.0 + above_contrib + below_contrib
-        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(diagonal_val)
-    
+
+    # Sub-diagonal (connection to level below)
+    sub_diagonal_vals = -k_scaled[:, 1:-1] * recip_air_mass[:, :-1]  # shape: [ncol, nlev-1]
+    matrix_coeffs = matrix_coeffs.at[:, :-1, 0, matrix_idx].set(sub_diagonal_vals)
+
+    # Super-diagonal (connection to level above)  
+    super_diagonal_vals = -k_scaled[:, 1:-1] * recip_air_mass[:, 1:]  # shape: [ncol, nlev-1]
+    matrix_coeffs = matrix_coeffs.at[:, 1:, 2, matrix_idx].set(super_diagonal_vals)
+
+    # Diagonal
+    above_contrib = jnp.concatenate([
+        jnp.zeros((k_scaled.shape[0], 1)),  # k=0 has no above contribution
+        -super_diagonal_vals
+    ], axis=1)
+
+    below_contrib = jnp.concatenate([
+        -sub_diagonal_vals,  # k<nlev-1 contributions  
+        jnp.zeros((k_scaled.shape[0], 1))  # k=nlev-1 has no below contribution
+    ], axis=1)
+
+    diagonal_vals = 1.0 + above_contrib + below_contrib
+    matrix_coeffs = matrix_coeffs.at[:, :, 1, matrix_idx].set(diagonal_vals)
+
     return matrix_coeffs
 
 
@@ -203,40 +206,10 @@ def setup_hydrometeor_matrix(
     matrix_idx: int
 ) -> jnp.ndarray:
     """Set up tridiagonal matrix for hydrometeor equations."""
-    # Hydrometeors have no surface flux, so bottom boundary condition is different
-    ncol, nlev = exchange_coeff.shape
-    
-    # Exchange coefficient on half levels
-    k_half = jnp.zeros((ncol, nlev + 1))
-    k_half = k_half.at[:, 1:nlev].set(
-        0.5 * (exchange_coeff[:, :-1] + exchange_coeff[:, 1:])
+    # Hydrometeors have no surface flux, so bottom boundary condition is different; however, surface flux is handled separately
+    return setup_momentum_matrix(
+        matrix_coeffs, exchange_coeff, recip_dry_air_mass, dt_factor, matrix_idx
     )
-    # No flux at top and bottom
-    
-    # Scaled exchange coefficients
-    k_scaled = k_half * dt_factor
-    
-    # Build tridiagonal matrix
-    for k in range(nlev):
-        # Sub-diagonal (connection to level below)
-        if k < nlev - 1:
-            matrix_coeffs = matrix_coeffs.at[:, k, 0, matrix_idx].set(
-                -k_scaled[:, k + 1] * recip_dry_air_mass[:, k]
-            )
-        
-        # Super-diagonal (connection to level above)
-        if k > 0:
-            matrix_coeffs = matrix_coeffs.at[:, k, 2, matrix_idx].set(
-                -k_scaled[:, k] * recip_dry_air_mass[:, k]
-            )
-        
-        # Diagonal
-        above_contrib = jnp.where(k > 0, k_scaled[:, k] * recip_dry_air_mass[:, k], 0.0)
-        below_contrib = jnp.where(k < nlev - 1, k_scaled[:, k + 1] * recip_dry_air_mass[:, k], 0.0)
-        diagonal_val = 1.0 + above_contrib + below_contrib
-        matrix_coeffs = matrix_coeffs.at[:, k, 1, matrix_idx].set(diagonal_val)
-    
-    return matrix_coeffs
 
 
 @jax.jit
@@ -352,26 +325,51 @@ def solve_tridiagonal_single(
     ncol, nlev = b.shape
     
     # Forward sweep (elimination)
-    # Initialize
-    cp = jnp.zeros_like(c)
-    dp = jnp.zeros_like(d)
-    
-    # First row
-    cp = cp.at[:, 0].set(c[:, 0] / b[:, 0])
-    dp = dp.at[:, 0].set(d[:, 0] / b[:, 0])
+    # Initialize first row
+    cp_0 = c[:, 0] / b[:, 0]
+    dp_0 = d[:, 0] / b[:, 0]
     
     # Remaining rows
-    for i in range(1, nlev):
-        denominator = b[:, i] - a[:, i] * cp[:, i-1]
-        cp = cp.at[:, i].set(c[:, i] / denominator)
-        dp = dp.at[:, i].set((d[:, i] - a[:, i] * dp[:, i-1]) / denominator)
+    def forward_step(carry, inputs):
+        cp_prev, dp_prev = carry
+        a_i, b_i, c_i, d_i = inputs
+
+        denom_i = b_i - a_i * cp_prev
+        cp_i = c_i / denom_i
+        dp_i = (d_i - a_i * dp_prev) / denom_i
+        
+        return (cp_i, dp_i), (cp_i, dp_i)
     
+    _, forward_outputs = jax.lax.scan(
+        forward_step,
+        (cp_0, dp_0), # initial carry
+        (a[:, 1:].T, b[:, 1:].T, c[:, 1:].T, d[:, 1:].T) # inputs
+    )
+    
+    # Reconstruct cp and dp arrays
+    cp_rest, dp_rest = forward_outputs
+    cp = jnp.concatenate([cp_0[None, :], cp_rest], axis=0).T
+    dp = jnp.concatenate([dp_0[None, :], dp_rest], axis=0).T
+
     # Back substitution
-    x = jnp.zeros_like(d)
-    x = x.at[:, -1].set(dp[:, -1])
+    x_last = dp[:, -1]
+    def backward_step(carry, inputs):
+        """Backward substitution step for scan."""
+        x_next = carry
+        cp_i, dp_i = inputs
+        
+        x_i = dp_i - cp_i * x_next
+        
+        return x_i, x_i
     
-    for i in range(nlev-2, -1, -1):
-        x = x.at[:, i].set(dp[:, i] - cp[:, i] * x[:, i+1])
+    # Prepare inputs for backward scan (reverse order, skip last element)
+    backward_inputs = (cp[:, :-1].T[::-1], dp[:, :-1].T[::-1])
+
+    _, backward_outputs = jax.lax.scan(backward_step, x_last, backward_inputs)
+    
+    # Reconstruct solution array (reverse the outputs and add last element)
+    x_rest = backward_outputs[::-1]
+    x = jnp.concatenate([x_rest, x_last[None, :]], axis=0).T
     
     return x
 

@@ -264,7 +264,7 @@ def calculate_downdraft(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
     pressure: jnp.ndarray,
-    height: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
     rho: jnp.ndarray,
     updraft_state,  # UpdatedraftState from updraft.py
     precip_rate: jnp.ndarray,
@@ -279,7 +279,7 @@ def calculate_downdraft(
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental humidity (kg/kg) [nlev]
         pressure: Pressure (Pa) [nlev]
-        height: Height (m) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]
         rho: Air density (kg/m³) [nlev]
         updraft_state: Computed updraft state
         precip_rate: Column precipitation rate (kg/m²/s)
@@ -337,15 +337,11 @@ def calculate_downdraft(
         active=has_lfs
     )
     
-    # Calculate layer thicknesses
-    dz = jnp.diff(height)
-    dz = jnp.concatenate([dz, jnp.array([dz[-1]])])
-    
     # Prepare inputs for scan (extract config parameters to avoid passing object)
     k_levels = jnp.arange(nlev)
     level_inputs = (
         k_levels, temperature, humidity, pressure, 
-        dz, rho, jnp.full(nlev, precip_rate), 
+        layer_thickness, rho, jnp.full(nlev, precip_rate), 
         jnp.full(nlev, config.entrscv),
         jnp.full(nlev, config.cmfcmin),
         jnp.full(nlev, config.cevapcu)

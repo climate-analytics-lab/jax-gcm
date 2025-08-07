@@ -317,11 +317,11 @@ class Model:
         
         # Add time dimension to dynamics predictions
         dynamics_dict = dynamics_predictions.asdict()
-        for key, value in dynamics_dict.items():
-            if hasattr(value, 'shape') and value.ndim >= 1:
+        # for key, value in dynamics_dict.items():
+            # if hasattr(value, 'shape') and value.ndim >= 1:
                 # Add time dimension if not already present
-                if value.shape[0] != 1:
-                    dynamics_dict[key] = value.reshape(1, *value.shape)
+                # if value.shape[0] != 1:
+                #     dynamics_dict[key] = value.reshape(1, *value.shape)
         
         pred_ds = self.data_to_xarray(dynamics_dict | physics_preds_dict)
         

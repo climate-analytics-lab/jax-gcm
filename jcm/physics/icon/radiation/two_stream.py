@@ -20,7 +20,7 @@ from .radiation_types import OpticalProperties
 
 @jax.jit
 def two_stream_coefficients(
-    tau: jnp.ndarray,
+    tau: jnp.ndarray, # FIXME: remove this if unused
     ssa: jnp.ndarray,
     g: jnp.ndarray,
     mu0: Optional[float] = None
@@ -88,8 +88,8 @@ def layer_reflectance_transmittance(
     # Use 88 as threshold since exp(90) = inf, so be conservative
     large_tau = lambda_tau >= 88
     
-    exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
-    exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
+    # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
+    # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
     # Helper terms
     term1 = 1.0 / (lambda_val + gamma1)
@@ -97,8 +97,8 @@ def layer_reflectance_transmittance(
     
     # For large optical depths, avoid NaN by using safe values
     # Use finite values instead of inf for subsequent calculations
-    exp_plus_safe = jnp.where(large_tau, 1.0, exp_plus)
-    exp_minus_safe = jnp.where(large_tau, 0.0, exp_minus)
+    exp_plus_safe = jnp.where(large_tau, 1.0, jnp.exp(lambda_tau))
+    exp_minus_safe = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
     denom = exp_plus_safe - gamma2**2 / gamma1**2 * exp_minus_safe
     # Ensure denominator is never zero
@@ -311,16 +311,7 @@ def shortwave_fluxes_single_band(
     
     # Direct beam transmission through atmosphere
     # Calculate cumulative direct transmission from TOA
-    def direct_transmission(carry, T):
-        trans_above = carry
-        trans_below = trans_above * T
-        return trans_below, trans_below
-    
-    _, direct_trans = jax.lax.scan(
-        direct_transmission,
-        1.0,  # Full transmission at TOA
-        T_dir
-    )
+    direct_trans = jnp.cumprod(T_dir, axis=0)
     
     # Add TOA transmission
     direct_trans_full = jnp.concatenate([jnp.array([1.0]), direct_trans])
@@ -343,7 +334,7 @@ def shortwave_fluxes_single_band(
     def upward_diffuse_step(carry, x):
         flux_below = carry
         R, T, S = x
-        flux_above = R * flux_below + S
+        flux_above = T * flux_below + S
         return flux_above, flux_above
     
     _, flux_up_levels = jax.lax.scan(
@@ -357,7 +348,7 @@ def shortwave_fluxes_single_band(
     def downward_diffuse_step(carry, x):
         flux_above = carry
         R, T, S, flux_up = x
-        flux_below = T * flux_above + R * flux_up + S
+        flux_below = T * flux_above + R * flux_up + S # FIXME: verify this logic
         return flux_below, flux_below
     
     _, flux_down_levels = jax.lax.scan(
@@ -433,6 +424,7 @@ def flux_to_heating_rate(
     flux_up: jnp.ndarray,
     flux_down: jnp.ndarray,
     pressure_interfaces: jnp.ndarray,
+    g: float = 9.81,  # m/s^2
     cp: float = 1004.0  # J/kg/K
 ) -> jnp.ndarray:
     """
@@ -450,17 +442,16 @@ def flux_to_heating_rate(
         Heating rate (K/s) [nlev]
     """
     # Net flux at interfaces
-    net_flux = flux_up - flux_down
+    net_flux_down = flux_down - flux_up
     
     # Flux divergence in layers
-    flux_div = net_flux[1:] - net_flux[:-1]
+    flux_div = jnp.diff(net_flux_down, axis=0)
     
     # Pressure thickness
-    dp = pressure_interfaces[1:] - pressure_interfaces[:-1]
+    dp = jnp.diff(pressure_interfaces, axis=0)
     
     # Heating rate
-    g = 9.81
-    heating = -g / cp * flux_div / dp
+    heating = (g / cp) * (-flux_div) / dp
     
     return heating
 
