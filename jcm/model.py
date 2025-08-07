@@ -143,7 +143,7 @@ class Model:
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         filters = [
             lambda u, u_next: u_next.replace(
-                # prevent global mean surface pressure drift
+                # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
                 log_surface_pressure=u_next.log_surface_pressure.at[0,0,0].set(u.log_surface_pressure[0,0,0])
             ),
             dinosaur.time_integration.exponential_step_filter(
