@@ -14,6 +14,8 @@ from jcm.physics.icon.radiation.radiation_scheme import (
     radiation_scheme
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters
+from jcm.physics.icon.unit_conversions import calculate_layer_thickness, calculate_air_density
+from jcm.physics.icon.icon_physics_data import AerosolData
 
 
 def create_default_aerosol_data(nlev=10, parameters=None):
@@ -21,31 +23,38 @@ def create_default_aerosol_data(nlev=10, parameters=None):
     if parameters is None:
         parameters = RadiationParameters.default()
     
-    # Total number of bands (SW + LW)
+    # Create simple aerosol profiles with small background loading
     total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
-    
-    # Default small aerosol loading
-    aerosol_optical_depth = jnp.ones((nlev, total_bands)) * 0.01  # Small background AOD
-    aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9              # Mostly scattering
+    aod_profile = jnp.ones((nlev, total_bands)) * 0.01  # Small background AOD
+    ssa_profile = jnp.ones((nlev, total_bands)) * 0.9   # Mostly scattering
     # Set LW bands to pure absorption (SSA = 0)
-    aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
-    aerosol_asymmetry = jnp.ones((nlev, total_bands)) * 0.7       # Forward scattering
-    cdnc_factor = jnp.array(1.0)                                   # No aerosol-cloud interaction
+    ssa_profile = ssa_profile.at[:, int(parameters.n_sw_bands):].set(0.0)
+    asy_profile = jnp.ones((nlev, total_bands)) * 0.7   # Forward scattering
     
-    return {
-        'aerosol_optical_depth': aerosol_optical_depth,
-        'aerosol_ssa': aerosol_ssa,
-        'aerosol_asymmetry': aerosol_asymmetry,
-        'cdnc_factor': cdnc_factor
-    }
+    # Column-integrated properties
+    aod_total = jnp.array([0.1])              # Total column AOD
+    aod_anthropogenic = jnp.array([0.05])     # Anthropogenic AOD
+    aod_background = jnp.array([0.05])        # Background AOD
+    
+    # For Twomey effect
+    cdnc_factor = jnp.array([1.0])            # No aerosol-cloud interaction
+    
+    return AerosolData(
+        aod_profile=aod_profile,
+        ssa_profile=ssa_profile,
+        asy_profile=asy_profile,
+        aod_total=aod_total,
+        aod_anthropogenic=aod_anthropogenic,
+        aod_background=aod_background,
+        cdnc_factor=cdnc_factor
+    )
 
 
 def create_test_atmosphere(nlev=10):
     """Create a realistic test atmosphere"""
-    # Realistic atmospheric profile - pressure decreases with height
-    # Start from surface (high pressure) to TOA (low pressure)
-    pressure_levels = jnp.logspace(jnp.log10(100000.0), jnp.log10(1000.0), nlev)  # Pa (surface to TOA)
-    height_levels = jnp.linspace(0.0, 20000.0, nlev)  # m (surface to ~20km)
+    # Realistic atmospheric profile - pressure increases with index (TOA to surface)
+    pressure_levels = jnp.logspace(jnp.log10(1000.0), jnp.log10(100000.0), nlev)
+    height_levels = jnp.linspace(20000.0, 0.0, nlev)  # m (~20km to surface)
     
     # Temperature profile with lapse rate
     temperature = 288.0 - 6.5e-3 * height_levels  # K (standard lapse rate)
@@ -54,6 +63,12 @@ def create_test_atmosphere(nlev=10):
     # Humidity decreases exponentially with height
     specific_humidity = 0.01 * jnp.exp(-height_levels / 8000.0)  # kg/kg
     specific_humidity = jnp.maximum(specific_humidity, 1e-6)  # Minimum humidity
+
+    # Layer thickness
+    layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
+
+    # Air density
+    air_density = calculate_air_density(pressure_levels, temperature)
     
     # Some clouds in middle troposphere
     cloud_water = jnp.zeros(nlev)
@@ -71,7 +86,8 @@ def create_test_atmosphere(nlev=10):
         'temperature': temperature,
         'specific_humidity': specific_humidity,
         'pressure_levels': pressure_levels,
-        'height_levels': height_levels,
+        'layer_thickness': layer_thickness,
+        'air_density': air_density,
         'cloud_water': cloud_water,
         'cloud_ice': cloud_ice,
         'cloud_fraction': cloud_fraction
@@ -81,13 +97,14 @@ def create_test_atmosphere(nlev=10):
 def test_prepare_radiation_state():
     """Test radiation state preparation"""
     atm = create_test_atmosphere(nlev=5)
-    cos_zenith = 0.5
+    cos_zenith = jnp.array(0.5)
     
     rad_state = prepare_radiation_state(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
-        height_levels=atm['height_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -119,9 +136,9 @@ def test_prepare_radiation_state():
     assert jnp.all(rad_state.cloud_ice_path >= 0)
     
     # Check pressure interface ordering  
-    # The current implementation has pressure_levels[0] = surface, pressure_levels[-1] = TOA
-    # So interface 0 should be higher pressure than interface -1
-    assert rad_state.pressure_interfaces[0] > rad_state.pressure_interfaces[-1]  # Should be decreasing
+    # The current implementation has pressure_levels[0] = TOA, pressure_levels[-1] = surface
+    # So interface -1 should be higher pressure than interface 0
+    assert rad_state.pressure_interfaces[-1] > rad_state.pressure_interfaces[0]  # Should be increasing (TOA to surface)
     
     # Middle interfaces should be reasonable
     assert jnp.all(rad_state.pressure_interfaces >= 0)
@@ -135,10 +152,7 @@ def test_prepare_radiation_state():
 def test_radiation_scheme_basic():
     """Test basic radiation scheme functionality"""
     atm = create_test_atmosphere(nlev=8)
-    
-    # Convert height to geopotential
-    geopotential = atm['height_levels'] * 9.81
-    
+
     # Solar geometry for noon, summer
     day_of_year = 172.0
     seconds_since_midnight = 43200.0
@@ -154,8 +168,9 @@ def test_radiation_scheme_basic():
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,  # Normalized
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -164,10 +179,7 @@ def test_radiation_scheme_basic():
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Check output shapes
@@ -206,7 +218,6 @@ def test_radiation_scheme_basic():
 def test_radiation_scheme_nighttime():
     """Test radiation scheme at nighttime (no solar)"""
     atm = create_test_atmosphere(nlev=5)
-    geopotential = atm['height_levels'] * 9.81
     
     # Nighttime conditions
     day_of_year = 172.0
@@ -223,8 +234,9 @@ def test_radiation_scheme_nighttime():
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -233,10 +245,7 @@ def test_radiation_scheme_nighttime():
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Should have minimal shortwave at night and valid longwave
@@ -258,7 +267,6 @@ def test_radiation_scheme_nighttime():
 def test_radiation_scheme_custom_parameters():
     """Test radiation scheme with custom parameters"""
     atm = create_test_atmosphere(nlev=6)
-    geopotential = atm['height_levels'] * 9.81
     
     # Custom parameters with appropriate band limits
     custom_params = RadiationParameters.default(
@@ -272,12 +280,13 @@ def test_radiation_scheme_custom_parameters():
     
     # Create aerosol data for custom parameters
     aerosol_data = create_default_aerosol_data(nlev=6, parameters=custom_params)
-    
+
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -286,10 +295,7 @@ def test_radiation_scheme_custom_parameters():
         latitude=0.0,
         longitude=0.0,
         parameters=custom_params,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Check output shapes - hardcoded to max_bands=10
@@ -305,13 +311,17 @@ def test_radiation_scheme_extreme_conditions():
     """Test radiation scheme with extreme atmospheric conditions"""
     nlev = 5
     
-    # Very cold, dry atmosphere
+    # Very cold, dry atmosphere with extreme pressure profile
     temperature = jnp.ones(nlev) * 180.0  # Very cold
     specific_humidity = jnp.ones(nlev) * 1e-6  # Very dry
-    geopotential = jnp.linspace(0, 50000, nlev) * 9.81  # High altitude
+    pressure_levels = jnp.logspace(jnp.log10(100.0), jnp.log10(10000.0), nlev)  # Very low pressure (TOA to mid-stratosphere)
     cloud_water = jnp.zeros(nlev)
     cloud_ice = jnp.zeros(nlev) 
     cloud_fraction = jnp.zeros(nlev)
+    
+    # Compute required parameters
+    air_density = calculate_air_density(pressure_levels, temperature)
+    layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
     
     # Create default radiation parameters
     parameters = RadiationParameters.default()
@@ -322,8 +332,9 @@ def test_radiation_scheme_extreme_conditions():
     tendencies, diagnostics = radiation_scheme(
         temperature=temperature,
         specific_humidity=specific_humidity,
-        surface_pressure=0.1,  # Very low surface pressure
-        geopotential=geopotential,
+        pressure_levels=pressure_levels,
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
@@ -332,10 +343,7 @@ def test_radiation_scheme_extreme_conditions():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Should handle extreme conditions without NaN
@@ -353,8 +361,6 @@ def test_radiation_scheme_very_cloudy():
     cloud_ice = jnp.ones(8) * 5e-4    # Heavy ice clouds
     cloud_fraction = jnp.ones(8) * 0.9  # 90% cloud cover
     
-    geopotential = atm['height_levels'] * 9.81
-    
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
@@ -364,8 +370,9 @@ def test_radiation_scheme_very_cloudy():
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
@@ -374,10 +381,7 @@ def test_radiation_scheme_very_cloudy():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Should handle heavy clouds without NaN
@@ -393,10 +397,42 @@ def test_radiation_scheme_very_cloudy():
     assert sw_flux_variations > 1.0  # Some variation due to cloud scattering
 
 
+def test_radiation_column():
+    """Test single column radiation function"""
+    atm = create_test_atmosphere(nlev=6)
+    
+    # Create default radiation parameters
+    parameters = RadiationParameters.default()
+    
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=6, parameters=parameters)
+    
+    tendencies, diagnostics = radiation_scheme(
+        temperature=atm['temperature'],
+        specific_humidity=atm['specific_humidity'],
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
+        cloud_water=atm['cloud_water'],
+        cloud_ice=atm['cloud_ice'],
+        cloud_fraction=atm['cloud_fraction'],
+        day_of_year=172.0,
+        seconds_since_midnight=43200.0,
+        latitude=0.0,
+        longitude=0.0,
+        parameters=parameters,
+        aerosol_data=aerosol_data
+    )
+    
+    # Should produce same results as main function
+    assert tendencies.temperature_tendency.shape == (6,)
+    assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))
+    assert jnp.all(jnp.isfinite(diagnostics.toa_lw_up))
+
+
 def test_radiation_scheme_energy_conservation():
     """Test energy conservation in radiation scheme"""
     atm = create_test_atmosphere(nlev=10)
-    geopotential = atm['height_levels'] * 9.81
     
     # Create default radiation parameters
     parameters = RadiationParameters.default()
@@ -407,8 +443,9 @@ def test_radiation_scheme_energy_conservation():
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -417,10 +454,7 @@ def test_radiation_scheme_energy_conservation():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Energy conservation checks
@@ -441,7 +475,6 @@ def test_radiation_scheme_energy_conservation():
 def test_radiation_scheme_realistic_values():
     """Test that radiation scheme produces realistic atmospheric values"""
     atm = create_test_atmosphere(nlev=15)
-    geopotential = atm['height_levels'] * 9.81
     
     # Create default radiation parameters
     parameters = RadiationParameters.default()
@@ -452,8 +485,9 @@ def test_radiation_scheme_realistic_values():
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -462,10 +496,7 @@ def test_radiation_scheme_realistic_values():
         latitude=30.0,  # Mid-latitude
         longitude=0.0,
         parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
+        aerosol_data=aerosol_data
     )
     
     # Check that computation completed and produced expected output shapes
@@ -495,7 +526,6 @@ def test_radiation_scheme_realistic_values():
 def test_radiation_scheme_reproducibility():
     """Test that radiation scheme produces reproducible results"""
     atm = create_test_atmosphere(nlev=7)
-    geopotential = atm['height_levels'] * 9.81
     
     # Create default radiation parameters
     parameters = RadiationParameters.default()
@@ -508,8 +538,9 @@ def test_radiation_scheme_reproducibility():
         tendencies, diagnostics = radiation_scheme(
             temperature=atm['temperature'],
             specific_humidity=atm['specific_humidity'],
-            surface_pressure=1.0,
-            geopotential=geopotential,
+            pressure_levels=atm['pressure_levels'],
+            layer_thickness=atm['layer_thickness'],
+            air_density=atm['air_density'],
             cloud_water=atm['cloud_water'],
             cloud_ice=atm['cloud_ice'],
             cloud_fraction=atm['cloud_fraction'],
@@ -518,10 +549,7 @@ def test_radiation_scheme_reproducibility():
             latitude=0.0,
             longitude=0.0,
             parameters=parameters,
-            aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-            aerosol_ssa=aerosol_data['aerosol_ssa'],
-            aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-            cdnc_factor=aerosol_data['cdnc_factor']
+            aerosol_data=aerosol_data
         )
         
         if i == 0:
