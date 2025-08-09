@@ -228,7 +228,18 @@ def prepare_icon_data(
     lw_heating = rrtmgp_data['rad_heat_lw_3d'][0, 0, halo:halo+nlev]
     sw_heating = rrtmgp_data['rad_heat_sw_3d'][0, 0, halo:halo+nlev]
     
-    # Create radiation tendencies
+    # Check if we need to reverse vertical order back to ICON convention
+    # RRTMGP outputs in surface→TOA order, ICON expects TOA→surface order
+    needs_reversal = _reverse_if_needed(icon_data.pressure)
+    flip = lambda a: a[::-1]
+    identity = lambda a: a
+    
+    # Conditionally reverse heating rates back to ICON order
+    total_heating = lax.cond(needs_reversal, flip, identity, total_heating)
+    lw_heating = lax.cond(needs_reversal, flip, identity, lw_heating)
+    sw_heating = lax.cond(needs_reversal, flip, identity, sw_heating)
+    
+    # Create radiation tendencies (now in ICON's TOA→surface order)
     tendencies = RadiationTendencies(
         temperature_tendency=total_heating,
         longwave_heating=lw_heating,
@@ -251,14 +262,19 @@ def prepare_icon_data(
     lw_flux_up_profile = jnp.zeros((nlev + 1, 1))
     lw_flux_down_profile = jnp.zeros((nlev + 1, 1))
 
-    # Set surface (index 0) and TOA (index -1) boundary values
-    sw_flux_down_profile = sw_flux_down_profile.at[0, 0].set(surf_sw_down)
-    sw_flux_up_profile = sw_flux_up_profile.at[0, 0].set(surf_sw_up)
-    sw_flux_down_profile = sw_flux_down_profile.at[-1, 0].set(toa_sw_down)
-    sw_flux_up_profile = sw_flux_up_profile.at[-1, 0].set(toa_sw_up)
-    lw_flux_down_profile = lw_flux_down_profile.at[0, 0].set(surf_lw_down)
-    lw_flux_up_profile = lw_flux_up_profile.at[0, 0].set(surf_lw_up)
-    lw_flux_up_profile = lw_flux_up_profile.at[-1, 0].set(toa_lw_up)
+    # Set flux boundary values with correct ICON vertical indexing
+    # ICON order: index 0 = TOA, index -1 = surface (when needs_reversal=True)
+    toa_idx = lax.cond(needs_reversal, lambda: 0, lambda: -1)
+    surf_idx = lax.cond(needs_reversal, lambda: -1, lambda: 0)
+    
+    # Set boundary values using conditional indexing
+    sw_flux_down_profile = sw_flux_down_profile.at[surf_idx, 0].set(surf_sw_down)
+    sw_flux_up_profile = sw_flux_up_profile.at[surf_idx, 0].set(surf_sw_up)
+    sw_flux_down_profile = sw_flux_down_profile.at[toa_idx, 0].set(toa_sw_down)
+    sw_flux_up_profile = sw_flux_up_profile.at[toa_idx, 0].set(toa_sw_up)
+    lw_flux_down_profile = lw_flux_down_profile.at[surf_idx, 0].set(surf_lw_down)
+    lw_flux_up_profile = lw_flux_up_profile.at[surf_idx, 0].set(surf_lw_up)
+    lw_flux_up_profile = lw_flux_up_profile.at[toa_idx, 0].set(toa_lw_up)
     
     # Create radiation diagnostics
     diagnostics = RadiationData(

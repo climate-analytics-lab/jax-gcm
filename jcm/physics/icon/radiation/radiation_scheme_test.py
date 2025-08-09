@@ -53,7 +53,7 @@ def create_default_aerosol_data(nlev=10, parameters=None):
 def create_test_atmosphere(nlev=10):
     """Create a realistic test atmosphere"""
     # Realistic atmospheric profile - pressure increases with index (TOA to surface)
-    pressure_levels = jnp.logspace(jnp.log10(1000.0), jnp.log10(100000.0), nlev)
+    pressure_levels = jnp.logspace(jnp.log10(100.0), jnp.log10(101325.0), nlev)
     height_levels = jnp.linspace(20000.0, 0.0, nlev)  # m (~20km to surface)
     
     # Temperature profile with lapse rate
