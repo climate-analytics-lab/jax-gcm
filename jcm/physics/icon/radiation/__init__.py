@@ -124,7 +124,7 @@ from .radiation_scheme import (
     radiation_scheme,
     prepare_radiation_state
 )
-from .radiation_scheme_custom import (
+from .radiation_scheme_rrtmgp import (
     radiation_scheme_rrtmgp
 )
 from ..icon_physics_data import RadiationData
