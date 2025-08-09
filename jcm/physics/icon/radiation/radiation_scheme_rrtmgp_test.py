@@ -15,11 +15,14 @@ from jcm.physics.icon.radiation.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data
 )
+from jcm.physics.icon.unit_conversions import calculate_layer_thickness, calculate_air_density
 
 
 def create_identical_atmosphere_state(nlev=10, lat=0.0, lon=0.0, day=172.0, time_hours=12.0):
     """Create identical atmospheric state for both radiation schemes (ICON signature: date, surface_*, pressure_interfaces)."""
     atm = create_test_atmosphere(nlev=nlev)
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     parameters = RadiationParameters.default()
     aerosol_data = create_default_aerosol_data(nlev=nlev, parameters=parameters)
 
@@ -37,8 +40,8 @@ def create_identical_atmosphere_state(nlev=10, lat=0.0, lon=0.0, day=172.0, time
         'specific_humidity': atm['specific_humidity'],
         'pressure_levels': atm['pressure_levels'],
         'pressure_interfaces': atm['pressure_interfaces'],
-        'layer_thickness': atm['layer_thickness'],
-        'air_density': atm['air_density'],
+        'layer_thickness': layer_thickness,
+        'air_density': air_density,
         'cloud_water': clear_sky_cloud_water,
         'cloud_ice': clear_sky_cloud_ice,
         'cloud_fraction': clear_sky_cloud_fraction,
@@ -123,7 +126,7 @@ def test_heating_tendency_comparison():
     
     atol = 0.1
     rtol = 1.0
-    
+
     # Assert heating tendencies are approximately equal
     assert icon_tendencies.temperature_tendency == pytest.approx(
         rrtmgp_tendencies.temperature_tendency, abs=atol, rel=rtol
@@ -167,7 +170,7 @@ def test_multiple_conditions(lat, lon, day, time_hours):
     # Tolerance check (may need looser tolerances for extreme conditions)
     atol = 0.1
     rtol = 1.0
-    
+
     assert icon_tendencies.temperature_tendency == pytest.approx(
         rrtmgp_tendencies.temperature_tendency, abs=atol, rel=rtol
     ), f"Heating rates differ at lat={lat}, lon={lon}, day={day}, time={time_hours}"

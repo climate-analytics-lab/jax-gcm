@@ -21,7 +21,6 @@ import jax.numpy as jnp
 from jax import lax
 
 from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
-
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters, RadiationTendencies
 from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.radiation.radiation_scheme import prepare_radiation_state
@@ -240,12 +239,12 @@ def prepare_icon_data(
     needs_reversal = _reverse_if_needed(icon_data.pressure)
     flip = lambda a: a[::-1]
     identity = lambda a: a
-    
+
     # Conditionally reverse heating rates back to ICON order
     total_heating = lax.cond(needs_reversal, flip, identity, total_heating)
     lw_heating = lax.cond(needs_reversal, flip, identity, lw_heating)
     sw_heating = lax.cond(needs_reversal, flip, identity, sw_heating)
-    
+
     # Create radiation tendencies (now in ICON's TOA→surface order)
     tendencies = RadiationTendencies(
         temperature_tendency=total_heating,
@@ -268,13 +267,13 @@ def prepare_icon_data(
     sw_flux_down = rrtmgp_data['sw_flux_down_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
     lw_flux_up = rrtmgp_data['lw_flux_up_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
     lw_flux_down = rrtmgp_data['lw_flux_down_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
-    
+
     # Reverse flux profiles if needed
     sw_flux_up = lax.cond(needs_reversal, flip, identity, sw_flux_up)
     sw_flux_down = lax.cond(needs_reversal, flip, identity, sw_flux_down)
     lw_flux_up = lax.cond(needs_reversal, flip, identity, lw_flux_up)
     lw_flux_down = lax.cond(needs_reversal, flip, identity, lw_flux_down)
-    
+
     # Create radiation diagnostics using ICON's RadiationData structure
     diagnostics = RadiationData(
         cos_zenith=cos_zenith,
@@ -339,27 +338,6 @@ def radiation_scheme_rrtmgp_fn(
         object.__setattr__(_GLOBAL_RRTMGP_INSTANCE.atmospheric_state, 'irrad', original_irrad)
 
 
-def _datetime_to_day_seconds(date) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Convert DateData / datetime to (day_of_year, seconds_since_midnight)."""
-    dt = getattr(date, "dt", date)
-    if hasattr(dt, "delta"):
-        d = dt.delta
-        days = int(getattr(d, "days", 0))
-        secs = int(getattr(d, "seconds", 0))
-        total_sec = days * 86400 + secs
-        seconds_since_midnight = jnp.float32(total_sec % 86400)
-        day_of_year = jnp.float32((total_sec // 86400) % 365 + 1)
-        return day_of_year, seconds_since_midnight
-    if hasattr(date, "tyear"):
-        _DAYS_YEAR = 365.2425
-        day_of_year = jnp.asarray(date.tyear * _DAYS_YEAR, dtype=jnp.float32)
-        s = getattr(getattr(date, "dt", None), "delta", None)
-        secs = int(getattr(s, "seconds", 43200)) if s is not None else 43200
-        seconds_since_midnight = jnp.float32(secs % 86400)
-        return day_of_year, seconds_since_midnight
-    return jnp.array(172.0, dtype=jnp.float32), jnp.array(43200.0, dtype=jnp.float32)
-
-
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -385,22 +363,20 @@ def radiation_scheme_rrtmgp(
     """RRTMGP radiation scheme with ICON-compatible signature (date, surface_*, pressure_interfaces).
 
     Drop-in replacement for ICON's radiation_scheme. date must be a jax_datetime or have .dt
-    (e.g. DateData); it is passed to jax_solar's OrbitalTime.from_datetime. surface_* and
-    pressure_interfaces are accepted for signature compatibility but not used.
+    (e.g. DateData); it is passed to jax_solar's OrbitalTime.from_datetime.
     """
     # Extract cloud droplet number concentration factor
     if aerosol_data.cdnc_factor.ndim == 0:
         cdnc_factor = jnp.array(aerosol_data.cdnc_factor)  # Scalar from vmap
     else:
         cdnc_factor = aerosol_data.cdnc_factor  # Take first element if array
-
     # Solar geometry via jax_solar; date must be jax_datetime or have .dt (e.g. DateData)
     actual_date = getattr(date, "dt", date)
     orbital_time = OrbitalTime.from_datetime(actual_date)
     toa_flux = radiation_flux(orbital_time, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
-    
+
     # Prepare ICON radiation state
     icon_state = prepare_radiation_state(
         temperature=temperature,
@@ -435,5 +411,4 @@ def radiation_scheme_rrtmgp(
         surface_albedo_nir,
         surface_emissivity,
     )
-    
     return tendencies, diagnostics
