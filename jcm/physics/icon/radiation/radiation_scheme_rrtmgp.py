@@ -268,7 +268,7 @@ def prepare_icon_data(
     lw_flux_up = rrtmgp_data['lw_flux_up_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
     lw_flux_down = rrtmgp_data['lw_flux_down_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
 
-    # Reverse flux profiles if needed
+    # Reverse flux profiles if needed (ICON order: index 0 = TOA, index -1 = surface)
     sw_flux_up = lax.cond(needs_reversal, flip, identity, sw_flux_up)
     sw_flux_down = lax.cond(needs_reversal, flip, identity, sw_flux_down)
     lw_flux_up = lax.cond(needs_reversal, flip, identity, lw_flux_up)
