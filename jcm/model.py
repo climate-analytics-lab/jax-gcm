@@ -48,8 +48,8 @@ class Model:
 
     def __init__(self, time_step=30.0, save_interval=10.0, total_time=1200,
                  start_date=None, layers=8, horizontal_resolution=31,
-                 coords: CoordinateSystem=None, boundaries: BoundaryData=None,
-                 initial_state: PhysicsState=None, physics: Physics=None) -> None:
+                 coords: CoordinateSystem=None, orography: jnp.ndarray=None,
+                 physics: Physics=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -61,8 +61,7 @@ class Model:
             layers: Number of vertical layers
             horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
             coords: CoordinateSystem object describing model grid
-            boundaries: BoundaryData object describing surface boundary conditions
-            initial_state: Initial state of the model (PhysicsState object), optional
+            orography: 2D array describing surface orography
             physics: Physics object describing the model physics
         """
         from datetime import datetime
@@ -72,7 +71,7 @@ class Model:
         self.save_interval = save_interval * units.day
         self.total_time = total_time * units.day
         self.time_step = time_step
-        dt_si = self.time_step * units.minute
+        self.dt_si = self.time_step * units.minute
 
         self.physics_specs = PHYSICS_SPECS
 
@@ -83,14 +82,9 @@ class Model:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
         self.geometry = Geometry.from_coords(self.coords)
 
-        self.inner_steps = int(self.save_interval.to(units.minute) / dt_si)
+        self.inner_steps = int(self.save_interval.to(units.minute) / self.dt_si)
         self.outer_steps = int(self.total_time / self.save_interval)
-        self.dt = self.physics_specs.nondimensionalize(dt_si)
-
-        if initial_state is not None:
-            self.initial_state = initial_state
-        else:
-            self.initial_state = None
+        self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
@@ -103,17 +97,10 @@ class Model:
         
         self.physics = physics or SpeedyPhysics()
 
+        self.orography = orography or aux_features[dinosaur.xarray_utils.OROGRAPHY]
         # TODO: make the truncation number a parameter consistent with the grid shape
-        params_for_boundaries = (self.physics.parameters 
-                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
-                                 else Parameters.default())
-        if boundaries is None:
-            truncated_orography = primitive_equations.truncated_modal_orography(aux_features[dinosaur.xarray_utils.OROGRAPHY], self.coords, wavenumbers_to_clip=2)
-            self.boundaries = default_boundaries(self.coords.horizontal, aux_features[dinosaur.xarray_utils.OROGRAPHY], params_for_boundaries)
-        else:
-            self.boundaries = update_boundaries_with_timestep(boundaries, params_for_boundaries, dt_si)
-            truncated_orography = primitive_equations.truncated_modal_orography(self.boundaries.orog, self.coords, wavenumbers_to_clip=2)
-        
+        truncated_orography = primitive_equations.truncated_modal_orography(self.orography, self.coords, wavenumbers_to_clip=2)
+
         self.primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=self.ref_temps,
             orography=truncated_orography, 
@@ -121,13 +108,13 @@ class Model:
             physics_specs=self.physics_specs,
         )
         
-        physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
+        physics_forcing_eqn = lambda boundaries: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
                 dynamics=self.primitive,
                 time_step=time_step,
                 physics=self.physics,
-                boundaries=self.boundaries,
+                boundaries=boundaries,
                 geometry=self.geometry,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
@@ -139,10 +126,10 @@ class Model:
 
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
-        
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
-        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
-        
+
+        self.primitive_with_speedy = lambda boundaries: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(boundaries)])
+        step_fn = lambda boundaries: dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy(boundaries), self.dt)
+
         def conserve_global_mean_surface_pressure(u, u_next):
             return u_next.replace(
                 # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
@@ -155,15 +142,24 @@ class Model:
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
         ]
-        self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
+        self.step_fn = lambda boundaries: dinosaur.time_integration.step_with_filters(step_fn(boundaries), filters)
 
-    def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
+    def get_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
+        params_for_boundaries = (self.physics.parameters 
+                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
+                                 else Parameters.default())
+        if boundaries is None:
+            return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
+        
+        return update_boundaries_with_timestep(boundaries, params_for_boundaries, self.dt_si)
+
+    def get_initial_dynamics_state(self, initial_physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
 
         # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
         # but the optional initial state from the user is a nodal PhysicsState
-        if self.initial_state is not None:
-            state = physics_state_to_dynamics_state(self.initial_state, self.primitive)
+        if initial_physics_state is not None:
+            state = physics_state_to_dynamics_state(initial_physics_state, self.primitive)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
@@ -196,15 +192,15 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data)
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
+    def unroll(self, state: primitive_equations.State=None, boundaries: BoundaryData=None) -> tuple[primitive_equations.State, Predictions]:
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            jax.checkpoint(self.step_fn),
+            jax.checkpoint(self.step_fn(self.get_boundaries(boundaries))),
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
             post_process_fn=self.post_process,
         ))
-        return integrate_fn(state)
+        return integrate_fn(state or self.get_initial_dynamics_state())
 
     def data_to_xarray(self, data):
         from dinosaur.xarray_utils import data_to_xarray
