@@ -57,7 +57,7 @@ def create_test_atmosphere(nlev=10):
     height_levels = jnp.linspace(20000.0, 0.0, nlev)  # m (~20km to surface)
     
     # Temperature profile with lapse rate
-    temperature = 288.0 - 6.5e-3 * height_levels  # K (standard lapse rate)
+    temperature = 300.0 - 6.5e-3 * height_levels  # K (standard lapse rate from 300K surface)
     temperature = jnp.maximum(temperature, 200.0)  # Don't go below 200K
     
     # Humidity decreases exponentially with height
@@ -88,6 +88,7 @@ def create_test_atmosphere(nlev=10):
         'pressure_levels': pressure_levels,
         'layer_thickness': layer_thickness,
         'air_density': air_density,
+        'height': height_levels,
         'cloud_water': cloud_water,
         'cloud_ice': cloud_ice,
         'cloud_fraction': cloud_fraction
