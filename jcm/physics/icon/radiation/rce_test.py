@@ -145,7 +145,7 @@ class RCESolver:
             setup: Configuration parameters for the RCE simulation
         """
         self.setup = setup
-        
+
         # Initialize radiation parameters; TOA flux at this location/time via jax_solar
         _date = jdt.to_datetime("1970-01-01") + jdt.Timedelta(
             days=int(setup.day_of_year) - 1, seconds=int(setup.seconds_since_midnight)
@@ -155,10 +155,10 @@ class RCESolver:
             _orbital_time, setup.longitude, setup.latitude, 1361.0
         )
         self.radiation_params = RadiationParameters.default(solar_constant=_toa_flux)
-        
+
         # Initialize aerosol data
         self.aerosol_data = create_default_aerosol_data(setup.nlev, self.radiation_params)
-        
+
         # Select radiation scheme (both use ICON signature: date, surface_*, pressure_interfaces)
         if setup.radiation_scheme.lower() == "rrtmgp":
             self.radiation_fn = radiation_scheme_rrtmgp
@@ -174,10 +174,10 @@ class RCESolver:
         Returns:
             Initial RCE state with atmospheric profiles and zero heating rates
         """
-        # Use test atmosphere (create_test_atmosphere does not return layer_thickness/air_density)
+        # Use test atmosphere (create_test_atmosphere now returns layer_thickness/air_density)
         atm = create_test_atmosphere(self.setup.nlev)
-        layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
-        air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+        layer_thickness = atm['layer_thickness']
+        air_density = atm['air_density']
 
         # Initialize heating arrays
         radiative_heating = jnp.zeros(self.setup.nlev)
@@ -213,7 +213,6 @@ class RCESolver:
         Returns:
             Tuple of (radiative_heating, net_surface_flux)
         """
-
         # jax_solar expects jax_datetime for OrbitalTime.from_datetime
         date = jdt.to_datetime("1970-01-01") + jdt.Timedelta(
             days=int(self.setup.day_of_year) - 1,
@@ -351,7 +350,7 @@ class RCESolver:
             total_heating=state.total_heating,
             net_energy_flux=state.net_energy_flux
         )
-        
+
         # Stage 2: Compute tendency at midpoint state
         rhs2 = self.compute_rhs(state_mid)
         
@@ -385,7 +384,7 @@ class RCESolver:
             total_heating=total_heating,
             net_energy_flux=net_surface_flux
         )
-    
+
     def run_simulation(self) -> Tuple[RCEState, dict]:
         """Run RCE simulation to convergence.
         

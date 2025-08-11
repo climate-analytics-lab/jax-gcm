@@ -68,7 +68,7 @@ def create_test_atmosphere(nlev=10):
     ])
 
     # Temperature profile with lapse rate
-    temperature = 288.0 - 6.5e-3 * height_levels  # K (standard lapse rate)
+    temperature = 300.0 - 6.5e-3 * height_levels  # K (standard lapse rate from 300K surface)
     temperature = jnp.maximum(temperature, 200.0)  # Don't go below 200K
 
     # Humidity decreases exponentially with height
@@ -87,12 +87,18 @@ def create_test_atmosphere(nlev=10):
         cloud_ice = cloud_ice.at[mid_indices[-2:]].set(5e-5)     # kg/kg
         cloud_fraction = cloud_fraction.at[mid_indices].set(0.5)
 
+    layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
+    air_density = calculate_air_density(pressure_levels, temperature)
+
     return {
         'temperature': temperature,
         'specific_humidity': specific_humidity,
         'pressure_levels': pressure_levels,
         'pressure_interfaces': pressure_interfaces,
         'height_levels': height_levels,
+        'layer_thickness': layer_thickness,
+        'air_density': air_density,
+        'height': height_levels,
         'cloud_water': cloud_water,
         'cloud_ice': cloud_ice,
         'cloud_fraction': cloud_fraction
