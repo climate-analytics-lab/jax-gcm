@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import tree_math
-from datetime import datetime
 
 ### NOTE, the below code is taken verbatim from the NeuralGCM experimental branch and should be
 ### imported from there (or wherever it ends up) once it is stable
 import dataclasses
 import jax
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any
 import numpy as np
 
 days_year = 365.25

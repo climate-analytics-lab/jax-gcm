@@ -143,6 +143,7 @@ class Model:
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
+        # step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
         step_fn = dinosaur.time_integration.semi_implicit_leapfrog(self.primitive_with_speedy, self.dt)
         
         # SPEEDY-style horizontal diffusion: two separate filters
@@ -198,7 +199,15 @@ class Model:
             # 'tracers': NOT included - no stratospheric diffusion for tracers in SPEEDY
         }
         
+        
+        def conserve_global_mean_surface_pressure(u, u_next):
+            return u_next.replace(
+                # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
+                log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
+            )
+        
         filters = [
+            conserve_global_mean_surface_pressure,
             # Filter 1: del^8 diffusion on all levels with 2.4h timescales
             leapfrog_step_filter(multi_timescale_horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, main_timescales, main_orders
@@ -207,7 +216,7 @@ class Model:
             leapfrog_step_filter(multi_timescale_horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, stratospheric_timescales, stratospheric_orders
             )),
-            dinosaur.time_integration.robert_asselin_leapfrog_filter(0.2),  # Required for stability with explicit diffusion
+            dinosaur.time_integration.robert_asselin_leapfrog_filter(0.2),  # Required for stability with leapfrog
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
