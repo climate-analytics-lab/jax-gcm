@@ -12,17 +12,15 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 from collections import abc
-from typing import Tuple, Optional
+from typing import Callable, Tuple, Optional
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
 from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
 
-# Import physics modules (will be implemented progressively)
 from jcm.physics.icon.radiation import (
     radiation_scheme as radiation_scheme_icon,
-    radiation_scheme_rrtmgp
 )
 from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection
@@ -54,7 +52,7 @@ class IconPhysics(Physics):
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
                  parameters: Optional[Parameters] = None,
-                 radiation: str = "icon"):
+                 radiation_scheme: Callable = radiation_scheme_icon):
         """
         Initialize the ICON physics.
         
@@ -62,17 +60,10 @@ class IconPhysics(Physics):
             write_output: Whether to write physics output to predictions
             checkpoint_terms: Whether to checkpoint physics terms
             parameters: Optional physics parameters (uses defaults if None)
-            radiation: String indicating the radiation scheme to use, currently supports "icon" and "rrtmgp"
+            radiation_scheme: Radiation scheme function (defaults to ICON radiation scheme)
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
-
-        # Parameterization stores
-        ## For radiation currently supports icon and rrtmgp.
-        self.radiation_scheme_fn = {
-            "icon": radiation_scheme_icon,
-            "rrtmgp": radiation_scheme_rrtmgp
-        }.get(radiation)
         
         # Store parameters
         self.parameters = parameters or Parameters.default()
@@ -82,7 +73,7 @@ class IconPhysics(Physics):
             _prepare_common_physics_state,
             get_simple_aerosol,            # Aerosol before radiation FIXME: get_CDNC issue
             apply_chemistry,               # Chemistry for ozone, methane etc.
-            make_apply_radiation(self.radiation_scheme_fn),               # Radiation early for surface fluxes. FIXME: revisit shortwave flux--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere. Problem seems to be ozone optical depth
+            make_apply_radiation(radiation_scheme),               # Radiation early for surface fluxes. FIXME: revisit shortwave flux--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere. Problem seems to be ozone optical depth
             apply_convection,              # FIXME: surface evaporation drives strong updraft causing temperature blowup in layer 1 in 4-5 hours of model time (or in 1 step if vertical_diffusion is on)
             apply_clouds,
             apply_microphysics,
