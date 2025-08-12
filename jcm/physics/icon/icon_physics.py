@@ -76,7 +76,7 @@ class IconPhysics(Physics):
         if dt_physics is not None:
             params = params.with_timestep(dt_physics)
         self.parameters = params
-        
+
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
@@ -84,7 +84,7 @@ class IconPhysics(Physics):
             get_simple_aerosol,            # Aerosol before radiation
             apply_chemistry,               # Chemistry for ozone, methane etc.
             make_apply_radiation(radiation_scheme_fn if radiation_scheme_fn is not None else radiation_scheme),
-            apply_convection,              
+            apply_convection,
             apply_clouds,
             apply_microphysics,
             apply_vertical_diffusion,      
