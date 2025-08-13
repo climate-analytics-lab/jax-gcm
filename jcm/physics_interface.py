@@ -62,6 +62,16 @@ class PhysicsState:
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+    
+    def extract_subregion(self, i_lon, i_lat, width, height) -> 'PhysicsState':
+        return PhysicsState(
+            u_wind=self.u_wind[..., i_lon:i_lon+width, i_lat:i_lat+height],
+            v_wind=self.v_wind[..., i_lon:i_lon+width, i_lat:i_lat+height],
+            temperature=self.temperature[..., i_lon:i_lon+width, i_lat:i_lat+height],
+            specific_humidity=self.specific_humidity[..., i_lon:i_lon+width, i_lat:i_lat+height],
+            geopotential=self.geopotential[..., i_lon:i_lon+width, i_lat:i_lat+height],
+            normalized_surface_pressure=self.normalized_surface_pressure[..., i_lon:i_lon+width, i_lat:i_lat+height]
+        )
 
 @tree_math.struct
 class PhysicsTendency:
@@ -145,6 +155,10 @@ class Physics:
         # replace multi-channel fields with a field for each channel
         _original_keys = list(items.keys())
         for k in _original_keys:
+            if not isinstance(items[k], jnp.ndarray):
+                print(k)
+                del items[k]
+                continue
             s = items[k].shape
             if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
                 items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})

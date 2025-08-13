@@ -12,7 +12,7 @@ from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
+from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, verify_state, verify_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
 
@@ -206,11 +206,11 @@ class Model:
         ))
         return integrate_fn(state)
 
-    def data_to_xarray(self, data):
+    def data_to_xarray(self, data, coords: CoordinateSystem=None):
         from dinosaur.xarray_utils import data_to_xarray
-        return data_to_xarray(data, coords=self.coords, times=self.times)
+        return data_to_xarray(data, coords=coords or self.coords, times=self.times)
 
-    def predictions_to_xarray(self, predictions):
+    def predictions_to_xarray(self, predictions: Predictions, geometry: Geometry=None):
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions.dynamics
@@ -218,8 +218,8 @@ class Model:
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
-        physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
-        
+        physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, geometry or self.geometry)
+
         pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
@@ -231,3 +231,51 @@ class Model:
         ).astype('datetime64[ns]')
         
         return pred_ds
+
+    def diagnose_physics_at_location(self, predictions: Predictions,
+                                     i_lon, i_lat, width, height,
+                                     start_date: Timestamp=None,
+                                     time_step=None,
+                                     save_interval=None) -> Predictions:
+        """
+        Computes physics tendencies and physicsdata in a subregion, given the output of a completed model run containing dynamics data.
+        
+        Args:
+            predictions: The predictions from the model run.
+            i_lon: The longitude index of the subregion.
+            i_lat: The latitude index of the subregion.
+            width: The width of the subregion.
+            height: The height of the subregion.
+            start_date (optional): The start date for the diagnosis, if different from model.start_date.
+            time_step (optional): The time step for the diagnosis, if different from model.time_step.
+            save_interval (optional): The save interval for the diagnosis, if different from model.save_interval.
+
+        Returns:
+            Predictions: The diagnosed physics tendencies and data for the subregion.
+        """
+        start_date = start_date or self.start_date
+        time_step = time_step if time_step is not None else self.time_step
+        save_interval = save_interval if save_interval is not None else self.save_interval
+        dt_s = (time_step * units.minute).to(units.second).m
+
+        subregion_states = predictions.dynamics.extract_subregion(i_lon, i_lat, width, height)
+        subregion_geometry = self.geometry.extract_subregion(i_lon, i_lat, width, height)
+        subregion_boundaries = self.boundaries.extract_subregion(i_lon, i_lat, width, height)
+
+        def _diagnose_physics_single_timestep(physics_state: PhysicsState, time) -> tuple[PhysicsState, Any]:
+            date = DateData.set_date(
+                model_time=start_date + Timedelta(seconds=time),
+                model_step=(time / dt_s).astype(jnp.int32),
+                dt_seconds=jnp.float32(dt_s)
+            )
+
+            clamped_physics_state = verify_state(physics_state)
+            physics_tendency, physics_data = self.physics.compute_tendencies(clamped_physics_state, subregion_boundaries, subregion_geometry, date)
+            physics_tendency = verify_tendencies(physics_state, physics_tendency, dt_s)
+            return physics_tendency, physics_data
+
+        times = save_interval.to(units.second).m * jnp.arange(subregion_states.u_wind.shape[0])
+
+        physics_tendencies, physics_datas = jax.vmap(_diagnose_physics_single_timestep, in_axes=(0, 0))(subregion_states, times)
+
+        return Predictions(dynamics=physics_tendencies, physics=physics_datas)

@@ -27,6 +27,38 @@ class BoundaryData:
 
     fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
 
+    def extract_subregion(self, i_lon: int, i_lat: int, width: int, height: int) -> 'BoundaryData':
+        """
+        Extract a subregion of the boundary data for a specific longitude and latitude.
+
+        Args:
+            i_lon: Longitude index
+            i_lat: Latitude index
+            width: Width of the subregion
+            height: Height of the subregion
+
+        Returns:
+            A new BoundaryData instance with the extracted subregion.
+        """
+        return BoundaryData(
+            fmask=self.fmask[i_lon:i_lon+width, i_lat:i_lat+height],
+            forog=self.forog[i_lon:i_lon+width, i_lat:i_lat+height],
+            orog=self.orog[i_lon:i_lon+width, i_lat:i_lat+height],
+            phi0=self.phi0[i_lon:i_lon+width, i_lat:i_lat+height],
+            phis0=self.phis0[i_lon:i_lon+width, i_lat:i_lat+height],
+            alb0=self.alb0[i_lon:i_lon+width, i_lat:i_lat+height],
+            sice_am=self.sice_am[i_lon:i_lon+width, i_lat:i_lat+height],
+            fmask_l=self.fmask_l[i_lon:i_lon+width, i_lat:i_lat+height],
+            rhcapl=self.rhcapl[i_lon:i_lon+width, i_lat:i_lat+height],
+            cdland=self.cdland[i_lon:i_lon+width, i_lat:i_lat+height],
+            stlcl_ob=self.stlcl_ob[i_lon:i_lon+width, i_lat:i_lat+height],
+            snowd_am=self.snowd_am[i_lon:i_lon+width, i_lat:i_lat+height],
+            soilw_am=self.soilw_am[i_lon:i_lon+width, i_lat:i_lat+height],
+            lfluxland=self.lfluxland,
+            land_coupling_flag=self.land_coupling_flag,
+            tsea=self.tsea[i_lon:i_lon+width, i_lat:i_lat+height],
+            fmask_s=self.fmask_s[i_lon:i_lon+width, i_lat:i_lat+height]
+        )
 
     @classmethod
     def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,

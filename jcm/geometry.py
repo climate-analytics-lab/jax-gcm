@@ -55,6 +55,33 @@ class Geometry:
     grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
     wvi: jnp.ndarray # Weights for vertical interpolation
 
+    def extract_subregion(self, i_lon: int, i_lat: int, width: int, height: int) -> 'Geometry':
+        """
+        Extract a subregion of the geometry for a specific longitude and latitude.
+
+        Args:
+            i_lon: Longitude index
+            i_lat: Latitude index
+            width: Width of the subregion
+            height: Height of the subregion
+
+        Returns:
+            A new Geometry object representing the subregion
+        """
+        return Geometry(
+            nodal_shape=(self.nodal_shape[0], width, height),
+            radang=self.radang[i_lat:i_lat + height],
+            sia=self.sia[i_lat:i_lat + height],
+            coa=self.coa[i_lat:i_lat + height],
+            hsg=self.hsg,
+            fsg=self.fsg,
+            dhs=self.dhs,
+            sigl=self.sigl,
+            grdsig=self.grdsig,
+            grdscp=self.grdscp,
+            wvi=self.wvi
+        )
+
     @classmethod
     def from_coords(cls, coords: CoordinateSystem=None):
         """
