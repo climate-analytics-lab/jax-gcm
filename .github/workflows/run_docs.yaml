@@ -5,6 +5,9 @@ on:
       - 'notebooks/units_table.csv'  
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   update-docs:
     runs-on: ubuntu-latest
@@ -24,7 +27,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add docs/source/speedy_translation.rst
-          # Also commit built HTML if you want to (optional)
-          # git add docs/build/html/
           git diff --staged --quiet || git commit -m "Auto-update variable translation documentation"
           git push
