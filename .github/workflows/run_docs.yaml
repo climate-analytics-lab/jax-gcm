@@ -1,0 +1,30 @@
+name: Update Documentation
+on:
+  push:
+    paths:
+      - 'notebooks/units_table.csv'  
+  workflow_dispatch:
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+          
+      - name: Update Sphinx documentation
+        run: python generate_docs.py
+          
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add docs/source/speedy_translation.rst
+          # Also commit built HTML if you want to (optional)
+          # git add docs/build/html/
+          git diff --staged --quiet || git commit -m "Auto-update variable translation documentation"
+          git push
