@@ -205,15 +205,20 @@ def initialize_boundaries(
 def update_boundaries_with_timestep(
         boundaries: BoundaryData,
         parameters: Parameters=None,
-        time_step=30*units.minute
+        time_step=1800.0
 ) -> BoundaryData:
     """
     Update the boundary conditions with the new time step
+
+    Args:
+        boundaries: The boundary data to update
+        parameters: The model parameters
+        time_step: The time step in seconds
     """
     parameters = parameters or Parameters.default()
     # Update the land heat capacity and dissipation time
     if boundaries.land_coupling_flag:
-        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
+        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step
         return boundaries.copy(rhcapl=rhcapl)
     else:
         return boundaries
