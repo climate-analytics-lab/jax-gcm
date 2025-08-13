@@ -15,19 +15,19 @@ class TestModelUnit(unittest.TestCase):
         model = Model(
             layers=layers,
             time_step=180,
-            total_time=2,
-            save_interval=1,
             physics=HeldSuarezPhysics(),
         )
 
-        state = model.get_initial_state()
+        state = model.prepare_initial_state()
         state.tracers = {'specific_humidity': 1e-4 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
-        nodal_tzxy = (model.outer_steps,) + nodal_zxy
-
-        final_state, predictions = model.unroll(state)
+        total_time, save_interval = 2, 1
+        final_state, predictions = model.unroll(state, total_time=total_time, save_interval=save_interval)
+        
         dynamics_predictions = predictions.dynamics
+
+        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
+        nodal_tzxy = (total_time / save_interval,) + nodal_zxy
 
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
@@ -58,20 +58,18 @@ class TestModelUnit(unittest.TestCase):
         # optionally add a boundary conditions file
         model = Model(
             time_step=720,
-            save_interval=1,
-            total_time=2,
         )
     
-        state = model.get_initial_state()
+        state = model.prepare_initial_state()
 
         # Specify humidity perturbation in kg/kg
         state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
 
-        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
-        nodal_tzxy = (model.outer_steps,) + nodal_zxy
-    
-        final_state, predictions = model.unroll(state)
+        save_interval, total_time = 1, 2
+        final_state, predictions = model.unroll(state, save_interval=save_interval, total_time=total_time)
         dynamics_predictions = predictions.dynamics
+        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
+        nodal_tzxy = (total_time / save_interval,) + nodal_zxy
 
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(dynamics_predictions)
@@ -109,11 +107,11 @@ class TestModelUnit(unittest.TestCase):
         from jcm.utils import ones_like
 
         # Create model that goes through one timestep
-        model = Model(save_interval=(1/48.), total_time=(1/48.))
-        state = model.get_initial_state()
+        model = Model()
+        state = model.prepare_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state)
+        primals, f_vjp = jax.vjp(lambda state: model.unroll(state, save_interval=(1/48.), total_time=(1/48.)), state)
         
         input = (ones_like(primals[0]), ones_like(primals[1]))
 
@@ -132,11 +130,11 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.utils import ones_like
 
-        model = Model(save_interval=(1/48.), total_time=(1/24.))
-        state = model.get_initial_state()
+        model = Model()
+        state = model.prepare_initial_state()
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state)
+        primals, f_vjp = jax.vjp(lambda state: model.unroll(state, save_interval=(1/48.), total_time=(1/24.)), state)
         input = (ones_like(primals[0]), ones_like(primals[1]))
         df_dstate = f_vjp(input)
 
@@ -166,17 +164,17 @@ class TestModelUnit(unittest.TestCase):
             coords.horizontal
         )
 
+        boundaries = default_boundaries()
+
         create_model = lambda params=Parameters.default(): Model(
-            save_interval=1/24.,
-            total_time=2./24.,
-            boundaries=default_boundaries(),
+            orography=boundaries.orog,
             physics=SpeedyPhysics(parameters=params),
         )
         
         def model_run_wrapper(params):
             model = create_model(params)
-            state = model.get_initial_state()
-            _, predictions = model.unroll(state)
+            state = model.prepare_initial_state()
+            _, predictions = model.unroll(state, boundaries=boundaries, save_interval=1/24., total_time=2./24.,)
             return predictions
                 
         # Calculate gradients using VJP
@@ -217,17 +215,17 @@ class TestModelUnit(unittest.TestCase):
             coords.horizontal
         )
 
+        boundaries = default_boundaries()
+
         create_model = lambda params=Parameters.default(): Model(
-            save_interval=1/24.,
-            total_time=2./24.,
-            boundaries=default_boundaries(),
+            orography=boundaries.orog,
             physics=SpeedyPhysics(parameters=params),
         )
         
         def model_run_wrapper(params):
             model = create_model(params)
-            state = model.get_initial_state()
-            _, predictions = model.unroll(state)
+            state = model.prepare_initial_state()
+            _, predictions = model.unroll(state, boundaries=boundaries, save_interval=1/24., total_time=2./24.)
             return predictions
         
         # Calculate gradients using JVP

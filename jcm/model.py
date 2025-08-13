@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-import tree_math
+from dataclasses import dataclass, replace
 from numpy import timedelta64
 from typing import Any, Callable
 from datetime import datetime
@@ -20,7 +20,7 @@ from jcm.physics.speedy.params import Parameters
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
-@tree_math.struct
+@dataclass
 class Predictions:
     dynamics: PhysicsState
     physics: Any
@@ -40,7 +40,25 @@ class Predictions:
 
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         return pred_ds.isel(level=slice(None, None, -1))
-        
+    
+    def tree_flatten(self):
+        return (
+            (self.dynamics, self.physics), # children
+            (self._data_to_xarray, self._data_struct_to_dict) # static aux data
+        )
+    
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        dynamics, physics = children
+        data_to_xarray, data_struct_to_dict = aux_data
+        return cls(dynamics, physics, data_to_xarray, data_struct_to_dict)
+
+jax.tree_util.register_pytree_node(
+    Predictions,
+    Predictions.tree_flatten,
+    Predictions.tree_unflatten
+)
+
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -124,16 +142,7 @@ class Model:
             ),
         ]
 
-    def _prepare_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
-        params_for_boundaries = (self.physics.parameters 
-                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
-                                 else Parameters.default())
-        if boundaries is None:
-            return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
-        return update_boundaries_with_timestep(boundaries, params_for_boundaries, self.dt_si.m)
-
     def _create_step_fn(self, boundaries: BoundaryData, start_date: Timestamp):
-        boundaries = self._prepare_boundaries(boundaries)
         physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
@@ -153,6 +162,14 @@ class Model:
         primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         unfiltered_step_fn = dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy, self.dt)
         return dinosaur.time_integration.step_with_filters(unfiltered_step_fn, self.filters)
+    
+    def _prepare_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
+        params_for_boundaries = (self.physics.parameters 
+                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
+                                 else Parameters.default())
+        if boundaries is None:
+            return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
+        return update_boundaries_with_timestep(boundaries, params_for_boundaries, self.dt_si.m)
 
     def prepare_initial_state(self, initial_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
@@ -223,6 +240,8 @@ class Model:
         outer_steps = int(total_time / save_interval)
         times = (start_date.delta.days + save_interval * jnp.arange(outer_steps)) * units.day
 
+        boundaries = self._prepare_boundaries(boundaries)
+
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self._create_step_fn(boundaries, start_date)),
             outer_steps=outer_steps,
@@ -232,7 +251,8 @@ class Model:
         ))
         final_state, predictions = integrate_fn(state or self.prepare_initial_state())
 
-        return final_state, predictions.replace(
+        return final_state, replace(
+            predictions,
             _data_to_xarray=lambda data: self._data_to_xarray(data, times),
             _data_struct_to_dict=lambda data: self.physics.data_struct_to_dict(data, self.geometry),
         )

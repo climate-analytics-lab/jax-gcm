@@ -10,9 +10,9 @@ class TestHeldSuarezUnit(unittest.TestCase):
         model = Model(time_step=time_step, physics=HeldSuarezPhysics())
     
         dynamics_tendency = get_physical_tendencies(
-            state = model.get_initial_state(),
+            state = model.prepare_initial_state(),
             dynamics = model.primitive,
-            time_step = time_step,
+            time_step = time_step * 60,
             physics = HeldSuarezPhysics(model.coords),
             boundaries = None,
             geometry = None,
@@ -25,9 +25,12 @@ class TestHeldSuarezUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         
-        model = Model(total_time=36, physics=HeldSuarezPhysics())
+        model = Model(physics=HeldSuarezPhysics())
 
-        final_state, _ = model.unroll(model.get_initial_state())
+        final_state, _ = model.unroll(
+            model.prepare_initial_state(),
+            total_time=36
+        )
 
         self.assertFalse(jnp.any(jnp.isnan(final_state.vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(final_state.divergence)))
