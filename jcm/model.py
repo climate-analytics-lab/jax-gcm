@@ -244,7 +244,7 @@ class Model:
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
         physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
 
-        times = predictions.times
+        times = jax.device_get(predictions.times)
 
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
 
