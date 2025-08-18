@@ -2,8 +2,8 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import tree_math
+from flax import nnx
 from numpy import timedelta64
-from typing import Any
 import dinosaur
 from typing import Callable, Any
 from dinosaur import typing
@@ -18,13 +18,43 @@ from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physics_data import PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+zeros_like_pytree = lambda x: tree_map(lambda a: jnp.zeros_like(a), x)
 
 @tree_math.struct
 class Predictions:
     dynamics: PhysicsState
     physics: Any
+
+class DiagnosticsCollector(nnx.Module):
+    data: nnx.Variable
+    i: nnx.Variable
+    physical_step: nnx.Variable
+
+    def __init__(self):
+        self.data = None
+        self.i = nnx.Variable(0)
+        self.physical_step = nnx.Variable(True)
+    
+    def update(self, new_data):
+        self.data.value = new_data
+    
+    def accumulate(self, new_data):
+        if self.physical_step.value:
+            self.data.value = tree_map(
+                lambda stacked_array, new_array: stacked_array.astype(jnp.float32).at[self.i.value].add(new_array.astype(jnp.float32)).astype(stacked_array.dtype),
+                self.data.value,
+                new_data
+            )
+            self.physical_step.value = False
+    
+    def increment(self):
+        self.i.value += 1
+    
+    def divide_by(self, n_steps):
+        self.data.value = tree_map(lambda x: (x / n_steps).astype(x.dtype) if hasattr(x, "dtype") else x, self.data.value)
 
 def trajectory_from_step(
     step_fn: typing.TimeStepFn,
@@ -50,17 +80,33 @@ def trajectory_from_step(
         (1) the final frame of the trajectory.
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
     """
-    def inner_step(carry, _):
-        x, x_sum = carry
-        x_next = step_fn(x)
-        return (x_next, x_sum + post_process_fn(x_next)), None
+    def integrate(x_initial, diagnostics_collector):
+        graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
-    def outer_step(carry, _):
-        zeros = tree_map(lambda a: jnp.zeros_like(a), post_process_fn(carry))
-        (x_final, x_sum), _ = jax.lax.scan(inner_step, (carry, zeros), xs=None, length=inner_steps)
-        return x_final, x_sum / inner_steps
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
+        def inner_step(carry):
+            x, x_sum, diag_state = carry
+            x_sum += post_process_fn(x) # include initial state, not final state
+            temp_collector_inner = nnx.merge(graphdef, diag_state)
+            temp_collector_inner.physical_step.value = True
+            x_next = step_fn(temp_collector_inner)(x)
+            _, updated_diag_state = nnx.split(temp_collector_inner)
+            return (x_next, x_sum, updated_diag_state), (None,)
 
-    return lambda x_initial: jax.lax.scan(outer_step, x_initial, xs=None, length=outer_steps)
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=outer_steps)
+        def outer_step(carry):
+            (x_final, x_sum, diag_state), _ = inner_step(carry)
+            temp_collector_outer = nnx.merge(graphdef, diag_state)
+            temp_collector_outer.increment()
+            _, updated_diag_state = nnx.split(temp_collector_outer)
+            return (x_final, zeros_like_pytree(x_sum), updated_diag_state), (x_sum / inner_steps,)
+        
+        carry = (x_initial, zeros_like_pytree(post_process_fn(x_initial)), init_diag_state)
+        (x_final, _, final_diag_state), (preds,) = outer_step(carry)
+        diagnostics_collector.update(nnx.merge(graphdef, final_diag_state).data.value)
+        return x_final, preds
+
+    return integrate
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -144,7 +190,7 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        params_for_boundaries = (self.physics.parameters 
+        params_for_boundaries = (self.physics.parameters
                                  if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
                                  else Parameters.default())
         if boundaries is None:
@@ -161,7 +207,7 @@ class Model:
             physics_specs=self.physics_specs,
         )
         
-        physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
+        physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
                 dynamics=self.primitive,
@@ -173,15 +219,16 @@ class Model:
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
                     model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
                     dt_seconds = jnp.float32(time_step * 60.0)
-                )
+                ),
+                diagnostics_collector=d
             )
         )
 
         # Define trajectory times, expects start_with_input=False
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
-        self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
-        step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
+        self.primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
+        step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy(d), self.dt)
         
         def conserve_global_mean_surface_pressure(u, u_next):
             return u_next.replace(
@@ -195,8 +242,10 @@ class Model:
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
         ]
-        self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
-        self.trajectory_fn = trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
+        self.step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn(d), filters)
+
+        self.output_averages = output_averages
+        self.trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
@@ -237,15 +286,22 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data)
 
-    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
-        integrate_fn = jax.jit(self.trajectory_fn(
-            jax.checkpoint(self.step_fn),
+    def unroll(self, state: primitive_equations.State, diagnostics_collector: DiagnosticsCollector=None) -> tuple[primitive_equations.State, Predictions]:
+        if diagnostics_collector is not None:
+            base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
+            physics_data_list = [base_physics_data] * self.outer_steps
+            diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
+
+        integrate_fn = nnx.jit(self.trajectory_fn(
+            self.step_fn,
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
             post_process_fn=self.post_process if self.physics.write_output else lambda x: x, # post_process on inner steps if we are computing physics output
         ))
-        final_state, predictions = integrate_fn(state)
+        final_state, predictions = integrate_fn(state, diagnostics_collector) if self.output_averages else integrate_fn(state)
+        if diagnostics_collector is not None:
+            diagnostics_collector.divide_by(self.inner_steps)
         if not self.physics.write_output:
             predictions = self.post_process(predictions) # if not computing physics output, post_process commutes with time average, so we can apply it here
         return final_state, predictions

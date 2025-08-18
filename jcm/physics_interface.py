@@ -4,6 +4,7 @@ Physics module that interfaces between the dynamics and the physics of the model
 to the specific physics being used.
 """
 
+import jax
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
@@ -278,6 +279,7 @@ def get_physical_tendencies(
     boundaries: BoundaryData,
     geometry: Geometry,
     date: DateData,
+    diagnostics_collector=None,
 ) -> State:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
@@ -290,6 +292,7 @@ def get_physical_tendencies(
         boundaries: BoundaryData object
         geometry: Geometry object
         date: DateData object
+        diagnostics_collector: DiagnosticsCollector object
 
     Returns:
         Physical tendencies in dinosaur.primitive_equations.State format
@@ -297,8 +300,12 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, _ = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date) # FIXME: figure out where to put jax.checkpoint
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
+    
+    if diagnostics_collector is not None:
+            diagnostics_collector.accumulate(physics_data)
+
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency
