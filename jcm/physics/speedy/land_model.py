@@ -26,6 +26,9 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     fmask_l = jnp.where(fmask_l >= parameters.land_model.thrsh,
                         jnp.where(boundaries.fmask > (1.0 - parameters.land_model.thrsh), 1.0, fmask_l), 0.0)
 
+    # Compute sea mask as complement of land mask 
+    fmask_s = 1.0 - fmask_l
+
     # Land-surface temperature
     stlcl_ob = jnp.asarray(xr.open_dataset(surface_filename)["stl"])
     # instead of using a check forchk, we check that 0.0 < stl12 < 400 and if it isn't we set it to 273
@@ -78,7 +81,7 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     # Set time_step/heat_capacity and dissipation fields
     cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
 
-    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
+    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, fmask_s=fmask_s, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
 
 # Exchanges fluxes between land and atmosphere.
 def couple_land_atm(

@@ -37,7 +37,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertIsNotNone(dynamics_predictions.temperature)
         self.assertIsNotNone(dynamics_predictions.specific_humidity)
         self.assertIsNotNone(dynamics_predictions.geopotential)
-        self.assertIsNotNone(dynamics_predictions.surface_pressure)
+        self.assertIsNotNone(dynamics_predictions.normalized_surface_pressure)
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
@@ -50,7 +50,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.temperature.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
-        self.assertTupleEqual(dynamics_predictions.surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
+        self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
         
     def test_speedy_model(self):
         from jcm.model import Model
@@ -87,7 +87,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertIsNotNone(dynamics_predictions.temperature)
         self.assertIsNotNone(dynamics_predictions.specific_humidity)
         self.assertIsNotNone(dynamics_predictions.geopotential)
-        self.assertIsNotNone(dynamics_predictions.surface_pressure)
+        self.assertIsNotNone(dynamics_predictions.normalized_surface_pressure)
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
@@ -100,7 +100,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.temperature.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
-        self.assertTupleEqual(dynamics_predictions.surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
+        self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
         
     def test_speedy_model_gradients_isnan(self):
         import jax
@@ -157,7 +157,8 @@ class TestModelUnit(unittest.TestCase):
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
         if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess, sys
+            import subprocess
+            import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
@@ -207,7 +208,8 @@ class TestModelUnit(unittest.TestCase):
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
         if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess, sys
+            import subprocess
+            import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
         default_boundaries = lambda coords=get_coords(): initialize_boundaries(
@@ -235,13 +237,13 @@ class TestModelUnit(unittest.TestCase):
         state = jvp_sum.dynamics
         physics_data = jvp_sum.physics
 
-        # Check dinosaur states
+        # Check dynamics state
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
         self.assertFalse(jnp.any(jnp.isnan(state.v_wind)))
         self.assertFalse(jnp.any(jnp.isnan(state.temperature)))
         self.assertFalse(jnp.any(jnp.isnan(state.specific_humidity)))
         self.assertFalse(jnp.any(jnp.isnan(state.geopotential)))
-        self.assertFalse(jnp.any(jnp.isnan(state.surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(state.normalized_surface_pressure)))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre

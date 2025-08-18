@@ -19,11 +19,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Lint with Ruff
-        run: |
-          pip install ruff
-          ruff --format=github --target-version=py311 .
-        continue-on-error: true
       - name: Test with pytest
         run: |
           coverage run -m pytest  -v -s --cov-fail-under=90

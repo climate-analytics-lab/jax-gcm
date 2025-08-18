@@ -21,15 +21,9 @@ def get_shortwave_rad_fluxes(
 
     # if compute_shortwave is true, then compute shortwave radiation
     # otherwise return the same physics_data and empty tendencies
-    tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
-    state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave,
-        shortwave_rad_fluxes,
-        pass_fn,
-        operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
-    )
-
-    return tendencies, physics_data
+    zero_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
+    state, physics_data, parameters, boundaries, geometry, tendencies = shortwave_rad_fluxes((state, physics_data, parameters, boundaries, geometry, zero_tendencies))
+    return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, lambda: tendencies, lambda: zero_tendencies), physics_data
 
 @jit
 def shortwave_rad_fluxes(operand):
@@ -51,7 +45,7 @@ def shortwave_rad_fluxes(operand):
     dhs = geometry.dhs
     fsg = geometry.fsg
 
-    psa = state.surface_pressure
+    psa = state.normalized_surface_pressure
     qa = state.specific_humidity
     icltop = physics_data.shortwave_rad.icltop
     cloudc = physics_data.shortwave_rad.cloudc
@@ -218,7 +212,7 @@ def shortwave_rad_fluxes(operand):
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
-    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.surface_pressure[jnp.newaxis] # physics.f90:160-162
+    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.normalized_surface_pressure[jnp.newaxis] # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
     return (state, physics_data, parameters, boundaries, geometry, physics_tendencies)
@@ -313,15 +307,9 @@ def get_clouds(
 
     # if compute_shortwave is true, then clouds
     # otherwise return the same physics_data and empty tendencies
-    tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
-    state, physics_data, parameters, boundaries, geometry, tendencies = jax.lax.cond(
-        physics_data.shortwave_rad.compute_shortwave,
-        clouds,
-        pass_fn,
-        operand=(state, physics_data, parameters, boundaries, geometry, tendencies)
-    )
-
-    return tendencies, physics_data
+    zero_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
+    state, physics_data, parameters, boundaries, geometry, tendencies = clouds((state, physics_data, parameters, boundaries, geometry, zero_tendencies))
+    return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, lambda: tendencies, lambda: zero_tendencies), physics_data
 
 @jit
 def clouds(operand):

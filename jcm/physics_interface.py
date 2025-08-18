@@ -7,14 +7,12 @@ to the specific physics being used.
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
-from jcm.physics.speedy.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.physics.speedy.physical_constants import p0
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
 
@@ -25,38 +23,38 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
+    normalized_surface_pressure: jnp.ndarray # Normalized by global mean sea level pressure
 
     @classmethod
-    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:])
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.zeros(shape[1:])
         )
 
     @classmethod
-    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None):
+    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:])
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.ones(shape[1:])
         )
 
-    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None):
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,normalized_surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
             v_wind if v_wind is not None else self.v_wind,
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity,
             geopotential if geopotential is not None else self.geopotential,
-            surface_pressure if surface_pressure is not None else self.surface_pressure
+            normalized_surface_pressure if normalized_surface_pressure is not None else self.normalized_surface_pressure
         )
 
     def isnan(self):
@@ -206,7 +204,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
     # take the log of normalized surface pressure and convert to modal
-    log_surface_pressure = jnp.log(physics_state.surface_pressure)
+    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     return State(
