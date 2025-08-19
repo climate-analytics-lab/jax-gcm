@@ -307,7 +307,7 @@ def get_physical_tendencies(
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     
     if diagnostics_collector is not None:
-            diagnostics_collector.accumulate(physics_data)
+            diagnostics_collector.accumulate_if_physical_step(physics_data)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     return dynamics_tendency

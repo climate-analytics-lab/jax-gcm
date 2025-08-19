@@ -38,23 +38,14 @@ class DiagnosticsCollector(nnx.Module):
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
     
-    def update(self, new_data):
-        self.data.value = new_data
-    
-    def accumulate(self, new_data):
+    def accumulate_if_physical_step(self, new_data):
         if self.physical_step.value:
             self.data.value = tree_map(
-                lambda stacked_array, new_array: stacked_array.astype(jnp.float32).at[self.i.value].add(new_array.astype(jnp.float32)).astype(stacked_array.dtype),
+                lambda stacked_array, new_array: stacked_array.at[self.i.value].add(new_array.astype(jnp.float32)),
                 self.data.value,
                 new_data
             )
             self.physical_step.value = False
-    
-    def increment(self):
-        self.i.value += 1
-    
-    def divide_by(self, n_steps):
-        self.data.value = tree_map(lambda x: (x / n_steps).astype(x.dtype) if hasattr(x, "dtype") else x, self.data.value)
 
 def trajectory_from_step(
     step_fn: typing.TimeStepFn,
@@ -97,13 +88,13 @@ def trajectory_from_step(
         def outer_step(carry):
             (x_final, x_sum, diag_state), _ = inner_step(carry)
             temp_collector_outer = nnx.merge(graphdef, diag_state)
-            temp_collector_outer.increment()
+            temp_collector_outer.i.value += 1
             _, updated_diag_state = nnx.split(temp_collector_outer)
             return (x_final, zeros_like_pytree(x_sum), updated_diag_state), (x_sum / inner_steps,)
         
         carry = (x_initial, zeros_like_pytree(x_initial), init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
-        diagnostics_collector.update(nnx.merge(graphdef, final_diag_state).data.value)
+        diagnostics_collector.value = nnx.merge(graphdef, final_diag_state).data.value
         return x_final, preds
 
     return integrate
@@ -266,62 +257,59 @@ class Model:
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
+    
+    def _post_process_just_dynamics(self, state: primitive_equations.State) -> Predictions:
+        return Predictions(
+            dynamics=dynamics_state_to_physics_state(state, self.primitive),
+            physics=None
+        )
 
-    def post_process(self, state: primitive_equations.State) -> Predictions:
+    def _post_process(self, state: primitive_equations.State) -> Predictions:
         from jcm.date import DateData
         from jcm.physics_interface import verify_state
 
-        physics_state = dynamics_state_to_physics_state(state, self.primitive)
+        nodal_predictions = self._post_process_just_dynamics(state)
         
-        physics_data = None
         if self.physics.write_output:
             date=DateData.set_date(
                 model_time = self.start_date + Timedelta(seconds=state.sim_time),
                 model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32),
                 dt_seconds = jnp.float32(self.time_step * 60.0)
             )
-            clamped_physics_state = verify_state(physics_state)
+            clamped_physics_state = verify_state(nodal_predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
+            nodal_predictions = nodal_predictions.replace(physics=physics_data)
 
-        return Predictions(dynamics=physics_state, physics=physics_data)
+        return nodal_predictions
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
-        if self.output_averages:
-            diagnostics_collector = None
-            if self.physics.write_output:
-                diagnostics_collector = DiagnosticsCollector()
-                base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
-                physics_data_list = [base_physics_data] * self.outer_steps
-                diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
+        diagnostics_collector = None
+        if self.output_averages and self.physics.write_output:
+            diagnostics_collector = DiagnosticsCollector()
+            base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
+            physics_data_list = [base_physics_data] * self.outer_steps
+            diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
+            diagnostics_collector.data.value = tree_map(lambda x: x.astype(jnp.float32), diagnostics_collector.data.value)
 
-            integrate_fn = nnx.jit(trajectory_from_step(
-                self.step_fn,
-                outer_steps=self.outer_steps,
-                inner_steps=self.inner_steps,
-                start_with_input=True,
-                post_process_fn=None,
-            ))
+        trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
-            final_state, dynamics_averages = integrate_fn(state, diagnostics_collector)
-            if diagnostics_collector is not None:
-                diagnostics_collector.divide_by(self.inner_steps)
+        integrate_fn = nnx.jit(trajectory_fn(
+            self.step_fn if self.output_averages else self.step_fn(),
+            outer_steps=self.outer_steps,
+            inner_steps=self.inner_steps,
+            start_with_input=True,
+            post_process_fn=self._post_process if self.physics.write_output else lambda x: x,
+        ))
+
+        final_state, raw_predictions = integrate_fn(state, diagnostics_collector) if self.output_averages else integrate_fn(state)
+        if diagnostics_collector is not None:
+            diagnostics_collector.data.value = tree_map(lambda x: (x / self.inner_steps), diagnostics_collector.data.value)
             
-            predictions = Predictions(
-                dynamics=dynamics_state_to_physics_state(dynamics_averages, self.primitive),
+        if self.output_averages or not self.physics.write_output: # cases when postprocessing is not done during integration
+            predictions = self._post_process_just_dynamics(raw_predictions).replace(
                 physics=diagnostics_collector.data.value if diagnostics_collector is not None else None
             )
-        else:
-            integrate_fn = nnx.jit(dinosaur.time_integration.trajectory_from_step(
-                self.step_fn(),
-                outer_steps=self.outer_steps,
-                inner_steps=self.inner_steps,
-                start_with_input=True,
-                post_process_fn=self.post_process if self.physics.write_output else lambda x: x, # post_process on each outer step if we are computing physics output
-            ))
-            final_state, predictions = integrate_fn(state)
-            if not self.physics.write_output:
-                predictions = self.post_process(predictions) # if not computing physics output, can apply post_process to the whole time series at once
-
+        
         return final_state, predictions
 
     def data_to_xarray(self, data):
