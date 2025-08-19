@@ -23,6 +23,12 @@ PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_S
 class Predictions:
     dynamics: PhysicsState
     physics: Any
+Predictions.__doc__ = """Container for model prediction outputs from a single timestep.
+Attributes:
+    dynamics (PhysicsState): The physical state variables converted from the
+        dynamical state.
+    physics (Any): Diagnostic physics data computed by the physics package.
+"""
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -55,16 +61,26 @@ class Model:
         Initialize the model with the given time step, save interval, and total time.
         
         Args:
-            time_step: Model time step in minutes
-            save_interval: Save interval in days
-            total_time: Total integration time in days
-            start_date: Start date of the simulation
-            layers: Number of vertical layers
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
-            coords: CoordinateSystem object describing model grid
-            boundaries: BoundaryData object describing surface boundary conditions
-            initial_state: Initial state of the model (PhysicsState object), optional
-            physics: Physics object describing the model physics
+            time_step: 
+                Model time step in minutes
+            save_interval: 
+                Save interval in days
+            total_time: 
+                Total integration time in days
+            start_date: 
+                Start date of the simulation
+            layers: 
+                Number of vertical layers
+            horizontal_resolution: 
+                Horizontal resolution of the model (31, 42, 85, or 213)
+            coords: 
+                CoordinateSystem object describing model grid
+            boundaries: 
+                BoundaryData object describing surface boundary conditions
+            initial_state: 
+                Initial state of the model (PhysicsState object), optional
+            physics: 
+                Physics object describing the model physics
         """
         from datetime import datetime
 
@@ -132,7 +148,8 @@ class Model:
                 geometry=self.geometry,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32)
+                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
+                    dt_seconds = jnp.float32(time_step * 60.0)
                 )
             )
         )
@@ -142,7 +159,15 @@ class Model:
         
         self.primitive_with_speedy = dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn])
         step_fn = dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy, self.dt)
+        
+        def conserve_global_mean_surface_pressure(u, u_next):
+            return u_next.replace(
+                # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
+                log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
+            )
+        
         filters = [
+            conserve_global_mean_surface_pressure,
             dinosaur.time_integration.exponential_step_filter(
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
@@ -150,6 +175,19 @@ class Model:
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
+        """Generates an initial state for a simulation.
+
+        Args:
+            random_seed: 
+                Seed for the JAX random number generator.
+            sim_time: 
+                The starting simulation time for the state.
+            humidity_perturbation: 
+                If True and using the default state, adds a small amount of specific humidity.
+        
+        Returns:
+            A `primitive_equations.State` object ready for integration.
+        """
         from jcm.physics_interface import physics_state_to_dynamics_state
 
         # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
@@ -171,6 +209,16 @@ class Model:
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def post_process(self, state: primitive_equations.State) -> Predictions:
+        """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
+        
+        Args:
+            state: 
+                A `primitive_equations.State` object from the simulation.
+        
+        Returns:
+            A dictionary containing the `PhysicsState` ('dynamics') and the
+            diagnostic `PhysicsData` ('physics').
+        """
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
@@ -180,7 +228,8 @@ class Model:
         if self.physics.write_output:
             date=DateData.set_date(
                 model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32)
+                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32),
+                dt_seconds = jnp.float32(self.time_step * 60.0)
             )
             clamped_physics_state = verify_state(physics_state)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
@@ -188,6 +237,15 @@ class Model:
         return Predictions(dynamics=physics_state, physics=physics_data)
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
+        """Runs the full simulation forward in time from a given state.
+        
+        Args:
+            state: 
+                The initial `primitive_equations.State` for the simulation.
+        
+        Returns:
+            A tuple containing the trajectory of post-processed model states.
+        """
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(self.step_fn),
             outer_steps=self.outer_steps,
@@ -198,10 +256,31 @@ class Model:
         return integrate_fn(state)
 
     def data_to_xarray(self, data):
+        """Converts raw simulation data to an xarray.Dataset.
+        
+        Args:
+            data: 
+                A dictionary of raw simulation output arrays.
+        
+        Returns:
+            An `xarray.Dataset` with labeled dimensions and coordinates.
+        """
         from dinosaur.xarray_utils import data_to_xarray
         return data_to_xarray(data, coords=self.coords, times=self.times)
 
     def predictions_to_xarray(self, predictions):
+        """Converts the full prediction trajectory to a final xarray.Dataset.
+        This function unpacks the nested dictionary structure from the simulation
+        output, formats the data, and converts the time coordinate to a
+        datetime object.
+
+        Args:
+            predictions: 
+                The raw output from the `unroll` method.
+
+        Returns:
+            A final `xarray.Dataset` ready for analysis and plotting.
+        """
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
         dynamics_predictions = predictions.dynamics

@@ -1,79 +1,79 @@
-Variable,Units
-surface_flux.t0,K
-shortwave_rad.gse,W/m²/K
-humidity.qsat,g/kg
-mod_radcon.flux.3,W/m²
-shortwave_rad.ftop,W/m²
-date.model_year,year
-date.model_step,1
-date.tyear,year
-shortwave_rad.zenit,radian
-condensation.dqlsc,g/kg/s
-convection.se,J/kg
-v_wind,m/s
-shortwave_rad.rsns,W/m²
-shortwave_rad.dfabs,W/m²
-surface_flux.ustr.1,N/m²
-mod_radcon.flux.2,W/m²
-shortwave_rad.compute_shortwave,bool
-mod_radcon.ablco2,1
-mod_radcon.alb_l,1
-surface_flux.rlus.1,W/m²
-surface_flux.tskin,K
-mod_radcon.st4a.0,W/m²
-mod_radcon.flux.1,W/m²
-surface_flux.tsfc,K
-shortwave_rad.qcloud,1
-surface_flux.evap.0,kg/m²/s
-shortwave_rad.cloudstr,1
-convection.cbmf,kg/m²/s
-shortwave_rad.rsds,W/m²
-surface_flux.shf.0,W/m²
-surface_flux.shf.2,W/m²
-longwave_rad.dfabs,W/m²
-surface_flux.rlns,W/m²
-mod_radcon.albsfc,1
-convection.precnv,g/m²/s
-surface_flux.shf.1,W/m²
-mod_radcon.snowc,1
-u_wind,m/s
-specific_humidity,g/kg
-surface_flux.hfluxn.0,W/m²
-shortwave_rad.cloudc,1
-surface_flux.ustr.2,N/m²
-surface_flux.ustr.0,N/m²
-mod_radcon.st4a.1,W/m²
-shortwave_rad.fsol,W/m²
-mod_radcon.tau2.1,1
-shortwave_rad.ozone,ppmv
-surface_flux.v0,m/s
-surface_flux.hfluxn.1,W/m²
-humidity.rh,1
-surface_flux.vstr.0,N/m²
-normalized_surface_pressure,1
-surface_flux.evap.1,kg/m²/s
-mod_radcon.tau2.3,1
-shortwave_rad.stratz,W/m²
-mod_radcon.alb_s,1
-shortwave_rad.icltop,model level index
-surface_flux.vstr.1,N/m²
-mod_radcon.stratc.0,W/m²
-convection.iptop,model level index
-surface_flux.vstr.2,N/m²
-longwave_rad.ftop,W/m²
-shortwave_rad.ozupp,Dobson Unit
-surface_flux.rlds,W/m²
-mod_radcon.flux.0,W/m²
-geopotential,m²/s²
-condensation.dtlsc,K/s
-surface_flux.rlus.2,W/m²
-land_model.stl_am,K
-mod_radcon.tau2.0,1
-condensation.precls,kg/m²/s
-mod_radcon.tau2.2,1
-surface_flux.u0,m/s
-surface_flux.rlus.0,W/m²
-temperature,K
-land_model.stl_lm,K
-surface_flux.evap.2,kg/m²/s
-mod_radcon.stratc.1,W/m²
+Variable,Units,Speedy,Description
+surface_flux.t0,K,t0,Near-surface temperature
+shortwave_rad.gse,W/m²/K,gse,Vertical gradient of dry static energy
+humidity.qsat,g/kg,qsat,saturation specific humidity
+mod_radcon.flux.3,W/m²,flux,Radiative flux in different spectral bands
+shortwave_rad.ftop,W/m²,ftop,Net downward flux at top of atmosphere
+date.model_year,year,model_datetime,The model's current year
+date.model_step,1,-,Model step counter
+date.tyear,year,tyear,Fractional time of year
+shortwave_rad.zenit,radian,zenit,The zenith angle
+condensation.dqlsc,g/kg/s,dqlsc,Specific humidity tendency due to large-scale condensation
+convection.se,J/kg,se,dry static energy
+v_wind,m/s,va,V-wind
+shortwave_rad.rsns,W/m²,fsfc,Net downward flux of short-wave radiation at the surface
+shortwave_rad.dfabs,W/m²,dfabs,Flux of long-wave radiation absorbed in each atmospheric layer
+surface_flux.ustr.1,N/m²,ustr,u-stress
+mod_radcon.flux.2,W/m²,flux,Radiative flux in different spectral bands
+shortwave_rad.compute_shortwave,bool,compute_shortwave,Flag to compute shortwave radiation
+mod_radcon.ablco2,1,ablco2,CO2 absorptivity
+mod_radcon.alb_l,1,alb_l,Daily-mean albedo over land (bare-land + snow)
+surface_flux.rlus.1,W/m²,slru,Upward flux of long-wave radiation at the surface
+surface_flux.tskin,K,tskin,Skin surface temperature
+mod_radcon.st4a.0,W/m²,st4a,Blackbody emission from full and half atmospheric levels
+mod_radcon.flux.1,W/m²,flux,Radiative flux in different spectral bands
+surface_flux.tsfc,K,tsfc,Surface temperature
+shortwave_rad.qcloud,1,qcloud,Equivalent specific humidity of clouds
+surface_flux.evap.0,kg/m²/s,evap,Evaporation
+shortwave_rad.cloudstr,1,clstr,Stratiform cloud cover
+convection.cbmf,kg/m²/s,cbmf,Cloud-base mass flux
+shortwave_rad.rsds,W/m²,fsfcd,Total downward flux of short-wave radiation at the surface
+surface_flux.shf.0,W/m²,shf,Sensible heat flux
+surface_flux.shf.2,W/m²,shf,Sensible heat flux
+longwave_rad.dfabs,W/m²,dfabs,Flux of long-wave radiation absorbed in each atmospheric layer
+surface_flux.rlns,W/m²,-,Net upward flux of long-wave radiation at the surface
+mod_radcon.albsfc,1,albsfc,Combined surface albedo (land + sea)
+convection.precnv,g/m²/s,precnv,Convective precipitation [g/(m^2 s)]
+surface_flux.shf.1,W/m²,shf,Sensible heat flux
+mod_radcon.snowc,1,snowc,Effective snow cover (fraction)
+u_wind,m/s,ua,U-wind
+specific_humidity,g/kg,qa,Specific humidity
+surface_flux.hfluxn.0,W/m²,hfluxn,Net downward heat flux
+shortwave_rad.cloudc,1,cloudc,Total cloud cover
+surface_flux.ustr.2,N/m²,ustr,u-stress
+surface_flux.ustr.0,N/m²,ustr,u-stress
+mod_radcon.st4a.1,W/m²,st4a,Blackbody emission from full and half atmospheric levels
+shortwave_rad.fsol,W/m²,fsol,Solar radiation at the top
+mod_radcon.tau2.1,1,tau2,Transmissivity of atmospheric layers
+shortwave_rad.ozone,ppmv,ozone,Ozone concentration in lower stratosphere
+surface_flux.v0,m/s,v0,Near-surface v-wind
+surface_flux.hfluxn.1,W/m²,hfluxn,Net downward heat flux
+humidity.rh,1,rh,relative humidity
+surface_flux.vstr.0,N/m²,vstr,v-stress
+normalized_surface_pressure,1,psa,normalized surface pressure
+surface_flux.evap.1,kg/m²/s,evap,evaporation
+mod_radcon.tau2.3,1,tau2,Transmissivity of atmospheric layers
+shortwave_rad.stratz,W/m²,stratz,Polar night cooling in the stratosphere
+mod_radcon.alb_s,1,alb_s,Daily-mean albedo over sea (open sea + sea ice)
+shortwave_rad.icltop,model level index,icltop,Cloud top level
+surface_flux.vstr.1,N/m²,vstr,v-stress
+mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term
+convection.iptop,model level index,itop,Top of convection (layer index)
+surface_flux.vstr.2,N/m²,vstr,v-stress
+longwave_rad.ftop,W/m²,ftop,Net downward flux at top of atmosphere
+shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
+surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation at the surface
+mod_radcon.flux.0,W/m²,flux,Radiative flux in different spectral bands
+geopotential,m²/s²,phi,geopotential
+condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensation
+surface_flux.rlus.2,W/m²,slru,Upward flux of long-wave radiation at the surface
+land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model
+mod_radcon.tau2.0,1,tau2,Transmissivity of atmospheric layers
+condensation.precls,kg/m²/s,precls,Precipitation due to large-scale condensation
+mod_radcon.tau2.2,1,tau2,Transmissivity of atmospheric layers
+surface_flux.u0,m/s,u0,Near-surface u-wind
+surface_flux.rlus.0,W/m²,slru,Upward flux of long-wave radiation at the surface
+temperature,K,ta,temperature
+land_model.stl_lm,K,stl_lm,Land surface temperature calculated by the land model
+surface_flux.evap.2,kg/m²/s,evap,Evaporation
+mod_radcon.stratc.1,W/m²,stratc,Stratospheric correction term
