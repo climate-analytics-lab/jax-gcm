@@ -71,7 +71,10 @@ def trajectory_from_step(
         (1) the final frame of the trajectory.
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
     """
-    def integrate(x_initial, diagnostics_collector):
+    @jax.jit
+    def integrate(x_initial, empty_preds): # FIXME: needs to work for diagnostics_collector=None
+        diagnostics_collector = DiagnosticsCollector()
+        diagnostics_collector.data = nnx.Variable(empty_preds)
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
@@ -94,8 +97,10 @@ def trajectory_from_step(
         
         carry = (x_initial, zeros_like_pytree(x_initial), init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
-        diagnostics_collector.value = nnx.merge(graphdef, final_diag_state).data.value
-        return x_final, preds
+        return x_final, Predictions(
+            dynamics=preds,
+            physics=tree_map(lambda x: (x / inner_steps), nnx.merge(graphdef, final_diag_state).data.value)
+        )
 
     return integrate
 
@@ -141,6 +146,7 @@ class Model:
             boundaries: BoundaryData object describing surface boundary conditions
             initial_state: Initial state of the model (PhysicsState object), optional
             physics: Physics object describing the model physics
+            output_averages: Whether to output time-averaged quantities
         """
         from datetime import datetime
 
@@ -197,6 +203,12 @@ class Model:
             coords=self.coords,
             physics_specs=self.physics_specs,
         )
+
+        self.date_from_sim_time = lambda sim_time: DateData.set_date(
+            model_time = Timestamp.from_datetime(datetime(2000, 1, 1)) + Timedelta(seconds=sim_time),
+            model_step = (sim_time / self.dt).astype(jnp.int32),
+            dt_seconds = dt_si.to(units.second).m
+        )
         
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
@@ -206,11 +218,7 @@ class Model:
                 physics=self.physics,
                 boundaries=self.boundaries,
                 geometry=self.geometry,
-                date = DateData.set_date(
-                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
-                    dt_seconds = jnp.float32(time_step * 60.0)
-                ),
+                date=self.date_from_sim_time(state.sim_time),
                 diagnostics_collector=d
             )
         )
@@ -219,7 +227,7 @@ class Model:
         self.times = self.save_interval * jnp.arange(1, self.outer_steps+1)
         
         self.primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
-        step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy(d), self.dt)
+        step_fn_unfiltered = lambda d: dinosaur.time_integration.imex_rk_sil3(self.primitive_with_speedy(d), self.dt)
         
         def conserve_global_mean_surface_pressure(u, u_next):
             return u_next.replace(
@@ -233,9 +241,12 @@ class Model:
                 self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
             ),
         ]
-        self.step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn(d), filters)
 
+        step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn_unfiltered(d), filters)
+        
         self.output_averages = output_averages
+        self.step_fn = step_fn if self.output_averages else step_fn()
+        self.trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
@@ -258,24 +269,16 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
     
-    def _post_process_just_dynamics(self, state: primitive_equations.State) -> Predictions:
-        return Predictions(
+    def _post_process(self, state: primitive_equations.State) -> Predictions:
+        from jcm.physics_interface import verify_state
+
+        nodal_predictions = Predictions(
             dynamics=dynamics_state_to_physics_state(state, self.primitive),
             physics=None
         )
-
-    def _post_process(self, state: primitive_equations.State) -> Predictions:
-        from jcm.date import DateData
-        from jcm.physics_interface import verify_state
-
-        nodal_predictions = self._post_process_just_dynamics(state)
         
         if self.physics.write_output:
-            date=DateData.set_date(
-                model_time = self.start_date + Timedelta(seconds=state.sim_time),
-                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32),
-                dt_seconds = jnp.float32(self.time_step * 60.0)
-            )
+            date = self.date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(nodal_predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
             nodal_predictions = nodal_predictions.replace(physics=physics_data)
@@ -283,31 +286,32 @@ class Model:
         return nodal_predictions
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
-        diagnostics_collector = None
-        if self.output_averages and self.physics.write_output:
-            diagnostics_collector = DiagnosticsCollector()
-            base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
-            physics_data_list = [base_physics_data] * self.outer_steps
-            diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
-            diagnostics_collector.data.value = tree_map(lambda x: x.astype(jnp.float32), diagnostics_collector.data.value)
+        empty_physics_data = PhysicsData.zeros(self.geometry.nodal_shape[1:], self.geometry.nodal_shape[0])
+        empty_physics_predictions = tree_map(
+            lambda *args: jnp.stack(args, axis=0).astype(jnp.float32),
+            *([empty_physics_data] * self.outer_steps)
+        )
 
-        trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
-
-        integrate_fn = nnx.jit(trajectory_fn(
-            self.step_fn if self.output_averages else self.step_fn(),
+        integrate_fn = nnx.jit(self.trajectory_fn(
+            self.step_fn, # FIXME: figure out where to put jax.checkpoint
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
             post_process_fn=self._post_process if self.physics.write_output else lambda x: x,
         ))
 
-        final_state, raw_predictions = integrate_fn(state, diagnostics_collector) if self.output_averages else integrate_fn(state)
-        if diagnostics_collector is not None:
-            diagnostics_collector.data.value = tree_map(lambda x: (x / self.inner_steps), diagnostics_collector.data.value)
-            
-        if self.output_averages or not self.physics.write_output: # cases when postprocessing is not done during integration
-            predictions = self._post_process_just_dynamics(raw_predictions).replace(
-                physics=diagnostics_collector.data.value if diagnostics_collector is not None else None
+        final_state, raw_predictions = integrate_fn(state, empty_physics_predictions) if self.output_averages else integrate_fn(state)
+
+        if self.output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
+            predictions = raw_predictions.replace(
+                dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
+            )
+        elif self.physics.write_output: # If averaging is off, raw_predictions has only been post-processed if self.physics.write_output is True
+            predictions = raw_predictions
+        else:
+            predictions = Predictions(
+                dynamics=dynamics_state_to_physics_state(raw_predictions, self.primitive),
+                physics=None
             )
         
         return final_state, predictions

@@ -302,7 +302,7 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date) # FIXME: figure out where to put jax.checkpoint
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     
