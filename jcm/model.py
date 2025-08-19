@@ -15,7 +15,7 @@ from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
+from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -86,7 +86,7 @@ def trajectory_from_step(
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
         def inner_step(carry):
             x, x_sum, diag_state = carry
-            x_sum += post_process_fn(x) # include initial state, not final state
+            x_sum += x  # include initial state, not final state
             temp_collector_inner = nnx.merge(graphdef, diag_state)
             temp_collector_inner.physical_step.value = True
             x_next = step_fn(temp_collector_inner)(x)
@@ -101,7 +101,7 @@ def trajectory_from_step(
             _, updated_diag_state = nnx.split(temp_collector_outer)
             return (x_final, zeros_like_pytree(x_sum), updated_diag_state), (x_sum / inner_steps,)
         
-        carry = (x_initial, zeros_like_pytree(post_process_fn(x_initial)), init_diag_state)
+        carry = (x_initial, zeros_like_pytree(x_initial), init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
         diagnostics_collector.update(nnx.merge(graphdef, final_diag_state).data.value)
         return x_final, preds
@@ -245,7 +245,6 @@ class Model:
         self.step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn(d), filters)
 
         self.output_averages = output_averages
-        self.trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         from jcm.physics_interface import physics_state_to_dynamics_state
@@ -270,7 +269,7 @@ class Model:
 
     def post_process(self, state: primitive_equations.State) -> Predictions:
         from jcm.date import DateData
-        from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
+        from jcm.physics_interface import verify_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         
@@ -286,24 +285,43 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data)
 
-    def unroll(self, state: primitive_equations.State, diagnostics_collector: DiagnosticsCollector=None) -> tuple[primitive_equations.State, Predictions]:
-        if diagnostics_collector is not None:
-            base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
-            physics_data_list = [base_physics_data] * self.outer_steps
-            diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
+    def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
+        if self.output_averages:
+            diagnostics_collector = None
+            if self.physics.write_output:
+                diagnostics_collector = DiagnosticsCollector()
+                base_physics_data = PhysicsData.zeros(self.coords.horizontal.nodal_shape, self.coords.vertical.layers)
+                physics_data_list = [base_physics_data] * self.outer_steps
+                diagnostics_collector.data = nnx.Variable(tree_map(lambda *args: jnp.stack(args, axis=0), *physics_data_list))
 
-        integrate_fn = nnx.jit(self.trajectory_fn(
-            self.step_fn,
-            outer_steps=self.outer_steps,
-            inner_steps=self.inner_steps,
-            start_with_input=True,
-            post_process_fn=self.post_process if self.physics.write_output else lambda x: x, # post_process on inner steps if we are computing physics output
-        ))
-        final_state, predictions = integrate_fn(state, diagnostics_collector) if self.output_averages else integrate_fn(state)
-        if diagnostics_collector is not None:
-            diagnostics_collector.divide_by(self.inner_steps)
-        if not self.physics.write_output:
-            predictions = self.post_process(predictions) # if not computing physics output, post_process commutes with time average, so we can apply it here
+            integrate_fn = nnx.jit(trajectory_from_step(
+                self.step_fn,
+                outer_steps=self.outer_steps,
+                inner_steps=self.inner_steps,
+                start_with_input=True,
+                post_process_fn=None,
+            ))
+
+            final_state, dynamics_averages = integrate_fn(state, diagnostics_collector)
+            if diagnostics_collector is not None:
+                diagnostics_collector.divide_by(self.inner_steps)
+            
+            predictions = Predictions(
+                dynamics=dynamics_state_to_physics_state(dynamics_averages, self.primitive),
+                physics=diagnostics_collector.data.value if diagnostics_collector is not None else None
+            )
+        else:
+            integrate_fn = nnx.jit(dinosaur.time_integration.trajectory_from_step(
+                self.step_fn(),
+                outer_steps=self.outer_steps,
+                inner_steps=self.inner_steps,
+                start_with_input=True,
+                post_process_fn=self.post_process if self.physics.write_output else lambda x: x, # post_process on each outer step if we are computing physics output
+            ))
+            final_state, predictions = integrate_fn(state)
+            if not self.physics.write_output:
+                predictions = self.post_process(predictions) # if not computing physics output, can apply post_process to the whole time series at once
+
         return final_state, predictions
 
     def data_to_xarray(self, data):
