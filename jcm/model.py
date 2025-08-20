@@ -17,6 +17,7 @@ from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
+import pandas as pd
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -25,6 +26,13 @@ class Predictions:
     dynamics: PhysicsState
     physics: Any
     times: Any
+Predictions.__doc__ = """Container for model prediction outputs from a single timestep.
+Attributes:
+    dynamics (PhysicsState): The physical state variables converted from the
+        dynamical state.
+    physics (Any): Diagnostic physics data computed by the physics package.
+    times (Any): Timestamps of the predictions.
+"""
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -56,12 +64,24 @@ class Model:
         Initialize the model with the given time step, save interval, and total time.
         
         Args:
-            time_step: Model time step in minutes
-            layers: Number of vertical layers
-            horizontal_resolution: Horizontal resolution of the model (31, 42, 85, or 213)
-            coords: CoordinateSystem object describing model grid
-            orography: Orography data (2D array)
-            physics: Physics object describing the model physics
+            time_step: 
+                Model time step in minutes
+            save_interval: 
+                Save interval in days
+            total_time: 
+                Total integration time in days
+            start_date: 
+                Start date of the simulation
+            layers: 
+                Number of vertical layers
+            horizontal_resolution: 
+                Horizontal resolution of the model (31, 42, 85, or 213)
+            coords: 
+                CoordinateSystem object describing model grid
+            orography:
+                Orography data (2D array)
+            physics: 
+                Physics object describing the model physics
         """
 
         self.physics_specs = PHYSICS_SPECS
@@ -120,6 +140,21 @@ class Model:
         self._final_state_internal = None
 
     def _prepare_initial_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
+        """Prepares initial state for a simulation.
+
+        Args:
+            physics_state: 
+                Optional PhysicsState object to use as the initial state.
+            random_seed: 
+                Seed for the JAX random number generator.
+            sim_time: 
+                The starting simulation time for the state.
+            humidity_perturbation: 
+                If True and using the default state, adds a small amount of specific humidity.
+        
+        Returns:
+            A `primitive_equations.State` object ready for integration.
+        """
         from jcm.physics_interface import physics_state_to_dynamics_state
 
         # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
@@ -174,6 +209,16 @@ class Model:
         return dinosaur.time_integration.step_with_filters(unfiltered_step_fn, self.filters)
 
     def _post_process(self, state: primitive_equations.State) -> Predictions:
+        """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
+        
+        Args:
+            state: 
+                A `primitive_equations.State` object from the simulation.
+        
+        Returns:
+            A dictionary containing the `PhysicsState` ('dynamics') and the
+            diagnostic `PhysicsData` ('physics').
+        """
         from jcm.date import DateData
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
 
@@ -211,15 +256,22 @@ class Model:
                total_time=120.0,
                start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
     ) -> tuple[primitive_equations.State, Predictions]:
-        """
-        Run the model from the initial state with the given run parameters.
+        """Runs the full simulation forward in time from a given state.
         
         Args:
-            initial_state (PhysicsState): Initial state of the model.
-            boundaries (BoundaryData): Boundary conditions for the model.
-            save_interval (float): Interval at which to save model outputs.
-            total_time (float): Total time to run the model.
-            start_date (Timestamp): Start date for the model run.
+            initial_state:
+                PhysicsState containing initial state of the model.
+            boundaries:
+                BoundaryData containing boundary conditions for the model.
+            save_interval:
+                Interval at which to save model outputs (float).
+            total_time:
+                Total time to run the model (float).
+            start_date:
+                Start date for the model run (Timestamp).
+
+        Returns:
+            A Predictions object containing the trajectory of post-processed model states.
         """
         if isinstance(initial_state, primitive_equations.State):
             self._final_state_internal = initial_state
@@ -234,6 +286,18 @@ class Model:
         return self.restart_run(save_interval=save_interval, total_time=total_time)
 
     def predictions_to_xarray(self, predictions):
+        """Converts the full prediction trajectory to a final xarray.Dataset.
+        This function unpacks the nested dictionary structure from the simulation
+        output, formats the data, and converts the time coordinate to a
+        datetime object.
+
+        Args:
+            predictions: 
+                The raw output from the `unroll` method.
+
+        Returns:
+            A final `xarray.Dataset` ready for analysis and plotting.
+        """
         from dinosaur.xarray_utils import data_to_xarray
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions (PhysicsData format) from postprocessed output
@@ -248,6 +312,14 @@ class Model:
 
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
 
+        # Import units attribute associated with each xarray output from units_table.csv
+        units_df = pd.read_csv("units_table.csv")
+        units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
+
+        for var, unit in units_from_csv.items():
+            if var in pred_ds:
+                pred_ds[var].attrs["units"] = unit
+        
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
 
