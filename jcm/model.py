@@ -21,7 +21,6 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
-zeros_like_pytree = lambda x: tree_map(lambda a: jnp.zeros_like(a), x)
 
 @tree_math.struct
 class Predictions:
@@ -77,6 +76,8 @@ def trajectory_from_step(
         diagnostics_collector.data = nnx.Variable(empty_preds)
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
+        empty_sum = tree_map(lambda x: jnp.zeros_like(x), x_initial)
+
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
         def inner_step(carry):
             x, x_sum, diag_state = carry
@@ -93,9 +94,9 @@ def trajectory_from_step(
             temp_collector_outer = nnx.merge(graphdef, diag_state)
             temp_collector_outer.i.value += 1
             _, updated_diag_state = nnx.split(temp_collector_outer)
-            return (x_final, zeros_like_pytree(x_sum), updated_diag_state), (x_sum / inner_steps,)
+            return (x_final, empty_sum, updated_diag_state), (x_sum / inner_steps,)
         
-        carry = (x_initial, zeros_like_pytree(x_initial), init_diag_state)
+        carry = (x_initial, empty_sum, init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
         return x_final, Predictions(
             dynamics=preds,
