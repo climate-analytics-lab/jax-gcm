@@ -213,10 +213,6 @@ def prepare_icon_data(
 
     Returns:
         Tuple of (RadiationTendencies, RadiationData)
-
-    Note:
-        Currently builds simple flux profiles from surface/TOA diagnostics.
-        Full 3D flux profiles require modification of jax-rrtmgp in terms of expanding the diagnostic fields.
     """
     # Extract information from available data
     halo = 1
@@ -255,35 +251,27 @@ def prepare_icon_data(
     toa_sw_up = rrtmgp_data['toa_sw_flux_outgoing_2d_xy'][0, 0]
     toa_lw_up = rrtmgp_data['toa_lw_flux_outgoing_2d_xy'][0, 0]
     
-    # Build flux profiles with singleton band dimension for IconPhysics transpose
-    # Shape: [nlev+1, 1] per column → [ncols, nlev+1, 1] after vmap → [nlev+1, ncols, 1] after transpose
-    sw_flux_up_profile = jnp.zeros((nlev + 1, 1))
-    sw_flux_down_profile = jnp.zeros((nlev + 1, 1))
-    lw_flux_up_profile = jnp.zeros((nlev + 1, 1))
-    lw_flux_down_profile = jnp.zeros((nlev + 1, 1))
-
-    # Set flux boundary values with correct ICON vertical indexing
-    # ICON order: index 0 = TOA, index -1 = surface (when needs_reversal=True)
-    toa_idx = lax.cond(needs_reversal, lambda: 0, lambda: -1)
-    surf_idx = lax.cond(needs_reversal, lambda: -1, lambda: 0)
+    # Extract full flux profiles from RRTMGP output
+    # RRTMGP already sums across spectral bands, so ngpts=1 by default
+    sw_flux_up = rrtmgp_data['sw_flux_up_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
+    sw_flux_down = rrtmgp_data['sw_flux_down_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
+    lw_flux_up = rrtmgp_data['lw_flux_up_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
+    lw_flux_down = rrtmgp_data['lw_flux_down_full'][0, :, :].transpose(1, 0)  # (nlev+1, ngpts)
     
-    # Set boundary values using conditional indexing
-    sw_flux_down_profile = sw_flux_down_profile.at[surf_idx, 0].set(surf_sw_down)
-    sw_flux_up_profile = sw_flux_up_profile.at[surf_idx, 0].set(surf_sw_up)
-    sw_flux_down_profile = sw_flux_down_profile.at[toa_idx, 0].set(toa_sw_down)
-    sw_flux_up_profile = sw_flux_up_profile.at[toa_idx, 0].set(toa_sw_up)
-    lw_flux_down_profile = lw_flux_down_profile.at[surf_idx, 0].set(surf_lw_down)
-    lw_flux_up_profile = lw_flux_up_profile.at[surf_idx, 0].set(surf_lw_up)
-    lw_flux_up_profile = lw_flux_up_profile.at[toa_idx, 0].set(toa_lw_up)
+    # Reverse flux profiles if needed
+    sw_flux_up = lax.cond(needs_reversal, flip, identity, sw_flux_up)
+    sw_flux_down = lax.cond(needs_reversal, flip, identity, sw_flux_down)
+    lw_flux_up = lax.cond(needs_reversal, flip, identity, lw_flux_up)
+    lw_flux_down = lax.cond(needs_reversal, flip, identity, lw_flux_down)
     
-    # Create radiation diagnostics
+    # Create radiation diagnostics using ICON's RadiationData structure
     diagnostics = RadiationData(
         cos_zenith=cos_zenith,
-        sw_flux_up=sw_flux_up_profile,
-        sw_flux_down=sw_flux_down_profile,
+        sw_flux_up=sw_flux_up,
+        sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,
-        lw_flux_up=lw_flux_up_profile,
-        lw_flux_down=lw_flux_down_profile,
+        lw_flux_up=lw_flux_up,
+        lw_flux_down=lw_flux_down,
         lw_heating_rate=lw_heating,
         surface_sw_down=surf_sw_down,
         surface_lw_down=surf_lw_down,
