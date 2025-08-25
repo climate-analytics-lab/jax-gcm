@@ -53,7 +53,7 @@ class DiagnosticsCollector(nnx.Module):
             )
             self.physical_step.value = False
 
-def trajectory_from_step(
+def averaged_trajectory_from_step(
     step_fn: typing.TimeStepFn,
     outer_steps: int,
     inner_steps: int,
@@ -265,7 +265,7 @@ class Model:
         
         self.output_averages = output_averages
         self.step_fn = step_fn if self.output_averages else step_fn()
-        self.trajectory_fn = trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
+        self.trajectory_fn = averaged_trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Generates an initial state for a simulation.
