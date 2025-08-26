@@ -334,7 +334,7 @@ class Model:
                 empty_physics_data = self.physics.get_empty_data(self.geometry)
 
                 integrate_fn = nnx.jit(averaged_trajectory_from_step(*args, **kwargs))
-                final_state, raw_predictions = integrate_fn(state, empty_physics_predictions)
+                final_state, raw_predictions = integrate_fn(state, empty_physics_data)
                 predictions = raw_predictions.replace(
                     dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
                 )
