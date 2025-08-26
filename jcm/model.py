@@ -232,7 +232,14 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
-    def resume(self, save_interval=10.0, total_time=120.0) -> Predictions:
+    def resume(self,
+               boundaries: BoundaryData=None,
+               save_interval=10.0,
+               total_time=120.0
+    ) -> Predictions:
+        self.boundaries = self._prepare_boundaries(boundaries)
+        self.step_fn = self._create_step_fn()
+
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
         start_time = self.start_date.delta.days + (self._final_state_internal.sim_time*units.second).to(units.day).m
@@ -250,11 +257,11 @@ class Model:
         return predictions.replace(times=times)
 
     def run(self,
-               initial_state: PhysicsState | primitive_equations.State = None,
-               boundaries: BoundaryData=None,
-               save_interval=10.0,
-               total_time=120.0,
-               start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
+            initial_state: PhysicsState | primitive_equations.State = None,
+            boundaries: BoundaryData=None,
+            save_interval=10.0,
+            total_time=120.0,
+            start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
     ) -> tuple[primitive_equations.State, Predictions]:
         """Runs the full simulation forward in time from a given state.
         
@@ -280,10 +287,8 @@ class Model:
             self._final_state_internal = self._prepare_initial_state(initial_state)
 
         self.start_date = start_date
-        self.boundaries = self._prepare_boundaries(boundaries)
-        self.step_fn = self._create_step_fn()
 
-        return self.resume(save_interval=save_interval, total_time=total_time)
+        return self.resume(boundaries=boundaries, save_interval=save_interval, total_time=total_time)
 
     def predictions_to_xarray(self, predictions):
         """Converts the full prediction trajectory to a final xarray.Dataset.
