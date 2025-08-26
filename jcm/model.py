@@ -175,7 +175,7 @@ class Model:
         filters = [
             conserve_global_mean_surface_pressure,
             dinosaur.time_integration.horizontal_diffusion_step_filter(
-                self.coords.horizontal, self.dt, self.diffusion.state_diff_timesacle, order=self.diffusion.state_diff_order),
+                self.coords.horizontal, self.dt, self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
