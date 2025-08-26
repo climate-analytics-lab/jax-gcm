@@ -377,7 +377,7 @@ def filter_tendencies(dynamics_tendency: State, time_step, grid) -> State:
     Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
 
     Args:
-        state: Dynamics tendencies in dinosaur.primitive_equations.State format
+        dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
         time_step: Time step in seconds
         grid: dinosaur.spherical_harmonic.Grid object
     
