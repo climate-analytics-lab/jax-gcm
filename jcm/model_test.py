@@ -18,7 +18,7 @@ class TestModelUnit(unittest.TestCase):
         )
 
         save_interval, total_time = 1, 2
-        predictions = model.unroll(
+        predictions = model.run(
             total_time=total_time,
             save_interval=save_interval,
         )
@@ -59,7 +59,7 @@ class TestModelUnit(unittest.TestCase):
         )
 
         save_interval, total_time = 1, 2
-        predictions = model.unroll(
+        predictions = model.run(
             save_interval=save_interval,
             total_time=total_time,
         )
@@ -108,8 +108,8 @@ class TestModelUnit(unittest.TestCase):
         state = model._prepare_initial_state()
 
         def fn(state):
-            _ = model.unroll(total_time=0) # to set up model fields
-            predictions = model.unroll(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
+            _ = model.run(total_time=0) # to set up model fields
+            predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
             return model._final_state_internal, predictions
 
         # Calculate gradients
@@ -136,7 +136,7 @@ class TestModelUnit(unittest.TestCase):
         state = model._prepare_initial_state()
 
         def fn(state):
-            predictions = model.unroll(initial_state=state, save_interval=(1/48.), total_time=(1/24.))
+            predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/24.))
             return model._final_state_internal, predictions
 
         # Calculate gradients
@@ -175,7 +175,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
         
-        fn = lambda params: create_model(params).unroll(save_interval=1/24., total_time=2./24.)
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -219,7 +219,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).unroll(save_interval=1/24., total_time=2./24.)
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
 
         # Calculate gradients using JVP
         params = Parameters.default()

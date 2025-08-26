@@ -27,7 +27,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
         
         model = Model(physics=HeldSuarezPhysics())
 
-        _ = model.unroll(total_time=36)
+        _ = model.run(total_time=36)
 
         final_state = model._final_state_internal
 

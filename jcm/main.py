@@ -14,7 +14,7 @@ def main(cfg: DictConfig):
         layers=cfg.model.layers
     )
     
-    predictions = model.unroll(
+    predictions = model.run(
         save_interval=cfg.model.save_interval,
         total_time=cfg.model.total_time
     )

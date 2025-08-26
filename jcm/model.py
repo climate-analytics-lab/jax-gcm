@@ -130,13 +130,13 @@ class Model:
             ),
         ]
 
-        # The following fields are set upon calling model.unroll
+        # The following fields are set upon calling model.run
         self.initial_state = None
         self.start_date = None
         self.boundaries = None
         self.step_fn = None
 
-        # Updated by model.unroll and model.restart
+        # Updated by model.run and model.resume
         self._final_state_internal = None
 
     def _prepare_initial_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
@@ -232,7 +232,7 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
-    def restart_run(self, save_interval=10.0, total_time=120.0) -> Predictions:
+    def resume(self, save_interval=10.0, total_time=120.0) -> Predictions:
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
         start_time = self.start_date.delta.days + (self._final_state_internal.sim_time*units.second).to(units.day).m
@@ -249,7 +249,7 @@ class Model:
         self._final_state_internal, predictions = integrate_fn(self._final_state_internal)
         return predictions.replace(times=times)
 
-    def unroll(self,
+    def run(self,
                initial_state: PhysicsState | primitive_equations.State = None,
                boundaries: BoundaryData=None,
                save_interval=10.0,
@@ -283,7 +283,7 @@ class Model:
         self.boundaries = self._prepare_boundaries(boundaries)
         self.step_fn = self._create_step_fn()
 
-        return self.restart_run(save_interval=save_interval, total_time=total_time)
+        return self.resume(save_interval=save_interval, total_time=total_time)
 
     def predictions_to_xarray(self, predictions):
         """Converts the full prediction trajectory to a final xarray.Dataset.
@@ -293,7 +293,7 @@ class Model:
 
         Args:
             predictions: 
-                The raw output from the `unroll` method.
+                The raw output from the `run` method.
 
         Returns:
             A final `xarray.Dataset` ready for analysis and plotting.
