@@ -369,9 +369,10 @@ def get_physical_tendencies(
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, time_step, dynamics.coords.horizontal)
+
     return filtered_dynamics_tendency
 
-def filter_tendencies(state: State, time_step, grid) -> State:
+def filter_tendencies(dynamics_tendency: State, time_step, grid) -> State:
     '''
     Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
 
@@ -389,6 +390,6 @@ def filter_tendencies(state: State, time_step, grid) -> State:
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
     filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=4)
-    filtered_tendencies = filter_fn(state)
+    filtered_tendency = filter_fn(dynamics_tendency)
     
-    return filtered_tendencies
+    return filtered_tendency
