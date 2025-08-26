@@ -8,7 +8,7 @@ from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
-from jcm.constants import p0, state_diff_timescale, state_diff_order
+from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, update_boundaries_with_timestep
 from jcm.date import DateData, Timestamp, Timedelta
