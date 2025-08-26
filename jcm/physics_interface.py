@@ -16,6 +16,7 @@ from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
+from jcm.diffusion import DiffusionFilter
 
 @tree_math.struct
 class PhysicsState:
@@ -344,6 +345,7 @@ def get_physical_tendencies(
     physics: Physics,
     boundaries: BoundaryData,
     geometry: Geometry,
+    diffusion: DiffusionFilter,
     date: DateData,
 ) -> State:
     """
@@ -368,11 +370,14 @@ def get_physical_tendencies(
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, time_step, dynamics.coords.horizontal)
+    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
 
     return filtered_dynamics_tendency
 
-def filter_tendencies(dynamics_tendency: State, time_step, grid) -> State:
+def filter_tendencies(dynamics_tendency: State, 
+                      diffusion: DiffusionFilter,
+                      time_step, 
+                      grid) -> State:
     '''
     Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
 
@@ -385,11 +390,12 @@ def filter_tendencies(dynamics_tendency: State, time_step, grid) -> State:
         Filtered dynamics tendencies in dinosaur.primitive_equations.State format
     '''
 
-    tau = 2.4*60*60 # 2.4 hours in seconds
-    order = 4 # order of the horizontal diffusion filter
+    tau = diffusion.tendency_diff_timescale
+    order = diffusion.tendency_diff_order
+
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
-    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=4)
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
     filtered_tendency = filter_fn(dynamics_tendency)
     
     return filtered_tendency
