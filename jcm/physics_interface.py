@@ -384,10 +384,10 @@ def filter_tendencies(state: State, time_step, grid) -> State:
     '''
 
     tau = 2.4*60*60 # 2.4 hours in seconds
-    order = 6 # order of the horizontal diffusion filter
+    order = 4 # order of the horizontal diffusion filter
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
-    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=6)
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=4)
     filtered_tendencies = filter_fn(state)
     
     return filtered_tendencies
