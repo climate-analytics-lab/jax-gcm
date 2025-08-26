@@ -11,6 +11,7 @@ from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.filtering import exponential_filter, horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
@@ -367,4 +368,26 @@ def get_physical_tendencies(
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    return dynamics_tendency
+    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, time_step, dynamics.coords.horizontal)
+    return filtered_dynamics_tendency
+
+def filter_tendencies(state: State, time_step, grid) -> State:
+    '''
+    Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
+
+    Args:
+        state: Dynamics tendencies in dinosaur.primitive_equations.State format
+        time_step: Time step in seconds
+    
+    Returns:
+        Filtered dynamics tendencies in dinosaur.primitive_equations.State format
+    '''
+
+    tau = 2.4*60*60 # 2.4 hours in seconds
+    order = 6 # order of the horizontal diffusion filter
+    scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
+
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=6)
+    filtered_tendencies = filter_fn(state)
+    
+    return filtered_tendencies

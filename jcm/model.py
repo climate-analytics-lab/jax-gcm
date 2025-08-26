@@ -168,9 +168,7 @@ class Model:
         
         filters = [
             conserve_global_mean_surface_pressure,
-            dinosaur.time_integration.exponential_step_filter(
-                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
-            ),
+            dinosaur.time_integration.horizontal_diffusion_step_filter(self.coords.horizontal, self.dt, 2.4*60*60, order=1),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
 
