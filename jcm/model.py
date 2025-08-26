@@ -78,7 +78,6 @@ def averaged_trajectory_from_step(
         (1) the final frame of the trajectory.
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
     """
-    @jax.jit
     def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector()
         diagnostics_collector.data = nnx.Variable(stack_trees([empty_data] * outer_steps))
@@ -329,25 +328,23 @@ class Model:
         return predictions
     
     def _get_integrate_fn(self, *args, **kwargs):
+        trajectory_fn = averaged_trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
+
         def _integrate_fn(state):
+            integrate_fn = jax.jit(trajectory_fn(
+                *args,
+                **kwargs,
+                post_process_fn=self._post_process if self.physics.write_output else lambda x: x
+            ))
+
             if self.output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
                 empty_physics_data = self.physics.get_empty_data(self.geometry)
-
-                integrate_fn = nnx.jit(averaged_trajectory_from_step(*args, **kwargs))
                 final_state, raw_predictions = integrate_fn(state, empty_physics_data)
                 predictions = raw_predictions.replace(
                     dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
                 )
-
             else:
-
-                integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-                    *args,
-                    **kwargs,
-                    post_process_fn=self._post_process if self.physics.write_output else lambda x: x,
-                ))
                 final_state, raw_predictions = integrate_fn(state)
-
                 # If averaging is off, raw_predictions is already a post-processed Predictions if we wrote physics output
                 # Otherwise it is a raw stack of dynamics states
                 predictions = raw_predictions if self.physics.write_output else Predictions(
