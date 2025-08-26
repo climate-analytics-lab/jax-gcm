@@ -11,7 +11,7 @@ from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
-from dinosaur.filtering import exponential_filter, horizontal_diffusion_filter
+from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
@@ -378,6 +378,7 @@ def filter_tendencies(state: State, time_step, grid) -> State:
     Args:
         state: Dynamics tendencies in dinosaur.primitive_equations.State format
         time_step: Time step in seconds
+        grid: dinosaur.spherical_harmonic.Grid object
     
     Returns:
         Filtered dynamics tendencies in dinosaur.primitive_equations.State format

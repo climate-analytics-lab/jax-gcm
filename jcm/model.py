@@ -168,6 +168,7 @@ class Model:
         
         filters = [
             conserve_global_mean_surface_pressure,
+            # horizontal diffusion filter, timescale 2.4 hours (taken from speedy:dynamical_constants.f90)
             dinosaur.time_integration.horizontal_diffusion_step_filter(self.coords.horizontal, self.dt, 2.4*60*60, order=1),
         ]
         self.step_fn = dinosaur.time_integration.step_with_filters(step_fn, filters)
