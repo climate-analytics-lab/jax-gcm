@@ -18,8 +18,9 @@ from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.utils import stack_trees
 import pandas as pd
+from datetime import datetime
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -78,12 +79,12 @@ def averaged_trajectory_from_step(
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
     """
     @jax.jit
-    def integrate(x_initial, empty_preds): # FIXME: needs to work for diagnostics_collector=None
+    def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector()
-        diagnostics_collector.data = nnx.Variable(empty_preds)
+        diagnostics_collector.data = nnx.Variable(stack_trees([empty_data] * outer_steps))
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
-        empty_sum = tree_map(lambda x: jnp.zeros_like(x), x_initial)
+        empty_sum = tree_map(jnp.zeros_like, x_initial)
 
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
         def inner_step(carry):
@@ -167,8 +168,6 @@ class Model:
             output_averages:
                 Whether to output time-averaged quantities
         """
-        from datetime import datetime
-
         # Integration settings
         self.start_date = start_date or Timestamp.from_datetime(datetime(2000, 1, 1))
         self.save_interval = save_interval * units.day
@@ -222,12 +221,6 @@ class Model:
             coords=self.coords,
             physics_specs=self.physics_specs,
         )
-
-        self.date_from_sim_time = lambda sim_time: DateData.set_date(
-            model_time = Timestamp.from_datetime(datetime(2000, 1, 1)) + Timedelta(seconds=sim_time),
-            model_step = (sim_time / self.dt).astype(jnp.int32),
-            dt_seconds = dt_si.to(units.second).m
-        )
         
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
@@ -237,7 +230,11 @@ class Model:
                 physics=self.physics,
                 boundaries=self.boundaries,
                 geometry=self.geometry,
-                date=self.date_from_sim_time(state.sim_time),
+                date = DateData.set_date(
+                    model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                    model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
+                    dt_seconds = jnp.float32(time_step * 60.0)
+                ),
                 diagnostics_collector=d
             )
         )
@@ -265,8 +262,7 @@ class Model:
         
         self.output_averages = output_averages
         self.step_fn = step_fn if self.output_averages else step_fn()
-        self.trajectory_fn = averaged_trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
-
+        
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Generates an initial state for a simulation.
 
@@ -310,7 +306,7 @@ class Model:
         
         Returns:
             A dictionary containing the `PhysicsState` ('dynamics') and the
-            diagnostic `PhysicsData` ('physics').
+            diagnostic physics variables (data structure determined by model.physics).
         """
         from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
         from jcm.physics_interface import verify_state
@@ -321,12 +317,47 @@ class Model:
         )
             
         if self.physics.write_output:
-            date = self.date_from_sim_time(state.sim_time)
+            date=DateData.set_date(
+                model_time = self.start_date + Timedelta(seconds=state.sim_time),
+                model_step = ((state.sim_time/60) / self.time_step).astype(jnp.int32),
+                dt_seconds = jnp.float32(self.time_step * 60.0)
+            )
             clamped_physics_state = verify_state(predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
+    
+    def _get_integrate_fn(self, *args, **kwargs):
+        def _integrate_fn(state):
+            if self.output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
+                empty_physics_data = self.physics.get_empty_data(self.geometry)
+
+                integrate_fn = nnx.jit(averaged_trajectory_from_step(*args, **kwargs))
+                final_state, raw_predictions = integrate_fn(state, empty_physics_predictions)
+                predictions = raw_predictions.replace(
+                    dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
+                )
+
+            else:
+
+                integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+                    *args,
+                    **kwargs,
+                    post_process_fn=self._post_process if self.physics.write_output else lambda x: x,
+                ))
+                final_state, raw_predictions = integrate_fn(state)
+
+                # If averaging is off, raw_predictions is already a post-processed Predictions if we wrote physics output
+                # Otherwise it is a raw stack of dynamics states
+                predictions = raw_predictions if self.physics.write_output else Predictions(
+                    dynamics=dynamics_state_to_physics_state(raw_predictions, self.primitive),
+                    physics=None
+                )
+
+            return final_state, predictions
+        
+        return _integrate_fn
 
     def unroll(self, state: primitive_equations.State) -> tuple[primitive_equations.State, Predictions]:
         """Runs the full simulation forward in time from a given state.
@@ -338,35 +369,13 @@ class Model:
         Returns:
             A tuple containing the trajectory of post-processed model states.
         """
-        empty_physics_data = PhysicsData.zeros(self.geometry.nodal_shape[1:], self.geometry.nodal_shape[0])
-        empty_physics_predictions = tree_map(
-            lambda *args: jnp.stack(args, axis=0).astype(jnp.float32),
-            *([empty_physics_data] * self.outer_steps)
-        )
-
-        integrate_fn = nnx.jit(self.trajectory_fn(
+        integrate = jax.jit(self._get_integrate_fn(
             self.step_fn, # FIXME: figure out where to put jax.checkpoint
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
-            post_process_fn=self._post_process if self.physics.write_output else lambda x: x,
         ))
-
-        final_state, raw_predictions = integrate_fn(state, empty_physics_predictions) if self.output_averages else integrate_fn(state)
-
-        if self.output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
-            predictions = raw_predictions.replace(
-                dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
-            )
-        elif self.physics.write_output: # If averaging is off, raw_predictions has only been post-processed if self.physics.write_output is True
-            predictions = raw_predictions
-        else:
-            predictions = Predictions(
-                dynamics=dynamics_state_to_physics_state(raw_predictions, self.primitive),
-                physics=None
-            )
-        
-        return final_state, predictions
+        return integrate(state)
 
     def data_to_xarray(self, data):
         """Converts raw simulation data to an xarray.Dataset.
@@ -395,7 +404,7 @@ class Model:
             A final `xarray.Dataset` ready for analysis and plotting.
         """
         # extract dynamics predictions (PhysicsState format)
-        # and physics predictions (PhysicsData format) from postprocessed output
+        # and physics predictions from postprocessed output
         dynamics_predictions = predictions.dynamics
         physics_predictions = predictions.physics
 

@@ -121,3 +121,6 @@ class SpeedyPhysics(Physics):
             physics_tendency += tend
         
         return physics_tendency, data
+
+    def get_empty_data(self, geometry: Geometry) -> PhysicsData:
+        return PhysicsData.zeros(geometry.nodal_shape[1:], geometry.nodal_shape[0])

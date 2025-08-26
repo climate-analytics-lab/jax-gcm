@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
+from jax.tree_util import tree_map
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber
@@ -27,5 +28,7 @@ def pass_fn(operand):
     return operand
 
 def ones_like(x):
-    import jax.tree_util as jtu
-    return jtu.tree_map(lambda y: jnp.ones_like(y), x)
+    return tree_map(jnp.ones_like, x)
+
+def stack_trees(trees):
+    return tree_map(lambda *arrays: jnp.stack(arrays, axis=0).astype(jnp.float32), *trees)

@@ -108,7 +108,7 @@ class BoundaryData:
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
 
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:

@@ -62,7 +62,7 @@ class PhysicsState:
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
 
 PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
 
@@ -150,6 +150,9 @@ class Physics:
             Object containing physics data
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
+    
+    def get_empty_data(self, geometry: Geometry) -> Any:
+        return None
 
     def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
         """

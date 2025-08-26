@@ -202,7 +202,7 @@ class TestModelUnit(unittest.TestCase):
                     return np.ones((), dtype=jax.dtypes.float0)
                 else:
                     return jnp.ones_like(x)
-            return jtu.tree_map(lambda x: make_tangent(x), params)
+            return jtu.tree_map(make_tangent, params)
         
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
