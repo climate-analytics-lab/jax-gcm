@@ -383,6 +383,7 @@ def filter_tendencies(dynamics_tendency: State,
 
     Args:
         dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
+        diffusion: DiffusionFilter object containing the diffusion parameters
         time_step: Time step in seconds
         grid: dinosaur.spherical_harmonic.Grid object
     
