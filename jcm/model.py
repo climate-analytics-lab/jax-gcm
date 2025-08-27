@@ -14,7 +14,7 @@ from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
 from jcm.boundaries import BoundaryData, default_boundaries, populate_parameter_dependent_boundaries
 from jcm.date import DateData, Timestamp, Timedelta
-from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
+from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
 import pandas as pd
@@ -219,8 +219,7 @@ class Model:
             A dictionary containing the `PhysicsState` ('dynamics') and the
             diagnostic `PhysicsData` ('physics').
         """
-        from jcm.date import DateData
-        from jcm.physics_interface import dynamics_state_to_physics_state, verify_state
+        from jcm.physics_interface import verify_state
 
         physics_state = dynamics_state_to_physics_state(state, self.primitive)
         
@@ -281,6 +280,7 @@ class Model:
             A Predictions object containing the trajectory of post-processed model states.
         """
         if isinstance(initial_state, primitive_equations.State):
+            self.initial_state = dynamics_state_to_physics_state(initial_state, self.primitive)
             self._final_state_internal = initial_state
         else:
             self.initial_state = initial_state
