@@ -2,7 +2,7 @@ name: Update Documentation
 on:
   push:
     paths:
-      - 'notebooks/units_table.csv'  
+      - 'units_table.csv'  
   workflow_dispatch:
 
 permissions:
