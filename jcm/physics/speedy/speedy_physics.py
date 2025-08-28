@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
 from collections import abc
 from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -123,4 +124,6 @@ class SpeedyPhysics(Physics):
         return physics_tendency, data
 
     def get_empty_data(self, geometry: Geometry) -> PhysicsData:
-        return PhysicsData.zeros(geometry.nodal_shape[1:], geometry.nodal_shape[0])
+        # PhysicsData.zeros creates an 'initial' physics data,
+        # but we need a completely zeroed one (including fields like model_year) for accumulating averages
+        return tree_map(lambda x: 0*x, PhysicsData.zeros(geometry.nodal_shape[1:], geometry.nodal_shape[0]))

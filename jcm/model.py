@@ -39,16 +39,18 @@ class DiagnosticsCollector(nnx.Module):
     data: nnx.Variable
     i: nnx.Variable
     physical_step: nnx.Variable
+    steps_to_average: int
 
-    def __init__(self):
+    def __init__(self, steps_to_average):
         self.data = None
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
-    
+        self.steps_to_average = steps_to_average
+
     def accumulate_if_physical_step(self, new_data):
         if self.physical_step.value:
             self.data.value = tree_map(
-                lambda stacked_array, new_array: stacked_array.at[self.i.value].add(new_array.astype(jnp.float32)),
+                lambda stacked_array, new_array: stacked_array.at[self.i.value].add(new_array/self.steps_to_average),
                 self.data.value,
                 new_data
             )
@@ -79,7 +81,7 @@ def averaged_trajectory_from_step(
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
     """
     def integrate(x_initial, empty_data):
-        diagnostics_collector = DiagnosticsCollector()
+        diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
         diagnostics_collector.data = nnx.Variable(stack_trees([empty_data] * outer_steps))
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
@@ -107,7 +109,7 @@ def averaged_trajectory_from_step(
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
         return x_final, Predictions(
             dynamics=preds,
-            physics=tree_map(lambda x: (x / inner_steps), nnx.merge(graphdef, final_diag_state).data.value)
+            physics=nnx.merge(graphdef, final_diag_state).data.value
         )
 
     return integrate

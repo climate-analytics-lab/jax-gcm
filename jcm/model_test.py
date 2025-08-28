@@ -1,6 +1,7 @@
 import unittest
 import jax.tree_util as jtu
 from dinosaur import primitive_equations_states
+import numpy as np
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -57,9 +58,9 @@ class TestModelUnit(unittest.TestCase):
 
         # optionally add a boundary conditions file
         model = Model(
-            time_step=720,
-            save_interval=1,
-            total_time=2,
+            time_step=30,
+            save_interval=1/24.,
+            total_time=2/24.,
         )
     
         state = model.get_initial_state()
@@ -101,7 +102,32 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
-        
+
+    def test_speedy_model_averages(self):
+        from jcm.model import Model
+
+        model = Model(
+            time_step=30, # make sure this test stays valid if we ever change the default timestep
+            save_interval=.5/24.,
+            total_time=2/24.,
+        )
+        _, preds = model.unroll(model.get_initial_state())
+        true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
+
+        avg_model = Model(
+            time_step=30,
+            save_interval=2/24.,
+            total_time=2/24.,
+            output_averages=True,
+        )
+        _, avg_preds = avg_model.unroll(avg_model.get_initial_state())
+
+        jtu.tree_map(
+            lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
+            true_avg_preds,
+            avg_preds
+        )
+
     def test_speedy_model_gradients_isnan(self):
         import jax
         import jax.numpy as jnp
