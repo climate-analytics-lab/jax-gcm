@@ -61,10 +61,7 @@ def averaged_trajectory_from_step(
     step_fn: typing.TimeStepFn,
     outer_steps: int,
     inner_steps: int,
-    *,
-    start_with_input: bool = False,
-    post_process_fn: typing.PostProcessFn = lambda x: x,
-    outer_step_post_process_fn: typing.PostProcessFn = lambda x: x,
+    **kwargs
 ) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
     """Returns a function that accumulates repeated applications of `step_fn`.
     Compute a trajectory by repeatedly calling `step_fn()`
@@ -334,12 +331,14 @@ class Model:
 
         return predictions
     
-    def _get_integrate_fn(self, *args, **kwargs):
+    def _get_integrate_fn(self, step_fn, outer_steps, inner_steps, **kwargs):
         trajectory_fn = averaged_trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
 
         def _integrate_fn(state):
             integrate_fn = jax.jit(trajectory_fn(
-                *args,
+                step_fn if self.output_averages else jax.checkpoint(step_fn), # FIXME: inability to checkpoint when using averages
+                outer_steps=outer_steps,
+                inner_steps=inner_steps,
                 **kwargs,
                 post_process_fn=self._post_process if self.physics.write_output else lambda x: x
             ))
@@ -374,7 +373,7 @@ class Model:
             A tuple containing the trajectory of post-processed model states.
         """
         integrate = jax.jit(self._get_integrate_fn(
-            self.step_fn, # FIXME: figure out where to put jax.checkpoint
+            self.step_fn,
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,

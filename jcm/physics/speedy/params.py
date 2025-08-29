@@ -31,8 +31,8 @@ class ConvectionParameters:
 
 @tree_math.struct
 class ForcingParameters:
-    increase_co2: jnp.bool # Minimum (normalised) surface pressure for the occurrence of convection
-    co2_year_ref: jnp.int32 # Time of relaxation (in hours) towards reference state
+    increase_co2: jnp.bool # Whether to increase CO2 concentration over time
+    co2_year_ref: jnp.int32 # Reference year for CO2 concentration
 
     @classmethod
     def default(cls):
