@@ -2,7 +2,7 @@ name: Update Documentation
 on:
   push:
     paths:
-      - 'notebooks/units_table.csv'  
+      - 'jcm/physics/speedy/units_table.csv'  
   workflow_dispatch:
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
           python-version: '3.x'
           
       - name: Update Sphinx documentation
-        run: python generate_docs.py
+        run: python docs/generate_docs.py
           
       - name: Commit changes
         run: |
