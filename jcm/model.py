@@ -66,12 +66,6 @@ class Model:
         Args:
             time_step: 
                 Model time step in minutes
-            save_interval: 
-                Save interval in days
-            total_time: 
-                Total integration time in days
-            start_date: 
-                Start date of the simulation
             layers: 
                 Number of vertical layers
             horizontal_resolution: 
@@ -236,6 +230,19 @@ class Model:
                save_interval=10.0,
                total_time=120.0
     ) -> Predictions:
+        """Runs the full simulation forward in time starting from end of previous call to model.run or model.resume.
+        
+        Args:
+            boundaries:
+                BoundaryData containing boundary conditions for the run.
+            save_interval:
+                Interval at which to save model outputs (float).
+            total_time:
+                Total time to run the model (float).
+            
+        Returns:
+            A Predictions object containing the trajectory of post-processed model states.
+        """
         self.boundaries = self._prepare_boundaries(boundaries)
         self.step_fn = self._create_step_fn()
 
@@ -268,7 +275,7 @@ class Model:
             initial_state:
                 PhysicsState containing initial state of the model.
             boundaries:
-                BoundaryData containing boundary conditions for the model.
+                BoundaryData containing boundary conditions for the run.
             save_interval:
                 Interval at which to save model outputs (float).
             total_time:
@@ -298,7 +305,7 @@ class Model:
 
         Args:
             predictions: 
-                The raw output from the `run` method.
+                The raw output from the `run` or `resume` method.
 
         Returns:
             A final `xarray.Dataset` ready for analysis and plotting.
