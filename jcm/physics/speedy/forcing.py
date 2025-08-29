@@ -38,6 +38,7 @@ def set_forcing(
 
     mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc, ablco2=ablco2)
 
+    physics_data = physics_data.copy(mod_radcon=mod_radcon)
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendencies, physics_data
