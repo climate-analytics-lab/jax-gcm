@@ -107,7 +107,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
 
         model = Model(
-            time_step=30, # make sure this test stays valid if we ever change the default timestep
+            time_step=30, # to make sure this test stays valid if we ever change the default timestep
             save_interval=.5/24.,
             total_time=2/24.,
         )

@@ -94,7 +94,9 @@ def averaged_trajectory_from_step(
             temp_collector_inner.physical_step.value = True
             x_next = step_fn(temp_collector_inner)(x)
             _, updated_diag_state = nnx.split(temp_collector_inner)
-            return (x_next, x_sum, updated_diag_state), (None,)
+            # in older flax versions, output has to be a tuple
+            # but in newer flax versions, a tuple output must be stackable (so can't return (None,) here)
+            return (x_next, x_sum, updated_diag_state), (jnp.zeros((), dtype=jnp.float32),)
 
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=outer_steps)
         def outer_step(carry):
