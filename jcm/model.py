@@ -86,6 +86,7 @@ def averaged_trajectory_from_step(
         empty_sum = tree_map(jnp.zeros_like, x_initial)
 
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
+        @jax.checkpoint
         def inner_step(carry):
             x, x_sum, diag_state = carry
             x_sum += x  # include initial state, not final state
@@ -336,7 +337,7 @@ class Model:
 
         def _integrate_fn(state):
             integrate_fn = jax.jit(trajectory_fn(
-                step_fn if self.output_averages else jax.checkpoint(step_fn), # FIXME: inability to checkpoint when using averages
+                step_fn if self.output_averages else jax.checkpoint(step_fn),
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 **kwargs,
