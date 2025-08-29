@@ -372,12 +372,12 @@ class Model:
         Returns:
             A tuple containing the trajectory of post-processed model states.
         """
-        integrate = jax.jit(self._get_integrate_fn(
+        integrate = self._get_integrate_fn(
             self.step_fn,
             outer_steps=self.outer_steps,
             inner_steps=self.inner_steps,
             start_with_input=True,
-        ))
+        )
         return integrate(state)
 
     def data_to_xarray(self, data):
