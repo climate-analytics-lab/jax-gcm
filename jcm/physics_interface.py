@@ -12,10 +12,12 @@ from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
+from jcm.diffusion import DiffusionFilter
 
 @tree_math.struct
 class PhysicsState:
@@ -349,6 +351,7 @@ def get_physical_tendencies(
     physics: Physics,
     boundaries: BoundaryData,
     geometry: Geometry,
+    diffusion: DiffusionFilter,
     date: DateData,
     diagnostics_collector=None,
 ) -> State:
@@ -379,4 +382,33 @@ def get_physical_tendencies(
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    return dynamics_tendency
+    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
+
+    return filtered_dynamics_tendency
+
+def filter_tendencies(dynamics_tendency: State, 
+                      diffusion: DiffusionFilter,
+                      time_step, 
+                      grid) -> State:
+    '''
+    Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
+
+    Args:
+        dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
+        diffusion: DiffusionFilter object containing the diffusion parameters
+        time_step: Time step in seconds
+        grid: dinosaur.spherical_harmonic.Grid object
+    
+    Returns:
+        Filtered dynamics tendencies in dinosaur.primitive_equations.State format
+    '''
+
+    tau = diffusion.tendency_diff_timescale
+    order = diffusion.tendency_diff_order
+
+    scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
+
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
+    filtered_tendency = filter_fn(dynamics_tendency)
+    
+    return filtered_tendency

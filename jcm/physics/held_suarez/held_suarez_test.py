@@ -5,6 +5,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.physics_interface import get_physical_tendencies
+        from jcm.diffusion import DiffusionFilter
 
         time_step = 10
         model = Model(time_step=time_step, physics=HeldSuarezPhysics())
@@ -16,6 +17,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
             physics = HeldSuarezPhysics(model.coords),
             boundaries = None,
             geometry = None,
+            diffusion = DiffusionFilter.default(),
             date = None
         )
 

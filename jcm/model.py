@@ -19,6 +19,7 @@ from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
 from jcm.utils import stack_trees
+from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from datetime import datetime
 
@@ -141,7 +142,7 @@ class Model:
                  start_date=None, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, boundaries: BoundaryData=None,
                  initial_state: PhysicsState=None, physics: Physics=None,
-                 output_averages=False) -> None:
+                 diffusion: DiffusionFilter=None, output_averages=False) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -166,6 +167,8 @@ class Model:
                 Initial state of the model (PhysicsState object), optional
             physics:
                 Physics object describing the model physics
+            diffusion:
+                DiffusionFilter object describing horizontal diffusion filter params
             output_averages:
                 Whether to output time-averaged quantities
         """
@@ -205,6 +208,8 @@ class Model:
         
         self.physics = physics or SpeedyPhysics()
 
+        self.diffusion = diffusion or DiffusionFilter.default()
+
         # TODO: make the truncation number a parameter consistent with the grid shape
         params_for_boundaries = (self.physics.parameters
                                  if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
@@ -231,6 +236,7 @@ class Model:
                 physics=self.physics,
                 boundaries=self.boundaries,
                 geometry=self.geometry,
+                diffusion=self.diffusion,
                 date = DateData.set_date(
                     model_time = self.start_date + Timedelta(seconds=state.sim_time),
                     model_step = ((state.sim_time/60) / time_step).astype(jnp.int32),
@@ -254,9 +260,8 @@ class Model:
         
         filters = [
             conserve_global_mean_surface_pressure,
-            dinosaur.time_integration.exponential_step_filter(
-                self.coords.horizontal, self.dt, tau=0.0087504, order=1.5, cutoff=0.8
-            ),
+            dinosaur.time_integration.horizontal_diffusion_step_filter(
+                self.coords.horizontal, self.dt, tau=self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
         ]
 
         step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn_unfiltered(d), filters)
@@ -414,7 +419,7 @@ class Model:
         pred_ds = self.data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict)
 
         # Import units attribute associated with each xarray output from units_table.csv
-        units_df = pd.read_csv("units_table.csv")
+        units_df = pd.read_csv("../jcm/physics/speedy/units_table.csv")
         units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
 
         for var, unit in units_from_csv.items():
