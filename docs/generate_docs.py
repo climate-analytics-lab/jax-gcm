@@ -118,7 +118,7 @@ def main():
     """
     output_file = 'docs/source/speedy_translation.rst'
     
-    csv_path = 'units_table.csv'
+    csv_path = 'jcm/physics/speedy/units_table.csv'
     
     success = update_sphinx_doc(csv_path, output_file)
     
