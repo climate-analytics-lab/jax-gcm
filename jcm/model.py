@@ -130,13 +130,13 @@ class Model:
         ]
 
         # The following fields are set upon calling model.run
-        self.initial_state = None
+        self.initial_nodal_state = None
         self.start_date = None
 
-        # spectral space primitive_equations.State state updated by model.run and model.resume
-        self._final_state = None
+        # spectral space primitive_equations.State updated by model.run and model.resume
+        self._final_modal_state = None
 
-    def _prepare_initial_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
+    def _prepare_initial_modal_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Prepares initial state for a simulation.
 
         Args:
@@ -252,7 +252,7 @@ class Model:
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
-        start_time = self.start_date.delta.days + (self._final_state.sim_time*units.second).to(units.day).m
+        start_time = self.start_date.delta.days + (self._final_modal_state.sim_time*units.second).to(units.day).m
         times = start_time + save_interval * jnp.arange(outer_steps)
 
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
@@ -263,8 +263,8 @@ class Model:
             post_process_fn=lambda state: self._post_process(state, boundaries),
         ))
 
-        # starts from preexisting self._final_state, then updates self._final_state
-        self._final_state, predictions = integrate_fn(self._final_state)
+        # starts from preexisting self._final_modal_state, then updates self._final_modal_state
+        self._final_modal_state, predictions = integrate_fn(self._final_modal_state)
         return predictions.replace(times=times)
 
     def run(self,
@@ -274,29 +274,29 @@ class Model:
             total_time=120.0,
             start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
     ) -> tuple[primitive_equations.State, Predictions]:
-        """Runs the full simulation forward in time from a given state.
+        """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
         
         Args:
             initial_state:
-                PhysicsState containing initial state of the model.
+                PhysicsState or dinosaur.primitive_equations.State containing initial state of the model (default isothermal atmosphere).
             boundaries:
-                BoundaryData containing boundary conditions for the run.
+                BoundaryData containing boundary conditions for the run (default aquaplanet).
             save_interval:
-                Interval at which to save model outputs (float).
+                (float) interval at which to save model outputs in days (default 10.0).
             total_time:
-                Total time to run the model (float).
+                (float) total time to run the model in days (default 120.0).
             start_date:
-                Start date for the model run (Timestamp).
+                (Timestamp) start date for the model run (default January 1, 2000).
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
         if isinstance(initial_state, primitive_equations.State):
-            self.initial_state = dynamics_state_to_physics_state(initial_state, self.primitive)
-            self._final_state = initial_state
+            self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
+            self._final_modal_state = initial_state
         else:
-            self.initial_state = initial_state
-            self._final_state = self._prepare_initial_state(initial_state)
+            self.initial_nodal_state = initial_state
+            self._final_modal_state = self._prepare_initial_modal_state(initial_state)
 
         self.start_date = start_date
 

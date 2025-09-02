@@ -11,7 +11,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
         model = Model(time_step=time_step, physics=HeldSuarezPhysics())
     
         dynamics_tendency = get_physical_tendencies(
-            state = model._prepare_initial_state(),
+            state = model._prepare_initial_modal_state(),
             dynamics = model.primitive,
             time_step = time_step * 60,
             physics = HeldSuarezPhysics(model.coords),
@@ -31,7 +31,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
 
         _ = model.run(total_time=36)
 
-        final_state = model._final_state_internal
+        final_state = model._final_modal_state
 
         self.assertFalse(jnp.any(jnp.isnan(final_state.vorticity)))
         self.assertFalse(jnp.any(jnp.isnan(final_state.divergence)))

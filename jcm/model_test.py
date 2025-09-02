@@ -22,7 +22,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=total_time,
             save_interval=save_interval,
         )
-        final_state, dynamics_predictions = model._final_state_internal, predictions.dynamics
+        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
 
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
@@ -63,7 +63,7 @@ class TestModelUnit(unittest.TestCase):
             save_interval=save_interval,
             total_time=total_time,
         )
-        final_state, dynamics_predictions = model._final_state_internal, predictions.dynamics
+        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
         
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
@@ -105,12 +105,12 @@ class TestModelUnit(unittest.TestCase):
 
         # Create model that goes through one timestep
         model = Model()
-        state = model._prepare_initial_state()
+        state = model._prepare_initial_modal_state()
 
         def fn(state):
             _ = model.run(total_time=0) # to set up model fields
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_state_internal, predictions
+            return model._final_modal_state, predictions
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(fn, state)
@@ -133,11 +133,11 @@ class TestModelUnit(unittest.TestCase):
         from jcm.utils import ones_like
 
         model = Model()
-        state = model._prepare_initial_state()
+        state = model._prepare_initial_modal_state()
 
         def fn(state):
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/24.))
-            return model._final_state_internal, predictions
+            return model._final_modal_state, predictions
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(fn, state)
