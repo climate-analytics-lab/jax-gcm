@@ -108,11 +108,11 @@ class Model:
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        truncated_orography = primitive_equations.truncated_modal_orography(self.orography, self.coords, wavenumbers_to_clip=2)
+        self.truncated_orography = primitive_equations.truncated_modal_orography(self.orography, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=self.ref_temps,
-            orography=truncated_orography, 
+            orography=self.truncated_orography,
             coords=self.coords,
             physics_specs=self.physics_specs,
         )
@@ -132,8 +132,6 @@ class Model:
         # The following fields are set upon calling model.run
         self.initial_state = None
         self.start_date = None
-        self.boundaries = None
-        self.step_fn = None
 
         # spectral space primitive_equations.State state updated by model.run and model.resume
         self._final_state = None
@@ -190,14 +188,14 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _create_step_fn(self):
+    def _create_step_fn(self, boundaries: BoundaryData):
         physics_forcing_eqn = ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
                 dynamics=self.primitive,
                 time_step=self.dt_si.m,
                 physics=self.physics,
-                boundaries=self.boundaries,
+                boundaries=boundaries,
                 diffusion=self.diffusion,
                 geometry=self.geometry,
                 date=self._date_from_sim_time(state.sim_time)
@@ -208,7 +206,7 @@ class Model:
         unfiltered_step_fn = dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy, self.dt)
         return dinosaur.time_integration.step_with_filters(unfiltered_step_fn, self.filters)
 
-    def _post_process(self, state: primitive_equations.State) -> Predictions:
+    def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData) -> Predictions:
         """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
@@ -227,7 +225,7 @@ class Model:
         if self.physics.write_output:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(physics_state)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, self.boundaries, self.geometry, date)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, boundaries, self.geometry, date)
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
@@ -249,8 +247,8 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        self.boundaries = self._prepare_boundaries(boundaries)
-        self.step_fn = self._create_step_fn()
+        boundaries = self._prepare_boundaries(boundaries)
+        step_fn = self._create_step_fn(boundaries)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
@@ -258,13 +256,14 @@ class Model:
         times = start_time + save_interval * jnp.arange(outer_steps)
 
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            jax.checkpoint(self.step_fn),
+            jax.checkpoint(step_fn),
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=self._post_process,
+            post_process_fn=lambda state: self._post_process(state, boundaries),
         ))
 
+        # starts from preexisting self._final_state, then updates self._final_state
         self._final_state, predictions = integrate_fn(self._final_state)
         return predictions.replace(times=times)
 
