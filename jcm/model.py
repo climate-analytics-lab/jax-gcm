@@ -24,16 +24,17 @@ PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_S
 
 @tree_math.struct
 class Predictions:
+    """Container for model prediction outputs from a single timestep.
+
+    Attributes:
+        dynamics (PhysicsState): The physical state variables converted from
+            the dynamical state.
+        physics (Any): Diagnostic physics data computed by the physics package.
+        times (Any): Timestamps of the predictions.
+    """
     dynamics: PhysicsState
     physics: Any
     times: Any
-Predictions.__doc__ = """Container for model prediction outputs from a single timestep.
-Attributes:
-    dynamics (PhysicsState): The physical state variables converted from the
-        dynamical state.
-    physics (Any): Diagnostic physics data computed by the physics package.
-    times (Any): Timestamps of the predictions.
-"""
 
 def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
     """
@@ -134,8 +135,8 @@ class Model:
         self.boundaries = None
         self.step_fn = None
 
-        # Updated by model.run and model.resume
-        self._final_state_internal = None
+        # spectral space primitive_equations.State state updated by model.run and model.resume
+        self._final_state = None
 
     def _prepare_initial_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Prepares initial state for a simulation.
@@ -253,7 +254,7 @@ class Model:
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
-        start_time = self.start_date.delta.days + (self._final_state_internal.sim_time*units.second).to(units.day).m
+        start_time = self.start_date.delta.days + (self._final_state.sim_time*units.second).to(units.day).m
         times = start_time + save_interval * jnp.arange(outer_steps)
 
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
@@ -264,7 +265,7 @@ class Model:
             post_process_fn=self._post_process,
         ))
 
-        self._final_state_internal, predictions = integrate_fn(self._final_state_internal)
+        self._final_state, predictions = integrate_fn(self._final_state)
         return predictions.replace(times=times)
 
     def run(self,
@@ -293,10 +294,10 @@ class Model:
         """
         if isinstance(initial_state, primitive_equations.State):
             self.initial_state = dynamics_state_to_physics_state(initial_state, self.primitive)
-            self._final_state_internal = initial_state
+            self._final_state = initial_state
         else:
             self.initial_state = initial_state
-            self._final_state_internal = self._prepare_initial_state(initial_state)
+            self._final_state = self._prepare_initial_state(initial_state)
 
         self.start_date = start_date
 
