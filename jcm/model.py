@@ -137,18 +137,18 @@ class Model:
         self._final_modal_state = None
 
     def _prepare_initial_modal_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        """Prepares initial state for a simulation.
+        """Prepares initial dinosaur.primitive_equations.State for a model run.
 
         Args:
-            physics_state: 
-                Optional PhysicsState object to use as the initial state.
-            random_seed: 
-                Seed for the JAX random number generator.
-            sim_time: 
-                The starting simulation time for the state.
-            humidity_perturbation: 
-                If True and using the default state, adds a small amount of specific humidity.
-        
+            physics_state:
+                Optional nodal PhysicsState from which to generate the modal state. If none provided, initial state will be isothermal atmosphere with random noise surface pressure perturbation.
+            random_seed:
+                Seed for pressure perturbation (default 0).
+            sim_time:
+                Optionally specify the sim_time attribute for the state (default 0.0).
+            humidity_perturbation:
+                If True and using the default state, adds a horizontally localized perturbation to specific humidity.
+
         Returns:
             A `primitive_equations.State` object ready for integration.
         """
