@@ -85,7 +85,7 @@ def averaged_trajectory_from_step(
 
         empty_sum = tree_map(jnp.zeros_like, x_initial)
 
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=inner_steps)
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry, 0), length=inner_steps)
         @jax.checkpoint
         def inner_step(carry):
             x, x_sum, diag_state = carry
@@ -98,7 +98,7 @@ def averaged_trajectory_from_step(
             # but in newer flax versions, a tuple output must be stackable (so can't return (None,) here)
             return (x_next, x_sum, updated_diag_state), None
 
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry,), length=outer_steps)
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry, 0), length=outer_steps)
         def outer_step(carry):
             (x_final, x_sum, diag_state), _ = inner_step(carry)
             temp_collector_outer = nnx.merge(graphdef, diag_state)
