@@ -15,8 +15,6 @@ class BoundaryData:
 
     sice_am: jnp.ndarray
     fmask_l: jnp.ndarray # land mask - set by land_model_init()
-    rhcapl: jnp.ndarray # 1/heat capacity (land)
-    cdland: jnp.ndarray # 1/dissipation time (land)
     stlcl_ob: jnp.ndarray # climatology for land temperature - might not need this and stl_lm
     snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
     soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
@@ -28,9 +26,8 @@ class BoundaryData:
 
     @classmethod
     def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
-              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
-              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-              fmask_s=None,lfluxland=None):
+              alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
+              soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -40,8 +37,6 @@ class BoundaryData:
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
             fmask_l=fmask_l if fmask_l is not None else jnp.zeros((nodal_shape)),
-            rhcapl=rhcapl if rhcapl is not None else jnp.zeros((nodal_shape)),
-            cdland=cdland if cdland is not None else jnp.zeros((nodal_shape)),
             stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
@@ -52,9 +47,8 @@ class BoundaryData:
 
     @classmethod
     def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
-             alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
-             stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-             fmask_s=None,lfluxland=None):
+             alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
+             soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
@@ -64,8 +58,6 @@ class BoundaryData:
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
             fmask_l=fmask_l if fmask_l is not None else jnp.ones((nodal_shape)),
-            rhcapl=rhcapl if rhcapl is not None else jnp.ones((nodal_shape)),
-            cdland=cdland if cdland is not None else jnp.ones((nodal_shape)),
             stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.ones((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
@@ -75,8 +67,8 @@ class BoundaryData:
         )
 
     def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
-             sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
-             snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
+             sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,soilw_am=None,
+             tsea=None,fmask_s=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             forog=forog if forog is not None else self.forog,
@@ -86,8 +78,6 @@ class BoundaryData:
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             fmask_l=fmask_l if fmask_l is not None else self.fmask_l,
-            rhcapl=rhcapl if rhcapl is not None else self.rhcapl,
-            cdland=cdland if cdland is not None else self.cdland,
             stlcl_ob=stlcl_ob if stlcl_ob is not None else self.stlcl_ob,
             snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
@@ -132,7 +122,7 @@ def default_boundaries(
 
     phi0 = grav * orography
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters)
+    forog = set_orog_land_sfc_drag(phis0, parameters.surface_flux.hdrag)
 
     # land-sea mask
     fmask = jnp.zeros_like(orography)
@@ -174,7 +164,7 @@ def initialize_boundaries(
     phi0 = grav * orog
     # Also store spectrally truncated surface geopotential for the land drag term
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters)
+    forog = set_orog_land_sfc_drag(phis0, parameters.surface_flux.hdrag)
 
     # Read land-sea mask
     fmask = jnp.asarray(ds["lsm"])
@@ -194,24 +184,3 @@ def initialize_boundaries(
     # call ice model init
 
     return boundaries
-
-def populate_parameter_dependent_boundaries(
-        boundaries: BoundaryData,
-        parameters: Parameters=None,
-        time_step=1800.
-) -> BoundaryData:
-    """
-    Populate the boundary conditions with parameter and timestep-dependent values.
-    
-    Args:
-        boundaries (BoundaryData): The boundary data to populate.
-        parameters (Parameters, optional): The model parameters. Defaults to Parameters.default().
-        time_step (float, optional): The time step in seconds. Defaults to 1800 seconds (30 minutes).
-    """
-    parameters = parameters or Parameters.default()
-    # Update the land heat capacity and dissipation time
-    if False: # FIXME
-        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step
-        return boundaries.copy(rhcapl=rhcapl)
-    else:
-        return boundaries

@@ -1,10 +1,6 @@
 from jcm.boundaries import BoundaryData
 from jcm.physics.speedy.params import Parameters
-from jcm.geometry import Geometry
-from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.physics.speedy.physics_data import PhysicsData
 import jax.numpy as jnp
-from jax import jit
 
 def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
     """
@@ -78,44 +74,4 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
     dmask = jnp.ones_like(fmask_l)
     dmask = jnp.where(fmask_l < parameters.land_model.flandmin, 0, dmask)
 
-    # Set time_step/heat_capacity and dissipation fields
-    cdland = dmask*parameters.land_model.tdland/(1.0+dmask*parameters.land_model.tdland)
-
-    return boundaries.copy(cdland=cdland, fmask_l=fmask_l, fmask_s=fmask_s, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)
-
-# Exchanges fluxes between land and atmosphere.
-def couple_land_atm(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    boundaries: BoundaryData=None,
-    geometry: Geometry=None
-) -> tuple[PhysicsTendency, PhysicsData]:
-
-    day = physics_data.date.model_day()
-    stl_lm=None
-    # Get the land surface from climatology
-    stl_am = boundaries.stlcl_ob[:,:,day]
-
-    # update land physics data
-    land_model_data = physics_data.land_model.copy(stl_am=stl_am, stl_lm=stl_lm)
-    physics_data = physics_data.copy(land_model=land_model_data)
-    physics_tendency = PhysicsTendency.zeros(state.temperature.shape)
-
-    return physics_tendency, physics_data
-
-# Integrates slab land-surface model for one day.
-@jit
-def run_land_model(hfluxn, stl_lm, stlcl_ob, cdland, rhcapl):
-    # Land-surface (soil/ice-sheet) layer
-    # Anomaly w.r.t. final-time climatological temperature
-    tanom = stl_lm - stlcl_ob
-
-    # Time evolution of temperature anomaly
-    tanom = cdland*(tanom + rhcapl*hfluxn[:,:,0])
-
-    # Full surface temperature at final time
-    stl_lm = tanom + stlcl_ob
-
-    return stl_lm
-
+    return boundaries.copy(fmask_l=fmask_l, fmask_s=fmask_s, stlcl_ob=stlcl_ob, snowd_am=snowd_am, soilw_am=soilw_am)

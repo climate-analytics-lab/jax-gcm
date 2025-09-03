@@ -12,7 +12,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.boundaries import BoundaryData, default_boundaries, populate_parameter_dependent_boundaries
+from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
@@ -172,14 +172,11 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def _prepare_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
+    def _get_default_boundaries(self) -> BoundaryData:
         params_for_boundaries = (self.physics.parameters
                                  if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
                                      else Parameters.default())
-        
-        if boundaries is None:
-            return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
-        return populate_parameter_dependent_boundaries(boundaries, params_for_boundaries, self.dt_si.m)
+        return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
@@ -247,7 +244,7 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        boundaries = self._prepare_boundaries(boundaries)
+        boundaries = boundaries or self._get_default_boundaries()
         step_fn = self._create_step_fn(boundaries)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
