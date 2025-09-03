@@ -21,7 +21,6 @@ class BoundaryData:
     snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
     soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
     lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
-    land_coupling_flag: jnp.bool # 0 or 1
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
@@ -31,7 +30,7 @@ class BoundaryData:
     def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
               stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-              fmask_s=None,lfluxland=None, land_coupling_flag=None):
+              fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             forog=forog if forog is not None else jnp.zeros((nodal_shape)),
@@ -46,7 +45,6 @@ class BoundaryData:
             stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
@@ -56,7 +54,7 @@ class BoundaryData:
     def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-             fmask_s=None,lfluxland=None, land_coupling_flag=None):
+             fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             forog=forog if forog is not None else jnp.ones((nodal_shape)),
@@ -71,7 +69,6 @@ class BoundaryData:
             stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.ones((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
@@ -79,8 +76,7 @@ class BoundaryData:
 
     def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
-             snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
-             land_coupling_flag=None):
+             snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             forog=forog if forog is not None else self.forog,
@@ -94,7 +90,6 @@ class BoundaryData:
             cdland=cdland if cdland is not None else self.cdland,
             stlcl_ob=stlcl_ob if stlcl_ob is not None else self.stlcl_ob,
             snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else self.land_coupling_flag,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
@@ -103,7 +98,6 @@ class BoundaryData:
 
     def isnan(self):
         self.lfluxland = 0
-        self.land_coupling_flag = 0
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
@@ -216,7 +210,7 @@ def populate_parameter_dependent_boundaries(
     """
     parameters = parameters or Parameters.default()
     # Update the land heat capacity and dissipation time
-    if boundaries.land_coupling_flag:
+    if False: # FIXME
         rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step
         return boundaries.copy(rhcapl=rhcapl)
     else:
