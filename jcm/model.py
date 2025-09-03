@@ -265,7 +265,7 @@ class Model:
         step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(step_fn_unfiltered(d), filters)
         
         self.output_averages = output_averages
-        self.step_fn = step_fn if self.output_averages else step_fn()
+        self.step_fn = step_fn if self.output_averages else jax.checkpoint(step_fn())
         
     def get_initial_state(self, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Generates an initial state for a simulation.
@@ -337,7 +337,7 @@ class Model:
 
         def _integrate_fn(state):
             integrate_fn = jax.jit(trajectory_fn(
-                step_fn if self.output_averages else jax.checkpoint(step_fn),
+                step_fn=step_fn,
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 **kwargs,
