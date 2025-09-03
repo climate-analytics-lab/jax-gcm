@@ -17,6 +17,7 @@ from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physics_data import PhysicsDataConfig # FIXME
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 

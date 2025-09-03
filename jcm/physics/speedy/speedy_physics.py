@@ -2,8 +2,9 @@ import jax
 import jax.numpy as jnp
 from collections import abc
 from typing import Callable, Tuple
+from jcm.utils import mask_leaves
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
-from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.physics_data import PhysicsData, PhysicsDataConfig
 from jcm.boundaries import BoundaryData
 from jcm.physics.speedy.params import Parameters
 from jcm.geometry import Geometry
@@ -33,9 +34,10 @@ def set_physics_flags(
 class SpeedyPhysics(Physics):
     parameters: Parameters
     write_output: bool
+    config: PhysicsDataConfig
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, write_output: bool=True,
+    def __init__(self, write_output: bool=True, config: PhysicsDataConfig=PhysicsDataConfig.all_true(),
                  parameters: Parameters=Parameters.default(),
                  sea_coupling_flag=0, checkpoint_terms=True) -> None:
         """
@@ -49,6 +51,7 @@ class SpeedyPhysics(Physics):
         """
         self.write_output = write_output
         self.parameters = parameters
+        self.config = config
 
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
         from jcm.physics.speedy.convection import get_convection_tendencies
@@ -120,4 +123,4 @@ class SpeedyPhysics(Physics):
             tend, data = term(state, data, self.parameters, boundaries, geometry)
             physics_tendency += tend
         
-        return physics_tendency, data
+        return physics_tendency, mask_leaves(data, self.config)

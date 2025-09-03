@@ -521,3 +521,54 @@ class PhysicsData:
     
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
+from jcm.utils import bool_version
+SWRadiationDataConfig = bool_version(SWRadiationData)
+LWRadiationDataConfig = bool_version(LWRadiationData)
+ConvectionDataConfig = bool_version(ConvectionData)
+ModRadConDataConfig = bool_version(ModRadConData)
+HumidityDataConfig = bool_version(HumidityData)
+CondensationDataConfig = bool_version(CondensationData)
+SurfaceFluxDataConfig = bool_version(SurfaceFluxData)
+DateDataConfig = bool_version(DateData)
+LandModelDataConfig = bool_version(LandModelData)
+
+@tree_math.struct
+class PhysicsDataConfig:
+    shortwave_rad: "SWRadiationDataConfig"
+    longwave_rad: "LWRadiationDataConfig"
+    convection: "ConvectionDataConfig"
+    mod_radcon: "ModRadConDataConfig"
+    humidity: "HumidityDataConfig"
+    condensation: "CondensationDataConfig"
+    surface_flux: "SurfaceFluxDataConfig"
+    date: "DateDataConfig"
+    land_model: "LandModelDataConfig"
+
+    @classmethod
+    def all_false(cls):
+        return cls(
+            shortwave_rad=SWRadiationDataConfig.all_false(),
+            longwave_rad=LWRadiationDataConfig.all_false(),
+            convection=ConvectionDataConfig.all_false(),
+            mod_radcon=ModRadConDataConfig.all_false(),
+            humidity=HumidityDataConfig.all_false(),
+            condensation=CondensationDataConfig.all_false(),
+            surface_flux=SurfaceFluxDataConfig.all_false(),
+            date=DateDataConfig.all_false(),
+            land_model=LandModelDataConfig.all_false()
+        )
+
+    @classmethod
+    def all_true(cls):
+        return cls(
+            shortwave_rad=SWRadiationDataConfig.all_true(),
+            longwave_rad=LWRadiationDataConfig.all_true(),
+            convection=ConvectionDataConfig.all_true(),
+            mod_radcon=ModRadConDataConfig.all_true(),
+            humidity=HumidityDataConfig.all_true(),
+            condensation=CondensationDataConfig.all_true(),
+            surface_flux=SurfaceFluxDataConfig.all_true(),
+            date=DateDataConfig.all_true(),
+            land_model=LandModelDataConfig.all_true()
+        )

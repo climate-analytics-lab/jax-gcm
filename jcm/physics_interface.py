@@ -182,9 +182,13 @@ class Physics:
         # replace multi-channel fields with a field for each channel
         _original_keys = list(items.keys())
         for k in _original_keys:
-            s = items[k].shape
+            v = items[k]
+            if v is None:
+                del items[k]
+                continue
+            s = v.shape
             if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
-                items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
+                items.update({f"{k}{sep}{i}": v[..., i] for i in range(s[-1])})
                 del items[k]
 
         return items
