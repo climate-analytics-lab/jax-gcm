@@ -11,14 +11,14 @@ def main(cfg: DictConfig):
     """
     model = Model(
         time_step=cfg.model.time_step,
-        save_interval=cfg.model.save_interval,
-        total_time=cfg.model.total_time,
         layers=cfg.model.layers
     )
     
-    state = model.get_initial_state()
+    predictions = model.run(
+        save_interval=cfg.model.save_interval,
+        total_time=cfg.model.total_time
+    )
     
-    final_state, predictions = model.unroll(state)
     ds = model.predictions_to_xarray(predictions)
     hydra_cfg = HydraConfig.get()
     print(hydra_cfg.mode)
