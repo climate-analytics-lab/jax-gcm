@@ -1,6 +1,5 @@
 import unittest
 import jax.tree_util as jtu
-from dinosaur import primitive_equations_states
 import numpy as np
 
 class TestModelUnit(unittest.TestCase):
@@ -16,19 +15,18 @@ class TestModelUnit(unittest.TestCase):
         model = Model(
             layers=layers,
             time_step=180,
-            total_time=2,
-            save_interval=1,
             physics=HeldSuarezPhysics(),
         )
 
-        state = model.get_initial_state()
-        state.tracers = {'specific_humidity': 1e-4 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
+        save_interval, total_time = 1, 2
+        predictions = model.run(
+            total_time=total_time,
+            save_interval=save_interval,
+        )
+        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
 
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
-        nodal_tzxy = (model.outer_steps,) + nodal_zxy
-
-        final_state, predictions = model.unroll(state)
-        dynamics_predictions = predictions.dynamics
+        nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
         self.assertIsNotNone(final_state.log_surface_pressure)
         self.assertIsNotNone(final_state.tracers['specific_humidity'])
@@ -58,21 +56,18 @@ class TestModelUnit(unittest.TestCase):
 
         # optionally add a boundary conditions file
         model = Model(
-            time_step=30,
-            save_interval=1/24.,
-            total_time=2/24.,
+            time_step=720,
         )
-    
-        state = model.get_initial_state()
 
-        # Specify humidity perturbation in kg/kg
-        state.tracers = {'specific_humidity': 1e-2 * primitive_equations_states.gaussian_scalar(model.coords, model.physics_specs)}
-
+        save_interval, total_time = 1, 2
+        predictions = model.run(
+            save_interval=save_interval,
+            total_time=total_time,
+        )
+        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
+        
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
-        nodal_tzxy = (model.outer_steps,) + nodal_zxy
-    
-        final_state, predictions = model.unroll(state)
-        dynamics_predictions = predictions.dynamics
+        nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
         self.assertIsNotNone(final_state)
         self.assertIsNotNone(dynamics_predictions)
@@ -108,19 +103,19 @@ class TestModelUnit(unittest.TestCase):
 
         model = Model(
             time_step=30, # to make sure this test stays valid if we ever change the default timestep
-            save_interval=.5/24.,
-            total_time=2/24.,
         )
-        _, preds = model.unroll(model.get_initial_state())
+        preds = model.run(save_interval=.5/24., total_time=2/24.)
+
         true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
 
         avg_model = Model(
             time_step=30,
-            save_interval=2/24.,
-            total_time=2/24.,
             output_averages=True,
         )
-        _, avg_preds = avg_model.unroll(avg_model.get_initial_state())
+        avg_preds = avg_model.run(
+            save_interval=2/24.,
+            total_time=2/24.,
+        )
 
         jtu.tree_map(
             lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
@@ -135,11 +130,16 @@ class TestModelUnit(unittest.TestCase):
         from jcm.utils import ones_like
 
         # Create model that goes through one timestep
-        model = Model(save_interval=(1/48.), total_time=(1/48.))
-        state = model.get_initial_state()
+        model = Model()
+        state = model._prepare_initial_modal_state()
+
+        def fn(state):
+            _ = model.run(total_time=0) # to set up model fields
+            predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
+            return model._final_modal_state, predictions
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state)
+        primals, f_vjp = jax.vjp(fn, state)
         
         input = (ones_like(primals[0]), ones_like(primals[1]))
 
@@ -158,11 +158,15 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.utils import ones_like
 
-        model = Model(save_interval=(1/48.), total_time=(1/24.))
-        state = model.get_initial_state()
+        model = Model()
+        state = model._prepare_initial_modal_state()
+
+        def fn(state):
+            predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/24.))
+            return model._final_modal_state, predictions
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(model.unroll, state)
+        primals, f_vjp = jax.vjp(fn, state)
         input = (ones_like(primals[0]), ones_like(primals[1]))
         df_dstate = f_vjp(input)
 
@@ -187,32 +191,25 @@ class TestModelUnit(unittest.TestCase):
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
-        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+        boundaries = initialize_boundaries(
             boundaries_dir / 'boundaries_daily.nc',
-            coords.horizontal
+            get_coords().horizontal
         )
 
         create_model = lambda params=Parameters.default(): Model(
-            save_interval=1/24.,
-            total_time=2./24.,
-            boundaries=default_boundaries(),
+            orography=boundaries.orog,
             physics=SpeedyPhysics(parameters=params),
         )
         
-        def model_run_wrapper(params):
-            model = create_model(params)
-            state = model.get_initial_state()
-            _, predictions = model.unroll(state)
-            return predictions
-                
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+
         # Calculate gradients using VJP
         params = Parameters.default()
-        primal, f_vjp = jax.vjp(model_run_wrapper, params)
+        primal, f_vjp = jax.vjp(fn, params)
         df_dparams = f_vjp(ones_like(primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     
-
     def test_speedy_model_param_gradients_isnan_jvp(self):
         import jax
         import jax.numpy as jnp
@@ -238,24 +235,18 @@ class TestModelUnit(unittest.TestCase):
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
-        default_boundaries = lambda coords=get_coords(): initialize_boundaries(
+        boundaries = initialize_boundaries(
             boundaries_dir / 'boundaries_daily.nc',
-            coords.horizontal
+            get_coords().horizontal
         )
 
         create_model = lambda params=Parameters.default(): Model(
-            save_interval=1/24.,
-            total_time=2./24.,
-            boundaries=default_boundaries(),
+            orography=boundaries.orog,
             physics=SpeedyPhysics(parameters=params),
         )
-        
-        def model_run_wrapper(params):
-            model = create_model(params)
-            state = model.get_initial_state()
-            _, predictions = model.unroll(state)
-            return predictions
-        
+
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+
         # Calculate gradients using JVP
         params = Parameters.default()
         tangent = make_ones_parameters_object(params)
@@ -273,5 +264,4 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
-
 

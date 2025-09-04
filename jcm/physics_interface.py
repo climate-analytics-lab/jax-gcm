@@ -156,7 +156,7 @@ class Physics:
     def get_empty_data(self, geometry: Geometry) -> Any:
         return None
 
-    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
+    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
         """
         Flattens a physics data struct into a dictionary.
 
@@ -190,7 +190,7 @@ class Physics:
         for k in _original_keys:
             s = items[k].shape
             if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
-                items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})
+                items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
                 del items[k]
 
         return items
@@ -333,12 +333,11 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         The verified and potentially corrected `PhysicsTendency` object.
     """
     # set specific humidity tendency such that the resulting specific humidity is non-negative
-    dt_seconds = 60 * time_step
     updated_tendencies = tendencies.copy(
         specific_humidity=jnp.where(
-            state.specific_humidity + dt_seconds * tendencies.specific_humidity >= 0,
+            state.specific_humidity + time_step * tendencies.specific_humidity >= 0,
             tendencies.specific_humidity,
-            - state.specific_humidity / dt_seconds
+            - state.specific_humidity / time_step
         )
     )
 
@@ -347,7 +346,7 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
 def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
-    time_step: int,
+    time_step: float,
     physics: Physics,
     boundaries: BoundaryData,
     geometry: Geometry,
