@@ -4,7 +4,6 @@ import tree_math
 from numpy import timedelta64
 from typing import Any
 from datetime import datetime
-from xarray import Dataset
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
@@ -183,8 +182,8 @@ class Model:
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
-            model_time=self.start_date + Timedelta(seconds=sim_time),
-            model_step=(sim_time / self.dt_si.m).astype(jnp.int32),
+            model_time=self.start_date + Timedelta(seconds=jnp.int32(sim_time)),
+            model_step=(sim_time / self.dt_si.m),
             dt_seconds=self.dt_si.m
         )
 
