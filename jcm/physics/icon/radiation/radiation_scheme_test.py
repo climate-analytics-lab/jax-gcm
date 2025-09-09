@@ -11,8 +11,7 @@ import jax.numpy as jnp
 import pytest
 from jcm.physics.icon.radiation.radiation_scheme import (
     prepare_radiation_state,
-    radiation_scheme,
-    radiation_column
+    radiation_scheme
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters
 
@@ -392,42 +391,6 @@ def test_radiation_scheme_very_cloudy():
     # Look for significant SW flux variations indicating cloud interactions
     sw_flux_variations = jnp.std(diagnostics.sw_flux_down[1:-1, :])
     assert sw_flux_variations > 1.0  # Some variation due to cloud scattering
-
-
-def test_radiation_column():
-    """Test single column radiation function"""
-    atm = create_test_atmosphere(nlev=6)
-    geopotential = atm['height_levels'] * 9.81
-    
-    # Create default radiation parameters
-    parameters = RadiationParameters.default()
-    
-    # Create default aerosol data
-    aerosol_data = create_default_aerosol_data(nlev=6, parameters=parameters)
-    
-    tendencies, diagnostics = radiation_column(
-        temperature=atm['temperature'],
-        specific_humidity=atm['specific_humidity'],
-        surface_pressure=1.0,
-        geopotential=geopotential,
-        cloud_water=atm['cloud_water'],
-        cloud_ice=atm['cloud_ice'],
-        cloud_fraction=atm['cloud_fraction'],
-        day_of_year=172.0,
-        seconds_since_midnight=43200.0,
-        latitude=0.0,
-        longitude=0.0,
-        parameters=parameters,
-        aerosol_optical_depth=aerosol_data['aerosol_optical_depth'],
-        aerosol_ssa=aerosol_data['aerosol_ssa'],
-        aerosol_asymmetry=aerosol_data['aerosol_asymmetry'],
-        cdnc_factor=aerosol_data['cdnc_factor']
-    )
-    
-    # Should produce same results as main function
-    assert tendencies.temperature_tendency.shape == (6,)
-    assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))
-    assert jnp.all(jnp.isfinite(diagnostics.toa_lw_up))
 
 
 def test_radiation_scheme_energy_conservation():

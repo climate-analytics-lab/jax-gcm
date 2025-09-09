@@ -7,8 +7,7 @@ This script tests the updated radiation scheme with aerosol effects.
 import jax.numpy as jnp
 import jax
 from jcm.physics.icon.radiation.radiation_scheme import (
-    radiation_scheme, 
-    radiation_scheme_with_aerosols,
+    radiation_scheme,
     combine_optical_properties
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters, OpticalProperties
