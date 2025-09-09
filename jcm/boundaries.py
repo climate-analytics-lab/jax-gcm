@@ -7,9 +7,7 @@ from jcm.physics.speedy.params import Parameters
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
-    forog: jnp.ndarray # orographic factor for land surface drag
     orog: jnp.ndarray # orography in meters
-    phi0: jnp.ndarray  # surface geopotential (ix, il)
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
@@ -25,14 +23,12 @@ class BoundaryData:
 
 
     @classmethod
-    def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def zeros(cls,nodal_shape,fmask=None,orog=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
               soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
-            forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             orog=orog if orog is not None else jnp.zeros((nodal_shape)),
-            phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
@@ -46,14 +42,12 @@ class BoundaryData:
         )
 
     @classmethod
-    def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
+    def ones(cls,nodal_shape,fmask=None,orog=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
              soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
-            forog=forog if forog is not None else jnp.ones((nodal_shape)),
             orog=orog if orog is not None else jnp.ones((nodal_shape)),
-            phi0=phi0 if phi0 is not None else jnp.ones((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.ones((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
@@ -66,14 +60,12 @@ class BoundaryData:
             fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
-    def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
+    def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,soilw_am=None,
              tsea=None,fmask_s=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
-            forog=forog if forog is not None else self.forog,
             orog=orog if orog is not None else self.orog,
-            phi0=phi0 if phi0 is not None else self.phi0,
             phis0=phis0 if phis0 is not None else self.phis0,
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
@@ -108,21 +100,16 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
 def default_boundaries(
     grid: HorizontalGridTypes,
     orography,
-    parameters: Parameters=None,
     truncation_number=None
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
     """
-    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
     from jcm.physics.speedy.physical_constants import grav
 
-    parameters = parameters or Parameters.default()
-
     phi0 = grav * orography
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters.surface_flux.hdrag)
 
     # land-sea mask
     fmask = jnp.zeros_like(orography)
@@ -135,7 +122,7 @@ def default_boundaries(
     
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0,
+        orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0,
         fmask_l=fmask_l, fmask_s=fmask_s)
 
 
@@ -143,7 +130,7 @@ def default_boundaries(
 def initialize_boundaries(
     filename: str,
     grid: HorizontalGridTypes,
-    parameters: Parameters=None,
+    parameters: Parameters=Parameters.default(),
     truncation_number=None
 ) -> BoundaryData:
     """
@@ -152,10 +139,7 @@ def initialize_boundaries(
     from jcm.physics.speedy.physical_constants import grav
     from jcm.utils import spectral_truncation
     from jcm.physics.speedy.land_model import land_model_init
-    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
-
-    parameters = parameters or Parameters.default()
     
     ds = xr.open_dataset(filename)
 
@@ -164,7 +148,6 @@ def initialize_boundaries(
     phi0 = grav * orog
     # Also store spectrally truncated surface geopotential for the land drag term
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters.surface_flux.hdrag)
 
     # Read land-sea mask
     fmask = jnp.asarray(ds["lsm"])
@@ -176,7 +159,7 @@ def initialize_boundaries(
     tsea = _fixed_ssts(grid)
     boundaries = BoundaryData.zeros(
         nodal_shape=fmask.shape,
-        fmask=fmask, forog=forog, orog=orog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
+        fmask=fmask, orog=orog, phis0=phis0, tsea=tsea, alb0=alb0)
     
     boundaries = land_model_init(filename, parameters, boundaries)
 

@@ -172,12 +172,6 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def _get_default_boundaries(self) -> BoundaryData:
-        params_for_boundaries = (self.physics.parameters
-                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
-                                     else Parameters.default())
-        return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
-
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
             model_time=self.start_date + Timedelta(seconds=sim_time),
@@ -244,7 +238,7 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        boundaries = boundaries or self._get_default_boundaries()
+        boundaries = boundaries or default_boundaries(self.coords.horizontal, self.orography)
         step_fn = self._create_step_fn(boundaries)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
