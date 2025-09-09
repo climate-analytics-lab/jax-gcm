@@ -62,7 +62,7 @@ def create_test_boundaries(lon_points=96, lat_points=48):
             from jcm.physics.speedy.physical_constants import grav
             self.phis0 = grav * orog  # Approximate phis0 = g * h
             # Add land/sea masks and sea surface temperature for humidity correction
-            self.fmask_l = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
+            self.fmask = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
             self.tsea = jnp.full((lon_points, lat_points), 285.0)     # Sea surface temperature
     
     return TestBoundaries()
@@ -300,7 +300,7 @@ class TestOrographicCorrection:
         test_phis0 = grav * test_orog
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
-        test_fmask_l = jnp.full((4, 4), 0.7)  # 70% land
+        test_fmask = jnp.full((4, 4), 0.7)  # 70% land
         test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature 
         test_sst_am = jnp.full((4, 4), 285.0)  # Sea surface temperature
         
@@ -308,7 +308,7 @@ class TestOrographicCorrection:
             def __init__(self):
                 self.orog = test_orog
                 self.phis0 = test_phis0
-                self.fmask_l = test_fmask_l
+                self.fmask = test_fmask
                 self.tsea = test_sst_am
         
         boundaries_fortran = TestBoundariesFortran()

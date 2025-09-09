@@ -60,7 +60,7 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = boundaries.fmask_l
+    fmask = boundaries.fmask
 
     lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
