@@ -4,7 +4,6 @@ import tree_math
 from numpy import timedelta64
 from typing import Any
 from datetime import datetime
-from xarray import Dataset
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
@@ -16,7 +15,6 @@ from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.physics.speedy.params import Parameters
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 

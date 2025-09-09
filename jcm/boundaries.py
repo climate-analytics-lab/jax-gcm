@@ -19,13 +19,10 @@ class BoundaryData:
     lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
-    fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
-
-
     @classmethod
     def zeros(cls,nodal_shape,fmask=None,orog=None,phis0=None,
               alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
-              soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
+              soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             orog=orog if orog is not None else jnp.zeros((nodal_shape)),
@@ -38,13 +35,12 @@ class BoundaryData:
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
         )
 
     @classmethod
     def ones(cls,nodal_shape,fmask=None,orog=None,phis0=None,
              alb0=None,sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,
-             soilw_am=None,tsea=None,fmask_s=None,lfluxland=None):
+             soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             orog=orog if orog is not None else jnp.ones((nodal_shape)),
@@ -57,12 +53,11 @@ class BoundaryData:
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
         )
 
     def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
              sice_am=None,fmask_l=None,stlcl_ob=None,snowd_am=None,soilw_am=None,
-             tsea=None,fmask_s=None,lfluxland=None):
+             tsea=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
             orog=orog if orog is not None else self.orog,
@@ -75,7 +70,6 @@ class BoundaryData:
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
-            fmask_s=fmask_s if fmask_s is not None else self.fmask_s
         )
 
     def isnan(self):
@@ -118,12 +112,11 @@ def default_boundaries(
     
     # Default to all sea when no land-sea mask provided
     fmask_l = jnp.zeros_like(orography)  # No land
-    fmask_s = jnp.ones_like(orography)   # All sea
     
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0,
-        fmask_l=fmask_l, fmask_s=fmask_s)
+        orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0, fmask_l=fmask_l
+    )
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
@@ -144,9 +137,8 @@ def initialize_boundaries(
     ds = xr.open_dataset(filename)
 
     orog = jnp.asarray(ds["orog"])
-    # Read surface geopotential (i.e. orography)
-    phi0 = grav * orog
     # Also store spectrally truncated surface geopotential for the land drag term
+    phi0 = grav * orog
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
 
     # Read land-sea mask

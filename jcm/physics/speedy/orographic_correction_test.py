@@ -63,7 +63,6 @@ def create_test_boundaries(lon_points=96, lat_points=48):
             self.phis0 = grav * orog  # Approximate phis0 = g * h
             # Add land/sea masks and sea surface temperature for humidity correction
             self.fmask_l = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
-            self.fmask_s = jnp.ones((lon_points, lat_points)) * 0.3  # 30% sea
             self.tsea = jnp.full((lon_points, lat_points), 285.0)     # Sea surface temperature
     
     return TestBoundaries()
@@ -302,7 +301,6 @@ class TestOrographicCorrection:
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
         test_fmask_l = jnp.full((4, 4), 0.7)  # 70% land
-        test_fmask_s = jnp.full((4, 4), 0.3)  # 30% sea
         test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature 
         test_sst_am = jnp.full((4, 4), 285.0)  # Sea surface temperature
         
@@ -311,7 +309,6 @@ class TestOrographicCorrection:
                 self.orog = test_orog
                 self.phis0 = test_phis0
                 self.fmask_l = test_fmask_l
-                self.fmask_s = test_fmask_s
                 self.tsea = test_sst_am
         
         boundaries_fortran = TestBoundariesFortran()
