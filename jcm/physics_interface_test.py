@@ -1,9 +1,10 @@
 import unittest
-from dinosaur.primitive_equations import PrimitiveEquations
-from dinosaur import primitive_equations_states
-from dinosaur.sigma_coordinates import centered_vertical_advection
 import jax.numpy as jnp
+from dinosaur import primitive_equations_states
+from dinosaur.scales import units
+from jcm.constants import p0
 from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
+
 class TestPhysicsInterfaceUnit(unittest.TestCase):
     def test_initial_state_conversion(self):
         from dinosaur.scales import SI_SCALE
@@ -24,8 +25,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         _, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=coords,
             physics_specs=PHYSICS_SPECS,
-            p0=1e5,
-            p1=5e3,
+            p0=p0*units.pascal,
         )
         ref_temps = aux_features[xarray_utils.REF_TEMP_KEY]
         truncated_orography = primitive_equations.truncated_modal_orography(aux_features[xarray_utils.OROGRAPHY], coords)

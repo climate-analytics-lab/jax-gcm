@@ -1,8 +1,6 @@
 import hydra
 from omegaconf import DictConfig
 from jcm.model import Model
-from dinosaur import primitive_equations_states
-from dataclasses import asdict
 from hydra.core.hydra_config import HydraConfig
 from pathlib import Path
 
@@ -13,14 +11,14 @@ def main(cfg: DictConfig):
     """
     model = Model(
         time_step=cfg.model.time_step,
-        save_interval=cfg.model.save_interval,
-        total_time=cfg.model.total_time,
         layers=cfg.model.layers
     )
     
-    state = model.get_initial_state()
+    predictions = model.run(
+        save_interval=cfg.model.save_interval,
+        total_time=cfg.model.total_time
+    )
     
-    final_state, predictions = model.unroll(state)
     ds = model.predictions_to_xarray(predictions)
     hydra_cfg = HydraConfig.get()
     print(hydra_cfg.mode)
@@ -32,7 +30,7 @@ def main(cfg: DictConfig):
         output_dir = base_dir
     
     
-    filename = f"model_state.nc"
+    filename = "model_state.nc"
     output_path = output_dir / filename
     
     output_dir.mkdir(parents=True, exist_ok=True)

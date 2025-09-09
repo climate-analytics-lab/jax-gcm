@@ -7,16 +7,16 @@ to the specific physics being used.
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
-from jcm.physics.speedy.params import Parameters
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
-from jcm.physics.speedy.physical_constants import p0
 from jcm.date import DateData
 from typing import Tuple, Dict, Any, Optional
+from jcm.diffusion import DiffusionFilter
 
 @tree_math.struct
 class PhysicsState:
@@ -25,10 +25,10 @@ class PhysicsState:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
-    surface_pressure: jnp.ndarray  # normalized surface pressure (normalized by p0)
+    normalized_surface_pressure: jnp.ndarray # Normalized by global mean sea level pressure
     tracers: Dict[str, jnp.ndarray]  # Additional tracers beyond specific_humidity
 
-    def __init__(self, u_wind, v_wind, temperature, specific_humidity, geopotential, surface_pressure, tracers=None):
+    def __init__(self, u_wind, v_wind, temperature, specific_humidity, geopotential, normalized_surface_pressure, tracers=None):
         """
         Initialize the PhysicsState with the given variables.
 
@@ -46,41 +46,41 @@ class PhysicsState:
         self.temperature = temperature
         self.specific_humidity = specific_humidity
         self.geopotential = geopotential
-        self.surface_pressure = surface_pressure
+        self.normalized_surface_pressure = normalized_surface_pressure
         self.tracers = tracers if tracers is not None else {}
 
     @classmethod
-    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
+    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None, tracers=None):
         return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
-            surface_pressure if surface_pressure is not None else jnp.zeros(shape[1:]),
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.zeros(shape[1:]),
             tracers if tracers is not None else {}
         )
 
     @classmethod
-    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, surface_pressure=None, tracers=None):
+    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None, tracers=None):
         return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
-            surface_pressure if surface_pressure is not None else jnp.ones(shape[1:]),
+            normalized_surface_pressure if normalized_surface_pressure is not None else jnp.ones(shape[1:]),
             tracers if tracers is not None else {}
         )
 
-    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,surface_pressure=None,tracers=None):
+    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,normalized_surface_pressure=None,tracers=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
             v_wind if v_wind is not None else self.v_wind,
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity,
             geopotential if geopotential is not None else self.geopotential,
-            surface_pressure if surface_pressure is not None else self.surface_pressure,
+            normalized_surface_pressure if normalized_surface_pressure is not None else self.normalized_surface_pressure,
             tracers if tracers is not None else self.tracers
         )
 
@@ -89,6 +89,26 @@ class PhysicsState:
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
+PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
+
+This structure holds the atmospheric variables on a grid, which are used as
+inputs for the physics parameterizations.
+
+Attributes:
+    u_wind : jnp.ndarray
+        Zonal (east-west) component of wind.
+    v_wind : jnp.ndarray
+        Meridional (north-south) component of wind.
+    temperature : jnp.ndarray
+        Atmospheric temperature.
+    specific_humidity : jnp.ndarray
+        The mass of water vapor per unit mass of moist air.
+    geopotential : jnp.ndarray
+        The gravitational potential energy per unit mass at a given height.
+    normalized_surface_pressure : jnp.ndarray
+        Surface pressure normalized by a reference pressure p0.
+"""
 
 @tree_math.struct
 class PhysicsTendency:
@@ -134,6 +154,21 @@ class PhysicsTendency:
             tracers if tracers is not None else self.tracers
         )
 
+PhysicsTendency.__doc__ = """Represents the tendencies (rates of change) of physical variables.
+These tendencies are computed by the physics parameterizations and are used
+to update the model state over a time step.
+
+Attributes:
+    u_wind : jnp.ndarray
+        Tendency of the zonal wind component.
+    v_wind : jnp.ndarray
+        Tendency of the meridional wind component.
+    temperature : jnp.ndarray
+        Tendency of temperature.
+    specific_humidity : jnp.ndarray
+        Tendency of specific humidity.
+"""
+
 class Physics:
     write_output: bool
     
@@ -153,7 +188,7 @@ class Physics:
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
 
-    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
+    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
         """
         Flattens a physics data struct into a dictionary.
 
@@ -185,7 +220,7 @@ class Physics:
         for k in _original_keys:
             s = items[k].shape
             if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
-                items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})
+                items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
                 del items[k]
 
         return items
@@ -236,7 +271,18 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
 
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
-
+    """
+    Converts state variables from the physics (nodal space) back to the dynamical core (spectral space).
+    This is the inverse of `dynamics_state_to_physics_state`. It is currently not used in the main
+    time-stepping loop but can be useful for diagnostics or model initialization.
+    
+    Args:
+        physics_state: The `PhysicsState` object containing the atmospheric state on the model grid.
+        dynamics: The `PrimitiveEquations` object containing model configuration.
+    
+    Returns:
+        A `State` object for the dynamical core.
+    """
     # Calculate vorticity and divergence from u and v
     modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
 
@@ -249,7 +295,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
     # take the log of normalized surface pressure and convert to modal
-    log_surface_pressure = jnp.log(physics_state.surface_pressure)
+    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     # Convert all tracers to modal
@@ -310,6 +356,15 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     return dynamics_tendency
 
 def verify_state(state: PhysicsState) -> PhysicsState:
+    """
+    Ensures the physical validity of the state variables.
+    
+    Args:
+        state: The `PhysicsState` object.
+    
+    Returns:
+        The verified and potentially corrected `PhysicsState` object.
+    """
     # set specific humidity to 0.0 if it became negative during the dynamics evaluation
     qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
     updated_state = state.copy(specific_humidity=qa)
@@ -317,13 +372,23 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     return updated_state
 
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
+    """
+    Adjusts tendencies to prevent the state from becoming physically invalid in the next time step.
+    
+    Args:
+        state: The current `PhysicsState`.
+        tendencies: The computed `PhysicsTendency`.
+        time_step: The model time step in seconds.
+    
+    Returns:
+        The verified and potentially corrected `PhysicsTendency` object.
+    """
     # set specific humidity tendency such that the resulting specific humidity is non-negative
-    dt_seconds = 60 * time_step
     updated_tendencies = tendencies.copy(
         specific_humidity=jnp.where(
-            state.specific_humidity + dt_seconds * tendencies.specific_humidity >= 0,
+            state.specific_humidity + time_step * tendencies.specific_humidity >= 0,
             tendencies.specific_humidity,
-            - state.specific_humidity / dt_seconds
+            - state.specific_humidity / time_step
         )
     )
 
@@ -332,10 +397,11 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
 def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
-    time_step: int,
+    time_step: float,
     physics: Physics,
     boundaries: BoundaryData,
     geometry: Geometry,
+    diffusion: DiffusionFilter,
     date: DateData,
 ) -> State:
     """
@@ -360,4 +426,33 @@ def get_physical_tendencies(
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    return dynamics_tendency
+    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
+
+    return filtered_dynamics_tendency
+
+def filter_tendencies(dynamics_tendency: State, 
+                      diffusion: DiffusionFilter,
+                      time_step, 
+                      grid) -> State:
+    '''
+    Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
+
+    Args:
+        dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
+        diffusion: DiffusionFilter object containing the diffusion parameters
+        time_step: Time step in seconds
+        grid: dinosaur.spherical_harmonic.Grid object
+    
+    Returns:
+        Filtered dynamics tendencies in dinosaur.primitive_equations.State format
+    '''
+
+    tau = diffusion.tendency_diff_timescale
+    order = diffusion.tendency_diff_order
+
+    scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
+
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
+    filtered_tendency = filter_fn(dynamics_tendency)
+    
+    return filtered_tendency

@@ -1,14 +1,12 @@
-from dinosaur.scales import units
 import jax.numpy as jnp
-from jcm.boundaries import BoundaryData
+from typing import Tuple
+from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from dinosaur import primitive_equations
 from jcm.geometry import Geometry
-from jcm.physics.speedy.params import Parameters
+from jcm.boundaries import BoundaryData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import get_coords, PHYSICS_SPECS
 from jcm.date import DateData
-from typing import Tuple
 
 Quantity = units.Quantity
 
@@ -17,7 +15,6 @@ class HeldSuarezPhysics(Physics):
 
     def __init__(self,
         coords: coordinate_systems.CoordinateSystem = get_coords(),
-        p0: Quantity = 1e5 * units.pascal,
         sigma_b: Quantity = 0.7,
         kf: Quantity = 1 / (1 * units.day),
         ka: Quantity = 1 / (40 * units.day),
@@ -30,8 +27,7 @@ class HeldSuarezPhysics(Physics):
         """Initialize Held-Suarez.
 
         Args:
-            coords: horizontal and vertical descritization
-            p0: reference surface pressure.
+            coords: horizontal and vertical discretization
             sigma_b: sigma level of effective planetary boundary layer.
             kf: coefficient of friction for Rayleigh drag.
             ka: coefficient of thermal relaxation in upper atmosphere.
@@ -43,7 +39,6 @@ class HeldSuarezPhysics(Physics):
         """
         self.write_output = False
         self.coords = coords
-        self.p0 = PHYSICS_SPECS.nondimensionalize(p0)
         self.sigma_b = sigma_b
         self.kf = PHYSICS_SPECS.nondimensionalize(kf)
         self.ka = PHYSICS_SPECS.nondimensionalize(ka)
@@ -54,12 +49,11 @@ class HeldSuarezPhysics(Physics):
         self.dThz = PHYSICS_SPECS.nondimensionalize(dThz)
         # Coordinates
         self.sigma = self.coords.vertical.centers
-        _, sin_lat = self.coords.horizontal.nodal_mesh
-        self.lat = jnp.arcsin(sin_lat)
+        self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
 
-    def equilibrium_temperature(self, nodal_surface_pressure):
+    def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, jnp.newaxis, jnp.newaxis] * nodal_surface_pressure[jnp.newaxis] / self.p0
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
         )
         temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.maxT
@@ -100,7 +94,7 @@ class HeldSuarezPhysics(Physics):
             Physical tendencies in PhysicsTendency format
             Object containing physics data (unused)
         """
-        Teq = self.equilibrium_temperature(state.surface_pressure)
+        Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)
 
         d_v_wind = -self.kv() * state.v_wind

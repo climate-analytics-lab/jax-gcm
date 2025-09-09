@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-from dinosaur.scales import units
 from dinosaur.coordinate_systems import HorizontalGridTypes
 from jcm.physics.speedy.params import Parameters
 
@@ -14,7 +13,6 @@ class BoundaryData:
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
-    fmask: jnp.ndarray
     sice_am: jnp.ndarray
     fmask_l: jnp.ndarray # land mask - set by land_model_init()
     rhcapl: jnp.ndarray # 1/heat capacity (land)
@@ -218,10 +216,14 @@ def default_boundaries(
     alb0 = jnp.zeros_like(orography)
     tsea = _fixed_ssts(grid)
     
-    # No land_model_init, but should be fine because fmask = 0
+    # Default to all sea when no land-sea mask provided
+    fmask_l = jnp.zeros_like(orography)  # No land
+    fmask_s = jnp.ones_like(orography)   # All sea
+    
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
+        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0,
+        fmask_l=fmask_l, fmask_s=fmask_s)
 
 
 #this function calls land_model_init and eventually will call init for sea and ice models
@@ -270,18 +272,23 @@ def initialize_boundaries(
 
     return boundaries
 
-def update_boundaries_with_timestep(
+def populate_parameter_dependent_boundaries(
         boundaries: BoundaryData,
         parameters: Parameters=None,
-        time_step=30*units.minute
+        time_step=1800.
 ) -> BoundaryData:
     """
-    Update the boundary conditions with the new time step
+    Populate the boundary conditions with parameter and timestep-dependent values.
+    
+    Args:
+        boundaries (BoundaryData): The boundary data to populate.
+        parameters (Parameters, optional): The model parameters. Defaults to Parameters.default().
+        time_step (float, optional): The time step in seconds. Defaults to 1800 seconds (30 minutes).
     """
     parameters = parameters or Parameters.default()
     # Update the land heat capacity and dissipation time
     if boundaries.land_coupling_flag:
-        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
+        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step
         return boundaries.copy(rhcapl=rhcapl)
     else:
         return boundaries
