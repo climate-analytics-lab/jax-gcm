@@ -48,18 +48,23 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
 
 def create_test_atmosphere(nlev=10):
     """Create a realistic test atmosphere"""
-    # Realistic atmospheric profile - pressure decreases with height
-    # Start from surface (high pressure) to TOA (low pressure)
-    pressure_levels = jnp.logspace(jnp.log10(100000.0), jnp.log10(1000.0), nlev)  # Pa (surface to TOA)
-    height_levels = jnp.linspace(0.0, 20000.0, nlev)  # m (surface to ~20km)
+    # Realistic atmospheric profile - pressure increases with index (TOA to surface)
+    pressure_levels = jnp.logspace(jnp.log10(100.0), jnp.log10(101325.0), nlev)
+    height_levels = jnp.linspace(20000.0, 0.0, nlev)  # m (~20km to surface)
     
     # Temperature profile with lapse rate
-    temperature = 288.0 - 6.5e-3 * height_levels  # K (standard lapse rate)
+    temperature = 300.0 - 6.5e-3 * height_levels  # K (standard lapse rate from 300K surface)
     temperature = jnp.maximum(temperature, 200.0)  # Don't go below 200K
     
     # Humidity decreases exponentially with height
     specific_humidity = 0.01 * jnp.exp(-height_levels / 8000.0)  # kg/kg
     specific_humidity = jnp.maximum(specific_humidity, 1e-6)  # Minimum humidity
+
+    # Layer thickness
+    layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
+
+    # Air density
+    air_density = calculate_air_density(pressure_levels, temperature)
     
     # Some clouds in middle troposphere
     cloud_water = jnp.zeros(nlev)
@@ -77,7 +82,9 @@ def create_test_atmosphere(nlev=10):
         'temperature': temperature,
         'specific_humidity': specific_humidity,
         'pressure_levels': pressure_levels,
-        'height_levels': height_levels,
+        'layer_thickness': layer_thickness,
+        'air_density': air_density,
+        'height': height_levels,
         'cloud_water': cloud_water,
         'cloud_ice': cloud_ice,
         'cloud_fraction': cloud_fraction
@@ -87,7 +94,7 @@ def create_test_atmosphere(nlev=10):
 def test_prepare_radiation_state():
     """Test radiation state preparation"""
     atm = create_test_atmosphere(nlev=5)
-    cos_zenith = 0.5
+    cos_zenith = jnp.array(0.5)
     
     # Calculate layer thickness and air density as required by prepare_radiation_state
     from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
@@ -131,9 +138,9 @@ def test_prepare_radiation_state():
     assert jnp.all(rad_state.cloud_ice_path >= 0)
     
     # Check pressure interface ordering  
-    # The current implementation has pressure_levels[0] = surface, pressure_levels[-1] = TOA
-    # So interface 0 should be higher pressure than interface -1
-    assert rad_state.pressure_interfaces[0] > rad_state.pressure_interfaces[-1]  # Should be decreasing
+    # The current implementation has pressure_levels[0] = TOA, pressure_levels[-1] = surface
+    # So interface -1 should be higher pressure than interface 0
+    assert rad_state.pressure_interfaces[-1] > rad_state.pressure_interfaces[0]  # Should be increasing (TOA to surface)
     
     # Middle interfaces should be reasonable
     assert jnp.all(rad_state.pressure_interfaces >= 0)
@@ -407,6 +414,39 @@ def test_radiation_scheme_very_cloudy():
     # Look for significant SW flux variations indicating cloud interactions
     sw_flux_variations = jnp.std(diagnostics.sw_flux_down[1:-1, :])
     assert sw_flux_variations > 1.0  # Some variation due to cloud scattering
+
+
+def test_radiation_column():
+    """Test single column radiation function"""
+    atm = create_test_atmosphere(nlev=6)
+    
+    # Create default radiation parameters
+    parameters = RadiationParameters.default()
+    
+    # Create default aerosol data
+    aerosol_data = create_default_aerosol_data(nlev=6, parameters=parameters)
+    
+    tendencies, diagnostics = radiation_scheme(
+        temperature=atm['temperature'],
+        specific_humidity=atm['specific_humidity'],
+        pressure_levels=atm['pressure_levels'],
+        layer_thickness=atm['layer_thickness'],
+        air_density=atm['air_density'],
+        cloud_water=atm['cloud_water'],
+        cloud_ice=atm['cloud_ice'],
+        cloud_fraction=atm['cloud_fraction'],
+        day_of_year=172.0,
+        seconds_since_midnight=43200.0,
+        latitude=0.0,
+        longitude=0.0,
+        parameters=parameters,
+        aerosol_data=aerosol_data
+    )
+    
+    # Should produce same results as main function
+    assert tendencies.temperature_tendency.shape == (6,)
+    assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))
+    assert jnp.all(jnp.isfinite(diagnostics.toa_lw_up))
 
 
 def test_radiation_scheme_energy_conservation():
