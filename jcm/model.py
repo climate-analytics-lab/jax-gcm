@@ -11,10 +11,9 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
+from jcm.date import DateData, Timedelta, Timestamp
 from jcm.boundaries import BoundaryData, default_boundaries
-from jcm.date import DateData, Timestamp, Timedelta
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
-from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 
