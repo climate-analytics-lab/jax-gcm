@@ -147,10 +147,10 @@ def prepare_physics_state_2d(state, geometry):
     nlev, ncols = state.temperature.shape
     
     # Convert surface pressure to Pascal
-    surface_pressure_pa = convert_surface_pressure(state.surface_pressure)
+    surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
     
     # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.surface_pressure, geometry.fsg)
+    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, geometry.fsg)
     
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)
@@ -186,10 +186,10 @@ def prepare_physics_state_3d(state, geometry):
     nlev, nlat, nlon = state.temperature.shape
     
     # Convert surface pressure to Pascal
-    surface_pressure_pa = convert_surface_pressure(state.surface_pressure)
+    surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
     
     # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.surface_pressure, geometry.fsg)
+    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, geometry.fsg)
     
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)

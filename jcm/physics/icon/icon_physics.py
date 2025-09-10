@@ -179,7 +179,7 @@ class IconPhysics(Physics):
             'temperature': state.temperature,
             'specific_humidity': state.specific_humidity,
             'geopotential': state.geopotential,
-            'surface_pressure': state.surface_pressure,
+            'normalized_surface_pressure': state.normalized_surface_pressure,
         })
         
         # Handle tracers separately to maintain dict structure
@@ -476,7 +476,7 @@ def _prepare_common_physics_state(
     p0 = physical_constants.p0
     
     # Calculate pressure levels from surface pressure and sigma coordinates
-    surface_pressure = state.surface_pressure * p0  # Convert to Pa
+    surface_pressure = state.normalized_surface_pressure * p0  # Convert to Pa
     sigma_levels = geometry.fsg  # sigma coordinates at level centers
     pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
     
