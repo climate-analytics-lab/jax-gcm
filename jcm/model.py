@@ -20,6 +20,9 @@ from jcm.physics.speedy.params import Parameters
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 
+import os
+from pathlib import Path
+
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
 @tree_math.struct
@@ -32,6 +35,22 @@ class Predictions:
         physics (Any): Diagnostic physics data computed by the physics package.
         times (Any): Timestamps of the predictions.
     """
+    dynamics: PhysicsState
+    physics: Any
+    times: Any
+
+
+@tree_math.struct
+class Predictions2:
+    """Container for model prediction outputs from a single timestep.
+
+    Attributes:
+        dynamics (PhysicsState): The physical state variables converted from
+            the dynamical state.
+        physics (Any): Diagnostic physics data computed by the physics package.
+        times (Any): Timestamps of the predictions.
+    """
+    modal_state: Any
     dynamics: PhysicsState
     physics: Any
     times: Any
@@ -267,6 +286,55 @@ class Model:
         self._final_modal_state, predictions = integrate_fn(self._final_modal_state)
         return predictions.replace(times=times)
 
+    def genIntegrateFn(self,
+        sim_time,
+        boundaries: BoundaryData=None,
+        save_interval=10.0,
+        total_time=120.0,
+    ):
+        """Runs the full simulation forward in time starting from end of previous call to model.run or model.resume.
+        
+        Args:
+            boundaries:
+                BoundaryData containing boundary conditions for the run.
+            save_interval:
+                Interval at which to save model outputs (float).
+            total_time:
+                Total time to run the model (float).
+            
+        Returns:
+            A Predictions object containing the trajectory of post-processed model states.
+        """
+        boundaries = self._prepare_boundaries(boundaries)
+        step_fn = self._create_step_fn(boundaries)
+
+        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
+        outer_steps = int(total_time / save_interval)
+        start_time = self.start_date.delta.days + (sim_time*units.second).to(units.day).m
+        times = start_time + save_interval * jnp.arange(outer_steps)
+
+        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries),
+        ))
+
+        @jax.jit
+        def integrate_fn2(p2):
+            _final_modal_state, predictions = integrate_fn(p2.modal_state)
+            predictions = predictions.replace(times=times)
+            return Predictions2(
+                modal_state = _final_modal_state,
+                dynamics = predictions.dynamics,
+                physics = predictions.physics,
+                times = predictions.times
+            )
+
+        return integrate_fn2
+
+    
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
             boundaries: BoundaryData=None,
@@ -330,7 +398,7 @@ class Model:
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
 
         # Import units attribute associated with each xarray output from units_table.csv
-        units_df = pd.read_csv("../jcm/physics/speedy/units_table.csv")
+        units_df = pd.read_csv(Path(__file__).parent / "physics" / "speedy" / "units_table.csv")
         units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
 
         for var, unit in units_from_csv.items():
