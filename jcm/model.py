@@ -269,9 +269,7 @@ class Model:
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def _prepare_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
-        params_for_boundaries = (self.physics.parameters
-                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
-                                     else Parameters.default())
+        params_for_boundaries = self.physics.parameters
         
         if boundaries is None:
             return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
