@@ -15,30 +15,35 @@ from jcm.physics.icon.radiation.radiation_scheme import (
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters
 from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
+from jcm.physics.icon.icon_physics_data import AerosolData
 
 
-def create_default_aerosol_data(nlev=10, parameters=None):
-    """Create default aerosol data for testing"""
+def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
+    """Create default aerosol data for testing as AerosolData object"""
     if parameters is None:
         parameters = RadiationParameters.default()
     
-    # Total number of bands (SW + LW)
-    total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
+    # Create simple default aerosol profiles
+    # For tests, we don't need spectral bands - just create simple profiles
+    aod_profile = jnp.ones((nlev, ncols)) * 0.01  # Small background AOD profile
+    ssa_profile = jnp.ones((nlev, ncols)) * 0.9   # Mostly scattering
+    asy_profile = jnp.ones((nlev, ncols)) * 0.7   # Forward scattering
     
-    # Default small aerosol loading
-    aerosol_optical_depth = jnp.ones((nlev, total_bands)) * 0.01  # Small background AOD
-    aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9              # Mostly scattering
-    # Set LW bands to pure absorption (SSA = 0)
-    aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
-    aerosol_asymmetry = jnp.ones((nlev, total_bands)) * 0.7       # Forward scattering
-    cdnc_factor = jnp.array(1.0)                                   # No aerosol-cloud interaction
+    # Column-integrated properties
+    aod_total = jnp.sum(aod_profile, axis=0)  # Total column AOD
+    aod_anthropogenic = jnp.ones(ncols) * 0.005  # Small anthropogenic contribution
+    aod_background = jnp.ones(ncols) * 0.005     # Small background contribution
+    cdnc_factor = jnp.ones(ncols)                # No aerosol-cloud interaction
     
-    return {
-        'aerosol_optical_depth': aerosol_optical_depth,
-        'aerosol_ssa': aerosol_ssa,
-        'aerosol_asymmetry': aerosol_asymmetry,
-        'cdnc_factor': cdnc_factor
-    }
+    return AerosolData(
+        aod_profile=aod_profile,
+        ssa_profile=ssa_profile,
+        asy_profile=asy_profile,
+        aod_total=aod_total,
+        aod_anthropogenic=aod_anthropogenic,
+        aod_background=aod_background,
+        cdnc_factor=cdnc_factor
+    )
 
 
 def create_test_atmosphere(nlev=10):
@@ -157,8 +162,8 @@ def test_radiation_scheme_basic():
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     
-    # Create default aerosol data dictionary
-    aerosol_dict = create_default_aerosol_data(nlev=8, parameters=parameters)
+    # Create default aerosol data object
+    aerosol_data = create_default_aerosol_data(nlev=8, parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -174,7 +179,7 @@ def test_radiation_scheme_basic():
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Check output shapes
@@ -228,7 +233,7 @@ def test_radiation_scheme_nighttime():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=5, parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=5, parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -244,7 +249,7 @@ def test_radiation_scheme_nighttime():
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Should have minimal shortwave at night and valid longwave
@@ -282,7 +287,7 @@ def test_radiation_scheme_custom_parameters():
     )
     
     # Create aerosol data for custom parameters
-    aerosol_dict = create_default_aerosol_data(nlev=6, parameters=custom_params)
+    aerosol_data = create_default_aerosol_data(nlev=6, parameters=custom_params, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -298,7 +303,7 @@ def test_radiation_scheme_custom_parameters():
         latitude=0.0,
         longitude=0.0,
         parameters=custom_params,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Check output shapes - hardcoded to max_bands=10
@@ -330,7 +335,7 @@ def test_radiation_scheme_extreme_conditions():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=nlev, parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=nlev, parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=temperature,
@@ -346,7 +351,7 @@ def test_radiation_scheme_extreme_conditions():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Should handle extreme conditions without NaN
@@ -372,7 +377,7 @@ def test_radiation_scheme_very_cloudy():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -388,7 +393,7 @@ def test_radiation_scheme_very_cloudy():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Should handle heavy clouds without NaN
@@ -416,7 +421,7 @@ def test_radiation_scheme_energy_conservation():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -432,7 +437,7 @@ def test_radiation_scheme_energy_conservation():
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Energy conservation checks
@@ -462,7 +467,7 @@ def test_radiation_scheme_realistic_values():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters, ncols=1)
     
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
@@ -478,7 +483,7 @@ def test_radiation_scheme_realistic_values():
         latitude=30.0,  # Mid-latitude
         longitude=0.0,
         parameters=parameters,
-        aerosol_data=aerosol_dict
+        aerosol_data=aerosol_data
     )
     
     # Check that computation completed and produced expected output shapes
@@ -517,7 +522,7 @@ def test_radiation_scheme_reproducibility():
     parameters = RadiationParameters.default()
     
     # Create default aerosol data
-    aerosol_dict = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters)
+    aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters, ncols=1)
     
     # Run twice with identical inputs
     for i in range(2):
@@ -535,7 +540,7 @@ def test_radiation_scheme_reproducibility():
             latitude=0.0,
             longitude=0.0,
             parameters=parameters,
-            aerosol_data=aerosol_dict
+            aerosol_data=aerosol_data
         )
         
         if i == 0:
