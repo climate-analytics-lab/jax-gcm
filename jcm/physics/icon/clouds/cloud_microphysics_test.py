@@ -429,7 +429,7 @@ class TestFullMicrophysics:
             temperature, specific_humidity, pressure,
             cloud_water, cloud_ice, cloud_fraction,
             air_density, layer_thickness, droplet_number,
-            dt, config
+            dt, config, rain_water, snow
         )
         
         # Should have melting near freezing level

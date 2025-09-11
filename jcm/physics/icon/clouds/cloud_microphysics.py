@@ -514,7 +514,9 @@ def cloud_microphysics(
     layer_thickness: jnp.ndarray,
     droplet_number: jnp.ndarray,
     dt: float,
-    config: Optional[MicrophysicsParameters] = None
+    config: Optional[MicrophysicsParameters] = None,
+    rain_water: Optional[jnp.ndarray] = None,
+    snow: Optional[jnp.ndarray] = None
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """
     Main cloud microphysics scheme
@@ -537,6 +539,8 @@ def cloud_microphysics(
         droplet_number: Droplet number concentration (1/kg) [nlev]
         dt: Time step (s)
         config: Microphysics configuration
+        rain_water: Rain water mixing ratio (kg/kg) [nlev]. If None, initialized to zeros.
+        snow: Snow mixing ratio (kg/kg) [nlev]. If None, initialized to zeros.
         
     Returns:
         Tuple of (tendencies, state)
@@ -555,8 +559,12 @@ def cloud_microphysics(
     dqidt = jnp.zeros(nlev)
     dqrdt = jnp.zeros(nlev)
     dqsdt = jnp.zeros(nlev)
-    rain_water = jnp.zeros(nlev)  # Initialize rain water
-    snow = jnp.zeros(nlev)  # Initialize snow
+    
+    # Initialize precipitation if not provided
+    if rain_water is None:
+        rain_water = jnp.zeros(nlev)
+    if snow is None:
+        snow = jnp.zeros(nlev)
     
     # Calculate in-cloud values
     qc_in_cloud = jnp.where(
