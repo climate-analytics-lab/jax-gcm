@@ -102,7 +102,7 @@ class Geometry:
             return a_centers[:, None] + b_centers[:, None] * surface_pressure[None, :]
         else:
             # Pure sigma coordinates: p = σ * p_surface
-            return self.fsg[:, None] * surface_pressure[None, :] * pc.p0
+            return self.fsg[:, None] * surface_pressure[None, :] * p0
     
     def get_pressure_interfaces(self, surface_pressure: jnp.ndarray) -> jnp.ndarray:
         """Calculate pressure at level interfaces.
@@ -118,7 +118,7 @@ class Geometry:
             return self.hybrid_a_boundaries[:, None] + self.hybrid_b_boundaries[:, None] * surface_pressure[None, :]
         else:
             # Pure sigma coordinates: p = σ * p_surface
-            return self.hsg[:, None] * surface_pressure[None, :] * pc.p0
+            return self.hsg[:, None] * surface_pressure[None, :] * p0
     
     def get_layer_thickness(self, surface_pressure: jnp.ndarray) -> jnp.ndarray:
         """Calculate layer thickness in pressure coordinates.
@@ -188,8 +188,8 @@ class Geometry:
         sigl = jnp.log(fsg_safe)
         
         # Create dummy conversion factors (overridden by hybrid calculations)
-        grdsig = jnp.ones_like(dhs) * pc.grav / pc.p0
-        grdscp = grdsig / pc.cp
+        grdsig = jnp.ones_like(dhs) * grav / p0
+        grdscp = grdsig / cp
         wvi = jnp.zeros((nlevels, 2))
         
         return hsg, fsg, dhs, sigl, grdsig, grdscp, wvi, hybrid_levels
