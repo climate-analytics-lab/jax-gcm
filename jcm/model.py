@@ -45,6 +45,7 @@ class Predictions2:
     """Container for model prediction outputs from a single timestep.
 
     Attributes:
+        modal_state : The internal modal state
         dynamics (PhysicsState): The physical state variables converted from
             the dynamical state.
         physics (Any): Diagnostic physics data computed by the physics package.
