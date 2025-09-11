@@ -235,7 +235,7 @@ class TestJAXCompatibility(TestCase):
         year = 2020.0
         
         # Test JIT compilation
-        jitted_bc = jax.jit(simple_boundary_conditions, static_argnums=(6,))
+        jitted_bc = jax.jit(simple_boundary_conditions)
         
         bc_state = jitted_bc(
             latitude, longitude, land_fraction, day_of_year, time_of_day, year, config
