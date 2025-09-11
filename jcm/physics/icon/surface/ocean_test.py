@@ -265,13 +265,13 @@ class TestOceanSurfaceFluxes:
         )
         
         # Temperature differences
-        temp_diff = self.atmospheric_state.temperature - self.ocean_temp
+        temp_diff = self.ocean_temp - self.atmospheric_state.temperature
         
         # Sensible heat flux should have same sign as temperature difference
         for i in range(self.ncol):
-            if temp_diff[i] > 0:  # Air warmer than ocean
+            if temp_diff[i] > 0:  # Ocean warmer than air
                 assert fluxes.sensible_heat[i, 0] > 0  # Upward flux
-            elif temp_diff[i] < 0:  # Air cooler than ocean
+            elif temp_diff[i] < 0:  # Ocean cooler than air
                 assert fluxes.sensible_heat[i, 0] < 0  # Downward flux
     
     def test_ocean_energy_balance_components(self):
