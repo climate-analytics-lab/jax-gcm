@@ -286,7 +286,7 @@ class Model:
         self._final_modal_state, predictions = integrate_fn(self._final_modal_state)
         return predictions.replace(times=times)
 
-    def genIntegrateFn(self,
+    def genForwardFunc(self,
         sim_time,
         boundaries: BoundaryData=None,
         save_interval=10.0,
