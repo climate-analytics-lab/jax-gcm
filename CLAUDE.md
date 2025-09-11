@@ -179,3 +179,68 @@ pytest path/to/test_file.py::test_function_name -v
 - Verify static shapes
 - Use `jax.debug.print` for debugging inside JIT
 - Consult JAX_gotchas.md for common pitfalls
+
+## Model Interface
+
+The `jcm.model.Model` class provides the main interface for running JAX-GCM simulations. 
+
+### Constructor vs Run Method (New Interface)
+
+**Model Configuration (Constructor)**: Physics and geometry settings are specified when creating the model:
+```python
+from jcm.model import Model
+from jcm.physics.speedy import SpeedyPhysics
+from jcm.physics.icon import IconPhysics
+
+# Configure model with physics and geometry
+model = Model(
+    time_step=30.0,              # Model timestep in minutes
+    layers=8,                    # Vertical layers
+    horizontal_resolution=31,    # Spectral resolution 
+    physics=SpeedyPhysics(),     # Physics package
+    use_hybrid_coords=False      # Coordinate system (auto-detected from physics)
+)
+```
+
+**Simulation Parameters (Run Method)**: Run-specific settings are passed to `model.run()`:
+```python
+# Run simulation with specific parameters
+predictions = model.run(
+    initial_state=None,                    # Optional initial state
+    boundaries=None,                       # Boundary conditions (default aquaplanet)
+    save_interval=10.0,                    # Save interval in days
+    total_time=120.0,                      # Total simulation time in days
+    start_date=Timestamp.from_datetime(datetime(2000, 1, 1))
+)
+```
+
+### Key Interface Changes
+
+1. **Method Renamed**: `unroll()` → `run()`
+2. **Parameter Migration**: Simulation parameters moved from constructor to `run()` method:
+   - `save_interval`, `total_time`, `start_date` → now in `run()`
+   - `initial_state`, `boundaries` → now in `run()` 
+   - `time_step`, `physics`, `geometry` → remain in constructor
+
+3. **Resume Capability**: Use `model.resume()` to continue from where `run()` left off:
+   ```python
+   # Continue simulation
+   more_predictions = model.resume(
+       save_interval=10.0,
+       total_time=60.0  # Additional 60 days
+   )
+   ```
+
+### Coordinate System Auto-Detection
+
+The model automatically detects coordinate systems:
+- **ICON Physics** → Hybrid sigma-pressure coordinates
+- **SPEEDY Physics** → Pure sigma coordinates  
+- Override with `use_hybrid_coords=True/False`
+
+### Physics Package Integration
+
+Physics packages must implement the `Physics` protocol:
+- `compute_tendencies()` method
+- `parameters` attribute for boundary condition setup
+- `write_output` flag for diagnostic data collection
