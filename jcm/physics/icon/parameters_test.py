@@ -77,7 +77,7 @@ def test_physics_terms_use_parameters():
         temperature=jnp.ones((nlev, nlat, nlon)) * 280.0,
         specific_humidity=jnp.ones((nlev, nlat, nlon)) * 0.005,
         geopotential=jnp.ones((nlev, nlat, nlon)) * 1000.0,
-        surface_pressure=jnp.ones((nlat, nlon)),
+        normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers={
             'qc': jnp.zeros((nlev, nlat, nlon)),
             'qi': jnp.zeros((nlev, nlat, nlon))

@@ -40,7 +40,7 @@ class TestChemistryIntegration(TestCase):
             temperature=jnp.ones((nlev, nlon, nlat)) * 250.0,
             specific_humidity=jnp.ones((nlev, nlon, nlat)) * 0.005,
             geopotential=jnp.zeros((nlev, nlon, nlat)),
-            surface_pressure=jnp.ones((nlon, nlat)) * 1000.0,
+            normalized_surface_pressure=jnp.ones((nlon, nlat)) * 1000.0,
             tracers={
                 'qc': jnp.zeros((nlev, nlon, nlat)),
                 'qi': jnp.zeros((nlev, nlon, nlat))

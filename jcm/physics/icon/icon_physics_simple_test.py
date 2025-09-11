@@ -68,7 +68,7 @@ def test_prepare_common_physics_state():
         u_wind=jnp.zeros((nlev, ncols)),
         v_wind=jnp.zeros((nlev, ncols)),
         geopotential=jnp.zeros((nlev, ncols)),
-        surface_pressure=jnp.ones(ncols),
+        normalized_surface_pressure=jnp.ones(ncols),
         tracers=tracers
     )
     
@@ -122,7 +122,7 @@ def test_simple_physics_integration():
         u_wind=jnp.zeros(shape_3d),
         v_wind=jnp.zeros(shape_3d),
         geopotential=jnp.zeros(shape_3d),
-        surface_pressure=jnp.ones((nlat, nlon)),
+        normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers=tracers
     )
     
@@ -171,7 +171,7 @@ def test_physics_vectorization():
         u_wind=jnp.zeros(shape_3d),
         v_wind=jnp.zeros(shape_3d),
         geopotential=jnp.zeros(shape_3d),
-        surface_pressure=jnp.ones((nlat, nlon)),
+        normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers=tracers
     )
     
