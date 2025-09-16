@@ -1,11 +1,12 @@
 import xarray as xr
-import jax.numpy as jnp
 
-ds = xr.open_dataset('./boundaries.nc')
-
-from jcm.physics.speedy.params import Parameters
+with xr.open_dataset('./boundaries.nc') as ds:
+    ds = ds.load()
 
 if not 'soilw_am' in ds.data_vars:
+    import jax.numpy as jnp
+    from jcm.physics.speedy.params import Parameters
+    
     veg_high = ds.vegh
     veg_low = ds.vegl
     assert jnp.all(0.0 <= veg_high.values)
@@ -26,8 +27,4 @@ if not 'soilw_am' in ds.data_vars:
 
 ds = ds.drop_vars([v for v in ('swl1', 'swl2', 'swl3', 'vegh', 'vegl') if v in ds.data_vars])
 
-ds.to_netcdf('./boundaries-converted.nc')
-
-ds.close()
-import os
-os.rename('./boundaries-converted.nc', './boundaries.nc')
+ds.to_netcdf('./boundaries.nc', mode='w')
