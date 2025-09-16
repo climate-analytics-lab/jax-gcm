@@ -145,34 +145,7 @@ def initialize_boundaries(
     # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
     snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
 
-    ################################################################################ FIXME
-
-    # # Read soil moisture and compute soil water availability using vegetation fraction
-    # # Read vegetation fraction
-    # veg_high = jnp.asarray(ds["vegh"])
-    # veg_low  = jnp.asarray(ds["vegl"])
-    # assert jnp.all(0.0 <= veg_high)
-    # assert jnp.all(0.0 <= veg_low)
-
-    # # Combine high and low vegetation fractions
-    # veg = veg_high + 0.8*veg_low
-    # # Read soil moisture
-    # # sdep1 = 70.0
-    # idep2 = 3
-    # # sdep2 = idep2*sdep1
-
-    # rsw = 1.0/(parameters.land_model.swcap + idep2*(parameters.land_model.swcap - parameters.land_model.swwil))
-
-    # # Soil water content of two top layers
-    # swl1, swl2 = jnp.asarray(ds["swl1"]), jnp.asarray(ds["swl2"])
-
-    # # Compute the soil water content
-    # soilw_am = jnp.minimum(1.0, rsw * (
-    #     swl1 + jnp.maximum(0.0, veg[:,:,jnp.newaxis] * idep2 * (swl2 - parameters.land_model.swwil))
-    # )) # FIXME: is 1.0 the right maximum soilw_am? Or should it be 10?
-
-    ################################################################################
-
+    # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
     soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
     assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
