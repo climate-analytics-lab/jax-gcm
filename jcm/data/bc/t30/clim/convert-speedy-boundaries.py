@@ -25,6 +25,6 @@ if not 'soilw_am' in ds.data_vars:
     
     ds['soilw_am'] = 0*ds.swl1 + soilw_am
 
-ds = ds.drop_vars([v for v in ('swl1', 'swl2', 'swl3', 'vegh', 'vegl') if v in ds.data_vars])
+ds = ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl'} & set(ds.data_vars))
 
 ds.to_netcdf('./boundaries.nc', mode='w')
