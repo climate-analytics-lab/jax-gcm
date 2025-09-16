@@ -15,6 +15,7 @@ from jcm.date import DateData, Timedelta, Timestamp
 from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.diffusion import DiffusionFilter
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 import pandas as pd
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
