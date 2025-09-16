@@ -11,7 +11,7 @@ class BoundaryData:
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
-    sice_am: jnp.ndarray
+    sice_am: jnp.ndarray # FIXME: need to set this
     snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
     soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
     lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
@@ -107,29 +107,46 @@ def default_boundaries(
         orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0
     )
 
-
-def land_model_init(surface_filename, parameters: Parameters, boundaries: BoundaryData):
+def initialize_boundaries(
+    filename: str,
+    grid: HorizontalGridTypes,
+    parameters: Parameters=Parameters.default(),
+    truncation_number=None,
+    fmask_threshold=0.1,
+) -> BoundaryData:
     """
-        surface_filename: filename storing boundary data
-        parameters: initialized model parameters
-        boundaries: partially initialized boundary data
-        time_step: time step - model timestep in minutes
+    Initialize the boundary conditions
     """
+    from jcm.physics.speedy.physical_constants import grav
+    from jcm.utils import spectral_truncation
     import xarray as xr
-    ds = xr.open_dataset(surface_filename)
-    # =========================================================================
-    # Initialize land-surface boundary conditions
-    # =========================================================================
 
-    # Update fractional land mask
-    fmask, thrsh = boundaries.fmask, parameters.land_model.thrsh
-    fmask = jnp.where(fmask <= thrsh, 0.0, jnp.where(fmask >= 1.0 - thrsh, 1.0, fmask))
-    
-    # Snow depth
+    # Read boundaries from file
+    ds = xr.open_dataset(filename)
+
+    # land-sea mask
+    fmask = jnp.asarray(ds["lsm"])
+    # Apply some sanity checks -- might want to check this shape against the model shape?
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
+    # Set values close to 0 or 1 to exactly 0 or 1
+    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+
+    # orography
+    orog = jnp.asarray(ds["orog"])
+    # Also store spectrally truncated surface geopotential for the land drag term
+    phi0 = grav * orog
+    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
+
+    # annual-mean surface albedo
+    alb0 = jnp.asarray(ds["alb"])
+
+    # snow depth
     snowd_am = jnp.asarray(ds["snowd"])
     snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
     # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
     snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
+
+    ################################################################################ FIXME
 
     # Read soil moisture and compute soil water availability using vegetation fraction
     # Read vegetation fraction
@@ -155,44 +172,13 @@ def land_model_init(surface_filename, parameters: Parameters, boundaries: Bounda
         swl1 + jnp.maximum(0.0, veg[:,:,jnp.newaxis] * idep2 * (swl2 - parameters.land_model.swwil))
     )) # FIXME: is 1.0 the right maximum soilw_am? Or should it be 10?
 
-    return boundaries.copy(fmask=fmask, snowd_am=snowd_am, soilw_am=soilw_am)
+    ################################################################################
 
-#this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(
-    filename: str,
-    grid: HorizontalGridTypes,
-    parameters: Parameters=Parameters.default(),
-    truncation_number=None
-) -> BoundaryData:
-    """
-    Initialize the boundary conditions
-    """
-    from jcm.physics.speedy.physical_constants import grav
-    from jcm.utils import spectral_truncation
-    import xarray as xr
-    
-    ds = xr.open_dataset(filename)
-
-    orog = jnp.asarray(ds["orog"])
-    # Also store spectrally truncated surface geopotential for the land drag term
-    phi0 = grav * orog
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-
-    # Read land-sea mask
-    fmask = jnp.asarray(ds["lsm"])
-    # Annual-mean surface albedo
-    alb0 = jnp.asarray(ds["alb"])
-    # Apply some sanity checks -- might want to check this shape against the model shape?
-    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-
+    # Prescribe SSTs
     tsea = _fixed_ssts(grid)
-    boundaries = BoundaryData.zeros(
+
+    return BoundaryData.zeros(
         nodal_shape=fmask.shape,
-        fmask=fmask, orog=orog, phis0=phis0, tsea=tsea, alb0=alb0)
-    
-    boundaries = land_model_init(filename, parameters, boundaries)
-
-    # call sea model init
-    # call ice model init
-
-    return boundaries
+        fmask=fmask, orog=orog, phis0=phis0, alb0=alb0,
+        snowd_am=snowd_am, soilw_am=soilw_am, tsea=tsea
+    )
