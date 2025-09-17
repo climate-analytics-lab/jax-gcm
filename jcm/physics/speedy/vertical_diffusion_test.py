@@ -20,11 +20,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
 
     def test_get_vertical_diffusion_tend(self):
-        se = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(400,300,kx)[:, jnp.newaxis, jnp.newaxis]
-        rh = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(0.1,0.9,kx)[:, jnp.newaxis, jnp.newaxis]
-        qa = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[:, jnp.newaxis, jnp.newaxis]
-        qsat = jnp.ones((ix,il))[jnp.newaxis] * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[:, jnp.newaxis, jnp.newaxis]
-        phi = jnp.ones((ix,il))[jnp.newaxis] * jnp.linspace(150000,0,kx)[:, jnp.newaxis, jnp.newaxis]
+        se = jnp.ones((ix,il)) * jnp.linspace(400,300,kx)[:, jnp.newaxis, jnp.newaxis]
+        rh = jnp.ones((ix,il)) * jnp.linspace(0.1,0.9,kx)[:, jnp.newaxis, jnp.newaxis]
+        qa = jnp.ones((ix,il)) * jnp.array([1, 4, 7.3, 8.8, 12, 18, 24, 26])[:, jnp.newaxis, jnp.newaxis]
+        qsat = jnp.ones((ix,il)) * jnp.array([5, 8, 10, 13, 16, 21, 28, 31])[:, jnp.newaxis, jnp.newaxis]
+        phi = jnp.ones((ix,il)) * jnp.linspace(150000,0,kx)[:, jnp.newaxis, jnp.newaxis]
         iptop = jnp.ones((ix,il), dtype=int)*1
         
         zxy = (kx, ix, il)
