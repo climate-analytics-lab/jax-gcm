@@ -293,7 +293,7 @@ class Model:
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         final_modal_state, predictions = self.run_from_state(
-            initial_modal_state=self._final_modal_state,
+            initial_state=self._final_modal_state,
             boundaries=boundaries,
             save_interval=save_interval,
             total_time=total_time,
