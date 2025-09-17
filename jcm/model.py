@@ -229,6 +229,50 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
+    def run_from_state(self,
+                       initial_state: PhysicsState | primitive_equations.State = None,
+                       boundaries: BoundaryData=None,
+                       save_interval=10.0,
+                       total_time=120.0,
+                       start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
+    ) -> tuple[primitive_equations.State, Predictions]:
+        """Runs the full simulation forward in time starting from given initial state.
+        
+        Args:
+            initial_state:
+                PhysicsState or dinosaur.primitive_equations.State containing initial state of the run (default isothermal atmosphere).
+            boundaries:
+                BoundaryData containing boundary conditions for the run (default aquaplanet).
+            save_interval:
+                (float) interval at which to save model outputs in days (default 10.0).
+            total_time:
+                (float) total time to run the model in days (default 120.0).
+            start_date:
+                (Timestamp) start date for the model run (default January 1, 2000).
+    
+        Returns:
+            A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
+        """
+        initial_modal_state = self._prepare_initial_modal_state(initial_state) if isinstance(initial_state, PhysicsState) else initial_state
+        boundaries = self._prepare_boundaries(boundaries)
+        step_fn = self._create_step_fn(boundaries)
+
+        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
+        outer_steps = int(total_time / save_interval)
+        start_time = start_date.delta.days + (initial_modal_state.sim_time*units.second).to(units.day).m
+        times = start_time + save_interval * jnp.arange(outer_steps)
+
+        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries),
+        ))
+
+        final_modal_state, predictions = integrate_fn(initial_modal_state)
+        return final_modal_state, predictions.replace(times=times)
+
     def resume(self,
                boundaries: BoundaryData=None,
                save_interval=10.0,
@@ -247,25 +291,17 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        boundaries = self._prepare_boundaries(boundaries)
-        step_fn = self._create_step_fn(boundaries)
-
-        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
-        outer_steps = int(total_time / save_interval)
-        start_time = self.start_date.delta.days + (self._final_modal_state.sim_time*units.second).to(units.day).m
-        times = start_time + save_interval * jnp.arange(outer_steps)
-
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            jax.checkpoint(step_fn),
-            outer_steps=outer_steps,
-            inner_steps=inner_steps,
-            start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries),
-        ))
-
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
-        self._final_modal_state, predictions = integrate_fn(self._final_modal_state)
-        return predictions.replace(times=times)
+        final_modal_state, predictions = self.unroll(
+            initial_modal_state=self._final_modal_state,
+            boundaries=boundaries,
+            save_interval=save_interval,
+            total_time=total_time,
+            start_date=self.start_date
+        )
+        self._final_modal_state = final_modal_state
+        return predictions
+        
 
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
