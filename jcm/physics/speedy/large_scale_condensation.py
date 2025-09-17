@@ -37,11 +37,7 @@ def get_large_scale_condensation_tendencies(
     # 1. Initialization
     humidity = physics_data.humidity
     conv = physics_data.convection
-    
-    # Initialize outputs
-    dtlsc = jnp.zeros_like(state.specific_humidity)
-    dqlsc = jnp.zeros_like(state.specific_humidity)
-    
+        
     # Constants for computation
     qsmax = 10.0
 
@@ -67,15 +63,15 @@ def get_large_scale_condensation_tendencies(
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = dqlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], dqa[1:] * rtlsc, 0.0))
-    dtlsc = dtlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2[jnp.newaxis]), 0.))
+    dqlsc = jnp.where(negative_dqa_mask, dqa * rtlsc, 0.0)
+    dtlsc = jnp.where(negative_dqa_mask, tfact * jnp.minimum(-dqlsc, dqmax[:, jnp.newaxis, jnp.newaxis] * psa2[jnp.newaxis]), 0.)
 
     # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
     iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)
 
     # Large-scale precipitation
     pfact = geometry.dhs * prg
-    precls = 0. - jnp.sum(pfact[1:, jnp.newaxis, jnp.newaxis] * dqlsc[1:], axis=0)
+    precls = 0. - jnp.sum(pfact[:, jnp.newaxis, jnp.newaxis] * dqlsc, axis=0)
     precls *= state.normalized_surface_pressure
 
     condensation_out = physics_data.condensation.copy(precls=precls)
