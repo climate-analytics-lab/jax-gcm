@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import tree_math
+from packaging import version
+from flax import __version__ as flax_version
 from flax import nnx
 from numpy import timedelta64
 from typing import Any
@@ -23,6 +25,8 @@ from jcm.physics.speedy.params import Parameters
 from jcm.utils import stack_trees
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
+
+_LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -89,7 +93,10 @@ def averaged_trajectory_from_step(
 
         empty_sum = tree_map(jnp.zeros_like, x_initial)
 
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry, 0), length=inner_steps)
+        out_axes = (nnx.Carry,) if _LEGACY_SCAN_API else (nnx.Carry, 0)
+        empty_output = (None,) if _LEGACY_SCAN_API else None
+
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=out_axes, length=inner_steps)
         @jax.checkpoint
         def inner_step(carry):
             x, x_sum, diag_state = carry
@@ -98,9 +105,9 @@ def averaged_trajectory_from_step(
             temp_collector_inner.physical_step.value = True
             x_next = step_fn(temp_collector_inner)(x)
             _, updated_diag_state = nnx.split(temp_collector_inner)
-            return (x_next, x_sum, updated_diag_state), None
+            return (x_next, x_sum, updated_diag_state), empty_output
 
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=(nnx.Carry, 0), length=outer_steps)
+        @nnx.scan(in_axes=(nnx.Carry,), out_axes=out_axes, length=outer_steps)
         def outer_step(carry):
             (x_final, x_sum, diag_state), _ = inner_step(carry)
             temp_collector_outer = nnx.merge(graphdef, diag_state)
