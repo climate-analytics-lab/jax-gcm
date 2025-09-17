@@ -292,7 +292,7 @@ class Model:
             A Predictions object containing the trajectory of post-processed model states.
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
-        final_modal_state, predictions = self.unroll(
+        final_modal_state, predictions = self.run_from_state(
             initial_modal_state=self._final_modal_state,
             boundaries=boundaries,
             save_interval=save_interval,
