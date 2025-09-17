@@ -1,6 +1,7 @@
 import unittest
 import jax
 import jax.numpy as jnp
+import functools
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def setUp(self):
@@ -355,3 +356,17 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         test_data = [1.0000012824780082, 1.0000012824780082, 1.0000012824780082]
         self.assertAlmostEqual(jnp.max(forog_test),test_data[0])
         self.assertAlmostEqual(jnp.min(forog_test),test_data[1])
+
+    def test_set_orog_land_sfc_drag_gradient_check(self): 
+        from jax.test_util import check_vjp, check_jvp
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+
+        def f(phi0, parameters):
+            return set_orog_land_sfc_drag(phi0, parameters) 
+
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (phi0, parameters), 
+                                atol=1e-4, rtol=1e-4, eps=0.0001)
