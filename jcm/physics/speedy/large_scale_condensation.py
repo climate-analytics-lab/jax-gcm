@@ -63,8 +63,8 @@ def get_large_scale_condensation_tendencies(
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = jnp.where(negative_dqa_mask, dqa * rtlsc, 0.0)
-    dtlsc = jnp.where(negative_dqa_mask, tfact * jnp.minimum(-dqlsc, dqmax[:, jnp.newaxis, jnp.newaxis] * psa2[jnp.newaxis]), 0.)
+    dqlsc = negative_dqa_mask * dqa * rtlsc
+    dtlsc = negative_dqa_mask * tfact * jnp.minimum(-dqlsc, dqmax[:, jnp.newaxis, jnp.newaxis] * psa2[jnp.newaxis])
 
     # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
     iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)
