@@ -143,8 +143,7 @@ class Model:
 
     def __init__(self, time_step=30.0, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
-                 physics: Physics=None, diffusion: DiffusionFilter=None,
-                 output_averages=False) -> None:
+                 physics: Physics=None, diffusion: DiffusionFilter=None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -163,8 +162,6 @@ class Model:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
-            output_averages:
-                Whether to output time-averaged quantities
         """
 
         self.physics_specs = PHYSICS_SPECS
@@ -213,8 +210,6 @@ class Model:
             dinosaur.time_integration.horizontal_diffusion_step_filter(
                 self.coords.horizontal, self.dt, tau=self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
         ]
-        
-        self.output_averages = output_averages
 
         # The following fields are set upon calling model.run
         self.initial_nodal_state = None
@@ -275,7 +270,7 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _create_step_fn(self, boundaries: BoundaryData):
+    def _create_step_fn(self, boundaries: BoundaryData, output_averages):
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
@@ -292,7 +287,7 @@ class Model:
         primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
         step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
-        return step_fn if self.output_averages else jax.checkpoint(step_fn())
+        return step_fn if output_averages else jax.checkpoint(step_fn())
 
     def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData) -> Predictions:
         """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
@@ -321,8 +316,8 @@ class Model:
 
         return predictions
     
-    def _get_integrate_fn(self, step_fn, outer_steps, inner_steps, post_process_fn, **kwargs):
-        trajectory_fn = averaged_trajectory_from_step if self.output_averages else dinosaur.time_integration.trajectory_from_step
+    def _get_integrate_fn(self, step_fn, outer_steps, inner_steps, post_process_fn, output_averages, **kwargs):
+        trajectory_fn = averaged_trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
 
         def _integrate_fn(state):
             integrate_fn = jax.jit(trajectory_fn(
@@ -333,7 +328,7 @@ class Model:
                 post_process_fn=post_process_fn
             ))
 
-            if self.output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
+            if output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
                 empty_physics_data = self.physics.get_empty_data(self.geometry)
                 final_state, raw_predictions = integrate_fn(state, empty_physics_data)
                 predictions = raw_predictions.replace(
@@ -356,7 +351,8 @@ class Model:
     def resume(self,
                boundaries: BoundaryData=None,
                save_interval=10.0,
-               total_time=120.0
+               total_time=120.0,
+               output_averages=False
     ) -> Predictions:
         """Runs the full simulation forward in time starting from end of previous call to model.run or model.resume.
         
@@ -367,12 +363,14 @@ class Model:
                 Interval at which to save model outputs (float).
             total_time:
                 Total time to run the model (float).
-            
+            output_averages:
+                Whether to output time-averaged quantities (default False).
+
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
         boundaries = self._prepare_boundaries(boundaries)
-        step_fn = self._create_step_fn(boundaries)
+        step_fn = self._create_step_fn(boundaries, output_averages)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
@@ -384,7 +382,8 @@ class Model:
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=(lambda state: self._post_process(state, boundaries)) if self.physics.write_output else lambda x: x
+            post_process_fn=(lambda state: self._post_process(state, boundaries)) if self.physics.write_output else lambda x: x,
+            output_averages=output_averages
         )
 
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
@@ -397,7 +396,8 @@ class Model:
             boundaries: BoundaryData=None,
             save_interval=10.0,
             total_time=120.0,
-            start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
+            start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1)),
+            output_averages=False
     ) -> tuple[primitive_equations.State, Predictions]:
         """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
         
@@ -412,6 +412,8 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             start_date:
                 (Timestamp) start date for the model run (default January 1, 2000).
+            output_averages:
+                Whether to output time-averaged quantities (default False).
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
@@ -425,7 +427,7 @@ class Model:
 
         self.start_date = start_date
 
-        return self.resume(boundaries=boundaries, save_interval=save_interval, total_time=total_time)
+        return self.resume(boundaries=boundaries, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
 
     def predictions_to_xarray(self, predictions):
         """Converts the full prediction trajectory to a final xarray.Dataset.

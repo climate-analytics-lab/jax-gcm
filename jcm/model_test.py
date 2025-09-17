@@ -110,11 +110,11 @@ class TestModelUnit(unittest.TestCase):
 
         avg_model = Model(
             time_step=30,
-            output_averages=True,
         )
         avg_preds = avg_model.run(
             save_interval=2/24.,
             total_time=2/24.,
+            output_averages=True,
         )
 
         jtu.tree_map(
