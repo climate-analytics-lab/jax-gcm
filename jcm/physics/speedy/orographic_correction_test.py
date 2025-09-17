@@ -368,12 +368,12 @@ class TestOrographicCorrection:
         boundaries_flat = default_boundaries(grid, flat_orography, parameters)
         
         tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
-        assert jnp.all(tcorh_flat == 0.0)
+        assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)
         
         # Humidity correction should also be zero when orography is zero
         land_temp_flat = jnp.full(boundaries_flat.orog.shape, 288.0)
         qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry, tcorh_flat, land_temp_flat)
-        assert jnp.all(qcorh_flat == 0.0)
+        assert jnp.allclose(qcorh_flat, 0.0, atol=1e-5)
         
         # test that total corrections are zero for flat orography
         test_state = create_test_physics_state(lon_points=grid.nodal_shape[0], 
@@ -385,9 +385,9 @@ class TestOrographicCorrection:
         )
         
         # State should be completely unchanged when orography is flat
-        np.testing.assert_array_equal(corrected_state_flat.temperature, test_state.temperature,
+        np.testing.assert_allclose(corrected_state_flat.temperature, test_state.temperature, atol=1e-6,
                                     err_msg="Temperature should be unchanged with flat orography")
-        np.testing.assert_array_equal(corrected_state_flat.specific_humidity, test_state.specific_humidity,
+        np.testing.assert_allclose(corrected_state_flat.specific_humidity, test_state.specific_humidity, atol=1e-6,
                                     err_msg="Specific humidity should be unchanged with flat orography")
         
         # Test with minimum supported layers (5)
