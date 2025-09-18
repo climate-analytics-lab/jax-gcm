@@ -86,7 +86,7 @@ def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     
     # Add sinusoidal temperature variation
     temp_variation = 10.0 * jnp.sin(2 * jnp.pi * lon_grid / lon_points) * jnp.cos(jnp.pi * lat_grid / lat_points)
-    temperature = temperature + temp_variation[None, :, :]
+    temperature = temperature + temp_variation
     
     # Create humidity field (decreases with height)
     humidity = 0.01 * jnp.exp(-jnp.arange(layers)[:, None, None] / 3.0) * jnp.ones(shape)
@@ -256,8 +256,8 @@ class TestOrographicCorrection:
         # Check that corrections are applied correctly
         tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
         tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
-        expected_temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
-        
+        expected_temp_correction = tcorh * tcorv[:, None, None]
+
         actual_temp_correction = corrected_state.temperature - state.temperature
         # Allow for small numerical differences due to JAX/numpy precision
         np.testing.assert_allclose(actual_temp_correction, expected_temp_correction, rtol=1e-4, atol=2e-5)

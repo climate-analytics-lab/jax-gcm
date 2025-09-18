@@ -119,7 +119,7 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
     radang = grid.latitudes
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
+    return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
 
 def default_boundaries(
     grid: HorizontalGridTypes,
