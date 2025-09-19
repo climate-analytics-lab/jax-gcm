@@ -56,6 +56,7 @@ def get_large_scale_condensation_tendencies(
     
     rhref = parameters.condensation.rhlsc + parameters.condensation.drhlsc * (sig2 - 1.0)
     rhref = jnp.maximum(rhref, parameters.condensation.rhblsc)
+    rhref = rhref.at[0].set(2.) # Fix for top layer humidity blowup - set threshold to 200% RH
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array
@@ -63,10 +64,10 @@ def get_large_scale_condensation_tendencies(
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = negative_dqa_mask * dqa * rtlsc # allow condensation in top layer, but does not contribute latent heating / precip
+    dqlsc = negative_dqa_mask * dqa * rtlsc
     dtlsc = jnp.zeros_like(state.temperature).at[1:].set(
         negative_dqa_mask[1:] * tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2)
-    )
+    ) # Top layer condensation is only to prevent blowup, does not contribute heating or precip
 
     # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
     iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)

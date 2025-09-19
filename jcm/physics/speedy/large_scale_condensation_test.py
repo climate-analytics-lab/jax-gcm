@@ -9,7 +9,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 1, 1, 8
 
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies, p0, grav
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.params import Parameters
@@ -18,7 +18,6 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         geometry = Geometry.from_grid_shape((ix, il), kx)
         from jcm.boundaries import BoundaryData
         from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
-        from jcm.constants import p0, grav
 
     def test_get_large_scale_condensation_tendencies(self):
         xy = (ix,il)
