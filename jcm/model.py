@@ -319,7 +319,7 @@ class Model:
 
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
 
-        # Import units attribute associated with eacdh xarray output from units_table.csv
+        # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")
         units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
 
