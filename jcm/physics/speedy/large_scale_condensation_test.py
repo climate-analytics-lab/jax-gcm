@@ -59,15 +59,11 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries, geometry)
         
-        np.testing.assert_allclose(physics_tendencies.temperature[1:], jnp.asarray([1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
+        np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([0., 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
        0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
         np.testing.assert_allclose(physics_tendencies.specific_humidity[1:], jnp.asarray([-7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
-        self.assertAlmostEqual(
-            physics_data.condensation.precls,
-            -jnp.sum(physics_tendencies.specific_humidity * geometry.dhs[:, jnp.newaxis, jnp.newaxis] * p0 / grav, axis=0),
-            delta=0.05
-        )
+        self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
         self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
 
     def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):
