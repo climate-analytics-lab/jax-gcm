@@ -223,7 +223,6 @@ class Model:
                        boundaries: BoundaryData=None,
                        save_interval=10.0,
                        total_time=120.0,
-                       start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
     ) -> tuple[primitive_equations.State, Predictions]:
         """Runs the full simulation forward in time starting from given initial state.
         
@@ -236,8 +235,6 @@ class Model:
                 (float) interval at which to save model outputs in days (default 10.0).
             total_time:
                 (float) total time to run the model in days (default 120.0).
-            start_date:
-                (Timestamp) start date for the model run (default January 1, 2000).
     
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
@@ -248,8 +245,7 @@ class Model:
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
-        start_time = start_date.delta.days + (initial_modal_state.sim_time*units.second).to(units.day).m
-        times = start_time + save_interval * jnp.arange(outer_steps)
+        times = (initial_modal_state.sim_time*units.second).to(units.day).m + save_interval * jnp.arange(outer_steps)
 
         integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
             jax.checkpoint(step_fn),
@@ -285,11 +281,13 @@ class Model:
             initial_state=self._final_modal_state,
             boundaries=boundaries,
             save_interval=save_interval,
-            total_time=total_time,
-            start_date=self.start_date
+            total_time=total_time
         )
+        
         self._final_modal_state = final_modal_state
-        return predictions
+
+        # run_from_state returns predictions with times starting from the initial state sim_time, so we add start_date here
+        return predictions.replace(times=self.start_date.delta.days + predictions.times)
 
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
