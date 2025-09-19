@@ -63,8 +63,10 @@ def get_large_scale_condensation_tendencies(
 
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
-    dqlsc = negative_dqa_mask * dqa * rtlsc
-    dtlsc = dtlsc.at[1:].set(negative_dqa_mask[1:] * tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2))
+    dqlsc = negative_dqa_mask * dqa * rtlsc # allow condensation in top layer, but does not contribute latent heating / precip
+    dtlsc = jnp.zeros_like(state.temperature).at[1:].set(
+        negative_dqa_mask[1:] * tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2)
+    )
 
     # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
     iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)
