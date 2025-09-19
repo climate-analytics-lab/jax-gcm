@@ -237,7 +237,6 @@ class LandModelParameters:
     # Soil moisture parameters
     swcap: jnp.ndarray # Soil wetness at field capacity (volume fraction)
     swwil: jnp.ndarray # Soil wetness at wilting point  (volume fraction)
-    thrsh: jnp.ndarray# Threshold for land-sea mask definition (i.e. minimum fraction of either land or sea)
     # Model parameters (default values)
     depth_soil: jnp.ndarray # Soil layer depth (m)
     depth_lice: jnp.ndarray # Land-ice depth (m)
@@ -252,7 +251,6 @@ class LandModelParameters:
             sd2sc = jnp.array(60.0),
             swcap = jnp.array(0.30),
             swwil = jnp.array(0.17),
-            thrsh = jnp.array(0.1),
             depth_soil = jnp.array(1.0),
             depth_lice = jnp.array(5.0),
             tdland = jnp.array(40.0),

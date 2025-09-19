@@ -36,16 +36,17 @@ class SpeedyPhysics(Physics):
     write_output: bool
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
-    def __init__(self, write_output: bool=True,
+    def __init__(self,
+                 write_output: bool=True,
                  parameters: Parameters=Parameters.default(),
-                 sea_coupling_flag=0, checkpoint_terms=True) -> None:
+                 checkpoint_terms=True
+    ) -> None:
         """
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
             write_output (bool): Flag to indicate whether physics output should be written to predictions.
             parameters (Parameters): Parameters for the physics model.
-            sea_coupling_flag (int): Flag to indicate if sea coupling is enabled.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """
         self.write_output = write_output
@@ -58,7 +59,6 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics.speedy.surface_flux import get_surface_fluxes
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
-        from jcm.physics.speedy.land_model import couple_land_atm
         from jcm.physics.speedy.forcing import set_forcing
         from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
 
@@ -74,15 +74,11 @@ class SpeedyPhysics(Physics):
             get_surface_fluxes,
             get_upward_longwave_rad_fluxes,
             get_vertical_diffusion_tend,
-            couple_land_atm, # eventually couple sea model and ice model here
             # get_orographic_correction_tendencies # orographic corrections applied last
         ]
-        if sea_coupling_flag > 0:
-            physics_terms.insert(-3, get_surface_fluxes)
 
         static_argnums = {
             set_forcing: (2,),
-            couple_land_atm: (3,),
         }
 
         self.terms = physics_terms if not checkpoint_terms else [jax.checkpoint(term, static_argnums=static_argnums.get(term, ()) + (4,)) for term in physics_terms]

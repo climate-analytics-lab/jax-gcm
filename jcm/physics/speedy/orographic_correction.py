@@ -142,8 +142,8 @@ def compute_humidity_correction_horizontal(
     from jcm.physics.speedy.humidity import get_qsat
     
     # 1. Calculate surface temperature (land/sea mixture)
-    # tsfc = fmask_l * stl_am + fmask_s * sst_am
-    tsfc = boundaries.fmask_l * land_temperature + boundaries.fmask_s * boundaries.tsea
+    # tsfc = fmask * stl_am + (1 - fmask) * sst_am
+    tsfc = boundaries.fmask * land_temperature + (1.0 - boundaries.fmask) * boundaries.tsea
     
     # 2. Calculate reference temperature with orographic correction
     # tref = tsfc + corh (where corh is the temperature correction)
@@ -218,8 +218,8 @@ def get_orographic_correction_tendencies(
     qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
     
     # Apply corrections: field_corrected = field + horizontal * vertical
-    temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
-    humidity_correction = qcorh[None, :, :] * qcorv[:, None, None]
+    temp_correction = tcorh * tcorv[:, None, None]
+    humidity_correction = qcorh * qcorv[:, None, None]
     
     # In SPEEDY, these corrections are applied instantaneously every timestep before diffusion
     # To replicate this in JAX-GCM's tendency framework, we convert the instantaneous
@@ -283,8 +283,8 @@ def apply_orographic_corrections_to_state(
     qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
     
     # Apply corrections
-    temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
-    humidity_correction = qcorh[None, :, :] * qcorv[:, None, None]
+    temp_correction = tcorh * tcorv[:, None, None]
+    humidity_correction = qcorh * qcorv[:, None, None]
     
     corrected_temperature = state.temperature + temp_correction
     corrected_humidity = state.specific_humidity + humidity_correction

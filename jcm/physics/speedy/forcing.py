@@ -23,7 +23,7 @@ def set_forcing(
 
     # total surface albedo
     snowd_am = boundaries.snowd_am[:,:,day]
-    fmask_l = boundaries.fmask_l
+    fmask = boundaries.fmask
     sice_am = boundaries.sice_am[:,:,day]
 
     alb0 = boundaries.alb0
@@ -31,7 +31,7 @@ def set_forcing(
     snowc = jnp.minimum(1.0, snowd_am / parameters.land_model.sd2sc)
     alb_l = alb0 + snowc * (parameters.mod_radcon.albsn - alb0)
     alb_s = parameters.mod_radcon.albsea + sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
-    albsfc = alb_s + fmask_l * (alb_l - alb_s)
+    albsfc = alb_s + fmask * (alb_l - alb_s)
 
     iyear_ref = parameters.forcing.co2_year_ref
     ablco2 = ablco2_ref * jnp.exp(parameters.forcing.increase_co2 * del_co2 * (model_year + tyear - iyear_ref))
