@@ -48,10 +48,9 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
 
 def create_test_atmosphere(nlev=10):
     """Create a realistic test atmosphere"""
-    # Realistic atmospheric profile - pressure decreases with height
-    # Start from surface (high pressure) to TOA (low pressure)
-    pressure_levels = jnp.logspace(jnp.log10(100000.0), jnp.log10(1000.0), nlev)  # Pa (surface to TOA)
-    height_levels = jnp.linspace(0.0, 20000.0, nlev)  # m (surface to ~20km)
+    # Realistic atmospheric profile - pressure increases with index (TOA to surface)
+    pressure_levels = jnp.logspace(jnp.log10(100.0), jnp.log10(101325.0), nlev)
+    height_levels = jnp.linspace(20000.0, 0.0, nlev)  # m (~20km to surface)
     
     # Temperature profile with lapse rate
     temperature = 288.0 - 6.5e-3 * height_levels  # K (standard lapse rate)
@@ -87,7 +86,7 @@ def create_test_atmosphere(nlev=10):
 def test_prepare_radiation_state():
     """Test radiation state preparation"""
     atm = create_test_atmosphere(nlev=5)
-    cos_zenith = 0.5
+    cos_zenith = jnp.array(0.5)
     
     # Calculate layer thickness and air density as required by prepare_radiation_state
     from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
@@ -131,9 +130,9 @@ def test_prepare_radiation_state():
     assert jnp.all(rad_state.cloud_ice_path >= 0)
     
     # Check pressure interface ordering  
-    # The current implementation has pressure_levels[0] = surface, pressure_levels[-1] = TOA
-    # So interface 0 should be higher pressure than interface -1
-    assert rad_state.pressure_interfaces[0] > rad_state.pressure_interfaces[-1]  # Should be decreasing
+    # The current implementation has pressure_levels[0] = TOA, pressure_levels[-1] = surface
+    # So interface -1 should be higher pressure than interface 0
+    assert rad_state.pressure_interfaces[-1] > rad_state.pressure_interfaces[0]  # Should be increasing (TOA to surface)
     
     # Middle interfaces should be reasonable
     assert jnp.all(rad_state.pressure_interfaces >= 0)

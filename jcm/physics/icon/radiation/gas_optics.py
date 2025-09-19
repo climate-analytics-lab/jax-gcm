@@ -218,27 +218,27 @@ def ozone_absorption_sw(
     N_A = 6.022e23  # molecules/mol
     M_O3 = 48.0e-3  # kg/mol
     
-    # UV/visible band (200-700 nm) - Hartley-Huggins bands
-    sigma_ref_uv = 1.2e-17  # cm²/molecule at 273K for UV peak
-    a_uv = -3.5e-4  # Linear temperature coefficient (K⁻¹)
-    b_uv = 1.0e-6   # Quadratic temperature coefficient (K⁻²)
+    # UV/visible band (200-700 nm) - Hartley-Huggins-Chappuis bands
+    sigma_ref_uv_vis = 1.2e-21  # cm²/molecule at 273K for UV/Vis peak
+    a_uv_vis = -3.5e-4  # Linear temperature coefficient (K⁻¹)
+    b_uv_vis = 1.0e-6   # Quadratic temperature coefficient (K⁻²)
     
     dT = temperature - T_ref
-    temp_factor_uv = 1.0 + a_uv * dT + b_uv * dT**2
-    k_o3_uv = sigma_ref_uv * N_A / M_O3 * temp_factor_uv
+    temp_factor_uv_vis = 1.0 + a_uv_vis * dT + b_uv_vis * dT**2
+    k_o3_uv_vis = sigma_ref_uv_vis * N_A / M_O3 * temp_factor_uv_vis * 1e-4
     
-    # Near-infrared band (700-4000 nm) - Chappuis band
-    sigma_ref_nir = 4.5e-21  # cm²/molecule (much weaker than UV)
+    # Near-infrared band (700-4000 nm)
+    sigma_ref_nir = 4.5e-23  # cm²/molecule (much weaker than UV/Vis)
     temp_factor_nir = 1.0 + 1.5e-4 * (temperature - T_ref)
-    k_o3_nir = sigma_ref_nir * N_A / M_O3 * temp_factor_nir
+    k_o3_nir = sigma_ref_nir * N_A / M_O3 * temp_factor_nir * 1e-4
 
     k_o3_by_band = jnp.array([
-        k_o3_uv * 1.5,  # UV-C/B - highest O3 absorption
-        k_o3_uv,        # UV-A - strong O3 absorption
-        k_o3_uv * 0.8,  # Blue - moderate O3 absorption
-        k_o3_uv * 0.3,  # Green-Red - weak O3 absorption
-        k_o3_nir,       # Near-IR 1 - very weak
-        k_o3_nir * 0.5  # Near-IR 2 - minimal
+        k_o3_uv_vis * 1.5,  # UV-C/B - highest O3 absorption
+        k_o3_uv_vis,        # UV-A - strong O3 absorption
+        k_o3_uv_vis * 0.8,  # Blue - moderate O3 absorption
+        k_o3_uv_vis * 0.3,  # Green-Red - weak O3 absorption
+        k_o3_nir,           # Near-IR 1 - very weak
+        k_o3_nir * 0.5      # Near-IR 2 - minimal
     ])
 
     k_o3 = k_o3_by_band[band]
@@ -385,7 +385,7 @@ def gas_optical_depth_sw(
         k_o3 = ozone_absorption_sw(o3_vmr, temperature, band)
         
         # Total absorption
-        k_total = k_h2o + k_o3 # FIXME - ozone optical depth too large - disable k_o3 here if necessary
+        k_total = k_h2o + k_o3
         
         # Optical depth with slant path correction
         return k_total * air_density * layer_thickness * sec_zenith

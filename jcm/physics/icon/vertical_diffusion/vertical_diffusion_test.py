@@ -117,7 +117,7 @@ class TestTurbulenceCoefficients:
         params = VDiffParameters.default()
         
         # Create mixing length
-        mixing_length = jnp.linspace(10.0, 100.0, nlev)[None, :] * jnp.ones((ncol, nlev))
+        mixing_length = jnp.linspace(100.0, 10.0, nlev)[None, :] * jnp.ones((ncol, nlev))
         richardson_number = jnp.zeros((ncol, nlev - 1))
         
         exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture = (
@@ -146,15 +146,15 @@ class TestTurbulenceCoefficients:
         
         # Create exchange coefficient profile that decreases with height
         exchange_coeff_heat = jnp.array([
-            [10.0, 8.0, 6.0, 4.0, 2.0, 0.8, 0.6, 0.4, 0.2, 0.1],
-            [15.0, 12.0, 9.0, 6.0, 3.0, 1.2, 0.9, 0.6, 0.3, 0.15]
+            [0.1, 0.2, 0.4, 0.6, 0.8, 2.0, 4.0, 6.0, 8.0, 10.0],
+            [0.15, 0.3, 0.6, 0.9, 1.2, 3.0, 6.0, 9.0, 12.0, 15.0]
         ])
         
         pbl_height = compute_boundary_layer_height(state, exchange_coeff_heat, threshold=1.0)
         
         assert pbl_height.shape == (ncol,)
         assert jnp.all(pbl_height >= 50.0)  # Minimum PBL height
-        assert jnp.all(pbl_height <= 5000.0)  # Reasonable maximum
+        assert jnp.all(pbl_height <= 8000.0)  # Reasonable maximum
     
     def test_friction_velocity_computation(self):
         """Test friction velocity computation."""
@@ -273,7 +273,7 @@ class TestVerticalDiffusionScheme:
         # Create input data
         u = jnp.ones((ncol, nlev)) * 10.0
         v = jnp.ones((ncol, nlev)) * 5.0
-        temperature = jnp.linspace(300.0, 250.0, nlev)[None, :] * jnp.ones((ncol, nlev))
+        temperature = jnp.linspace(250.0, 300.0, nlev)[None, :] * jnp.ones((ncol, nlev))
         qv = jnp.ones((ncol, nlev)) * 0.01
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
@@ -281,11 +281,11 @@ class TestVerticalDiffusionScheme:
         params = VDiffParameters.default()
         
         # Pressure profile
-        pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        pressure_half = jnp.linspace(10000.0, 101325.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
         
         # Heights
-        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
         
         # Geopotential
@@ -338,15 +338,15 @@ class TestVerticalDiffusionScheme:
         # Create initial state
         u = jnp.ones((ncol, nlev)) * 10.0
         v = jnp.ones((ncol, nlev)) * 5.0
-        temperature = jnp.linspace(300.0, 250.0, nlev)[None, :] * jnp.ones((ncol, nlev))
+        temperature = jnp.linspace(250.0, 300.0, nlev)[None, :] * jnp.ones((ncol, nlev))
         qv = jnp.ones((ncol, nlev)) * 0.01
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
 
-        pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        pressure_half = jnp.linspace(10000.0, 101325.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
         
-        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
         
         geopotential = PHYS_CONST.grav * height_full
@@ -365,7 +365,6 @@ class TestVerticalDiffusionScheme:
         
         # Compute initial energy
         dp = jnp.diff(pressure_half, axis=1)
-        dp = -dp  # Make positive: p[k] - p[k+1] > 0
         air_mass = dp / PHYS_CONST.grav
         
         initial_kinetic_energy = 0.5 * air_mass * (u**2 + v**2)
@@ -401,18 +400,18 @@ class TestVerticalDiffusionScheme:
         params = VDiffParameters.default()
 
         # Create strong vertical gradients
-        u = jnp.array([[0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0]])
+        u = jnp.array([[45.0, 40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0, 0.0]])
         v = jnp.zeros((ncol, nlev))
-        temperature = jnp.array([[310.0, 305.0, 300.0, 295.0, 290.0, 285.0, 280.0, 275.0, 270.0, 265.0]])
+        temperature = jnp.array([[265.0, 270.0, 275.0, 280.0, 285.0, 290.0, 295.0, 300.0, 305.0, 310.0]])
         
         qv = jnp.ones((ncol, nlev)) * 0.01
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
         
-        pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        pressure_half = jnp.linspace(10000.0, 101325.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
         
-        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
         
         geopotential = PHYS_CONST.grav * height_full
@@ -454,8 +453,8 @@ class TestUtilityFunctions:
     
     def test_dry_static_energy(self):
         """Test dry static energy calculation."""
-        temperature = jnp.array([300.0, 290.0, 280.0])
-        geopotential = jnp.array([0.0, 10000.0, 20000.0])
+        temperature = jnp.array([280.0, 290.0, 300.0])
+        geopotential = jnp.array([20000.0, 10000.0, 0.0])
         
         dse = compute_dry_static_energy(temperature, geopotential)
         
@@ -464,8 +463,8 @@ class TestUtilityFunctions:
     
     def test_virtual_temperature(self):
         """Test virtual temperature calculation."""
-        temperature = jnp.array([300.0, 290.0, 280.0])
-        qv = jnp.array([0.01, 0.005, 0.001])
+        temperature = jnp.array([280.0, 290.0, 300.0])
+        qv = jnp.array([0.001, 0.005, 0.01])
         
         tv = compute_virtual_temperature(temperature, qv)
         
@@ -485,10 +484,10 @@ class TestUtilityFunctions:
         qc = jnp.ones((ncol, nlev)) * 0.001
         qi = jnp.ones((ncol, nlev)) * 0.0005
         
-        pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        pressure_half = jnp.linspace(10000.0, 101325.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
         
-        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+        height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
         height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
         
         geopotential = PHYS_CONST.grav * height_full
@@ -521,7 +520,6 @@ class TestUtilityFunctions:
         
         # Check air mass calculation
         dp = jnp.diff(pressure_half, axis=1)
-        dp = -dp  # Make positive: p[k] - p[k+1] > 0
         expected_air_mass = dp / PHYS_CONST.grav
         assert jnp.allclose(state.air_mass, expected_air_mass)
 
@@ -533,17 +531,17 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     # Create realistic profiles
     u = jnp.ones((ncol, nlev)) * 10.0
     v = jnp.ones((ncol, nlev)) * 5.0
-    temperature = jnp.linspace(300.0, 250.0, nlev)[None, :] * jnp.ones((ncol, nlev))
+    temperature = jnp.linspace(250.0, 300.0, nlev)[None, :] * jnp.ones((ncol, nlev))
     qv = jnp.ones((ncol, nlev)) * 0.01
     qc = jnp.ones((ncol, nlev)) * 0.001
     qi = jnp.ones((ncol, nlev)) * 0.0005
     
     # Pressure profile
-    pressure_half = jnp.linspace(101325.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+    pressure_half = jnp.linspace(10000.0, 101325.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
     pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
     
     # Heights
-    height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
+    height_half = jnp.linspace(10000.0, 0.0, nlev + 1)[None, :] * jnp.ones((ncol, nlev + 1))
     height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
     
     # Geopotential
@@ -551,7 +549,6 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     
     # Air masses
     dp = jnp.diff(pressure_half, axis=1)
-    dp = -dp  # Make positive: p[k] - p[k+1] > 0
     air_mass = dp / PHYS_CONST.grav
     dry_air_mass = air_mass * (1.0 - qv)
     

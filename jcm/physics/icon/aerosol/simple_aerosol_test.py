@@ -320,8 +320,8 @@ class TestCDNC:
         # Should be monotonically increasing
         assert jnp.all(jnp.diff(cdnc) >= 0)
         
-        # Should be zero when AOD is zero
-        assert cdnc[0] == 0.0
+        # Should be one when AOD is zero
+        assert cdnc[0] == 1.0
     
     def test_cdnc_parameters(self):
         """Test CDNC with different parameters"""

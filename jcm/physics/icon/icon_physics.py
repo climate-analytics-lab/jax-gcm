@@ -511,7 +511,7 @@ def _prepare_common_physics_state(
         height_full=height_levels,
         height_half=height_half,
         relative_humidity=rel_humidity,
-        normalized_surface_pressure=surface_pressure,
+        surface_pressure=surface_pressure,
         air_density=rho,
         layer_thickness=dz_full,
     )
