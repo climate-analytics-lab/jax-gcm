@@ -157,7 +157,7 @@ def initialize_boundaries(
     tsea = jnp.asarray(ds["sst"])
 
     return BoundaryData.zeros(
-        nodal_shape=fmask.shape,
-        fmask=fmask, orog=orog, phis0=phis0, alb0=alb0, sice_am=sice_am,
+        nodal_shape=fmask.shape, fmask=fmask,
+        orog=orog, phis0=phis0, alb0=alb0, sice_am=sice_am,
         snowd_am=snowd_am, soilw_am=soilw_am, tsea=tsea
     )
