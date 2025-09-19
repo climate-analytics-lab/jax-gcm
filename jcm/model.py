@@ -17,6 +17,7 @@ from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.diffusion import DiffusionFilter
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 import pandas as pd
+from functools import partial
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -129,7 +130,7 @@ class Model:
 
         # The following fields are set upon calling model.run
         self.initial_nodal_state = None
-        self.start_date = None
+        self.start_date = Timestamp.from_datetime(datetime(2000, 1, 1)) # need to populate this so that _date_from_sim_time works
 
         # spectral space primitive_equations.State updated by model.run and model.resume
         self._final_modal_state = None
@@ -218,6 +219,18 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
+    @partial(jax.jit, static_argnums=(0, 1, 2)) # Will recompile if outer_steps or inner_steps change, but will not see changes to model fields
+    def _integrate(self, outer_steps, inner_steps, boundaries, initial_modal_state):
+        step_fn = self._create_step_fn(boundaries)
+        integrate_fn = dinosaur.time_integration.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries)
+        )
+        return integrate_fn(initial_modal_state)
+
     def run_from_state(self,
                        initial_state: PhysicsState | primitive_equations.State = None,
                        boundaries: BoundaryData=None,
@@ -225,6 +238,7 @@ class Model:
                        total_time=120.0,
     ) -> tuple[primitive_equations.State, Predictions]:
         """Runs the full simulation forward in time starting from given initial state.
+        Alternative to model.run / model.resume which does not read/write model's internal current state.
         
         Args:
             initial_state:
@@ -241,21 +255,20 @@ class Model:
         """
         initial_modal_state = self._prepare_initial_modal_state(initial_state) if isinstance(initial_state, PhysicsState) else initial_state
         boundaries = boundaries or default_boundaries(self.coords.horizontal, self.orography)
-        step_fn = self._create_step_fn(boundaries)
-
+        
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
-        times = (initial_modal_state.sim_time*units.second).to(units.day).m + save_interval * jnp.arange(outer_steps)
+        times = self.start_date.delta.days \
+                + (initial_modal_state.sim_time*units.second).to(units.day).m \
+                + save_interval * jnp.arange(outer_steps)
 
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            jax.checkpoint(step_fn),
-            outer_steps=outer_steps,
-            inner_steps=inner_steps,
-            start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries),
-        ))
+        final_modal_state, predictions = self._integrate(
+            outer_steps,
+            inner_steps,
+            boundaries,
+            initial_modal_state
+        )
 
-        final_modal_state, predictions = integrate_fn(initial_modal_state)
         return final_modal_state, predictions.replace(times=times)
 
     def resume(self,
@@ -285,9 +298,7 @@ class Model:
         )
         
         self._final_modal_state = final_modal_state
-
-        # run_from_state returns predictions with times starting from the initial state sim_time, so we add start_date here
-        return predictions.replace(times=self.start_date.delta.days + predictions.times)
+        return predictions
 
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
