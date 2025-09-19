@@ -142,8 +142,8 @@ def compute_humidity_correction_horizontal(
     from jcm.physics.speedy.humidity import get_qsat
     
     # 1. Calculate surface temperature (land/sea mixture)
-    # tsfc = fmask_l * stl_am + fmask_s * sst_am
-    tsfc = boundaries.fmask_l * land_temperature + boundaries.fmask_s * boundaries.tsea
+    # tsfc = fmask * stl_am + (1 - fmask) * sst_am
+    tsfc = boundaries.fmask * land_temperature + (1.0 - boundaries.fmask) * boundaries.tsea
     
     # 2. Calculate reference temperature with orographic correction
     # tref = tsfc + corh (where corh is the temperature correction)

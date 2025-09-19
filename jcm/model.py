@@ -4,7 +4,6 @@ import tree_math
 from numpy import timedelta64
 from typing import Any
 from datetime import datetime
-from xarray import Dataset
 import dinosaur
 from dinosaur.scales import SI_SCALE, units
 from dinosaur.time_integration import ExplicitODE
@@ -12,12 +11,11 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import sigma_layer_boundaries, Geometry
-from jcm.boundaries import BoundaryData, default_boundaries, populate_parameter_dependent_boundaries
-from jcm.date import DateData, Timestamp, Timedelta
+from jcm.date import DateData, Timedelta, Timestamp
+from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
-from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.physics.speedy.params import Parameters
 from jcm.diffusion import DiffusionFilter
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 import pandas as pd
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
@@ -172,15 +170,6 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def _prepare_boundaries(self, boundaries: BoundaryData=None) -> BoundaryData:
-        params_for_boundaries = (self.physics.parameters
-                                 if (hasattr(self.physics, 'parameters') and isinstance(self.physics.parameters, Parameters))
-                                     else Parameters.default())
-        
-        if boundaries is None:
-            return default_boundaries(self.coords.horizontal, self.orography, params_for_boundaries)
-        return populate_parameter_dependent_boundaries(boundaries, params_for_boundaries, self.dt_si.m)
-
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
             model_time=self.start_date + Timedelta(seconds=sim_time),
@@ -247,7 +236,7 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        boundaries = self._prepare_boundaries(boundaries)
+        boundaries = boundaries or default_boundaries(self.coords.horizontal, self.orography)
         step_fn = self._create_step_fn(boundaries)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
