@@ -38,7 +38,7 @@ def get_surface_fluxes(
     phi : 3D array
         - Geopotential, state.geopotential
     phi0 : 2D array
-        - Surface geopotential, physics_data.surface_flux.phi0
+        - Surface geopotential, boundaries.orog * grav
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
     tsea : 2D array
@@ -60,21 +60,19 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = boundaries.fmask_l
+    fmask = boundaries.fmask
 
     lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = boundaries.phi0 # surface geopotentail
+    phi0 = boundaries.orog * grav # surface geopotential
     tsea = boundaries.tsea
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
     alb_s = physics_data.mod_radcon.alb_s
-
-    forog = boundaries.forog
 
     # Initialize variables
     esbc  = parameters.mod_radcon.emisfc*sbc
@@ -150,6 +148,7 @@ def get_surface_fluxes(
         denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
 
         # 2.3 Computing Wind Stress
+        forog = get_orog_land_sfc_drag(boundaries.phis0, parameters.surface_flux.hdrag)
         cdldv = parameters.surface_flux.cdl * denvvs[:, :, 0] * forog
         ustr = ustr.at[:, :, 0].set(-cdldv * ua[kx-1])
         vstr = vstr.at[:, :, 0].set(-cdldv * va[kx-1])
@@ -304,7 +303,7 @@ def get_surface_fluxes(
     return physics_tendencies, physics_data
 
 @jit
-def set_orog_land_sfc_drag(phis0, parameters):
+def get_orog_land_sfc_drag(phis0, hdrag):
     """
     Parameters
     ----------
@@ -312,7 +311,7 @@ def set_orog_land_sfc_drag(phis0, parameters):
         - Array used for calculating the forog
     """
 
-    rhdrag = 1/(grav*parameters.surface_flux.hdrag)
+    rhdrag = 1/(grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))
 
