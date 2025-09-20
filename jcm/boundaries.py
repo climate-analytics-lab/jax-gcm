@@ -107,7 +107,7 @@ def default_boundaries(
         orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0
     )
 
-def initialize_boundaries(
+def boundaries_from_file(
     filename: str,
     grid: HorizontalGridTypes,
     truncation_number=None,
