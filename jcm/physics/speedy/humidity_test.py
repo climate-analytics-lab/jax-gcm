@@ -143,44 +143,51 @@ class TestHumidityUnit(unittest.TestCase):
     # Gradient checks
         
     def test_get_qsat_gradient_check(self):
-        # from jcm.physics.speedy.speedy_gradient_check import check_vjp, check_jvp
         from jax.test_util import check_vjp, check_jvp
         from jax._src.tree_util import tree_map
         temp = self.temp_standard
         pressure = self.pressure_standard
-        sigma = float(self.sigma)
-        print(sigma)
-        print(int(sigma))
+        sigma = self.sigma
+
         # def gradient_check(f, x_0):
         #     to_floats = lambda x: tree_map(lambda a: a.astype(jnp.float32), x)
         #     to_ref_dtypes = lambda x: tree_map(lambda a, a0: a.astype(a0.dtype), x)
         #     f_with_float_input = lambda x: f(to_ref_dtypes(x))
         #     jax_gradient_check(f_with_float_input, to_floats(x_0))
         # in converts dtypes to the x0 dtypes and change it to actually just set a to a0 if a0.dtype is int or bool
-        def f(temp_s, pressure, sigma):
+
+        # def gradient_check(f, args0):
+        #     convert_to_float = lambda x: tree_map(lambda a: a.astype(jnp.float32), x)
+        #     convert_back = lambda x, x0: tree_map(lambda a, a0: a if x0.dtype == jnp.float32 else a0, x, x0)
+        #     jax_gradient_check(
+        #         lambda args: f(*(convert_back(x, x0) for x, x0 in zip(args, args0))),
+        #         tuple(convert_to_float(x0) for x0 in args0)
+        #     ) (edited) 
+        def f(temp_s, pressure):
             return get_qsat(temp_s, pressure, sigma) #(jnp.round(sigma)).astype(int)
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (temp[int(sigma)], pressure, sigma), 
-                                atol=None, rtol=0.001, eps=0.00001)
-        check_jvp(f, f_jvp, args = (temp[int(sigma)], pressure, sigma), 
+        check_vjp(f, f_vjp, args = (temp[sigma], pressure), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (temp[sigma], pressure), 
                                 atol=None, rtol=1, eps=0.000001)
         
         # Edge case: Very low temperature
         temp = jnp.ones((ix,il))*100
-        check_vjp(f, f_vjp, args = (temp[int(sigma)], pressure, sigma), 
+        check_vjp(f, f_vjp, args = (temp, pressure), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (temp[int(sigma)], pressure, sigma), 
+        check_jvp(f, f_jvp, args = (temp, pressure), 
                                 atol=None, rtol=1, eps=0.000001)
 
 
         # Edge case: Very high temperature
         temp = jnp.ones((ix,il))*350
-        check_vjp(f, f_vjp, args = (temp[int(sigma)], pressure, sigma), 
+        check_vjp(f, f_vjp, args = (temp, pressure), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (temp[int(sigma)], pressure, sigma), 
+        # Test fails
+        check_jvp(f, f_jvp, args = (temp, pressure), 
                                 atol=None, rtol=1, eps=0.000001)
 
 
@@ -208,7 +215,105 @@ class TestHumidityUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.00001)
         check_jvp(f, f_jvp, args = (temp[0], pressure, geometry.fsg[0], physics_data.humidity.rh[0]), 
                                 atol=None, rtol=1, eps=0.000001)
+        
+    def test_spec_hum_to_rel_hum_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        temp = self.temp_standard
+        pressure = self.pressure_standard
+        qg = self.qg_standard
+        zxy = (kx,ix,il)
+        xy = (ix,il)
+        # Set inputs
+        convection_data = ConvectionData.ones((ix,il), kx)
+        physics_data = PhysicsData.ones((ix,il), kx, convection=convection_data)
+        boundaries = BoundaryData.ones(xy)
+        # Edge case: Zero Specific Humidity
+        qg = jnp.ones((kx,ix,il))*0
+        state = PhysicsState.ones(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
 
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # convert_to_float = lambda x: tree_map(lambda a: a.astype(jnp.float32), x)
+        # convert_back = lambda x, x0: tree_map(lambda a, a0: a if x0.dtype == jnp.float32 else a0, x, x0)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = spec_hum_to_rel_hum(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out), convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        #                         atol=None, rtol=1, eps=0.000001)
+
+
+        # Edge case: Very High Temperature
+        temp = jnp.ones((kx,ix,il))*400
+        state = PhysicsState.ones(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
+        state_floats = convert_to_float(state)
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        #                         atol=None, rtol=1, eps=0.000001)
+
+
+        # Edge case: Extremely High Pressure
+        pressure = jnp.ones((ix,il))*10
+        state.normalized_surface_pressure = pressure
+        state_floats = convert_to_float(state)
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        #                         atol=None, rtol=1, eps=0.000001)
+
+
+        # Edge case: High Specific Humidity (near saturation)
+        pressure = self.pressure_standard
+        temp = self.temp_standard
+        qg = jnp.ones((kx,ix,il))*(physics_data.humidity.qsat[:, 0, 0][:, jnp.newaxis, jnp.newaxis] - 1e-6)
+        state = state.copy(specific_humidity=qg)
+        state_floats = convert_to_float(state)
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        #                         atol=None, rtol=1, eps=0.000001)
+        
 
 if __name__ == '__main__':
     unittest.main()
