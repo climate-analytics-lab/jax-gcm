@@ -235,3 +235,121 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[6,0,0], test_ttend[6], places=2)
         self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2)
+
+
+    # # Gradient checks
+    def test_diagnose_convection_varying_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        se = cp * ta + phi
+
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+        
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(ps, se, qa, qsat, parameters_f, boundaries_f,geometry_f):
+            iptop, qdif = diagnose_convection(ps, se, qa, qsat, 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(iptop), convert_to_float(qdif)
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+
+
+    def test_get_convection_tendencies_varying_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
+        state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        boundaries = BoundaryData.zeros((ix,il))
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out), convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        #                         atol=None, rtol=1, eps=0.00001)
+
+
+    
