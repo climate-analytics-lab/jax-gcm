@@ -321,11 +321,10 @@ class Model:
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")
-        units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
-
-        for var, unit in units_from_csv.items():
+        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
             if var in pred_ds:
                 pred_ds[var].attrs["units"] = unit
+                pred_ds[var].attrs["description"] = desc
         
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
