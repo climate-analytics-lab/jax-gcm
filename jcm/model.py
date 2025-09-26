@@ -21,7 +21,6 @@ from jcm.date import DateData, Timedelta, Timestamp
 from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.physics.speedy.params import Parameters
 from jcm.utils import stack_trees
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
