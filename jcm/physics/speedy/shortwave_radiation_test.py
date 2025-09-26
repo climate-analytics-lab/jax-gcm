@@ -119,292 +119,506 @@ class TestSolar(unittest.TestCase):
         check_jvp(f, f_jvp, args = (tyear, csol), 
                                 atol=None, rtol=1, eps=0.000001)
         
-# class TestShortWaveRadiation(unittest.TestCase):
+class TestShortWaveRadiation(unittest.TestCase):
 
-#     def setUp(self):
-#         global ix, il, kx
-#         ix, il, kx = 96, 48, 8
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
 
-#         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-#                PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
-#         from jcm.boundaries import BoundaryData
-#         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
-#         from jcm.physics_interface import PhysicsState, PhysicsTendency
-#         from jcm.physics.speedy.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
-#         from jcm.physics.speedy.physical_constants import epssw, solc
-#         from jcm.physics.speedy.params import Parameters
-#         from jcm.geometry import Geometry
-#         parameters = Parameters.default()
-#         boundaries = BoundaryData.zeros((ix, il))
-#         geometry = Geometry.from_grid_shape((ix, il), kx)
+        global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
+               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
+        from jcm.boundaries import BoundaryData
+        from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
+        from jcm.physics.speedy.physical_constants import epssw, solc
+        from jcm.physics.speedy.params import Parameters
+        from jcm.geometry import Geometry
+        parameters = Parameters.default()
+        boundaries = BoundaryData.zeros((ix, il))
+        geometry = Geometry.from_grid_shape((ix, il), kx)
 
-#     def test_shortwave_radiation(self):
-#         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
-#         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-#         rh = qa/qsat
-#         geopotential = jnp.arange(7, -1, -1, dtype = float)
-#         se = .1*geopotential
+    def test_shortwave_radiation(self):
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
 
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
-#         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
-#         psa = jnp.ones(xy)
-#         precnv = -1.0 * np.ones(xy)
-#         precls = 4.0 * np.ones(xy)
-#         iptop = 8 * np.ones(xy, dtype=int)
-#         fmask = .7 * np.ones(xy)
+        psa = jnp.ones(xy)
+        precnv = -1.0 * np.ones(xy)
+        precls = 4.0 * np.ones(xy)
+        iptop = 8 * np.ones(xy, dtype=int)
+        fmask = .7 * np.ones(xy)
 
-#         surface_flux = SurfaceFluxData.zeros(xy)
-#         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-#         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
-#         condensation = CondensationData.zeros(xy, kx, precls=precls)
-#         sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
-#         date_data = DateData.zeros()
-#         date_data.tyear = 0.6
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
 
-#         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-#         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-#         boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
-#         _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
-#         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
-#         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
+        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
         
-#         np.testing.assert_allclose(physics_data.shortwave_rad.rsds[0, :], [
-#             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
-#             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
-#             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
-#             225.60832278, 231.37096758, 236.18142325, 240.03003908, 242.91081466, 244.82085417, 245.76014002,
-#             245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
-#             219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
-#             186.12903619, 185.31120169, 183.42677496
-#         ], atol=1e-4)
+        np.testing.assert_allclose(physics_data.shortwave_rad.rsds[0, :], [
+            0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
+            67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
+            160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
+            225.60832278, 231.37096758, 236.18142325, 240.03003908, 242.91081466, 244.82085417, 245.76014002,
+            245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
+            219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
+            186.12903619, 185.31120169, 183.42677496
+        ], atol=1e-4)
 
-#         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
-#             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
-#             67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
-#             160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
-#             225.60832278, 231.37096758, 236.18142325, 240.03003908, 242.91081466, 244.82085417, 245.76014002,
-#             245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
-#             219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
-#             186.12903619, 185.31120169, 183.42677496
-#         ], atol=1e-4))
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
+            0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
+            67.22801389, 80.95422179, 94.79448489, 108.58701854, 122.18603817, 135.46087123, 148.29548103,
+            160.58828119, 172.25138545, 183.21006299, 193.40177528, 202.77492961, 211.28786499, 218.90753726,
+            225.60832278, 231.37096758, 236.18142325, 240.03003908, 242.91081466, 244.82085417, 245.76014002,
+            245.7315415, 244.74127921, 242.79984604, 239.92358203, 236.13704304, 231.47654032, 225.99538369,
+            219.77196135, 212.92314683, 205.62864786, 198.18231101, 191.12290959, 185.73622544, 185.85603776,
+            186.12903619, 185.31120169, 183.42677496
+        ], atol=1e-4))
 
-#         self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], [
-#             0., 0., 0., 0., 1.93599586, 13.84635135, 29.51685016, 46.89146027, 65.11718871, 83.73023451,
-#             102.44168978, 121.0533787, 139.41874296, 157.42199198, 174.96630874, 191.96679879, 208.34607385,
-#             224.03188495, 238.95538028, 253.05068109, 266.25471774, 278.50725748, 289.75158834, 299.9350031,
-#             309.0094909, 316.93257921, 323.66789347, 329.1860073, 333.46512965, 336.4917604, 338.26143437,
-#             338.77936105, 338.06122342, 336.13410495, 333.03776805, 328.82654748, 323.57244264, 317.37036698,
-#             310.3474896, 302.680774, 294.63184471, 286.62427534, 279.44504545, 275.01597523, 279.19413113,
-#             284.20954594, 288.1834261, 291.08877534
-#         ], atol=1e-4))
+        self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], [
+            0., 0., 0., 0., 1.93599586, 13.84635135, 29.51685016, 46.89146027, 65.11718871, 83.73023451,
+            102.44168978, 121.0533787, 139.41874296, 157.42199198, 174.96630874, 191.96679879, 208.34607385,
+            224.03188495, 238.95538028, 253.05068109, 266.25471774, 278.50725748, 289.75158834, 299.9350031,
+            309.0094909, 316.93257921, 323.66789347, 329.1860073, 333.46512965, 336.4917604, 338.26143437,
+            338.77936105, 338.06122342, 336.13410495, 333.03776805, 328.82654748, 323.57244264, 317.37036698,
+            310.3474896, 302.680774, 294.63184471, 286.62427534, 279.44504545, 275.01597523, 279.19413113,
+            284.20954594, 288.1834261, 291.08877534
+        ], atol=1e-4))
 
-#         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
-#             0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
-#             4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
-#             8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
-#             10.93580878, 11.14449603, 11.31928937, 11.45886328, 11.56266179, 11.63097744, 11.66499303,
-#             11.66678236, 11.63927325, 11.58618806, 11.51198779, 11.42187291, 11.32194103, 11.2197034,
-#             11.12539961, 11.05524554, 11.04026698, 11.15996872, 11.66726167, 12.26006372, 12.85902805,
-#             13.45775005
-#         ], atol=1e-4))
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
+            0., 0., 0., 0., 0.10687137, 0.73259064, 1.49614688, 2.27724268, 3.03175176, 3.74177215,
+            4.40170949, 5.01239461, 5.57803226, 6.10437168, 6.59753382, 7.06324094, 7.5063241, 7.93045047,
+            8.33799935, 8.73007726, 9.10661781, 9.46654098, 9.80796542, 10.12843323, 10.42514601, 10.69520145,
+            10.93580878, 11.14449603, 11.31928937, 11.45886328, 11.56266179, 11.63097744, 11.66499303,
+            11.66678236, 11.63927325, 11.58618806, 11.51198779, 11.42187291, 11.32194103, 11.2197034,
+            11.12539961, 11.05524554, 11.04026698, 11.15996872, 11.66726167, 12.26006372, 12.85902805,
+            13.45775005
+        ], atol=1e-4))
 
-#         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
-#             3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
-#         ], atol=1e-4))
+        self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
+            3.82887045, 7.81598669, 14.17718547, 5.65627818, 7.80939064, 12.48949685, 8.5056334, 5.21519786,
+        ], atol=1e-4))
 
-#     def test_output_shapes(self):
-#         from datetime import datetime
-#         from jcm.date import Timestamp
-#         # Ensure that the output shapes are correct
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         # Provide a date that is equivalent to tyear=0.25
-#         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-#         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-#         state = PhysicsState.zeros(zxy)
-#         boundaries = BoundaryData.zeros(xy)
+    def test_output_shapes(self):
+        from datetime import datetime
+        from jcm.date import Timestamp
+        # Ensure that the output shapes are correct
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        # Provide a date that is equivalent to tyear=0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        state = PhysicsState.zeros(zxy)
+        boundaries = BoundaryData.zeros(xy)
 
-#         new_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        new_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
         
-#         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
-#         self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
-#         self.assertEqual(new_data.shortwave_rad.ozone.shape, (ix, il))
-#         self.assertEqual(new_data.shortwave_rad.stratz.shape, (ix, il))
-#         self.assertEqual(new_data.shortwave_rad.zenit.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.ozone.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.stratz.shape, (ix, il))
+        self.assertEqual(new_data.shortwave_rad.zenit.shape, (ix, il))
 
-#     def test_solar_radiation_values(self):
-#         # Test that the solar radiation values are computed correctly
-#         from datetime import datetime
-#         from jcm.date import Timestamp
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         # Provide a date that is equivalent to tyear=0.25
-#         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-#         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+    def test_solar_radiation_values(self):
+        # Test that the solar radiation values are computed correctly
+        from datetime import datetime
+        from jcm.date import Timestamp
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        # Provide a date that is equivalent to tyear=0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
-#         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
        
-#         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
 
-#         topsr = solar(date_data.tyear, geometry=geometry)
-#         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
+        topsr = solar(date_data.tyear, geometry=geometry)
+        self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
-#     def test_polar_night_cooling(self):
-#         # Ensure polar night cooling behaves correctly
-#         from datetime import datetime
-#         from jcm.date import Timestamp
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         # Provide a date that is equivalent to tyear=0.25
-#         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-#         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+    def test_polar_night_cooling(self):
+        # Ensure polar night cooling behaves correctly
+        from datetime import datetime
+        from jcm.date import Timestamp
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        # Provide a date that is equivalent to tyear=0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
-#         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         
-#         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
 
-#         fs0 = 6.0
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
-#         self.assertTrue(jnp.all(jnp.maximum(fs0 - physics_data.shortwave_rad.fsol, 0) == physics_data.shortwave_rad.stratz))
+        fs0 = 6.0
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
+        self.assertTrue(jnp.all(jnp.maximum(fs0 - physics_data.shortwave_rad.fsol, 0) == physics_data.shortwave_rad.stratz))
 
-#     def test_ozone_absorption(self):
-#         # Check that ozone absorption is being calculated correctly
-#         from datetime import datetime
-#         from jcm.date import Timestamp
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
+    def test_ozone_absorption(self):
+        # Check that ozone absorption is being calculated correctly
+        from datetime import datetime
+        from jcm.date import Timestamp
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
 
-#         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-#         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-#         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
 
-#         # Expected form for ozone based on the provided formula
-#         flat2 = 1.5 * geometry.sia**2 - 0.5
-#         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
-#         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
+        # Expected form for ozone based on the provided formula
+        flat2 = 1.5 * geometry.sia**2 - 0.5
+        expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
+        np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
-#     def test_random_input_consistency(self):
-#         from datetime import datetime
-#         from jcm.date import Timestamp
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         # Provide a date that is equivalent to tyear=0.25
-#         date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
-#         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
-#         state = PhysicsState.zeros(zxy)
-#         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+    def test_random_input_consistency(self):
+        from datetime import datetime
+        from jcm.date import Timestamp
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        # Provide a date that is equivalent to tyear=0.25
+        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        state = PhysicsState.zeros(zxy)
+        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
         
-#         # Ensure outputs are consistent and within expected ranges
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.ozupp >= 0))
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.ozone >= 0))
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
-#         self.assertTrue(jnp.all(physics_data.shortwave_rad.zenit >= 0))
+        # Ensure outputs are consistent and within expected ranges
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.ozupp >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.ozone >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
+        self.assertTrue(jnp.all(physics_data.shortwave_rad.zenit >= 0))
         
-#     def test_get_zonal_average_fields_gradients_isnan(self):
-#         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
+    def test_get_zonal_average_fields_gradients_isnan(self):
+        """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
 
-#         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
-#         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-#         rh = qa/qsat
-#         geopotential = jnp.arange(7, -1, -1, dtype = float)
-#         se = .1*geopotential
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
 
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
-#         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
-#         psa = jnp.ones(xy)
-#         precnv = -1.0 * jnp.ones(xy)
-#         precls = 4.0 * jnp.ones(xy)
-#         iptop = 8 * jnp.ones(xy, dtype=int)
-#         fmask = .7 * jnp.ones(xy)
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
 
-#         surface_flux = SurfaceFluxData.zeros(xy)
-#         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-#         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
-#         condensation = CondensationData.zeros(xy, kx, precls=precls)
-#         sw_data = SWRadiationData.zeros(xy, kx)
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx)
 
-#         date_data = DateData.zeros()
-#         date_data.tyear = 0.6
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
 
-#         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-#         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
 
-#         # Calculate gradient
-#         _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries, geometry)
-#         datas = PhysicsData.ones(xy,kx)
-#         df_dstates, df_ddatas, _, _ = f_vjp(datas)
+        # Calculate gradient
+        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries, geometry)
+        datas = PhysicsData.ones(xy,kx)
+        df_dstates, df_ddatas, _, _ = f_vjp(datas)
 
-#         self.assertFalse(df_ddatas.isnan().any_true())
-#         self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
 
-#     def test_get_shortwave_rad_fluxes_gradients_isnan_ones(self):
-#         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
-#         state =PhysicsState.ones(zxy)
-#         boundaries = BoundaryData.ones(xy)
-#         physics_data.shortwave_rad.compute_shortwave = True
+    def test_get_shortwave_rad_fluxes_gradients_isnan_ones(self):
+        """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(zxy)
+        boundaries = BoundaryData.ones(xy)
+        physics_data.shortwave_rad.compute_shortwave = True
 
-#         # Calculate gradient
-#         _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
-#         tends = PhysicsTendency.ones(zxy)
-#         datas = PhysicsData.ones(xy,kx)
-#         input = (tends, datas)
-#         df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        # Calculate gradient
+        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
+        tends = PhysicsTendency.ones(zxy)
+        datas = PhysicsData.ones(xy,kx)
+        input = (tends, datas)
+        df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
 
-#         self.assertFalse(df_ddatas.isnan().any_true())
-#         self.assertFalse(df_dstates.isnan().any_true())
-#         self.assertFalse(df_dboundaries.isnan().any_true())
-#         self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstates.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
 
-#     def test_clouds_gradients_isnan_with_realistic_values(self):
-#         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
-#         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-#         rh = qa/qsat
-#         geopotential = jnp.arange(7, -1, -1, dtype = float)
-#         se = .1*geopotential
+    def test_clouds_gradients_isnan_with_realistic_values_grad(self):
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
 
-#         xy = (ix, il)
-#         zxy = (kx, ix, il)
-#         broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
-#         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
-#         psa = jnp.ones(xy)
-#         precnv = -1.0 * jnp.ones(xy)
-#         precls = 4.0 * jnp.ones(xy)
-#         iptop = 8 * jnp.ones(xy, dtype=int)
-#         fmask = .7 * jnp.ones(xy)
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
 
-#         surface_flux = SurfaceFluxData.zeros(xy)
-#         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
-#         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
-#         condensation = CondensationData.zeros(xy, kx, precls=precls)
-#         sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
-#         date_data = DateData.zeros()
-#         date_data.tyear = 0.6
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
 
-#         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
-#         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-#         boundaries = BoundaryData.zeros(xy, fmask=fmask)
-#         # Calculate gradient
-#         primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
-#         tends = PhysicsTendency.ones(zxy)
-#         datas = PhysicsData.ones(xy,kx)
-#         input = (tends, datas)
-#         df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        # Calculate gradient
+        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
+        tends = PhysicsTendency.ones(zxy)
+        datas = PhysicsData.ones(xy,kx)
+        input = (tends, datas)
+        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
         
-#         self.assertFalse(df_ddatas.isnan().any_true())
-#         self.assertFalse(df_dstate.isnan().any_true())
-#         self.assertFalse(df_dparams.isnan().any_true())
-#         self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dstate.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
+        self.assertFalse(df_dboundaries.isnan().any_true())
+
+    def test_get_zonal_average_fields_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        """Test whether gradients are close for shortwave radiation"""
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx)
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
+
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, boundaries_f,geometry_f):
+            data_out = get_zonal_average_fields(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
+    def test_get_shortwave_rad_fluxes_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        """Test whether gradients are close for shortwave radiation"""
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(zxy)
+        boundaries = BoundaryData.ones(xy)
+        physics_data.shortwave_rad.compute_shortwave = True
+
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_shortwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
+    def test_clouds_gradient_check_realistic_values(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
+
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
+
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
