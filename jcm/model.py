@@ -441,6 +441,7 @@ class Model:
             A final `xarray.Dataset` ready for analysis and plotting.
         """
         from dinosaur.xarray_utils import data_to_xarray
+        from pathlib import Path
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions from postprocessed output
         dynamics_predictions = predictions.dynamics
@@ -455,7 +456,7 @@ class Model:
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
 
         # Import units attribute associated with each xarray output from units_table.csv
-        units_df = pd.read_csv("../jcm/physics/speedy/units_table.csv")
+        units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")
         units_from_csv = dict(zip(units_df["Variable"], units_df["Units"]))
 
         for var, unit in units_from_csv.items():
