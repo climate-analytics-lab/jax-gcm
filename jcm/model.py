@@ -69,6 +69,7 @@ def averaged_trajectory_from_step(
     step_fn: typing.TimeStepFn,
     outer_steps: int,
     inner_steps: int,
+    post_process_fn=lambda x: x,
     **kwargs
 ) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
     """Returns a function that accumulates repeated applications of `step_fn`.
@@ -117,10 +118,8 @@ def averaged_trajectory_from_step(
         
         carry = (x_initial, empty_sum, init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
-        return x_final, Predictions(
-            dynamics=preds,
+        return x_final, post_process_fn(preds).replace(
             physics=nnx.merge(graphdef, final_diag_state).data.value,
-            times=None
         )
 
     return integrate
@@ -287,7 +286,7 @@ class Model:
         step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
         return step_fn if output_averages else jax.checkpoint(step_fn())
 
-    def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData) -> Predictions:
+    def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData, output_averages: bool) -> Predictions:
         """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
@@ -306,7 +305,7 @@ class Model:
             times=None
         )
 
-        if self.physics.write_output:
+        if self.physics.write_output and not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, boundaries, self.geometry, date)
@@ -326,23 +325,10 @@ class Model:
                 post_process_fn=post_process_fn
             ))
 
-            if output_averages: # If averaging is on, raw_predictions is already a Predictions with the physics populated but dynamics have not been post-processed
-                empty_physics_data = self.physics.get_empty_data(self.geometry)
-                final_state, raw_predictions = integrate_fn(state, empty_physics_data)
-                predictions = raw_predictions.replace(
-                    dynamics=dynamics_state_to_physics_state(raw_predictions.dynamics, self.primitive)
-                )
-            else:
-                final_state, raw_predictions = integrate_fn(state)
-                # If averaging is off, raw_predictions is already a post-processed Predictions if we wrote physics output
-                # Otherwise it is a raw stack of dynamics states
-                predictions = raw_predictions if self.physics.write_output else Predictions(
-                    dynamics=dynamics_state_to_physics_state(raw_predictions, self.primitive),
-                    physics=None,
-                    times=None
-                )
-
-            return final_state, predictions
+            if output_averages: # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
+                integrate_fn = lambda s: integrate_fn(s, self.physics.get_empty_data(self.geometry))
+            
+            return integrate_fn(state)
         
         return _integrate_fn
 
@@ -380,7 +366,7 @@ class Model:
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=(lambda state: self._post_process(state, boundaries)) if self.physics.write_output else lambda x: x,
+            post_process_fn=lambda state: self._post_process(state, boundaries, output_averages),
             output_averages=output_averages
         )
 
