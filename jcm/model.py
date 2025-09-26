@@ -324,11 +324,9 @@ class Model:
                 **kwargs,
                 post_process_fn=post_process_fn
             ))
-
-            if output_averages: # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
-                integrate_fn = lambda s: integrate_fn(s, self.physics.get_empty_data(self.geometry))
             
-            return integrate_fn(state)
+            # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
+            return integrate_fn(state, self.physics.get_empty_data(self.geometry)) if output_averages else integrate_fn(state)
         
         return _integrate_fn
 
