@@ -254,7 +254,7 @@ class TestHumidityUnit(unittest.TestCase):
                                        boundaries=convert_back(boundaries_f, boundaries), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
-            return convert_to_float(tend_out), convert_to_float(data_out)
+            return convert_to_float(data_out.humidity)
         
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
@@ -262,8 +262,8 @@ class TestHumidityUnit(unittest.TestCase):
 
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
-        #                         atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
 
 
         # Edge case: Very High Temperature
@@ -272,8 +272,8 @@ class TestHumidityUnit(unittest.TestCase):
         state_floats = convert_to_float(state)
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
-        #                         atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
 
 
         # Edge case: Extremely High Pressure
@@ -282,8 +282,8 @@ class TestHumidityUnit(unittest.TestCase):
         state_floats = convert_to_float(state)
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
-        #                         atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
 
 
         # Edge case: High Specific Humidity (near saturation)
@@ -294,8 +294,8 @@ class TestHumidityUnit(unittest.TestCase):
         state_floats = convert_to_float(state)
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
-        #                         atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
         
 
 if __name__ == '__main__':

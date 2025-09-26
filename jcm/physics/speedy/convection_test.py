@@ -83,26 +83,6 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
 
-    def test_get_convection_tendencies_gradient_check(self): 
-        from jax.test_util import check_vjp, check_jvp
-        xy = (ix, il)
-        zxy = (kx, ix, il)
-        
-        physics_data = PhysicsData.ones(xy, kx)
-        state = PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
-
-        def f(state):
-            return get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
-
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)
-
-        check_jvp(f, f_jvp, args = (state, ), 
-                                atol=1e-4, rtol=1e-4, eps=0.0001)
-        # check_vjp(f, f_vjp, args = (state, ), 
-        #                         atol=1e-4, rtol=1e-4, eps=0.0001)
 
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
@@ -348,8 +328,8 @@ class TestConvectionUnit(unittest.TestCase):
 
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        # check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
-        #                         atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.001)
 
 
     

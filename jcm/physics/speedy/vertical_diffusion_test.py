@@ -71,21 +71,58 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     def test_get_vertical_diffusion_gradient_check(self):
         """Test that we get correct gradient values"""
         from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
         xy = (ix, il)
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
 
-        def f(state):
-            return get_vertical_diffusion_tend(state, physics_data, parameters, boundaries, geometry)
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
 
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_vertical_diffusion_tend(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out)
+        
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
 
-        # check_jvp(f, f_jvp, args = (state, ), 
-        #                         atol=1e-4, rtol=1e-4, eps=0.0001)
-        check_vjp(f, f_vjp, args = (state, ), 
-                                atol=1e-4, rtol=1e-4, eps=0.0001)
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+
         

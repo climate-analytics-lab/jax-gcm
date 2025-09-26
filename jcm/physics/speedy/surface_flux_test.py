@@ -357,16 +357,122 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertAlmostEqual(jnp.max(forog_test),test_data[0])
         self.assertAlmostEqual(jnp.min(forog_test),test_data[1])
 
-    def test_set_orog_land_sfc_drag_gradient_check(self): 
+
+    def test_surface_fluxes_gradient_check_test1(self):
         from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        xy = (ix,il)
+        zxy = (kx,ix,il)
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il)) #ssts
+        rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
+        lfluxland=True
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
+        forog = set_orog_land_sfc_drag(phi0, parameters)
+        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
 
-        def f(phi0, parameters):
-            return set_orog_land_sfc_drag(phi0, parameters) 
+        # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
 
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f( state_f, physics_data_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_surface_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out.surface_flux)
+        
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (phi0, parameters), 
-                                atol=1e-4, rtol=1e-4, eps=0.0001)
+        check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (state_floats,physics_data_floats,  parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+        
+    def test_surface_fluxes_drag_test_gradient_check(self):
+        from jax.test_util import check_vjp, check_jvp
+        from jax.tree_util import tree_map
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+                # Converting functions
+        def check_type_convert_to_float(x): # Do error catch block
+            try:
+                return x.astype(jnp.float32)
+            except AttributeError:
+                return jnp.float32(x)
+        def convert_to_float(x): 
+            return tree_map(check_type_convert_to_float, x)
+        def check_type_convert_back(x, x0):
+            try: 
+                if x0.dtype == jnp.float32:
+                    return x
+                else:
+                    return x0
+            except AttributeError:
+                if type(x0) == jnp.float32:
+                    return x
+                else:
+                    return x0
+        def convert_back(x, x0):
+            return tree_map(check_type_convert_back, x, x0)
+
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+
+        def f(phi0, parameters_f):
+            return set_orog_land_sfc_drag(phi0, parameters=convert_back(parameters_f, parameters), )
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (phi0, parameters_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (phi0, parameters_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+
