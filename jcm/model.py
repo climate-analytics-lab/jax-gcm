@@ -81,7 +81,6 @@ def averaged_trajectory_from_step(
         inner_steps: number of repeated calls to step_fn() between saved steps.
         start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
         post_process_fn: function to apply to trajectory outputs.
-        outer_step_post_process_fn: function to apply to outer step outputs (for post processing that commutes with the time average).
     Returns:
         A function that takes an initial state and returns a tuple consisting of:
         (1) the final frame of the trajectory.
@@ -305,7 +304,7 @@ class Model:
             times=None
         )
 
-        if self.physics.write_output and not output_averages:
+        if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, boundaries, self.geometry, date)

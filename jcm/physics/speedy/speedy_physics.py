@@ -33,11 +33,9 @@ def set_physics_flags(
 
 class SpeedyPhysics(Physics):
     parameters: Parameters
-    write_output: bool
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
     def __init__(self,
-                 write_output: bool=True,
                  parameters: Parameters=Parameters.default(),
                  checkpoint_terms=True
     ) -> None:
@@ -45,11 +43,9 @@ class SpeedyPhysics(Physics):
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
-            write_output (bool): Flag to indicate whether physics output should be written to predictions.
             parameters (Parameters): Parameters for the physics model.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """
-        self.write_output = write_output
         self.parameters = parameters
 
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum

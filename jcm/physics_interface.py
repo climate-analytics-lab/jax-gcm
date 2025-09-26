@@ -134,9 +134,7 @@ Attributes:
         Tendency of specific humidity.
 """
 
-class Physics:
-    write_output: bool
-    
+class Physics:    
     def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
