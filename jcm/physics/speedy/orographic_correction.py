@@ -118,7 +118,8 @@ def compute_humidity_correction_horizontal(
     boundaries: BoundaryData, 
     geometry: Geometry,
     temperature_correction: jnp.ndarray,
-    land_temperature: jnp.ndarray
+    land_temperature: jnp.ndarray,
+    day: int = 0
 ) -> jnp.ndarray:
     """
     Compute horizontal humidity correction in grid space.
@@ -135,6 +136,7 @@ def compute_humidity_correction_horizontal(
         geometry: Model geometry
         temperature_correction: Horizontal temperature correction (tcorh)
         land_temperature: Land surface temperature from land model
+        day: day of year
         
     Returns:
         Horizontal correction array of shape (lon, lat)
@@ -143,7 +145,7 @@ def compute_humidity_correction_horizontal(
     
     # 1. Calculate surface temperature (land/sea mixture)
     # tsfc = fmask * stl_am + (1 - fmask) * sst_am
-    tsfc = boundaries.fmask * land_temperature + (1.0 - boundaries.fmask) * boundaries.tsea
+    tsfc = boundaries.fmask * land_temperature + (1.0 - boundaries.fmask) * boundaries.tsea[:,:,day]
     
     # 2. Calculate reference temperature with orographic correction
     # tref = tsfc + corh (where corh is the temperature correction)
