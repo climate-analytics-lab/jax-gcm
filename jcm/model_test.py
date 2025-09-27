@@ -154,7 +154,7 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         from jcm.model import Model, get_coords
-        from jcm.boundaries import initialize_boundaries
+        from jcm.boundaries import boundaries_from_file
         from jcm.utils import ones_like
 
         from pathlib import Path
@@ -165,7 +165,7 @@ class TestModelUnit(unittest.TestCase):
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
-        boundaries = initialize_boundaries(
+        boundaries = boundaries_from_file(
             boundaries_dir / 'boundaries_daily.nc',
             get_coords().horizontal
         )
@@ -189,7 +189,7 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from jcm.model import Model, get_coords
-        from jcm.boundaries import initialize_boundaries
+        from jcm.boundaries import boundaries_from_file
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -208,8 +208,8 @@ class TestModelUnit(unittest.TestCase):
             import subprocess
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = initialize_boundaries(
+
+        boundaries = boundaries_from_file(
             boundaries_dir / 'boundaries_daily.nc',
             get_coords().horizontal
         )

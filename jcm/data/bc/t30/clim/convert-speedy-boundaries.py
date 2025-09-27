@@ -1,7 +1,14 @@
 import xarray as xr
+import jax.numpy as jnp
+from pathlib import Path
+from jcm.model import get_coords
+from jcm.boundaries import _fixed_ssts
 
-with xr.open_dataset('./boundaries.nc') as ds:
+with xr.open_dataset(Path(__file__).parent / 'boundaries.nc') as ds:
     ds = ds.load()
+
+ds['sst'] = 0*ds.sst + _fixed_ssts(get_coords().horizontal)[:,:,jnp.newaxis]
+ds['icec'] = 0*ds.icec # set it to 0 rather than nan over land to allow for slightly different fmask values
 
 if not 'soilw_am' in ds.data_vars:
     import jax.numpy as jnp
@@ -27,4 +34,4 @@ if not 'soilw_am' in ds.data_vars:
 
 ds = ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl'} & set(ds.data_vars))
 
-ds.to_netcdf('./boundaries.nc', mode='w')
+ds.to_netcdf(Path(__file__).parent / 'boundaries.nc', mode='w')
