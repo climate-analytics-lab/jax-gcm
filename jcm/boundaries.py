@@ -100,7 +100,7 @@ def default_boundaries(
     # land-sea mask
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
-    tsea = jnp.tile(_fixed_ssts(grid), (1, 1, 365))
+    tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
         
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
