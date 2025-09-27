@@ -136,7 +136,7 @@ def compute_humidity_correction_horizontal(
         geometry: Model geometry
         temperature_correction: Horizontal temperature correction (tcorh)
         land_temperature: Land surface temperature from land model
-        day: day of year
+        day: day of year (for SST)
         
     Returns:
         Horizontal correction array of shape (lon, lat)
@@ -217,7 +217,7 @@ def get_orographic_correction_tendencies(
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
     land_temperature = physics_data.land_model.stl_am
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
+    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature, physics_data.date.model_day())
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh * tcorv[:, None, None]
@@ -252,7 +252,8 @@ def apply_orographic_corrections_to_state(
     boundaries: BoundaryData,
     geometry: Geometry,
     parameters: Parameters,
-    land_temperature: jnp.ndarray = None
+    land_temperature: jnp.ndarray = None,
+    day: int = 0
 ) -> PhysicsState:
     """
     Apply orographic corrections directly to a physics state (for testing).
@@ -266,6 +267,7 @@ def apply_orographic_corrections_to_state(
         geometry: Model geometry
         parameters: SPEEDY parameters
         land_temperature: Land surface temperature (if None, uses a default value)
+        day: day of year (for SST)
         
     Returns:
         Corrected physics state
@@ -282,7 +284,7 @@ def apply_orographic_corrections_to_state(
         # Use a default land temperature (288K) for testing
         land_temperature = jnp.full(boundaries.orog.shape, 288.0)
     
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature)
+    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature, day)
     
     # Apply corrections
     temp_correction = tcorh * tcorv[:, None, None]
