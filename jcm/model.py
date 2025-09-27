@@ -223,7 +223,7 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
-    @partial(jax.jit, static_argnums=(0, 1, 2)) # Note: will not recompile if model fields change
+    @partial(jax.jit, static_argnums=(0, 3, 4)) # Note: will not recompile if model fields change
     def run_from_state(self,
                        initial_state: primitive_equations.State,
                        boundaries: BoundaryData,
