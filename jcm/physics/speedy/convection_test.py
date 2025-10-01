@@ -2,6 +2,7 @@ import unittest
 import jax.numpy as jnp
 import jax
 import functools
+from jax.test_util import check_vjp, check_jvp
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -219,36 +220,13 @@ class TestConvectionUnit(unittest.TestCase):
 
     # # Gradient checks
     def test_diagnose_convection_varying_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         ps = jnp.ones((ix, il))
         ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
         qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
         qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
         
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
@@ -273,8 +251,7 @@ class TestConvectionUnit(unittest.TestCase):
 
 
     def test_get_convection_tendencies_varying_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         ps = jnp.ones((ix, il))
         ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
         qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
@@ -284,27 +261,6 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
         boundaries = BoundaryData.zeros((ix,il))
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)

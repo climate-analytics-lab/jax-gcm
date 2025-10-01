@@ -2,6 +2,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import functools
+from jax.test_util import check_vjp, check_jvp
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def setUp(self):
@@ -359,8 +360,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
 
     def test_surface_fluxes_gradient_check_test1(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         xy = (ix,il)
         zxy = (kx,ix,il)
         psa = jnp.ones((ix,il)) #surface pressure
@@ -388,28 +388,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         forog = set_orog_land_sfc_drag(phi0, parameters)
         boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
 
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
-
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
@@ -436,30 +414,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.000001)
         
     def test_surface_fluxes_drag_test_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-                # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         parameters_floats = convert_to_float(parameters)

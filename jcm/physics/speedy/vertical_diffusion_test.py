@@ -3,6 +3,7 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import functools
+from jax.test_util import check_vjp, check_jvp
 
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
@@ -70,35 +71,12 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def test_get_vertical_diffusion_gradient_check(self):
         """Test that we get correct gradient values"""
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         xy = (ix, il)
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)

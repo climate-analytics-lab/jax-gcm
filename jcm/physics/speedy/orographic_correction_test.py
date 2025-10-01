@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import functools
+from jax.test_util import check_vjp, check_jvp
 from jcm.physics.speedy.orographic_correction import (
     compute_temperature_correction_vertical_profile,
     compute_humidity_correction_vertical_profile,
@@ -431,33 +432,10 @@ class TestOrographicCorrection:
         assert max_orog_idx == max_corr_idx
 
     def test_temperature_vertical_profile_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test computation of temperature correction vertical profile gradient check."""
         geometry = create_test_geometry(layers=8)
         parameters = Parameters.default()
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
@@ -478,33 +456,10 @@ class TestOrographicCorrection:
         
     
     def test_humidity_vertical_profile_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test computation of humidity correction vertical profile gradient check."""
         geometry = create_test_geometry(layers=8)
         parameters = Parameters.default()
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
@@ -526,8 +481,7 @@ class TestOrographicCorrection:
 
     
     def test_temperature_horizontal_correction_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test computation of temperature horizontal correction gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
@@ -537,28 +491,6 @@ class TestOrographicCorrection:
                                        fmask_l = test_boundaries.fmask_l,
                                        fmask_s = test_boundaries.fmask_s,
                                        tsea = test_boundaries.tsea)
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         boundaries_floats = convert_to_float(boundaries)
@@ -579,8 +511,7 @@ class TestOrographicCorrection:
         
     
     def test_humidity_horizontal_correction_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test computation of humidity horizontal correction gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
@@ -593,28 +524,6 @@ class TestOrographicCorrection:
         # Compute temperature correction needed for the new humidity correction
         tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         boundaries_floats = convert_to_float(boundaries)
@@ -635,8 +544,7 @@ class TestOrographicCorrection:
                                 atol=None, rtol=1, eps=0.00001)
         
     def test_get_orographic_correction_tendencies_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test the main tendency computation function gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
@@ -651,28 +559,6 @@ class TestOrographicCorrection:
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
         node_levels = state.temperature.shape[0]   # layers
         physics_data = PhysicsData.ones(nodal_shape, node_levels)
-        
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         state_floats = convert_to_float(state)
@@ -700,8 +586,7 @@ class TestOrographicCorrection:
                                 atol=None, rtol=1, eps=0.001)
     
     def test_apply_orographic_corrections_to_state_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test direct application of corrections to state gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
@@ -713,28 +598,6 @@ class TestOrographicCorrection:
         state = create_test_physics_state()
         geometry = create_test_geometry()
         parameters = Parameters.default()
-
-         # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         state_floats = convert_to_float(state)

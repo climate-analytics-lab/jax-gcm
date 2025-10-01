@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 import functools
+from jax.test_util import check_vjp, check_jvp
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -180,7 +181,6 @@ class TestLongwave(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_radset_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
         xy = (ix, il)
         zxy = (kx, ix, il)
         state = PhysicsState.ones(zxy)
@@ -200,8 +200,7 @@ class TestLongwave(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.000001)
         
     def test_downward_longwave_rad_fluxes_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         # FIXME: This array doesn't need to be this big once we fix the interfaces
         # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
@@ -211,28 +210,6 @@ class TestLongwave(unittest.TestCase):
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
         boundaries = BoundaryData.ones(xy)
         state = PhysicsState.zeros(zxy,temperature=ta)
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
@@ -261,8 +238,7 @@ class TestLongwave(unittest.TestCase):
 
 
     def test_upward_longwave_rad_fluxes_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         ta = jnp.ones((kx, ix, il)) * 300
         ts = jnp.ones((ix, il)) * 300
         rlds = jnp.ones((ix, il))
@@ -280,28 +256,6 @@ class TestLongwave(unittest.TestCase):
             surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
         )
         boundaries = BoundaryData.zeros((ix, il))
-
-               # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(input_physics_data)

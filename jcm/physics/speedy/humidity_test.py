@@ -2,6 +2,7 @@ import unittest
 import jax.numpy as jnp
 import jax
 import functools
+from jax.test_util import check_vjp, check_jvp
 
 class TestHumidityUnit(unittest.TestCase):
 
@@ -143,8 +144,6 @@ class TestHumidityUnit(unittest.TestCase):
     # Gradient checks
         
     def test_get_qsat_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax._src.tree_util import tree_map
         temp = self.temp_standard
         pressure = self.pressure_standard
         sigma = self.sigma
@@ -178,7 +177,6 @@ class TestHumidityUnit(unittest.TestCase):
 
 
     def test_rel_hum_to_spec_hum_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
@@ -203,8 +201,7 @@ class TestHumidityUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.000001)
         
     def test_spec_hum_to_rel_hum_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         temp = self.temp_standard
         pressure = self.pressure_standard
         qg = self.qg_standard
@@ -217,28 +214,6 @@ class TestHumidityUnit(unittest.TestCase):
         # Edge case: Zero Specific Humidity
         qg = jnp.ones((kx,ix,il))*0
         state = PhysicsState.ones(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)

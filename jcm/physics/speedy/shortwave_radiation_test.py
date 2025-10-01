@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 import functools
+from jax.test_util import check_vjp, check_jvp
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
@@ -102,7 +103,6 @@ class TestSolar(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
         
     def test_solar_gradient_check(self): 
-        from jax.test_util import check_vjp, check_jvp
         from jcm.physics.speedy.physical_constants import solc
         tyear = 0.2
         csol = 4.*solc
@@ -410,8 +410,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_get_zonal_average_fields_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -439,28 +438,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
 
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
-
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
@@ -485,8 +462,7 @@ class TestShortWaveRadiation(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.0001)
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
         xy = (ix, il)
         zxy = (kx, ix, il)
@@ -494,28 +470,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         state =PhysicsState.ones(zxy)
         boundaries = BoundaryData.ones(xy)
         physics_data.shortwave_rad.compute_shortwave = True
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
@@ -543,8 +497,7 @@ class TestShortWaveRadiation(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.0001)
 
     def test_clouds_gradient_check_realistic_values(self):
-        from jax.test_util import check_vjp, check_jvp
-        from jax.tree_util import tree_map
+        from jcm.utils import convert_back, convert_to_float
 
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -575,28 +528,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         boundaries = BoundaryData.zeros(xy, fmask=fmask)
-
-        # Converting functions
-        def check_type_convert_to_float(x): # Do error catch block
-            try:
-                return x.astype(jnp.float32)
-            except AttributeError:
-                return jnp.float32(x)
-        def convert_to_float(x): 
-            return tree_map(check_type_convert_to_float, x)
-        def check_type_convert_back(x, x0):
-            try: 
-                if x0.dtype == jnp.float32:
-                    return x
-                else:
-                    return x0
-            except AttributeError:
-                if type(x0) == jnp.float32:
-                    return x
-                else:
-                    return x0
-        def convert_back(x, x0):
-            return tree_map(check_type_convert_back, x, x0)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
