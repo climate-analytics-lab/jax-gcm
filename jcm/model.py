@@ -270,7 +270,7 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _create_step_fn(self, boundaries: BoundaryData, output_averages):
+    def _create_step_fn(self, boundaries: BoundaryData):
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
@@ -286,8 +286,7 @@ class Model:
         )
         primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
-        step_fn = lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
-        return step_fn if output_averages else jax.checkpoint(step_fn())
+        return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
     def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData, output_averages: bool) -> Predictions:
         """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
@@ -359,7 +358,8 @@ class Model:
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
         """
-        step_fn = self._create_step_fn(boundaries, output_averages)
+        raw_step_fn = self._create_step_fn(boundaries, output_averages)
+        step_fn = raw_step_fn if output_averages else jax.checkpoint(raw_step_fn)
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
