@@ -30,7 +30,7 @@ class BoundaryData:
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
@@ -46,7 +46,7 @@ class BoundaryData:
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
     def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
@@ -100,14 +100,14 @@ def default_boundaries(
     # land-sea mask
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
-    tsea = _fixed_ssts(grid)
+    tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
         
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
         orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0
     )
 
-def initialize_boundaries(
+def boundaries_from_file(
     filename: str,
     grid: HorizontalGridTypes,
     truncation_number=None,
@@ -139,6 +139,9 @@ def initialize_boundaries(
     # annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
 
+    # sea ice concentration
+    sice_am = jnp.asarray(ds["icec"])
+
     # snow depth
     snowd_am = jnp.asarray(ds["snowd"])
     snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
@@ -151,10 +154,10 @@ def initialize_boundaries(
     assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
 
     # Prescribe SSTs
-    tsea = _fixed_ssts(grid)
+    tsea = jnp.asarray(ds["sst"])
 
     return BoundaryData.zeros(
-        nodal_shape=fmask.shape,
-        fmask=fmask, orog=orog, phis0=phis0, alb0=alb0,
+        nodal_shape=fmask.shape, fmask=fmask,
+        orog=orog, phis0=phis0, alb0=alb0, sice_am=sice_am,
         snowd_am=snowd_am, soilw_am=soilw_am, tsea=tsea
     )
