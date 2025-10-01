@@ -3,7 +3,7 @@ Date: 2/7/2024
 Physics module that interfaces between the dynamics and the physics of the model. Should be agnostic
 to the specific physics being used.
 """
-
+import jax
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
@@ -171,10 +171,12 @@ class Physics:
             items = {}
             for key, val in obj.__dict__.items():
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
-                if hasattr(val, "__dict__") and val.__dict__:
+                if isinstance(val, jax.Array):
+                    items[new_key] = val
+                elif hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))
                 else:
-                    items[new_key] = val
+                    raise ValueError(f"Unsupported type for key {new_key}: {type(val)}")
             return items
         
         items = _to_dict_recursive(struct)

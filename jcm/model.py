@@ -17,6 +17,7 @@ from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies
 from jcm.diffusion import DiffusionFilter
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 import pandas as pd
+from functools import partial
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -59,7 +60,8 @@ class Model:
 
     def __init__(self, time_step=30.0, layers=8, horizontal_resolution=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
-                 physics: Physics=None, diffusion: DiffusionFilter=None) -> None:
+                 physics: Physics=None, diffusion: DiffusionFilter=None,
+                 start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -78,6 +80,8 @@ class Model:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
+            start_date: 
+                Timestamp object containing start date of the simulation (default January 1, 2000)
         """
 
         self.physics_specs = PHYSICS_SPECS
@@ -127,9 +131,10 @@ class Model:
                 self.coords.horizontal, self.dt, tau=self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
         ]
 
-        # The following fields are set upon calling model.run
+        self.start_date = start_date
+
+        # grid space PhysicsState set upon calling model.run
         self.initial_nodal_state = None
-        self.start_date = None
 
         # spectral space primitive_equations.State updated by model.run and model.resume
         self._final_modal_state = None
@@ -218,6 +223,48 @@ class Model:
 
         return Predictions(dynamics=physics_state, physics=physics_data, times=None)
 
+    @partial(jax.jit, static_argnums=(0, 3, 4)) # Note: will not recompile if model fields change
+    def run_from_state(self,
+                       initial_state: primitive_equations.State,
+                       boundaries: BoundaryData,
+                       save_interval=10.0,
+                       total_time=120.0,
+    ) -> tuple[primitive_equations.State, Predictions]:
+        """Runs the full simulation forward in time starting from given initial state.
+        Alternative to model.run / model.resume which does not read/write model's internal current state.
+        
+        Args:
+            initial_state:
+                dinosaur.primitive_equations.State containing initial state of the run.
+            boundaries:
+                BoundaryData containing boundary conditions for the run.
+            save_interval:
+                (float) interval at which to save model outputs in days (default 10.0).
+            total_time:
+                (float) total time to run the model in days (default 120.0).
+    
+        Returns:
+            A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
+        """
+        step_fn = self._create_step_fn(boundaries)
+        
+        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
+        outer_steps = int(total_time / save_interval)
+        times = self.start_date.delta.days \
+                + (initial_state.sim_time*units.second).to(units.day).m \
+                + save_interval * jnp.arange(outer_steps)
+
+        integrate_fn = dinosaur.time_integration.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries)
+        )
+        
+        final_modal_state, predictions = integrate_fn(initial_state)
+        return final_modal_state, predictions.replace(times=times)
+
     def resume(self,
                boundaries: BoundaryData=None,
                save_interval=10.0,
@@ -236,32 +283,22 @@ class Model:
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
         """
-        boundaries = boundaries or default_boundaries(self.coords.horizontal, self.orography)
-        step_fn = self._create_step_fn(boundaries)
-
-        inner_steps = int(save_interval / self.dt_si.to(units.day).m)
-        outer_steps = int(total_time / save_interval)
-        start_time = self.start_date.delta.days + (self._final_modal_state.sim_time*units.second).to(units.day).m
-        times = start_time + save_interval * jnp.arange(outer_steps)
-
-        integrate_fn = jax.jit(dinosaur.time_integration.trajectory_from_step(
-            jax.checkpoint(step_fn),
-            outer_steps=outer_steps,
-            inner_steps=inner_steps,
-            start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries),
-        ))
-
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
-        self._final_modal_state, predictions = integrate_fn(self._final_modal_state)
-        return predictions.replace(times=times)
+        final_modal_state, predictions = self.run_from_state(
+            initial_state=self._final_modal_state,
+            boundaries=boundaries or default_boundaries(self.coords.horizontal, self.orography),
+            save_interval=save_interval,
+            total_time=total_time
+        )
+        
+        self._final_modal_state = final_modal_state
+        return predictions
 
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
             boundaries: BoundaryData=None,
             save_interval=10.0,
             total_time=120.0,
-            start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))
     ) -> tuple[primitive_equations.State, Predictions]:
         """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
         
@@ -274,8 +311,6 @@ class Model:
                 (float) interval at which to save model outputs in days (default 10.0).
             total_time:
                 (float) total time to run the model in days (default 120.0).
-            start_date:
-                (Timestamp) start date for the model run (default January 1, 2000).
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
@@ -286,8 +321,6 @@ class Model:
         else:
             self.initial_nodal_state = initial_state
             self._final_modal_state = self._prepare_initial_modal_state(initial_state)
-
-        self.start_date = start_date
 
         return self.resume(boundaries=boundaries, save_interval=save_interval, total_time=total_time)
 
