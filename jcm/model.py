@@ -333,7 +333,7 @@ class Model:
         
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 3, 4)) # Note: will not recompile if model fields change
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: will not recompile if model fields change
     def run_from_state(self,
                        initial_state: primitive_equations.State,
                        boundaries: BoundaryData,
