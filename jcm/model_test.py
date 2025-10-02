@@ -239,4 +239,84 @@ class TestModelUnit(unittest.TestCase):
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
 
+    def test_speedy_model_default_statistics(self):
+        from jcm.model import Model, get_coords
+        from jcm.boundaries import boundaries_from_file
+        import numpy as np
+
+        realistic_boundaries = boundaries_from_file(
+            'jcm/data/bc/t30/clim/boundaries.nc',
+            get_coords().horizontal,
+)
+        # default model settings
+        # use reslistic orography from boundaries file
+        model = Model(
+            orography=realistic_boundaries.orog,
+        )
+
+        # save every month, run for 3 months, turn on averaging
+        predictions = model.run(
+            save_interval=30,
+            total_time=90,
+            # add output averaging flag
+            # output_averages=True
+        )
+        pred_ds = model.predictions_to_xarray(predictions)
+
+        # load test file for comparison
+        default_stats = np.load('jcm/data/test_data/speedy_default_statistics.npz')
+
+        # check statistics of the model state
+        lower_q = default_stats['q_mean'] - 2*default_stats['q_std']
+        upper_q = default_stats['q_mean'] + 2*default_stats['q_std']
+        assert lower_q <= pred_ds['specific_humidity'].isel(time=-1) <= upper_q
+
+        lower_t = default_stats['t_mean'] - 2*default_stats['t_std']
+        upper_t = default_stats['t_mean'] + 2*default_stats['t_std']
+        assert lower_t <= pred_ds['temperature'].isel(time=-1) <= upper_t
+
+        lower_u = default_stats['u_mean'] - 2*default_stats['u_std']
+        upper_u = default_stats['u_mean'] + 2*default_stats['u_std']
+        assert lower_u <= pred_ds['u_wind'].isel(time=-1) <= upper_u
+
+        lower_v = default_stats['v_mean'] - 2*default_stats['v_std']
+        upper_v = default_stats['v_mean'] + 2*default_stats['v_std']
+        assert lower_v <= pred_ds['v_wind'].isel(time=-1) <= upper_v
+
+        lower_nsp = default_stats['nsp_mean'] - 2*default_stats['nsp_std']
+        upper_nsp = default_stats['nsp_mean'] + 2*default_stats['nsp_std']
+        assert lower_nsp <= pred_ds['normalized_surface_pressure'].isel(time=-1) <= upper_nsp
+
+        lower_phi = default_stats['phi_mean'] - 2*default_stats['phi_std']
+        upper_phi = default_stats['phi_mean'] + 2*default_stats['phi_std']
+        assert lower_phi <= pred_ds['geopotential'].isel(time=-1) <= upper_phi
+
+        # check statistics of some of the physics outputs
+        TOA_rad = pred_ds['shortwave_rad.ftop']-pred_ds['longwave_rad.ftop']
+        lower_TOA = default_stats['TOA_rad_mean'] - 2*default_stats['TOA_rad_std']
+        upper_TOA = default_stats['TOA_rad_mean'] + 2*default_stats['TOA_rad_std']
+        assert lower_TOA <= TOA_rad.isel(time=-1) <= upper_TOA
+
+        lower_rh = default_stats['rh_mean'] - 2*default_stats['rh_std']
+        upper_rh = default_stats['rh_mean'] + 2*default_stats['rh_std']
+        assert lower_rh <= pred_ds['humidity.rh'].isel(time=-1) <= upper_rh
+
+        lower_cloudstr = default_stats['cloudstr_mean'] - 2*default_stats['cloudstr_std']
+        upper_cloudstr = default_stats['cloudstr_mean'] + 2*default_stats['cloudstr_std']
+        assert lower_cloudstr <= pred_ds['shortwave_rad.cloudstr'].isel(time=-1) <= upper_cloudstr
+
+        lower_qcloud = default_stats['qcloud_mean'] - 2*default_stats['qcloud_std']
+        upper_qcloud = default_stats['qcloud_mean'] + 2*default_stats['qcloud_std']
+        assert lower_qcloud <= pred_ds['shortwave_rad.qcloud'].isel(time=-1) <= upper_qcloud
+
+        lower_precnv = default_stats['precnv_mean'] - 2*default_stats['precnv_std']
+        upper_precnv = default_stats['precnv_mean'] + 2*default_stats['precnv_std']
+        assert lower_precnv <= pred_ds['convection.precnv'].isel(time=-1) <= upper_precnv
+
+        lower_precls = default_stats['precls_mean'] - 2*default_stats['precls_std']
+        upper_precls = default_stats['precls_mean'] + 2*default_stats['precls_std']
+        assert lower_precls <= pred_ds['condensation.precls'].isel(time=-1) <= upper_precls
+
+
+
 
