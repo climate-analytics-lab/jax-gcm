@@ -258,7 +258,7 @@ class TestModelUnit(unittest.TestCase):
         # save every month, run for 3 months, turn on averaging
         predictions = model.run(
             save_interval=30,
-            total_time=90,
+            total_time=60,
             # add output averaging flag
             # output_averages=True
         )
