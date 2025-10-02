@@ -10,7 +10,7 @@ class LWRadiationData:
     """
     Parameters:
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
-        ftop: Net downward flux at top of atmosphere
+        ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
     """
     dfabs: jnp.ndarray 
     ftop: jnp.ndarray
