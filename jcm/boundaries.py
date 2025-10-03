@@ -2,7 +2,6 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
-from jcm.physics.speedy.params import Parameters
 
 @tree_math.struct
 class BoundaryData:

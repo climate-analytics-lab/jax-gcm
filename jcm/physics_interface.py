@@ -248,7 +248,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
 
     # convert specific humidity to modal (and nondimensionalize)
-    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram / units.second)
+    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram)
     q_modal = dynamics.coords.horizontal.to_modal(q)
 
     # convert temperature to a variation and then to modal
