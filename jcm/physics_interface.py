@@ -409,19 +409,19 @@ def filter_tendencies(dynamics_tendency: State,
     # select only the upper 2 (?) levels
     strat_level = diffusion.stratosphere_level 
     strat_tend = filtered_tendency.copy(
-        temperature=filtered_tendency.temperature[-strat_level:],
-        u_wind=filtered_tendency.u_wind[-strat_level:],
-        v_wind=filtered_tendency.v_wind[-strat_level:],
-        specific_humidity=filtered_tendency.specific_humidity[-strat_level:]
+        temperature=filtered_tendency.temperature[:strat_level],
+        u_wind=filtered_tendency.u_wind[:strat_level],
+        v_wind=filtered_tendency.v_wind[:strat_level],
+        specific_humidity=filtered_tendency.specific_humidity[:strat_level]
     )
     filtered_strat_tend = filter_fn(strat_tend)
 
     # replace the upper levels of the full tendency with the additionally filtered stratospheric tendency
     filtered_tendency = filtered_tendency.copy(
-        temperature=filtered_tendency.temperature.at[-strat_level:].set(filtered_strat_tend.temperature),
-        u_wind=filtered_tendency.u_wind.at[-strat_level:].set(filtered_strat_tend.u_wind),
-        v_wind=filtered_tendency.v_wind.at[-strat_level:].set(filtered_strat_tend.v_wind),
-        specific_humidity=filtered_tendency.specific_humidity.at[-strat_level:].set(filtered_strat_tend.specific_humidity)
+        temperature=filtered_tendency.temperature.at[:strat_level].set(filtered_strat_tend.temperature),
+        u_wind=filtered_tendency.u_wind.at[:strat_level].set(filtered_strat_tend.u_wind),
+        v_wind=filtered_tendency.v_wind.at[:strat_level].set(filtered_strat_tend.v_wind),
+        specific_humidity=filtered_tendency.specific_humidity.at[:strat_level].set(filtered_strat_tend.specific_humidity)
     )
 
     return filtered_tendency
