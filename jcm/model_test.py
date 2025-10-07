@@ -1,5 +1,6 @@
 import unittest
 import jax.tree_util as jtu
+import jax.numpy as jnp
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -164,14 +165,11 @@ class TestModelUnit(unittest.TestCase):
             import subprocess
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+
+        orography = jnp.load(boundaries_dir / 'orography.npy')
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
         
@@ -209,13 +207,10 @@ class TestModelUnit(unittest.TestCase):
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
 
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+        orography = jnp.load(boundaries_dir / 'orography.npy')
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
 

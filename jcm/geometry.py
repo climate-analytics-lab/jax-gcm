@@ -5,6 +5,7 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
+from jcm.utils import spectral_truncation
 from dinosaur.coordinate_systems import CoordinateSystem
 
 sigma_layer_boundaries = {
@@ -42,6 +43,9 @@ def _initialize_vertical(kx):
 class Geometry:
     nodal_shape: tuple[int, int, int] # (kx, ix, il)
 
+    orog: jnp.ndarray # orography height (m), shape (ix, il)
+    phis0: jnp.ndarray # spectrally truncated surface geopotential
+
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
     coa: jnp.ndarray # cos of latitude
@@ -66,6 +70,9 @@ class Geometry:
         Returns:
             Geometry object
         """
+        # Orography and surface geopotential
+        orog = jnp.zeros(coords.horizontal.nodal_shape)
+        phis0 = jnp.zeros(coords.horizontal.nodal_shape)
 
         # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
@@ -76,6 +83,7 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
         return cls(nodal_shape=coords.nodal_shape,
+                   orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
@@ -92,6 +100,9 @@ class Geometry:
         Returns:
             Geometry object
         """
+        # Orography and surface geopotential
+        orog = jnp.zeros(nodal_shape)
+        phis0 = jnp.zeros(nodal_shape)
 
         # Horizontal functions of latitude (from south to north)
         il = nodal_shape[1]
@@ -108,6 +119,22 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
         return cls(nodal_shape=(node_levels,) + nodal_shape,
+                   orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
+    
+    def set_orography(self, orog, grid, truncation_number=None):
+        """
+        Returns a new Geometry object with updated orography and surface geopotential.
+
+        Args:
+            orog: New orography height (m), shape (ix, il)
+
+        Returns:
+            New Geometry object
+        """
+        phi0 = grav * orog
+        phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
+
+        return self.copy(orog=orog, phis0=phis0)

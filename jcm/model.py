@@ -93,8 +93,7 @@ class Model:
             horizontal_resolution = coords.horizontal.total_wavenumbers - 2
         else:
             self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
-        self.geometry = Geometry.from_coords(self.coords)
-
+        
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
@@ -107,6 +106,8 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
+        self.geometry = Geometry.from_coords(self.coords).set_orography(self.orography, self.coords.horizontal)
+
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
@@ -286,7 +287,7 @@ class Model:
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
-            boundaries=boundaries or default_boundaries(self.coords.horizontal, self.orography),
+            boundaries=boundaries or default_boundaries(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time
         )

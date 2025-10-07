@@ -365,7 +365,7 @@ class TestOrographicCorrection:
         flat_orography = jnp.zeros(grid.nodal_shape)
         
         # Use the actual model boundary initialization (now fixed)
-        boundaries_flat = default_boundaries(grid, flat_orography)
+        boundaries_flat = default_boundaries(grid)
         
         tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
         assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)

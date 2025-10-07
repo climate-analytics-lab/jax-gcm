@@ -109,7 +109,7 @@ def compute_temperature_correction_horizontal(boundaries: BoundaryData, geometry
     gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
     
     # Apply correction: gamlat * phis0 (spectrally-filtered surface geopotential)
-    corh = gamlat * boundaries.phis0
+    corh = gamlat * geometry.phis0
     
     return corh
 
