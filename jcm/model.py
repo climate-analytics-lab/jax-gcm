@@ -358,8 +358,8 @@ class Model:
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
         """
-        raw_step_fn = self._create_step_fn(boundaries, output_averages)
-        step_fn = raw_step_fn if output_averages else jax.checkpoint(raw_step_fn)
+        raw_step_fn = self._create_step_fn(boundaries)
+        step_fn = raw_step_fn if output_averages else jax.checkpoint(raw_step_fn())
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
