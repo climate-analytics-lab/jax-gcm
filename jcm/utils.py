@@ -47,7 +47,6 @@ def check_type_convert_back(x, x0):
         if x0.dtype == jnp.float32:
             return x
         else:
-            print(x0.dtype)
             return x0
     except AttributeError:
         if type(x0) == jnp.float32:
