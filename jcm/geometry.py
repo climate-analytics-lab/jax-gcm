@@ -137,4 +137,4 @@ class Geometry:
         phi0 = grav * orog
         phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
 
-        return self.copy(orog=orog, phis0=phis0)
+        return self.replace(orog=orog, phis0=phis0)
