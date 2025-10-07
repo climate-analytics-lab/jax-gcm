@@ -26,6 +26,7 @@ class TestHumidityUnit(unittest.TestCase):
 
     def test_spec_hum_to_rel_hum_isnan_ones(self):
         from jcm.constants import grav
+        from jcm.model import get_coords
         xy = (ix, il)
         zxy = (kx, ix, il)
         
@@ -41,7 +42,9 @@ class TestHumidityUnit(unittest.TestCase):
         tsea = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,orog=phi0/grav,lfluxland=True)
+
+        geometry = geometry.set_orography(phi0/grav, get_coords().horizontal)
+        boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
