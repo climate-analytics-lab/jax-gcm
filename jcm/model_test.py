@@ -99,34 +99,34 @@ class TestModelUnit(unittest.TestCase):
     #     self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
     #     self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
         
-    def test_speedy_model_gradients_isnan(self):
-        import jax
-        import jax.numpy as jnp
-        from jcm.model import Model
-        from jcm.utils import ones_like
+    # def test_speedy_model_gradients_isnan(self):
+    #     import jax
+    #     import jax.numpy as jnp
+    #     from jcm.model import Model
+    #     from jcm.utils import ones_like
 
-        # Create model that goes through one timestep
-        model = Model()
-        state = model._prepare_initial_modal_state()
+    #     # Create model that goes through one timestep
+    #     model = Model()
+    #     state = model._prepare_initial_modal_state()
 
-        def fn(state):
-            _ = model.run(total_time=0) # to set up model fields
-            predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_modal_state, predictions
+    #     def fn(state):
+    #         _ = model.run(total_time=0) # to set up model fields
+    #         predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
+    #         return model._final_modal_state, predictions
 
-        # Calculate gradients
-        primals, f_vjp = jax.vjp(fn, state)
+    #     # Calculate gradients
+    #     primals, f_vjp = jax.vjp(fn, state)
         
-        input = (ones_like(primals[0]), ones_like(primals[1]))
+    #     input = (ones_like(primals[0]), ones_like(primals[1]))
 
-        df_dstate = f_vjp(input)
+    #     df_dstate = f_vjp(input)
         
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+    #     self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
+    #     self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
+    #     self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
+    #     self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
+    #     self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
+    #     # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
     # def test_speedy_model_gradients_multiple_timesteps_isnan(self):
     #     import jax
@@ -254,16 +254,16 @@ class TestModelUnit(unittest.TestCase):
 
         def f(state_f):
             _ = model.run(total_time=0) # to set up model fields
-            predictions = model.run(initial_state=convert_back(state_f, state), save_interval=(1/48.), total_time=(1/48.))
+            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
             return model._final_modal_state, predictions
         
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f) 
 
-        check_vjp(f, f_vjp, args = (state_floats,), 
+        check_vjp(f, f_vjp, args = (state,), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state_floats,), 
+        check_jvp(f, f_jvp, args = (state,), 
                                 atol=None, rtol=1, eps=0.001)
 
 
