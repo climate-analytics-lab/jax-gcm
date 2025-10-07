@@ -399,29 +399,33 @@ def filter_tendencies(dynamics_tendency: State,
     filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
     filtered_tendency = filter_fn(dynamics_tendency)
 
-    # additional diffusion just to the stratosphere 
+    # # additional diffusion just to the stratosphere 
     tau = diffusion.strat_tendency_diff_timescale
     order = diffusion.strat_tendency_diff_order
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
     filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
 
-    # select only the upper 2 (?) levels
+    # select only the upper N levels
     strat_level = diffusion.stratosphere_level 
-    strat_tend = filtered_tendency.copy(
-        temperature=filtered_tendency.temperature[:strat_level],
-        u_wind=filtered_tendency.u_wind[:strat_level],
-        v_wind=filtered_tendency.v_wind[:strat_level],
-        specific_humidity=filtered_tendency.specific_humidity[:strat_level]
+    strat_tend = State(
+        temperature_variation=filtered_tendency.temperature_variation[:strat_level],
+        vorticity=filtered_tendency.vorticity[:strat_level],
+        divergence=filtered_tendency.divergence[:strat_level],
+        log_surface_pressure=filtered_tendency.log_surface_pressure*0.0, # no filtering of surface pressure
+        tracers={'specific_humidity': filtered_tendency.tracers['specific_humidity'][:strat_level]},
+        sim_time = filtered_tendency.sim_time,
     )
     filtered_strat_tend = filter_fn(strat_tend)
 
     # replace the upper levels of the full tendency with the additionally filtered stratospheric tendency
-    filtered_tendency = filtered_tendency.copy(
-        temperature=filtered_tendency.temperature.at[:strat_level].set(filtered_strat_tend.temperature),
-        u_wind=filtered_tendency.u_wind.at[:strat_level].set(filtered_strat_tend.u_wind),
-        v_wind=filtered_tendency.v_wind.at[:strat_level].set(filtered_strat_tend.v_wind),
-        specific_humidity=filtered_tendency.specific_humidity.at[:strat_level].set(filtered_strat_tend.specific_humidity)
+    final_tendency = State(
+        temperature_variation=filtered_tendency.temperature_variation.at[:strat_level].set(filtered_strat_tend.temperature_variation),
+        vorticity=filtered_tendency.vorticity.at[:strat_level].set(filtered_strat_tend.vorticity),
+        divergence=filtered_tendency.divergence.at[:strat_level].set(filtered_strat_tend.divergence),
+        log_surface_pressure=filtered_tendency.log_surface_pressure, # no filtering of surface pressure
+        tracers={'specific_humidity': filtered_tendency.tracers['specific_humidity'].at[:strat_level].set(filtered_strat_tend.tracers['specific_humidity'])},
+        sim_time = filtered_tendency.sim_time,
     )
 
-    return filtered_tendency
+    return final_tendency
