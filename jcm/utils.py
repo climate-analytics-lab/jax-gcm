@@ -33,7 +33,6 @@ def ones_like(x):
 
 # Convert object to float 
 def check_type_convert_to_float(x): 
-    print(type(x))
     try:
         return x.astype(jnp.float32)
     except AttributeError:
