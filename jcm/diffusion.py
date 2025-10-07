@@ -17,7 +17,7 @@ class DiffusionFilter:
         return cls(
             tendency_diff_timescale = 2.4*60*60, # Diffusion timescale (s)
             tendency_diff_order = 4, # Order of diffusion operator for tendencies
-            strat_tendency_diff_timescale = 6.0*60*60, # Diffusion timescale (s)
+            strat_tendency_diff_timescale = 24.0*60*60, # Diffusion timescale (s)
             strat_tendency_diff_order = 1, # Order of diffusion operator for tendencies
             state_diff_timescale = 2.4*60*60, # Diffusion timescale (s)
             state_diff_order = 1,  # Order of diffusion operator for state variables
