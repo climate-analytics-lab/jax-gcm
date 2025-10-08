@@ -81,8 +81,8 @@ def default_boundaries(
     Initialize the boundary conditions
     """
     # land-sea mask
-    fmask = jnp.zeros_like(grid.nodal_shape)
-    alb0 = jnp.zeros_like(grid.nodal_shape)
+    fmask = jnp.zeros(grid.nodal_shape)
+    alb0 = jnp.zeros(grid.nodal_shape)
     tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
         
     return BoundaryData.zeros(
