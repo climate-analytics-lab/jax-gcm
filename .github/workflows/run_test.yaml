@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+concurrency:
+  # For pull requests: group by PR number
+  # For branch pushes: group by branch name
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,7 +40,7 @@ jobs:
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |
-          coverage run -m pytest -v -s -m "slow" --cov-fail-under=90
+          coverage run -m pytest -v -s --cov-fail-under=90
 
       - name: Generate Coverage Report
         run: |
