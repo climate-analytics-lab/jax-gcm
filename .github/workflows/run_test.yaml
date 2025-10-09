@@ -36,11 +36,11 @@ jobs:
         run: |
           coverage run -m pytest -v -s -m "not slow" --cov-fail-under=90
 
-      # run all tests when triggered by a push to an open PR
+      # run slow tests when triggered by a push to an open PR
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |
-          coverage run -m pytest -v -s --cov-fail-under=90
+          coverage run -m pytest -v -s -m "slow" --cov-fail-under=90
 
       - name: Generate Coverage Report
         run: |
