@@ -30,12 +30,13 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # Run tests differently depending on event type
+      # run fast tests when triggered by a push *without* an open PR
       - name: Test with pytest (no slow tests on push)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.event.pull_request.head.repo == null
         run: |
           coverage run -m pytest -v -s -m "not slow" --cov-fail-under=90
 
+      # run all tests when triggered by a push to an open PR
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |
