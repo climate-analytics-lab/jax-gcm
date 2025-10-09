@@ -4,12 +4,6 @@ on:
   push:
   pull_request:
 
-concurrency:
-  # For pull requests: group by PR number
-  # For branch pushes: group by branch name
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
