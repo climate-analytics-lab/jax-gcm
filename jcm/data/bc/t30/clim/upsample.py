@@ -24,7 +24,7 @@ def clamp_to_valid_ranges(ds):
     return ds
 
 def main(target_resolution):
-    grid = get_coords(horizontal_resolution=target_resolution).horizontal
+    grid = get_coords(spectral_truncation=target_resolution).horizontal
     ds = xr.open_dataset(Path(__file__).parent / 'boundaries_daily.nc')
 
     # Pad longitude so edge values are handled correctly

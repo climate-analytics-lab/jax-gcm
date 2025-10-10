@@ -42,7 +42,7 @@ class Model:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=30.0, layers=8, horizontal_resolution=31,
+    def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))) -> None:
@@ -54,8 +54,8 @@ class Model:
                 Model time step in minutes
             layers: 
                 Number of vertical layers
-            horizontal_resolution: 
-                Horizontal resolution of the model (31, 42, 85, or 213)
+            spectral_truncation:
+                Spectral truncation (horizontal resolution) of the model grid (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
             coords: 
                 CoordinateSystem object describing model grid
             orography:
@@ -74,9 +74,9 @@ class Model:
 
         if coords is not None:
             self.coords = coords
-            horizontal_resolution = coords.horizontal.total_wavenumbers - 2
+            spectral_truncation = coords.horizontal.total_wavenumbers - 2
         else:
-            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
+            self.coords = get_coords(layers=layers, spectral_truncation=spectral_truncation)
         
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(

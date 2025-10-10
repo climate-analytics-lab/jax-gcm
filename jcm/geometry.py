@@ -3,7 +3,6 @@ Date: 2/1/2024
 For storing all variables related to the model's grid space.
 """
 import jax.numpy as jnp
-from matplotlib.pyplot import grid
 import tree_math
 from jcm.constants import p0, grav, cp
 from jcm.utils import spectral_truncation
@@ -31,14 +30,21 @@ truncation_for_nodal_shape = {
     (1280, 640): 425,
 }
 
-def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
+def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
+    if spectral_truncation is None:
+        if nodal_shape is None:
+            spectral_truncation = 31
+        else:
+            spectral_truncation = truncation_for_nodal_shape[nodal_shape].get(nodal_shape, None)
+            if spectral_truncation is None:
+                raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {list(truncation_for_nodal_shape.keys())}")
     try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
     except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+        raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
     if layers not in sigma_layer_boundaries:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
 
@@ -106,8 +112,9 @@ class Geometry:
             Geometry object
         """
         # Orography and surface geopotential
-        orog = jnp.zeros(coords.horizontal.nodal_shape)
-        phis0 = jnp.zeros(coords.horizontal.nodal_shape)
+        orog = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
+        phi0 = grav * orog
+        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
         # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
@@ -116,11 +123,6 @@ class Geometry:
         # Vertical functions of sigma
         kx = coords.nodal_shape[0]
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
-
-        # Orography and surface geopotential
-        orography = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
-        phi0 = grav * orography
-        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
         return cls(nodal_shape=coords.nodal_shape,
                    orog=orog, phis0=phis0,
@@ -141,8 +143,10 @@ class Geometry:
             Geometry object
         """
         # Orography and surface geopotential
-        orog = jnp.zeros(nodal_shape)
-        phis0 = jnp.zeros(nodal_shape)
+        coords = get_coords(nodal_shape=nodal_shape)
+        orog = jnp.zeros(nodal_shape) if orography is None else orography
+        phi0 = grav * orog
+        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
         # Horizontal functions of latitude (from south to north)
         il = nodal_shape[1]
@@ -157,12 +161,6 @@ class Geometry:
         # Vertical functions of sigma
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
-
-        # Orography and surface geopotential
-        coords = get_coords(horizontal_resolution=truncation_for_nodal_shape[nodal_shape])
-        orography = jnp.zeros(nodal_shape) if orography is None else orography
-        phi0 = grav * orography
-        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
         return cls(nodal_shape=(node_levels,) + nodal_shape,
                    orog=orog, phis0=phis0,
