@@ -159,11 +159,11 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
         # Orography and surface geopotential
-        grid = get_coords(horizontal_resolution=truncation_for_nodal_shape[nodal_shape])
+        coords = get_coords(horizontal_resolution=truncation_for_nodal_shape[nodal_shape])
         orography = jnp.zeros(nodal_shape) if orography is None else orography
         phi0 = grav * orography
-        phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-        
+        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
+
         return cls(nodal_shape=(node_levels,) + nodal_shape,
                    orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
