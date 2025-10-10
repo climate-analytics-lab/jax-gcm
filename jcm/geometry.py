@@ -38,7 +38,7 @@ def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> Coordina
         if nodal_shape is None:
             spectral_truncation = 31
         else:
-            spectral_truncation = truncation_for_nodal_shape[nodal_shape].get(nodal_shape, None)
+            spectral_truncation = truncation_for_nodal_shape.get(nodal_shape, None)
             if spectral_truncation is None:
                 raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {list(truncation_for_nodal_shape.keys())}")
     try:
