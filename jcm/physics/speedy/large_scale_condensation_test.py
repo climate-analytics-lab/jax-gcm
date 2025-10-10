@@ -7,7 +7,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
 
     def setUp(self):
         global ix, il, kx
-        ix, il, kx = 1, 1, 8
+        ix, il, kx = 64, 32, 8
 
         global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, BoundaryData, get_large_scale_condensation_tendencies
         from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
@@ -15,7 +15,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         parameters = Parameters.default()
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx)
         from jcm.boundaries import BoundaryData
         from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
 
@@ -43,27 +43,33 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
     def test_get_large_scale_condensation_tendencies_realistic(self):
         xy = (ix,il)
         zxy = (kx,ix,il)
-        psa = jnp.ones((ix, il)) * 1.0110737
+        psa = 1.0110737 * jnp.ones(xy)
         qa = jnp.asarray([16.148024  , 10.943978  ,  5.851813  ,  2.4522789 ,  0.02198645,
-        0.16069981,  0.        ,  0.        ])
+        0.16069981,  0.        ,  0.        ])[:, jnp.newaxis, jnp.newaxis] * jnp.ones(zxy) 
         qsat = jnp.asarray([1.64229703e-01, 1.69719307e-02, 1.45193088e-01, 1.98833509e+00,
-       4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01])
+       4.58917155e+00, 9.24226425e+00, 1.48490220e+01, 2.02474803e+01])[:, jnp.newaxis, jnp.newaxis] * jnp.ones(zxy)
         itop = jnp.ones((ix, il), dtype=int) * 4
 
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
-        humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
-        state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],normalized_surface_pressure=psa)
+        humidity = HumidityData.zeros(xy, kx, qsat=qsat)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa,normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
         boundaries = BoundaryData.ones(xy)
 
         physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, boundaries, geometry)
         
-        np.testing.assert_allclose(physics_tendencies.temperature, jnp.asarray([0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04,
-       0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
-        np.testing.assert_allclose(physics_tendencies.specific_humidity, jnp.asarray([ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05,
-        0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00])[:,jnp.newaxis,jnp.newaxis], atol=1e-4, rtol=0)
-        self.assertAlmostEqual(physics_data.condensation.precls, jnp.asarray([1.293]), delta=0.05)
-        self.assertEqual(physics_data.convection.iptop, jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
+        np.testing.assert_allclose(
+            physics_tendencies.temperature[:,0,0],
+            jnp.asarray([0.00000000e+00, 1.59599063e-05, 7.07364228e-05, 1.45072684e-04, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00]),
+            atol=1e-4, rtol=0
+        )
+        np.testing.assert_allclose(
+            physics_tendencies.specific_humidity[:,0,0],
+            jnp.asarray([ 0.00000000e+00, -7.59054545e-04, -3.98269278e-04, -5.82378946e-05, 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00]),
+            atol=1e-4, rtol=0
+        )
+        self.assertAlmostEqual(physics_data.condensation.precls[0,0,jnp.newaxis], jnp.asarray([1.293]), delta=0.05)
+        self.assertEqual(physics_data.convection.iptop[0,0,jnp.newaxis], jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
 
     def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):
         """Test that we can calculate gradients of large-scale condensation without getting NaN values"""

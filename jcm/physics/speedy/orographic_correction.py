@@ -282,7 +282,7 @@ def apply_orographic_corrections_to_state(
     # For humidity correction, use provided land temperature or default value
     if land_temperature is None:
         # Use a default land temperature (288K) for testing
-        land_temperature = jnp.full(boundaries.orog.shape, 288.0)
+        land_temperature = jnp.full(geometry.orog.shape, 288.0)
     
     qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature, day)
     

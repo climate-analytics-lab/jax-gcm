@@ -13,7 +13,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx)
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
         from jcm.physics_interface import PhysicsState, PhysicsTendency

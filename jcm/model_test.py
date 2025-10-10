@@ -154,7 +154,6 @@ class TestModelUnit(unittest.TestCase):
 
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
-        from jcm.geometry import get_coords
         from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
         from jcm.utils import ones_like
@@ -174,7 +173,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
         
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc', get_coords().horizontal))
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc'))
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -187,7 +186,6 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jcm.geometry import get_coords
         from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
 
@@ -216,7 +214,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc', get_coords().horizontal))
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc'))
 
         # Calculate gradients using JVP
         params = Parameters.default()

@@ -14,7 +14,7 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.geometry import Geometry
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx)
         fsg = geometry.fsg
         grdscp = geometry.grdscp
         grdsig = geometry.grdsig
