@@ -10,7 +10,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         from dinosaur.scales import SI_SCALE
         from dinosaur import primitive_equations
         from dinosaur import xarray_utils
-        from jcm.model import get_coords
+        from jcm.geometry import get_coords
 
         PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
         kx, ix, il = 8, 96, 48

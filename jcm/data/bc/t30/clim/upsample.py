@@ -1,6 +1,6 @@
 import numpy as np
 import xarray as xr
-from jcm.model import get_coords
+from jcm.geometry import get_coords
 import argparse
 from pathlib import Path
 

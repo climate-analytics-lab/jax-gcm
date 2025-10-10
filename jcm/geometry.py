@@ -3,16 +3,51 @@ Date: 2/1/2024
 For storing all variables related to the model's grid space.
 """
 import jax.numpy as jnp
+from matplotlib.pyplot import grid
 import tree_math
 from jcm.constants import p0, grav, cp
 from jcm.utils import spectral_truncation
+import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem
+from dinosaur.primitive_equations import PrimitiveEquationsSpecs
+from dinosaur.scales import SI_SCALE
 
 sigma_layer_boundaries = {
     5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
     7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
     8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
 }
+
+truncation_for_nodal_shape = {
+    (64, 32): 21,
+    (96, 48): 31,
+    (128, 64): 42,
+    (256, 128): 85,
+    (320, 160): 106,
+    (360, 180): 119,
+    (512, 256): 170,
+    (640, 320): 213,
+    (1024, 512): 340,
+    (1280, 640): 425,
+}
+
+def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    """
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+    if layers not in sigma_layer_boundaries:
+        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+
+    physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+
+    return CoordinateSystem(
+        horizontal=horizontal_grid(radius=physics_specs.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+    )
 
 def _initialize_vertical(kx):
     # Definition of model levels
@@ -60,7 +95,7 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem=None):
+    def from_coords(cls, coords: CoordinateSystem=None, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
@@ -82,6 +117,11 @@ class Geometry:
         kx = coords.nodal_shape[0]
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
+        # Orography and surface geopotential
+        orography = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
+        phi0 = grav * orography
+        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
+
         return cls(nodal_shape=coords.nodal_shape,
                    orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
@@ -89,7 +129,7 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape=None, node_levels=None):
+    def from_grid_shape(cls, nodal_shape=None, node_levels=None, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
@@ -117,24 +157,15 @@ class Geometry:
         # Vertical functions of sigma
         kx = node_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
+
+        # Orography and surface geopotential
+        grid = get_coords(horizontal_resolution=truncation_for_nodal_shape[nodal_shape])
+        orography = jnp.zeros(nodal_shape) if orography is None else orography
+        phi0 = grav * orography
+        phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
         
         return cls(nodal_shape=(node_levels,) + nodal_shape,
                    orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
-    
-    def set_orography(self, orog, grid, truncation_number=None):
-        """
-        Returns a new Geometry object with updated orography and surface geopotential.
-
-        Args:
-            orog: New orography height (m), shape (ix, il)
-
-        Returns:
-            New Geometry object
-        """
-        phi0 = grav * orog
-        phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-
-        return self.replace(orog=orog, phis0=phis0)

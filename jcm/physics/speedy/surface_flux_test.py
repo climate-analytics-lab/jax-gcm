@@ -8,17 +8,14 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData, \
-               PhysicsState, get_surface_fluxes, get_orog_land_sfc_drag, PhysicsTendency, parameters, geometry_raw, grav, coords
+               PhysicsState, get_surface_fluxes, get_orog_land_sfc_drag, PhysicsTendency, parameters, Geometry, grav
         from jcm.boundaries import BoundaryData
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         from jcm.constants import grav
-        from jcm.model import get_coords
         parameters = Parameters.default()
-        geometry_raw = Geometry.from_grid_shape((ix, il), kx)
-        coords = get_coords()
         
         from jcm.physics.speedy.surface_flux import get_surface_fluxes, get_orog_land_sfc_drag
 
@@ -47,7 +44,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea, fmask=fmask, lfluxland=lfluxland)
 
         _, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, parameters, boundaries, geometry)
@@ -87,7 +84,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.ones(xy,tsea=tsea, fmask=fmask, lfluxland=lfluxland, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
@@ -130,7 +127,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask=fmask, soilw_am=soilw_am)
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
         sflux_data = physics_data.surface_flux
@@ -179,7 +176,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea, fmask=fmask,lfluxland=lfluxland, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
@@ -229,7 +226,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea, fmask=fmask,lfluxland=lfluxland, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
@@ -279,7 +276,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea,fmask=fmask,lfluxland=lfluxland, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
@@ -328,7 +325,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        geometry = geometry_raw.set_orography(phi0/grav, coords.horizontal)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.zeros(xy,tsea=tsea,fmask=fmask,soilw_am=soilw_am,lfluxland=lfluxland)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, boundaries, geometry)
