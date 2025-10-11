@@ -11,7 +11,7 @@ import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 os.environ['JAX_PLATFORMS'] = 'cpu'
 
-# import pytest  # Comment out for environments without pytest
+import pytest  # Comment out for environments without pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -144,10 +144,9 @@ class TestOrographicCorrection:
     
     def test_temperature_horizontal_correction(self):
         """Test computation of temperature horizontal correction."""
-        boundaries = create_test_boundaries(lon_points=96, lat_points=48)
         geometry = create_test_geometry(orography=True)
         
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         
         # Check shape
         assert tcorh.shape == (96, 48)
@@ -163,10 +162,10 @@ class TestOrographicCorrection:
         geometry = create_test_geometry(orography=True)
         
         # Compute temperature correction needed for the new humidity correction
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
         
-        qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temp)
+        qcorh = compute_humidity_correction_horizontal(boundaries, tcorh, land_temp)
         
         # Check shape
         assert qcorh.shape == (96, 48)
@@ -247,7 +246,7 @@ class TestOrographicCorrection:
         
         # Check that corrections are applied correctly
         tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         expected_temp_correction = tcorh * tcorv[:, None, None]
 
         actual_temp_correction = corrected_state.temperature - state.temperature
@@ -290,6 +289,8 @@ class TestOrographicCorrection:
         
         # phis0 = g * orog (as in Fortran)
         test_phis0 = grav * test_orog
+
+        geometry_fortran = geometry_fortran.replace(orog=test_orog, phis0=test_phis0)
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
         test_fmask = jnp.full((4, 4), 0.7)  # 70% land
@@ -298,8 +299,6 @@ class TestOrographicCorrection:
         
         class TestBoundariesFortran:
             def __init__(self):
-                self.orog = test_orog
-                self.phis0 = test_phis0
                 self.fmask = test_fmask
                 self.tsea = test_sst_am
         
@@ -328,8 +327,8 @@ class TestOrographicCorrection:
         # Compute JAX-GCM values
         jax_tcorv = compute_temperature_correction_vertical_profile(geometry_fortran, parameters)
         jax_qcorv = compute_humidity_correction_vertical_profile(geometry_fortran, parameters)
-        jax_tcorh = compute_temperature_correction_horizontal(boundaries_fortran, geometry_fortran)
-        jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, geometry_fortran, jax_tcorh, test_stl_am)
+        jax_tcorh = compute_temperature_correction_horizontal(geometry_fortran)
+        jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, jax_tcorh, test_stl_am)
         
         # Test temperature vertical profile - should match within floating-point precision
         np.testing.assert_allclose(jax_tcorv, fortran_tcorv, rtol=1e-3, atol=1e-6,
@@ -350,17 +349,16 @@ class TestOrographicCorrection:
                 
         # Create grid and flat orography
         grid = get_coords().horizontal
-        flat_orography = jnp.zeros(grid.nodal_shape)
         
         # Use the actual model boundary initialization (now fixed)
         boundaries_flat = default_boundaries(grid)
         
-        tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
+        tcorh_flat = compute_temperature_correction_horizontal(geometry)
         assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)
         
         # Humidity correction should also be zero when orography is zero
         land_temp_flat = jnp.full(geometry.orog.shape, 288.0)
-        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry, tcorh_flat, land_temp_flat)
+        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, tcorh_flat, land_temp_flat)
         assert jnp.allclose(qcorh_flat, 0.0, atol=1e-5)
         
         # test that total corrections are zero for flat orography
@@ -384,13 +382,13 @@ class TestOrographicCorrection:
         assert tcorv_5layer.shape == (5,)
         assert tcorv_5layer[0] == 0.0
         
+        ix, il = 64, 32
+
         # Test with extreme orography (very tall, steep mountain)
-        boundaries_extreme = create_test_boundaries(lon_points=32, lat_points=32)
-        geometry = create_test_geometry(layers=8, lon_points=32, lat_points=32, orography=True)
+        geometry = create_test_geometry(layers=8, lon_points=ix, lat_points=il, orography=True)
         
         # Create an extremely tall, steep mountain (like Everest: 8849m)
-        lon_idx = jnp.arange(32)
-        lat_idx = jnp.arange(32)
+        lon_idx, lat_idx = jnp.arange(ix), jnp.arange(il)
         lon_grid, lat_grid = jnp.meshgrid(lon_idx, lat_idx, indexing='ij')
         
         # Very steep mountain: 8000m peak with small footprint (sigma=2 grid points)
@@ -404,7 +402,7 @@ class TestOrographicCorrection:
         geometry.orog = extreme_orog
         geometry.phis0 = grav * extreme_orog  # Update phis0 too
         
-        tcorh_extreme = compute_temperature_correction_horizontal(boundaries_extreme, geometry)
+        tcorh_extreme = compute_temperature_correction_horizontal(geometry)
         assert jnp.all(jnp.isfinite(tcorh_extreme))  # Should not have infinities
         assert jnp.max(tcorh_extreme) > 0.0  # Should have positive values where mountain exists
         assert jnp.min(tcorh_extreme) < 1e-20  # Should be essentially zero where no orography
