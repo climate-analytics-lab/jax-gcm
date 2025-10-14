@@ -35,7 +35,7 @@ def create_test_geometry(layers=8, lon_points=96, lat_points=48):
     """Create a test geometry object using the actual Geometry class."""
     # Use the actual Geometry class from the codebase
     nodal_shape = (lon_points, lat_points)
-    return Geometry.from_grid_shape(nodal_shape=nodal_shape, node_levels=layers)
+    return Geometry.from_grid_shape(nodal_shape=nodal_shape, num_levels=layers)
 
 
 def create_test_boundaries(lon_points=96, lat_points=48):
@@ -192,8 +192,8 @@ class TestOrographicCorrection:
         geometry = create_test_geometry()
         parameters = Parameters.default()
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
-        node_levels = state.temperature.shape[0]   # layers
-        physics_data = PhysicsData.zeros(nodal_shape, node_levels)
+        num_levels = state.temperature.shape[0]   # layers
+        physics_data = PhysicsData.zeros(nodal_shape, num_levels)
         
         tendencies, updated_physics_data = get_orographic_correction_tendencies(
             state, physics_data, parameters, boundaries, geometry

@@ -81,13 +81,13 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape=None, node_levels=None):
+    def from_grid_shape(cls, nodal_shape=None, num_levels=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
         Args:
             nodal_shape: Shape of the nodal grid `(ix,il)`
-            node_levels: Number of vertical levels `kx`
+            num_levels: Number of vertical levels `kx`
 
         Returns:
             Geometry object
@@ -104,10 +104,10 @@ class Geometry:
         radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
 
         # Vertical functions of sigma
-        kx = node_levels
+        kx = num_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
         
-        return cls(nodal_shape=(node_levels,) + nodal_shape,
+        return cls(nodal_shape=(num_levels,) + nodal_shape,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
