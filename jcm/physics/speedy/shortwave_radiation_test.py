@@ -13,7 +13,8 @@ class TestSolar(unittest.TestCase):
         global solar, geometry
         from jcm.physics.speedy.shortwave_radiation import solar
         from jcm.geometry import Geometry
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_solar(self):
         self.assertTrue(np.allclose(solar(0.2, geometry=geometry), np.array([
@@ -106,9 +107,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physics.speedy.physical_constants import epssw, solc
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_shortwave_radiation(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])

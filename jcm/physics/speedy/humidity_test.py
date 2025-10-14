@@ -9,7 +9,7 @@ class TestHumidityUnit(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global ConvectionData, PhysicsData, PhysicsState, get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum, fsg, PhysicsTendency, \
-        SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData, Geometry, default_geometry
+        SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, BoundaryData, Geometry, convert_to_speedy_latitudes, default_geometry
         from jcm.physics.speedy.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
@@ -17,8 +17,9 @@ class TestHumidityUnit(unittest.TestCase):
         from jcm.physics.speedy.params import Parameters
         parameters = Parameters.default()
         from jcm.geometry import Geometry
-        default_geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
-        
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        default_geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
+
         self.temp_standard = jnp.ones((kx,ix,il))*273
         self.pressure_standard = jnp.ones((ix,il)) # normalized surface pressure
         self.sigma = 4
@@ -43,7 +44,7 @@ class TestHumidityUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav))
         boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)

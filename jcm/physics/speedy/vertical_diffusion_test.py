@@ -13,7 +13,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
         parameters = Parameters.default()
         from jcm.boundaries import BoundaryData
         from jcm.physics_interface import PhysicsState, PhysicsTendency

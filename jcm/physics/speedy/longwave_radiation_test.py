@@ -34,8 +34,9 @@ class TestLongwave(unittest.TestCase):
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
         from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
         from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
 
     def test_downward_longwave_rad_fluxes(self):
