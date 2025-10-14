@@ -270,7 +270,16 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _create_step_fn(self, boundaries: BoundaryData):
+    def _get_step_fn_factory(self, boundaries: BoundaryData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
+        """
+        For given surface boundary conditions, returns a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
+
+        Args:
+            boundaries: BoundaryData object containing surface boundary conditions.
+
+        Returns:
+            A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
+        """
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
                 state=state,
@@ -332,7 +341,7 @@ class Model:
         
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: will not recompile if model fields change
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
     def run_from_state(self,
                        initial_state: primitive_equations.State,
                        boundaries: BoundaryData,
@@ -358,8 +367,9 @@ class Model:
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
         """
-        raw_step_fn = self._create_step_fn(boundaries)
-        step_fn = raw_step_fn if output_averages else jax.checkpoint(raw_step_fn())
+        step_fn_factory = self._get_step_fn_factory(boundaries)
+        # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
+        step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
