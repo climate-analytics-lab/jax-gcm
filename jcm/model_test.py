@@ -1,5 +1,6 @@
 import unittest
 import jax.tree_util as jtu
+import jax.numpy as jnp
 import pytest
 
 class TestModelUnit(unittest.TestCase):
@@ -28,21 +29,21 @@ class TestModelUnit(unittest.TestCase):
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
-        self.assertIsNotNone(final_state.log_surface_pressure)
-        self.assertIsNotNone(final_state.tracers['specific_humidity'])
-
-        self.assertIsNotNone(dynamics_predictions.u_wind)
-        self.assertIsNotNone(dynamics_predictions.v_wind)
-        self.assertIsNotNone(dynamics_predictions.temperature)
-        self.assertIsNotNone(dynamics_predictions.specific_humidity)
-        self.assertIsNotNone(dynamics_predictions.geopotential)
-        self.assertIsNotNone(dynamics_predictions.normalized_surface_pressure)
+        self.assertIsNotNone(final_state)
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
-        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
+
+        self.assertFalse(jnp.isnan(final_state.divergence).any())
+        self.assertFalse(jnp.isnan(final_state.vorticity).any())
+        self.assertFalse(jnp.isnan(final_state.temperature_variation).any())
+        self.assertFalse(jnp.isnan(final_state.tracers['specific_humidity']).any())
+        self.assertFalse(jnp.isnan(final_state.log_surface_pressure).any())
+
+        self.assertIsNotNone(dynamics_predictions)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
@@ -50,11 +51,17 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
+    
+        self.assertFalse(jnp.isnan(dynamics_predictions.u_wind).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.v_wind).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.temperature).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.specific_humidity).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.geopotential).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.normalized_surface_pressure).any())
         
     def test_speedy_model(self):
         from jcm.model import Model
 
-        # optionally add a boundary conditions file
         model = Model(
             time_step=720,
         )
@@ -70,26 +77,20 @@ class TestModelUnit(unittest.TestCase):
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
         self.assertIsNotNone(final_state)
-        self.assertIsNotNone(dynamics_predictions)
-
-        self.assertIsNotNone(final_state.divergence)
-        self.assertIsNotNone(final_state.vorticity)
-        self.assertIsNotNone(final_state.temperature_variation)
-        self.assertIsNotNone(final_state.log_surface_pressure)
-        self.assertIsNotNone(final_state.tracers['specific_humidity'])
-
-        self.assertIsNotNone(dynamics_predictions.u_wind)
-        self.assertIsNotNone(dynamics_predictions.v_wind)
-        self.assertIsNotNone(dynamics_predictions.temperature)
-        self.assertIsNotNone(dynamics_predictions.specific_humidity)
-        self.assertIsNotNone(dynamics_predictions.geopotential)
-        self.assertIsNotNone(dynamics_predictions.normalized_surface_pressure)
 
         self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
         self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
         self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
-        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
         self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
+
+        self.assertFalse(jnp.isnan(final_state.divergence).any())
+        self.assertFalse(jnp.isnan(final_state.vorticity).any())
+        self.assertFalse(jnp.isnan(final_state.temperature_variation).any())
+        self.assertFalse(jnp.isnan(final_state.tracers['specific_humidity']).any())
+        self.assertFalse(jnp.isnan(final_state.log_surface_pressure).any())
+
+        self.assertIsNotNone(dynamics_predictions)
 
         self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
@@ -98,6 +99,13 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
     
+        self.assertFalse(jnp.isnan(dynamics_predictions.u_wind).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.v_wind).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.temperature).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.specific_humidity).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.geopotential).any())
+        self.assertFalse(jnp.isnan(dynamics_predictions.normalized_surface_pressure).any())
+
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         import jax
