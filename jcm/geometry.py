@@ -146,32 +146,12 @@ class Geometry:
         Returns:
             Geometry object
         """
-        # Orography and surface geopotential
-        coords = get_coords(nodal_shape=nodal_shape)
-        orog = jnp.zeros(nodal_shape) if orography is None else orography
-        phi0 = grav * orog
-        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
+        return cls.from_coords(
+            coords=get_coords(layers=num_levels, nodal_shape=nodal_shape),
+            orography=orography,
+            truncation_number=truncation_number
+        )
 
-        # Horizontal functions of latitude (from south to north)
-        il = nodal_shape[1]
-        iy = (il + 1)//2
-        j = jnp.arange(1, iy + 1)
-        sia_half = jnp.cos(jnp.pi * (j - 0.25) / (il + 0.5))
-        coa_half = jnp.sqrt(1.0 - sia_half ** 2.0)
-        sia = jnp.concatenate((-sia_half, sia_half[::-1]), axis=0).ravel()
-        coa = jnp.concatenate((coa_half, coa_half[::-1]), axis=0).ravel()
-        radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
-
-        # Vertical functions of sigma
-        kx = num_levels
-        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
-
-        return cls(nodal_shape=(num_levels,) + nodal_shape,
-                   orog=orog, phis0=phis0,
-                   radang=radang, sia=sia, coa=coa,
-                   hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
-                   grdsig=grdsig, grdscp=grdscp, wvi=wvi)
-    
     @classmethod
     def single_column_geometry(cls, radang=0., orog=0., phis0=None, num_levels=8):
         """
