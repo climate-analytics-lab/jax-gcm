@@ -1,6 +1,7 @@
 import unittest
 import jax.tree_util as jtu
 import numpy as np
+import pytest
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -98,6 +99,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
 
+    @pytest.mark.slow
     def test_speedy_model_averages(self):
         from jcm.model import Model
 
@@ -123,6 +125,7 @@ class TestModelUnit(unittest.TestCase):
             avg_preds
         )
 
+    @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         import jax
         import jax.numpy as jnp
@@ -152,6 +155,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
+    @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
         import jax
         import jax.numpy as jnp
@@ -177,6 +181,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
+    @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         from jcm.model import Model, get_coords
@@ -210,6 +215,7 @@ class TestModelUnit(unittest.TestCase):
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     
+    @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
         import jax
         import jax.numpy as jnp
