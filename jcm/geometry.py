@@ -133,13 +133,13 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape, node_levels=8, orography=None, truncation_number=None):
+    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
         Args:
             nodal_shape: Shape of the nodal grid `(ix,il)`.
-            node_levels (optional): Number of vertical levels `kx` (default 8).
+            num_levels (optional): Number of vertical levels `kx` (default 8).
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
@@ -163,17 +163,17 @@ class Geometry:
         radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
 
         # Vertical functions of sigma
-        kx = node_levels
+        kx = num_levels
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
-        return cls(nodal_shape=(node_levels,) + nodal_shape,
+        return cls(nodal_shape=(num_levels,) + nodal_shape,
                    orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
     
     @classmethod
-    def single_column_geometry(cls, radang=0., orog=0., phis0=None, node_levels=8):
+    def single_column_geometry(cls, radang=0., orog=0., phis0=None, num_levels=8):
         """
         Initializes a Geometry instance for a single column model.
 
@@ -181,7 +181,7 @@ class Geometry:
             radang (optional): Latitude of the single column in radians (default 0).
             orog (optional): Orography height in meters (default 0).
             phis0 (optional): Spectrally truncated surface geopotential (default grav * orog).
-            node_levels (optional): Number of vertical levels (default 8).
+            num_levels (optional): Number of vertical levels (default 8).
         
         Returns:
             Geometry object
@@ -194,9 +194,9 @@ class Geometry:
             phis0 = grav * orog
 
         # Vertical functions of sigma
-        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(node_levels)
+        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(num_levels)
 
-        return cls(nodal_shape=(node_levels, 1, 1),
+        return cls(nodal_shape=(num_levels, 1, 1),
                    orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]),
                    radang=jnp.array([[radang]]), sia=jnp.array([[sia]]), coa=jnp.array([[coa]]),
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,

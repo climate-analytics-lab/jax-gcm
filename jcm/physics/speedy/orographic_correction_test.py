@@ -184,8 +184,8 @@ class TestOrographicCorrection:
         geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
-        node_levels = state.temperature.shape[0]   # layers
-        physics_data = PhysicsData.zeros(nodal_shape, node_levels)
+        num_levels = state.temperature.shape[0]   # layers
+        physics_data = PhysicsData.zeros(nodal_shape, num_levels)
         
         tendencies, updated_physics_data = get_orographic_correction_tendencies(
             state, physics_data, parameters, boundaries, geometry
