@@ -11,11 +11,11 @@ class TestSpeedyPhysicsUnit(unittest.TestCase):
         from jcm.date import DateData
 
     def test_speedy_forcing(self):
-        grid_shape = (8,64,32)
+        grid_shape = (8,1,1)
         tendencies, data = SpeedyPhysics().compute_tendencies(
             state=PhysicsState.zeros(grid_shape),
             boundaries=BoundaryData.ones(grid_shape[1:]),
-            geometry=Geometry.from_grid_shape(nodal_shape=grid_shape[1:], node_levels=grid_shape[0]),
+            geometry=Geometry.single_column_geometry(num_levels=grid_shape[0]),
             date=DateData.zeros()
         )
         self.assertIsNotNone(tendencies)

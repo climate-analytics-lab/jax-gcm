@@ -53,7 +53,7 @@ def create_test_geometry(layers=8, lon_points=96, lat_points=48, orography=False
     orog = None
     if orography:
         orog = create_test_orography(lon_points, lat_points)
-    return Geometry.from_grid_shape(nodal_shape=nodal_shape, node_levels=layers, orography=orog)
+    return Geometry.from_grid_shape(nodal_shape=nodal_shape, num_levels=layers, orography=orog)
 
 def create_test_boundaries(lon_points=96, lat_points=48):
     boundaries = default_boundaries(get_coords(nodal_shape=(lon_points, lat_points)).horizontal)

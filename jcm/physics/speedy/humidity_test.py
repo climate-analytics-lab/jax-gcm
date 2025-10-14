@@ -17,7 +17,7 @@ class TestHumidityUnit(unittest.TestCase):
         from jcm.physics.speedy.params import Parameters
         parameters = Parameters.default()
         from jcm.geometry import Geometry
-        default_geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx)
+        default_geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx)
         
         self.temp_standard = jnp.ones((kx,ix,il))*273
         self.pressure_standard = jnp.ones((ix,il)) # normalized surface pressure
@@ -43,7 +43,7 @@ class TestHumidityUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
-        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), node_levels=kx, orography=phi0/grav)
+        geometry = Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav)
         boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
