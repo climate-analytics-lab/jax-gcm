@@ -28,6 +28,7 @@ class TestModelUnit(unittest.TestCase):
             get_coords().horizontal
         )
 
+    @pytest.mark.slow
     def test_held_suarez_model(self):
         layers = 8
         model = Model(
@@ -76,6 +77,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.isnan(dynamics_predictions.geopotential).any())
         self.assertFalse(jnp.isnan(dynamics_predictions.normalized_surface_pressure).any())
 
+    @pytest.mark.slow
     def test_held_suarez_gradients_jvp(self):
         state = Model()._prepare_initial_modal_state()
 
@@ -103,6 +105,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.geopotential)))
         self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.normalized_surface_pressure)))
 
+    @pytest.mark.slow
     def test_held_suarez_gradients_vjp(self):
         state = Model()._prepare_initial_modal_state()
 
@@ -265,4 +268,4 @@ class TestModelUnit(unittest.TestCase):
         for k, v in grads_dict.items():
             if v.dtype == jax.dtypes.float0:
                 continue
-            self.assertFalse(jnp.any(jnp.isnan(v)), f"NaN in physics gradient for {k}")
+            self.assertFalse(jnp.any(jnp.isnan(v)), f"NaN in gradient for {k}")
