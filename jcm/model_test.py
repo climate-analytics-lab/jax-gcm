@@ -169,7 +169,9 @@ class TestModelUnit(unittest.TestCase):
         if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
             import subprocess
             import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+            if not (boundaries_dir / 'boundaries_daily.nc').exists():
+                subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+            subprocess.run([sys.executable, str(boundaries_dir / 'upsample.py'), '31'], check=True)
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
@@ -212,7 +214,9 @@ class TestModelUnit(unittest.TestCase):
         if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
             import subprocess
             import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+            if not (boundaries_dir / 'boundaries_daily.nc').exists():
+                subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+            subprocess.run([sys.executable, str(boundaries_dir / 'upsample.py'), '31'], check=True)
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
