@@ -28,4 +28,4 @@ def pass_fn(operand):
 
 def ones_like(x):
     import jax.tree_util as jtu
-    return jtu.tree_map(lambda y: jnp.ones_like(y), x)
+    return jtu.tree_map(jnp.ones_like, x)

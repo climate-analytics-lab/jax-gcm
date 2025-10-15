@@ -153,6 +153,7 @@ class Physics:
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
 
     def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
+        import numpy as np
         """
         Flattens a physics data struct into a dictionary.
 
@@ -171,7 +172,7 @@ class Physics:
             items = {}
             for key, val in obj.__dict__.items():
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
-                if isinstance(val, jax.Array):
+                if isinstance(val, jax.Array) or isinstance(val, np.ndarray):
                     items[new_key] = val
                 elif hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))

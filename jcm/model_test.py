@@ -1,21 +1,39 @@
 import unittest
+import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
 import pytest
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
-        global SpeedyPhysics, Parameters
+        global HeldSuarezPhysics, SpeedyPhysics, Parameters, Model, ones_like, boundaries
+        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.physics.speedy.speedy_physics import SpeedyPhysics
         from jcm.physics.speedy.params import Parameters
+        from jcm.model import Model, get_coords
+        from jcm.utils import ones_like
+
+        from pathlib import Path
+        from jcm.boundaries import boundaries_from_file
+        
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        
+        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+        
+        boundaries = boundaries_from_file(
+            boundaries_dir / 'boundaries_daily.nc',
+            get_coords().horizontal
+        )
 
     def test_held_suarez_model(self):
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
-        from jcm.model import Model
         layers = 8
         model = Model(
             layers=layers,
             physics=HeldSuarezPhysics(),
+            orography=boundaries.orog,
         )
 
         save_interval, total_time = 90, 360
@@ -57,10 +75,54 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.isnan(dynamics_predictions.specific_humidity).any())
         self.assertFalse(jnp.isnan(dynamics_predictions.geopotential).any())
         self.assertFalse(jnp.isnan(dynamics_predictions.normalized_surface_pressure).any())
+
+    def test_held_suarez_gradients_jvp(self):
+        state = Model()._prepare_initial_modal_state()
+
+        def fn(state):
+            model = Model(physics=HeldSuarezPhysics(), orography=boundaries.orog)
+            predictions = model.run(initial_state=state, save_interval=30, total_time=60)
+            return model._final_modal_state, predictions
+
+        tangent = ones_like(state)
+        _, jvp_sum = jax.jvp(fn, (state,), (tangent,))
+        
+        d_final_d_tangent, d_predictions_d_tangent = jvp_sum
+        
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(d_final_d_tangent.sim_time)))
+        
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(d_predictions_d_tangent.dynamics.normalized_surface_pressure)))
+
+    def test_held_suarez_gradients_vjp(self):
+        state = Model()._prepare_initial_modal_state()
+
+        def fn(state):
+            model = Model(physics=HeldSuarezPhysics(), orography=boundaries.orog)
+            predictions = model.run(initial_state=state, save_interval=30, total_time=60)
+            return model._final_modal_state, predictions
+
+        (final_state, preds), f_vjp = jax.vjp(fn, state)
+        cotangent = (ones_like(final_state), ones_like(preds))
+        d_cotangent_d_state, = f_vjp(cotangent)
+        
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.tracers['specific_humidity'])))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.sim_time))) # FIXME: this is ending up nan
         
     def test_speedy_model(self):
-        from jcm.model import Model
-
         model = Model(
             time_step=720,
         )
@@ -107,11 +169,6 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
-        import jax
-        import jax.numpy as jnp
-        from jcm.model import Model
-        from jcm.utils import ones_like
-
         # Create model that goes through one timestep
         model = Model()
         state = model._prepare_initial_modal_state()
@@ -122,26 +179,19 @@ class TestModelUnit(unittest.TestCase):
             return model._final_modal_state, predictions
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(fn, state)
+        (final_state, preds), f_vjp = jax.vjp(fn, state)
+        cotangent = (ones_like(final_state), ones_like(preds))
+        d_cotangent_d_state, = f_vjp(cotangent)
         
-        input = (ones_like(primals[0]), ones_like(primals[1]))
-
-        df_dstate = f_vjp(input)
-        
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.tracers['specific_humidity'])))
+        # self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.sim_time))) FIXME: this is ending up nan
 
     @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
-        import jax
-        import jax.numpy as jnp
-        from jcm.model import Model
-        from jcm.utils import ones_like
-
         model = Model()
         state = model._prepare_initial_modal_state()
 
@@ -150,37 +200,19 @@ class TestModelUnit(unittest.TestCase):
             return model._final_modal_state, predictions
 
         # Calculate gradients
-        primals, f_vjp = jax.vjp(fn, state)
-        input = (ones_like(primals[0]), ones_like(primals[1]))
-        df_dstate = f_vjp(input)
+        (final_state, preds), f_vjp = jax.vjp(fn, state)
+        cotangent = (ones_like(final_state), ones_like(preds))
+        d_cotangent_d_state, = f_vjp(cotangent)
 
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.vorticity)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.divergence)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.temperature_variation)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.log_surface_pressure)))
+        self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.tracers['specific_humidity'])))
+        # self.assertFalse(jnp.any(jnp.isnan(d_cotangent_d_state.sim_time))) FIXME: this is ending up nan
 
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
-        import jax
-        from jcm.model import Model, get_coords
-        from jcm.boundaries import boundaries_from_file
-        from jcm.utils import ones_like
-
-        from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
-        
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
-
         create_model = lambda params=Parameters.default(): Model(
             orography=boundaries.orog,
             physics=SpeedyPhysics(parameters=params),
@@ -191,18 +223,13 @@ class TestModelUnit(unittest.TestCase):
         # Calculate gradients using VJP
         params = Parameters.default()
         primal, f_vjp = jax.vjp(fn, params)
-        df_dparams = f_vjp(ones_like(primal))
+        df_dparams, = f_vjp(ones_like(primal))
 
-        self.assertFalse(df_dparams[0].isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
     
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
-        import jax
-        import jax.numpy as jnp
         import numpy as np
-        from jcm.model import Model, get_coords
-        from jcm.boundaries import boundaries_from_file
-
         def make_ones_parameters_object(params):
             def make_tangent(x):
                 if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
@@ -210,21 +237,8 @@ class TestModelUnit(unittest.TestCase):
                 elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
                     return np.ones((), dtype=jax.dtypes.float0)
                 else:
-                    return jnp.ones_like(x)
+                    return np.ones_like(x)
             return jtu.tree_map(lambda x: make_tangent(x), params)
-        
-        from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
-        
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
 
         create_model = lambda params=Parameters.default(): Model(
             orography=boundaries.orog,
@@ -237,18 +251,18 @@ class TestModelUnit(unittest.TestCase):
         params = Parameters.default()
         tangent = make_ones_parameters_object(params)
         y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
-        state = jvp_sum.dynamics
-        physics_data = jvp_sum.physics
+        dynamics_gradients, physics_gradients = jvp_sum.dynamics, jvp_sum.physics
 
-        # Check dynamics state
-        self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(state.v_wind)))
-        self.assertFalse(jnp.any(jnp.isnan(state.temperature)))
-        self.assertFalse(jnp.any(jnp.isnan(state.specific_humidity)))
-        self.assertFalse(jnp.any(jnp.isnan(state.geopotential)))
-        self.assertFalse(jnp.any(jnp.isnan(state.normalized_surface_pressure)))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
-        # Check Physics Data object
-        # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.u_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.v_wind)))
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.temperature)))
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.specific_humidity)))
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.geopotential)))
+        self.assertFalse(jnp.any(jnp.isnan(dynamics_gradients.normalized_surface_pressure)))
 
+        grads_dict = SpeedyPhysics().data_struct_to_dict(physics_gradients, create_model().geometry)
 
+        for k, v in grads_dict.items():
+            if v.dtype == jax.dtypes.float0:
+                continue
+            self.assertFalse(jnp.any(jnp.isnan(v)), f"NaN in physics gradient for {k}")
