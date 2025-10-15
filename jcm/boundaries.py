@@ -1,110 +1,70 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-from dinosaur.scales import units
 from dinosaur.coordinate_systems import HorizontalGridTypes
-from jcm.physics.speedy.params import Parameters
 
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
-    forog: jnp.ndarray # orographic factor for land surface drag
     orog: jnp.ndarray # orography in meters
-    phi0: jnp.ndarray  # surface geopotential (ix, il)
     phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
-    sice_am: jnp.ndarray
-    fmask_l: jnp.ndarray # land mask - set by land_model_init()
-    rhcapl: jnp.ndarray # 1/heat capacity (land)
-    cdland: jnp.ndarray # 1/dissipation time (land)
-    stlcl_ob: jnp.ndarray # climatology for land temperature - might not need this and stl_lm
+    sice_am: jnp.ndarray # FIXME: need to set this
     snowd_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowd_am
     soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
     lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
-    land_coupling_flag: jnp.bool # 0 or 1
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
-    fmask_s: jnp.ndarray # sea mask - set by sea_model_init() once we have a model (instead of fixed ssts)
-
-
     @classmethod
-    def zeros(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
-              alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
-              stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-              fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def zeros(cls,nodal_shape,fmask=None,orog=None,phis0=None,
+              alb0=None,sice_am=None,snowd_am=None,
+              soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
-            forog=forog if forog is not None else jnp.zeros((nodal_shape)),
             orog=orog if orog is not None else jnp.zeros((nodal_shape)),
-            phi0=phi0 if phi0 is not None else jnp.zeros((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            fmask_l=fmask_l if fmask_l is not None else jnp.zeros((nodal_shape)),
-            rhcapl=rhcapl if rhcapl is not None else jnp.zeros((nodal_shape)),
-            cdland=cdland if cdland is not None else jnp.zeros((nodal_shape)),
-            stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.zeros((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.zeros((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
-    def ones(cls,nodal_shape,fmask=None,forog=None,orog=None,phi0=None,phis0=None,
-             alb0=None,sice_am=None,fmask_l=None,rhcapl=None,cdland=None,
-             stlcl_ob=None,snowd_am=None,soilw_am=None,tsea=None,
-             fmask_s=None,lfluxland=None, land_coupling_flag=None):
+    def ones(cls,nodal_shape,fmask=None,orog=None,phis0=None,
+             alb0=None,sice_am=None,snowd_am=None,
+             soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
-            forog=forog if forog is not None else jnp.ones((nodal_shape)),
             orog=orog if orog is not None else jnp.ones((nodal_shape)),
-            phi0=phi0 if phi0 is not None else jnp.ones((nodal_shape)),
             phis0=phis0 if phis0 is not None else jnp.ones((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
-            fmask_l=fmask_l if fmask_l is not None else jnp.ones((nodal_shape)),
-            rhcapl=rhcapl if rhcapl is not None else jnp.ones((nodal_shape)),
-            cdland=cdland if cdland is not None else jnp.ones((nodal_shape)),
-            stlcl_ob=stlcl_ob if stlcl_ob is not None else jnp.ones((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else False,
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
-            fmask_s=fmask_s if fmask_s is not None else jnp.ones((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
-    def copy(self,fmask=None,phi0=None,forog=None,orog=None,phis0=None,alb0=None,
-             sice_am=None,fmask_l=None,rhcapl=None,cdland=None,stlcl_ob=None,
-             snowd_am=None,soilw_am=None,tsea=None,fmask_s=None,lfluxland=None,
-             land_coupling_flag=None):
+    def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
+             sice_am=None,snowd_am=None,soilw_am=None,
+             tsea=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
-            forog=forog if forog is not None else self.forog,
             orog=orog if orog is not None else self.orog,
-            phi0=phi0 if phi0 is not None else self.phi0,
             phis0=phis0 if phis0 is not None else self.phis0,
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
-            fmask_l=fmask_l if fmask_l is not None else self.fmask_l,
-            rhcapl=rhcapl if rhcapl is not None else self.rhcapl,
-            cdland=cdland if cdland is not None else self.cdland,
-            stlcl_ob=stlcl_ob if stlcl_ob is not None else self.stlcl_ob,
             snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
-            land_coupling_flag=land_coupling_flag if land_coupling_flag is not None else self.land_coupling_flag,
             lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
-            fmask_s=fmask_s if fmask_s is not None else self.fmask_s
         )
 
     def isnan(self):
         self.lfluxland = 0
-        self.land_coupling_flag = 0
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
@@ -120,100 +80,83 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
     radang = grid.latitudes
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
-    return jnp.tile(sst_profile[jnp.newaxis], (grid.nodal_shape[0], 1))
+    return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
 
 def default_boundaries(
     grid: HorizontalGridTypes,
     orography,
-    parameters: Parameters=None,
     truncation_number=None
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
     """
-    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     from jcm.utils import spectral_truncation
     from jcm.physics.speedy.physical_constants import grav
 
-    parameters = parameters or Parameters.default()
-
     phi0 = grav * orography
     phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters)
 
     # land-sea mask
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
-    tsea = _fixed_ssts(grid)
-    
-    # Default to all sea when no land-sea mask provided
-    fmask_l = jnp.zeros_like(orography)  # No land
-    fmask_s = jnp.ones_like(orography)   # All sea
-    
+    tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
+        
     return BoundaryData.zeros(
         nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, forog=forog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0,
-        fmask_l=fmask_l, fmask_s=fmask_s)
+        orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0
+    )
 
-
-#this function calls land_model_init and eventually will call init for sea and ice models
-def initialize_boundaries(
+def boundaries_from_file(
     filename: str,
     grid: HorizontalGridTypes,
-    parameters: Parameters=None,
-    truncation_number=None
+    truncation_number=None,
+    fmask_threshold=0.1,
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
     """
     from jcm.physics.speedy.physical_constants import grav
     from jcm.utils import spectral_truncation
-    from jcm.physics.speedy.land_model import land_model_init
-    from jcm.physics.speedy.surface_flux import set_orog_land_sfc_drag
     import xarray as xr
 
-    parameters = parameters or Parameters.default()
-    
+    # Read boundaries from file
     ds = xr.open_dataset(filename)
 
-    orog = jnp.asarray(ds["orog"])
-    # Read surface geopotential (i.e. orography)
-    phi0 = grav * orog
-    # Also store spectrally truncated surface geopotential for the land drag term
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-    forog = set_orog_land_sfc_drag(phis0, parameters)
-
-    # Read land-sea mask
+    # land-sea mask
     fmask = jnp.asarray(ds["lsm"])
-    # Annual-mean surface albedo
-    alb0 = jnp.asarray(ds["alb"])
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
+    # Set values close to 0 or 1 to exactly 0 or 1
+    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
 
-    tsea = _fixed_ssts(grid)
-    boundaries = BoundaryData.zeros(
-        nodal_shape=fmask.shape,
-        fmask=fmask, forog=forog, orog=orog, phi0=phi0, phis0=phis0, tsea=tsea, alb0=alb0)
-    
-    boundaries = land_model_init(filename, parameters, boundaries)
+    # orography
+    orog = jnp.asarray(ds["orog"])
+    # Also store spectrally truncated surface geopotential for the land drag term
+    phi0 = grav * orog
+    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
 
-    # call sea model init
-    # call ice model init
+    # annual-mean surface albedo
+    alb0 = jnp.asarray(ds["alb"])
 
-    return boundaries
+    # sea ice concentration
+    sice_am = jnp.asarray(ds["icec"])
 
-def update_boundaries_with_timestep(
-        boundaries: BoundaryData,
-        parameters: Parameters=None,
-        time_step=30*units.minute
-) -> BoundaryData:
-    """
-    Update the boundary conditions with the new time step
-    """
-    parameters = parameters or Parameters.default()
-    # Update the land heat capacity and dissipation time
-    if boundaries.land_coupling_flag:
-        rhcapl = jnp.where(boundaries.alb0 < 0.4, 1./parameters.land_model.hcapl, 1./parameters.land_model.hcapli) * time_step.to(units.second).m
-        return boundaries.copy(rhcapl=rhcapl)
-    else:
-        return boundaries
+    # snow depth
+    snowd_am = jnp.asarray(ds["snowd"])
+    snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
+    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
+    snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
+
+    # soil moisture
+    soilw_am = jnp.asarray(ds["soilw_am"])
+    soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
+    assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
+
+    # Prescribe SSTs
+    tsea = jnp.asarray(ds["sst"])
+
+    return BoundaryData.zeros(
+        nodal_shape=fmask.shape, fmask=fmask,
+        orog=orog, phis0=phis0, alb0=alb0, sice_am=sice_am,
+        snowd_am=snowd_am, soilw_am=soilw_am, tsea=tsea
+    )

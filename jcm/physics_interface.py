@@ -3,7 +3,7 @@ Date: 2/7/2024
 Physics module that interfaces between the dynamics and the physics of the model. Should be agnostic
 to the specific physics being used.
 """
-
+import jax
 import jax.numpy as jnp
 import tree_math
 from jcm.geometry import Geometry
@@ -11,10 +11,12 @@ from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
 from typing import Tuple, Dict, Any
+from jcm.diffusion import DiffusionFilter
 
 @tree_math.struct
 class PhysicsState:
@@ -150,7 +152,7 @@ class Physics:
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
 
-    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> Dict[str, Any]:
+    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
         """
         Flattens a physics data struct into a dictionary.
 
@@ -169,10 +171,12 @@ class Physics:
             items = {}
             for key, val in obj.__dict__.items():
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
-                if hasattr(val, "__dict__") and val.__dict__:
+                if isinstance(val, jax.Array):
+                    items[new_key] = val
+                elif hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))
                 else:
-                    items[new_key] = val
+                    raise ValueError(f"Unsupported type for key {new_key}: {type(val)}")
             return items
         
         items = _to_dict_recursive(struct)
@@ -182,7 +186,7 @@ class Physics:
         for k in _original_keys:
             s = items[k].shape
             if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
-                items.update({f"{k}.{i}": items[k][..., i] for i in range(s[-1])})
+                items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
                 del items[k]
 
         return items
@@ -242,7 +246,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     modal_vorticity, modal_divergence = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind)
 
     # convert specific humidity to modal (and nondimensionalize)
-    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram / units.second)
+    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram)
     q_modal = dynamics.coords.horizontal.to_modal(q)
 
     # convert temperature to a variation and then to modal
@@ -325,12 +329,11 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         The verified and potentially corrected `PhysicsTendency` object.
     """
     # set specific humidity tendency such that the resulting specific humidity is non-negative
-    dt_seconds = 60 * time_step
     updated_tendencies = tendencies.copy(
         specific_humidity=jnp.where(
-            state.specific_humidity + dt_seconds * tendencies.specific_humidity >= 0,
+            state.specific_humidity + time_step * tendencies.specific_humidity >= 0,
             tendencies.specific_humidity,
-            - state.specific_humidity / dt_seconds
+            - state.specific_humidity / time_step
         )
     )
 
@@ -339,10 +342,11 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
 def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
-    time_step: int,
+    time_step: float,
     physics: Physics,
     boundaries: BoundaryData,
     geometry: Geometry,
+    diffusion: DiffusionFilter,
     date: DateData,
 ) -> State:
     """
@@ -367,4 +371,33 @@ def get_physical_tendencies(
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    return dynamics_tendency
+    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
+
+    return filtered_dynamics_tendency
+
+def filter_tendencies(dynamics_tendency: State, 
+                      diffusion: DiffusionFilter,
+                      time_step, 
+                      grid) -> State:
+    '''
+    Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
+
+    Args:
+        dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
+        diffusion: DiffusionFilter object containing the diffusion parameters
+        time_step: Time step in seconds
+        grid: dinosaur.spherical_harmonic.Grid object
+    
+    Returns:
+        Filtered dynamics tendencies in dinosaur.primitive_equations.State format
+    '''
+
+    tau = diffusion.tendency_diff_timescale
+    order = diffusion.tendency_diff_order
+
+    scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
+
+    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
+    filtered_tendency = filter_fn(dynamics_tendency)
+    
+    return filtered_tendency

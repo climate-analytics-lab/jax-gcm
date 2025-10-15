@@ -20,5 +20,6 @@ Contents
    speedy_translation
    api
    design
+   developer
    jax_userguide
 

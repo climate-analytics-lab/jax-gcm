@@ -49,16 +49,16 @@ class HeldSuarezPhysics(Physics):
         self.dThz = PHYSICS_SPECS.nondimensionalize(dThz)
         # Coordinates
         self.sigma = self.coords.vertical.centers
-        self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
+        self.lat = self.coords.horizontal.latitudes
 
     def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure
         )
         temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.maxT
-            - self.dTy * jnp.sin(self.lat[jnp.newaxis]) ** 2
-            - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat[jnp.newaxis]) ** 2
+            - self.dTy * jnp.sin(self.lat) ** 2
+            - self.dThz * jnp.log(p_over_p0) * jnp.cos(self.lat) ** 2
         )
         return jnp.maximum(self.minT, temperature)
 
@@ -71,7 +71,7 @@ class HeldSuarezPhysics(Physics):
     def kt(self):
         cutoff = jnp.maximum(0, (self.sigma - self.sigma_b) / (1 - self.sigma_b))
         return self.ka + (self.ks - self.ka) * (
-            cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat[jnp.newaxis]) ** 4
+            cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(self.lat) ** 4
     )
 
     def compute_tendencies(
