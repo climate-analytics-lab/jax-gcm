@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import functools
+import pytest
 from jax.test_util import check_vjp, check_jvp
 from jcm.physics.speedy.orographic_correction import (
     compute_temperature_correction_vertical_profile,
@@ -485,8 +486,7 @@ class TestOrographicCorrection:
         geometry = create_test_geometry()
         boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
                                        phis0 = test_boundaries.phis0,
-                                       fmask_l = test_boundaries.fmask_l,
-                                       fmask_s = test_boundaries.fmask_s,
+                                       fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
 
         # Set float inputs
@@ -515,8 +515,7 @@ class TestOrographicCorrection:
         geometry = create_test_geometry()
         boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
                                        phis0 = test_boundaries.phis0,
-                                       fmask_l = test_boundaries.fmask_l,
-                                       fmask_s = test_boundaries.fmask_s,
+                                       fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         # Compute temperature correction needed for the new humidity correction
         tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
@@ -539,7 +538,7 @@ class TestOrographicCorrection:
                                 atol=None, rtol=1, eps=0.00001)
         check_jvp(f, f_jvp, args = (boundaries_floats, geometry_floats, tcorh, land_temp), 
                                 atol=None, rtol=1, eps=0.00001)
-        
+    
     def test_get_orographic_correction_tendencies_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test the main tendency computation function gradient check."""
@@ -547,15 +546,14 @@ class TestOrographicCorrection:
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
         boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
                                        phis0 = test_boundaries.phis0,
-                                       fmask_l = test_boundaries.fmask_l,
-                                       fmask_s = test_boundaries.fmask_s,
+                                       fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         state = create_test_physics_state()
         geometry = create_test_geometry()
         parameters = Parameters.default()
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
         node_levels = state.temperature.shape[0]   # layers
-        physics_data = PhysicsData.ones(nodal_shape, node_levels)
+        physics_data = PhysicsData.zeros(nodal_shape, node_levels)
 
         # Set float inputs
         state_floats = convert_to_float(state)
@@ -589,8 +587,7 @@ class TestOrographicCorrection:
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
         boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
                                        phis0 = test_boundaries.phis0,
-                                       fmask_l = test_boundaries.fmask_l,
-                                       fmask_s = test_boundaries.fmask_s,
+                                       fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         state = create_test_physics_state()
         geometry = create_test_geometry()

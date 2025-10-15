@@ -367,8 +367,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rh = 0.8 * jnp.ones(zxy) #relative humidity
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-        fmask_l = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -381,8 +381,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        forog = set_orog_land_sfc_drag(phi0, parameters)
-        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask_l=fmask_l, phi0=phi0,forog=forog,soilw_am=soilw_am)
+        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask=fmask, orog=phi0/grav,soilw_am=soilw_am)
+
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
@@ -416,15 +416,15 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
 
-        def f(phi0, parameters_f):
-            return set_orog_land_sfc_drag(phi0, parameters=convert_back(parameters_f, parameters), )
+        def f(phi0, parameters_sf_hdrag):
+            return get_orog_land_sfc_drag(phi0, parameters_sf_hdrag)
         
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (phi0, parameters_floats), 
+        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (phi0, parameters_floats), 
+        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag), 
                                 atol=None, rtol=1, eps=0.000001)
 
