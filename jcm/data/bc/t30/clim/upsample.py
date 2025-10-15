@@ -25,30 +25,43 @@ def clamp_to_valid_ranges(ds):
 
 def main(target_resolution):
     grid = get_coords(spectral_truncation=target_resolution).horizontal
-    ds = xr.open_dataset(Path(__file__).parent / 'boundaries_daily.nc')
+    ds_boundaries = xr.open_dataset(Path(__file__).parent / 'boundaries_daily.nc')
+    da_orog = xr.open_dataarray(Path(__file__).parent / 'orography.nc')
 
     # Pad longitude so edge values are handled correctly
-    lon = ds['lon'].values
-    ds_pad = xr.concat([
-        ds.assign_coords(lon=lon - 360),
-        ds,
-        ds.assign_coords(lon=lon + 360)
+    lon = ds_boundaries['lon'].values
+    ds_boundaries_pad = xr.concat([
+        ds_boundaries.assign_coords(lon=lon - 360),
+        ds_boundaries,
+        ds_boundaries.assign_coords(lon=lon + 360)
+    ], dim='lon')
+    da_orog_pad = xr.concat([
+        da_orog.assign_coords(lon=lon - 360),
+        da_orog,
+        da_orog.assign_coords(lon=lon + 360)
     ], dim='lon')
 
     # Interpolate to new grid
-    ds_interp = ds_pad.interp(
+    ds_boundaries_interp = ds_boundaries_pad.interp(
+        lat=grid.latitudes * 180 / np.pi,
+        lon=grid.longitudes * 180 / np.pi,
+        method="linear"
+    )
+    da_orog_interp = da_orog_pad.interp(
         lat=grid.latitudes * 180 / np.pi,
         lon=grid.longitudes * 180 / np.pi,
         method="linear"
     )
 
     # Fill missing data at latitude extremes by padding with nearest non-nan values
-    for var in ds_interp.data_vars:
-        ds_interp[var].values = pad_1st_axis(ds_interp[var].values)
+    for var in ds_boundaries_interp.data_vars:
+        ds_boundaries_interp[var].values = pad_1st_axis(ds_boundaries_interp[var].values)
+    da_orog_interp.values = pad_1st_axis(da_orog_interp.values)
 
-    ds_interp = clamp_to_valid_ranges(ds_interp)
+    ds_boundaries_interp = clamp_to_valid_ranges(ds_boundaries_interp)
 
-    ds_interp.to_netcdf(Path(__file__).parent / f'./boundaries_daily_t{target_resolution}.nc')
+    ds_boundaries_interp.to_netcdf(Path(__file__).parent / f'./boundaries_daily_t{target_resolution}.nc')
+    da_orog_interp.to_netcdf(Path(__file__).parent / f'./orography_t{target_resolution}.nc')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upscale boundaries file to target horizontal spatial resolution.")

@@ -161,23 +161,24 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
         from jcm.utils import ones_like
+        import xarray as xr
 
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+        if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
             import subprocess
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
 
-        orography = jnp.load(boundaries_dir / 'orography.npy')
+        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
         create_model = lambda params=Parameters.default(): Model(
             orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
-        
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc'))
+
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -193,6 +194,7 @@ class TestModelUnit(unittest.TestCase):
         import numpy as np
         from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
+        import xarray as xr
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -207,19 +209,19 @@ class TestModelUnit(unittest.TestCase):
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
         
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
+        if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
             import subprocess
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
 
-        orography = jnp.load(boundaries_dir / 'orography.npy')
+        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
         create_model = lambda params=Parameters.default(): Model(
             orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily.nc'))
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
 
         # Calculate gradients using JVP
         params = Parameters.default()
