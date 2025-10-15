@@ -4,37 +4,25 @@ class TestHeldSuarezUnit(unittest.TestCase):
     def test_held_suarez_forcing(self):
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
-        from jcm.physics_interface import get_physical_tendencies
-        from jcm.diffusion import DiffusionFilter
+        from jcm.physics_interface import dynamics_state_to_physics_state
 
-        time_step = 10
-        model = Model(time_step=time_step, physics=HeldSuarezPhysics())
+        model = Model()
+        modal_state = model._prepare_initial_modal_state()
+        physics_state = dynamics_state_to_physics_state(modal_state, model.primitive)
+
+        physics_tendencies, _ = HeldSuarezPhysics().compute_tendencies(state=physics_state)
+
+        self.assertIsNotNone(physics_tendencies)
+
+        nodal_zxy = physics_state.u_wind.shape
+        self.assertTupleEqual(physics_tendencies.u_wind.shape, nodal_zxy)
+        self.assertTupleEqual(physics_tendencies.v_wind.shape, nodal_zxy)
+        self.assertTupleEqual(physics_tendencies.temperature.shape, nodal_zxy)
+        self.assertTupleEqual(physics_tendencies.specific_humidity.shape, nodal_zxy)
     
-        dynamics_tendency = get_physical_tendencies(
-            state = model._prepare_initial_modal_state(),
-            dynamics = model.primitive,
-            time_step = time_step * 60,
-            physics = HeldSuarezPhysics(model.coords),
-            boundaries = None,
-            geometry = None,
-            diffusion = DiffusionFilter.default(),
-            date = None
-        )
+        self.assertFalse(jnp.isnan(physics_tendencies.u_wind).any())
+        self.assertFalse(jnp.isnan(physics_tendencies.v_wind).any())
+        self.assertFalse(jnp.isnan(physics_tendencies.temperature).any())
+        self.assertFalse(jnp.isnan(physics_tendencies.specific_humidity).any())
 
-        self.assertIsNotNone(dynamics_tendency)
 
-    def test_held_suarez_model(self):
-        from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
-        
-        model = Model(physics=HeldSuarezPhysics())
-
-        _ = model.run(total_time=36)
-
-        final_state = model._final_modal_state
-
-        self.assertFalse(jnp.any(jnp.isnan(final_state.vorticity)))
-        self.assertFalse(jnp.any(jnp.isnan(final_state.divergence)))
-        self.assertFalse(jnp.any(jnp.isnan(final_state.temperature_variation)))
-        self.assertFalse(jnp.any(jnp.isnan(final_state.log_surface_pressure)))
-        self.assertFalse(jnp.any(jnp.isnan(final_state.tracers['specific_humidity'])))

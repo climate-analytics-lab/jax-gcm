@@ -15,11 +15,10 @@ class TestModelUnit(unittest.TestCase):
         layers = 8
         model = Model(
             layers=layers,
-            time_step=180,
             physics=HeldSuarezPhysics(),
         )
 
-        save_interval, total_time = 1, 2
+        save_interval, total_time = 90, 360
         predictions = model.run(
             total_time=total_time,
             save_interval=save_interval,

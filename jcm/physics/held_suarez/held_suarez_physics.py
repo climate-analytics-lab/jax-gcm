@@ -77,9 +77,9 @@ class HeldSuarezPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        boundaries: BoundaryData,
-        geometry: Geometry,
-        date: DateData,
+        boundaries: BoundaryData=None,
+        geometry: Geometry=None,
+        date: DateData=None,
     ) -> Tuple[PhysicsTendency, None]:
         """
         Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
