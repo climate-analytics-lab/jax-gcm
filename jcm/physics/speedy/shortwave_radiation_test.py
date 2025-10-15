@@ -167,7 +167,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask_l=fmask)
+        boundaries = BoundaryData.zeros(xy, fmask=fmask)
         _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)

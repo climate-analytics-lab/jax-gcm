@@ -28,9 +28,9 @@ class TestConvectionUnit(unittest.TestCase):
 
     def test_diagnose_convection_varying(self):
         ps = jnp.ones((ix, il))
-        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il) / il)**3))
         qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
-        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        qa = jnp.sin(2*jnp.arange(ix)[:, jnp.newaxis]/ix)**2 * qsat * 3.5
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
         
@@ -107,9 +107,9 @@ class TestConvectionUnit(unittest.TestCase):
 
     def test_get_convection_tendencies_varying(self):
         ps = jnp.ones((ix, il))
-        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il) / il)**3))
         qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
-        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        qa = jnp.sin(2*jnp.arange(ix)[:, jnp.newaxis]/ix)**2 * qsat * 3.5
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
 
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
@@ -132,8 +132,8 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(physics_data.convection.precnv, precnv_f90, atol=1e-4))
 
         rps = 1/ps
-        ttend_f90 = dfse_f90.at[1:].set(dfse_f90[1:] * rps[jnp.newaxis] * grdscp[1:, jnp.newaxis, jnp.newaxis])
-        qtend_f90 = dfqa_f90.at[1:].set(dfqa_f90[1:] * rps[jnp.newaxis] * grdsig[1:, jnp.newaxis, jnp.newaxis])
+        ttend_f90 = dfse_f90.at[1:].set(dfse_f90[1:] * rps * grdscp[1:, jnp.newaxis, jnp.newaxis])
+        qtend_f90 = dfqa_f90.at[1:].set(dfqa_f90[1:] * rps * grdsig[1:, jnp.newaxis, jnp.newaxis])
 
         self.assertTrue(jnp.allclose(physics_tendencies.temperature, ttend_f90, atol=1e-4))
         self.assertTrue(jnp.allclose(physics_tendencies.specific_humidity, qtend_f90, atol=1e-4))

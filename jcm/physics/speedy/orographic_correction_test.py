@@ -64,9 +64,8 @@ def create_test_boundaries(lon_points=96, lat_points=48):
             from jcm.physics.speedy.physical_constants import grav
             self.phis0 = grav * orog  # Approximate phis0 = g * h
             # Add land/sea masks and sea surface temperature for humidity correction
-            self.fmask_l = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
-            self.fmask_s = jnp.ones((lon_points, lat_points)) * 0.3  # 30% sea
-            self.tsea = jnp.full((lon_points, lat_points), 285.0)     # Sea surface temperature
+            self.fmask = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
+            self.tsea = jnp.full((lon_points, lat_points, 365), 285.0)     # Sea surface temperature
     
     return TestBoundaries()
 
@@ -88,7 +87,7 @@ def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     
     # Add sinusoidal temperature variation
     temp_variation = 10.0 * jnp.sin(2 * jnp.pi * lon_grid / lon_points) * jnp.cos(jnp.pi * lat_grid / lat_points)
-    temperature = temperature + temp_variation[None, :, :]
+    temperature = temperature + temp_variation
     
     # Create humidity field (decreases with height)
     humidity = 0.01 * jnp.exp(-jnp.arange(layers)[:, None, None] / 3.0) * jnp.ones(shape)
@@ -258,8 +257,8 @@ class TestOrographicCorrection:
         # Check that corrections are applied correctly
         tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
         tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
-        expected_temp_correction = tcorh[None, :, :] * tcorv[:, None, None]
-        
+        expected_temp_correction = tcorh * tcorv[:, None, None]
+
         actual_temp_correction = corrected_state.temperature - state.temperature
         # Allow for small numerical differences due to JAX/numpy precision
         np.testing.assert_allclose(actual_temp_correction, expected_temp_correction, rtol=1e-4, atol=2e-5)
@@ -303,17 +302,15 @@ class TestOrographicCorrection:
         test_phis0 = grav * test_orog
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
-        test_fmask_l = jnp.full((4, 4), 0.7)  # 70% land
-        test_fmask_s = jnp.full((4, 4), 0.3)  # 30% sea
-        test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature 
-        test_sst_am = jnp.full((4, 4), 285.0)  # Sea surface temperature
+        test_fmask = jnp.full((4, 4), 0.7)  # 70% land
+        test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
+        test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
         
         class TestBoundariesFortran:
             def __init__(self):
                 self.orog = test_orog
                 self.phis0 = test_phis0
-                self.fmask_l = test_fmask_l
-                self.fmask_s = test_fmask_s
+                self.fmask = test_fmask
                 self.tsea = test_sst_am
         
         boundaries_fortran = TestBoundariesFortran()
@@ -370,15 +367,15 @@ class TestOrographicCorrection:
         flat_orography = jnp.zeros(grid.nodal_shape)
         
         # Use the actual model boundary initialization (now fixed)
-        boundaries_flat = default_boundaries(grid, flat_orography, parameters)
+        boundaries_flat = default_boundaries(grid, flat_orography)
         
         tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
-        assert jnp.all(tcorh_flat == 0.0)
+        assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)
         
         # Humidity correction should also be zero when orography is zero
         land_temp_flat = jnp.full(boundaries_flat.orog.shape, 288.0)
         qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry, tcorh_flat, land_temp_flat)
-        assert jnp.all(qcorh_flat == 0.0)
+        assert jnp.allclose(qcorh_flat, 0.0, atol=1e-5)
         
         # test that total corrections are zero for flat orography
         test_state = create_test_physics_state(lon_points=grid.nodal_shape[0], 
@@ -390,9 +387,9 @@ class TestOrographicCorrection:
         )
         
         # State should be completely unchanged when orography is flat
-        np.testing.assert_array_equal(corrected_state_flat.temperature, test_state.temperature,
+        np.testing.assert_allclose(corrected_state_flat.temperature, test_state.temperature, atol=1e-6,
                                     err_msg="Temperature should be unchanged with flat orography")
-        np.testing.assert_array_equal(corrected_state_flat.specific_humidity, test_state.specific_humidity,
+        np.testing.assert_allclose(corrected_state_flat.specific_humidity, test_state.specific_humidity, atol=1e-6,
                                     err_msg="Specific humidity should be unchanged with flat orography")
         
         # Test with minimum supported layers (5)

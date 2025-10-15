@@ -1,6 +1,6 @@
 import unittest
-import pytest
 import jax.tree_util as jtu
+import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
 
@@ -99,7 +99,8 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
-        
+    
+    @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         import jax
         import jax.numpy as jnp
@@ -129,6 +130,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
+    @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
         import jax
         import jax.numpy as jnp
@@ -154,10 +156,11 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
 
+    @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         from jcm.model import Model, get_coords
-        from jcm.boundaries import initialize_boundaries
+        from jcm.boundaries import boundaries_from_file
         from jcm.utils import ones_like
 
         from pathlib import Path
@@ -168,7 +171,7 @@ class TestModelUnit(unittest.TestCase):
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
         
-        boundaries = initialize_boundaries(
+        boundaries = boundaries_from_file(
             boundaries_dir / 'boundaries_daily.nc',
             get_coords().horizontal
         )
@@ -187,12 +190,13 @@ class TestModelUnit(unittest.TestCase):
 
         self.assertFalse(df_dparams[0].isnan().any_true())
     
+    @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
         import jax
         import jax.numpy as jnp
         import numpy as np
         from jcm.model import Model, get_coords
-        from jcm.boundaries import initialize_boundaries
+        from jcm.boundaries import boundaries_from_file
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -211,8 +215,8 @@ class TestModelUnit(unittest.TestCase):
             import subprocess
             import sys
             subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = initialize_boundaries(
+
+        boundaries = boundaries_from_file(
             boundaries_dir / 'boundaries_daily.nc',
             get_coords().horizontal
         )
