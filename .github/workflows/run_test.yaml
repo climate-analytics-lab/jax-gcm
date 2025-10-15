@@ -21,7 +21,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       - name: Test with pytest
         run: |
-          coverage run -m pytest  -v -s --cov-fail-under=90
+          coverage run -m pytest  -v -s --cov-fail-under=90 --source=jcm/
       - name: Generate Coverage Report
         run: |
           coverage report -m
