@@ -7,7 +7,7 @@ on:
 concurrency:
   # For pull requests: group by PR number
   # For branch pushes: group by branch name
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
