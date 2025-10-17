@@ -51,7 +51,6 @@ class DiagnosticsCollector(nnx.Module):
     steps_to_average: int
 
     def __init__(self, steps_to_average):
-        # self.data = None
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
         self.steps_to_average = steps_to_average
