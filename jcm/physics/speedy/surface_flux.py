@@ -42,7 +42,7 @@ def get_surface_fluxes(
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
     tsea : 2D array
-        - Sea-surface temperature, physics_data.sea_model.tsea
+        - Sea-surface temperature, boundaries.tsea
     rsds : 2D array
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array
@@ -68,7 +68,7 @@ def get_surface_fluxes(
 
     rh = physics_data.humidity.rh
     phi0 = boundaries.orog * grav # surface geopotential
-    tsea = boundaries.tsea
+    tsea = boundaries.tsea[:,:,day]
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l

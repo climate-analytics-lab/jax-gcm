@@ -2,7 +2,6 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
-from jcm.physics.speedy.params import Parameters
 
 @tree_math.struct
 class BoundaryData:
@@ -30,7 +29,7 @@ class BoundaryData:
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
@@ -46,7 +45,7 @@ class BoundaryData:
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             lfluxland=lfluxland if lfluxland is not None else True,
-            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)),
+            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
     def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
@@ -100,7 +99,7 @@ def default_boundaries(
     # land-sea mask
     fmask = jnp.zeros_like(orography)
     alb0 = jnp.zeros_like(orography)
-    tsea = _fixed_ssts(grid)
+    tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
         
     return BoundaryData.zeros(
         nodal_shape=orography.shape,

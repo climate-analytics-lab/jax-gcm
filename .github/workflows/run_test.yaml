@@ -1,6 +1,14 @@
 name: Run Unit Tests via Pytest
 
-on: [push]
+on:
+  push:
+  pull_request:
+
+concurrency:
+  # For pull requests: group by PR number
+  # For branch pushes: group by branch name
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -11,18 +19,25 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Test with pytest
+
+      # run fast tests when triggered by a push 
+      - name: Test with pytest (no slow tests on push)
+        if: github.event_name == 'push'
         run: |
-          coverage run -m pytest  -v -s --cov-fail-under=90 --cov=jcm 
-      - name: Generate Coverage Report
+          pytest -v -s -m "not slow" --cov --cov-fail-under=90
+
+      # run slow tests when triggered by a push to an open PR
+      - name: Test with pytest (include slow tests on PR)
+        if: github.event_name == 'pull_request'
         run: |
-          coverage report -m
-      
+          pytest -v -s --cov --cov-fail-under=90
