@@ -30,14 +30,10 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # run fast tests when triggered by a push 
-      - name: Test with pytest (no slow tests on push)
-        if: github.event_name == 'push'
+      - name: Test with pytest (All tests on PR, fast tests on push)
         run: |
-          pytest -v -s -m "not slow" --cov --cov-fail-under=90
-
-      # run slow tests when triggered by a push to an open PR
-      - name: Test with pytest (include slow tests on PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -v -s --cov --cov-fail-under=90
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            pytest -v -s --cov --cov-fail-under=90
+          else
+            pytest -v -s -m "not slow" --cov --cov-fail-under=90
+          fi
