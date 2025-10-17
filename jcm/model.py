@@ -16,7 +16,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import sigma_layer_boundaries, Geometry, get_coords
+from jcm.geometry import Geometry, get_coords
 from jcm.date import DateData, Timedelta, Timestamp
 from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
@@ -51,7 +51,6 @@ class DiagnosticsCollector(nnx.Module):
     steps_to_average: int
 
     def __init__(self, steps_to_average):
-        # self.data = None
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
         self.steps_to_average = steps_to_average
@@ -123,22 +122,6 @@ def averaged_trajectory_from_step(
 
     return integrate
 
-def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    if layers not in sigma_layer_boundaries:
-        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
-
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
-    )
-
 class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
@@ -158,15 +141,9 @@ class Model:
                 Model time step in minutes
             layers: 
                 Number of vertical layers
-<<<<<<< HEAD
             spectral_truncation:
                 Spectral truncation (horizontal resolution) of the model grid (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
             coords: 
-=======
-            horizontal_resolution:
-                Horizontal resolution of the model (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
-            coords:
->>>>>>> main
                 CoordinateSystem object describing model grid
             orography:
                 Orography data (2D array)
