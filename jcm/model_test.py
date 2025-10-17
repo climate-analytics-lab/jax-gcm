@@ -1,5 +1,6 @@
 import unittest
 import jax.tree_util as jtu
+import numpy as np
 import pytest
 
 class TestModelUnit(unittest.TestCase):
@@ -97,7 +98,33 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
-    
+
+    @pytest.mark.slow
+    def test_speedy_model_averages(self):
+        from jcm.model import Model
+
+        model = Model(
+            time_step=30, # to make sure this test stays valid if we ever change the default timestep
+        )
+        preds = model.run(save_interval=.5/24., total_time=2/24.)
+
+        true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
+
+        avg_model = Model(
+            time_step=30,
+        )
+        avg_preds = avg_model.run(
+            save_interval=2/24.,
+            total_time=2/24.,
+            output_averages=True,
+        )
+
+        jtu.tree_map(
+            lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
+            true_avg_preds,
+            avg_preds
+        )
+
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         import jax
@@ -204,7 +231,7 @@ class TestModelUnit(unittest.TestCase):
                     return np.ones((), dtype=jax.dtypes.float0)
                 else:
                     return jnp.ones_like(x)
-            return jtu.tree_map(lambda x: make_tangent(x), params)
+            return jtu.tree_map(make_tangent, params)
         
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
@@ -243,5 +270,4 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
-
 
