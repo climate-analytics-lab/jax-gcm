@@ -30,7 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Test with pytest (All tests on PR, fast tests on push)
+      - name: Test with pytest (all tests on PR, fast tests on push)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             pytest -v -s --cov --cov-fail-under=90
