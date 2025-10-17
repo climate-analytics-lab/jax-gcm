@@ -2,6 +2,7 @@ import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 class TestModelUnit(unittest.TestCase):
@@ -171,6 +172,32 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.isnan(dynamics_predictions.normalized_surface_pressure).any())
 
     @pytest.mark.slow
+    def test_speedy_model_averages(self):
+        from jcm.model import Model
+
+        model = Model(
+            time_step=30, # to make sure this test stays valid if we ever change the default timestep
+        )
+        preds = model.run(save_interval=.5/24., total_time=2/24.)
+
+        true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
+
+        avg_model = Model(
+            time_step=30,
+        )
+        avg_preds = avg_model.run(
+            save_interval=2/24.,
+            total_time=2/24.,
+            output_averages=True,
+        )
+
+        jtu.tree_map(
+            lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
+            true_avg_preds,
+            avg_preds
+        )
+
+    @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         # Create model that goes through one timestep
         model = Model()
@@ -240,8 +267,8 @@ class TestModelUnit(unittest.TestCase):
                 elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
                     return np.ones((), dtype=jax.dtypes.float0)
                 else:
-                    return np.ones_like(x)
-            return jtu.tree_map(lambda x: make_tangent(x), params)
+                    return jnp.ones_like(x)
+            return jtu.tree_map(make_tangent, params)
 
         create_model = lambda params=Parameters.default(): Model(
             orography=boundaries.orog,

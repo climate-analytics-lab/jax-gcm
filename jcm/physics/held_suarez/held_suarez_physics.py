@@ -11,8 +11,6 @@ from jcm.date import DateData
 Quantity = units.Quantity
 
 class HeldSuarezPhysics(Physics):
-    write_output: bool
-
     def __init__(self,
         coords: coordinate_systems.CoordinateSystem = get_coords(),
         sigma_b: Quantity = 0.7,
@@ -37,7 +35,6 @@ class HeldSuarezPhysics(Physics):
             dTy: horizontal temperature variation of radiative equilibrium.
             dThz: vertical temperature variation of radiative equilibrium.
         """
-        self.write_output = False
         self.coords = coords
         self.sigma_b = sigma_b
         self.kf = PHYSICS_SPECS.nondimensionalize(kf)

@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
 from collections import abc
 from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -32,11 +33,9 @@ def set_physics_flags(
 
 class SpeedyPhysics(Physics):
     parameters: Parameters
-    write_output: bool
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
     def __init__(self,
-                 write_output: bool=True,
                  parameters: Parameters=Parameters.default(),
                  checkpoint_terms=True
     ) -> None:
@@ -44,11 +43,9 @@ class SpeedyPhysics(Physics):
         Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
-            write_output (bool): Flag to indicate whether physics output should be written to predictions.
             parameters (Parameters): Parameters for the physics model.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
         """
-        self.write_output = write_output
         self.parameters = parameters
 
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
@@ -117,3 +114,8 @@ class SpeedyPhysics(Physics):
             physics_tendency += tend
         
         return physics_tendency, data
+
+    def get_empty_data(self, geometry: Geometry) -> PhysicsData:
+        # PhysicsData.zeros creates an 'initial' physics data,
+        # but we need a completely zeroed one (including fields like model_year) for accumulating averages
+        return tree_map(lambda x: 0*x, PhysicsData.zeros(geometry.nodal_shape[1:], geometry.nodal_shape[0]))

@@ -3,6 +3,7 @@ Date: 2/7/2024
 Physics module that interfaces between the dynamics and the physics of the model. Should be agnostic
 to the specific physics being used.
 """
+
 import jax
 import jax.numpy as jnp
 import tree_math
@@ -63,7 +64,7 @@ class PhysicsState:
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
 
 PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
 
@@ -133,9 +134,7 @@ Attributes:
         Tendency of specific humidity.
 """
 
-class Physics:
-    write_output: bool
-    
+class Physics:    
     def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
@@ -151,6 +150,9 @@ class Physics:
             Object containing physics data
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
+    
+    def get_empty_data(self, geometry: Geometry) -> Any:
+        return None
 
     def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
         import numpy as np
@@ -349,6 +351,7 @@ def get_physical_tendencies(
     geometry: Geometry,
     diffusion: DiffusionFilter,
     date: DateData,
+    diagnostics_collector=None,
 ) -> State:
     """
     Computes the physical tendencies given the current state and a list of physics functions.
@@ -361,6 +364,7 @@ def get_physical_tendencies(
         boundaries: BoundaryData object
         geometry: Geometry object
         date: DateData object
+        diagnostics_collector: DiagnosticsCollector object
 
     Returns:
         Physical tendencies in dinosaur.primitive_equations.State format
@@ -368,9 +372,13 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, _ = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
+    
+    if diagnostics_collector is not None:
+            diagnostics_collector.accumulate_if_physical_step(physics_data)
+
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
     filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
 
