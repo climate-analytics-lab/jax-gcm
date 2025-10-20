@@ -1,6 +1,8 @@
 import unittest
 import jax.numpy as jnp
 import jax
+import functools
+from jax.test_util import check_vjp, check_jvp
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -81,6 +83,7 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
+
 
     def test_diagnose_convection_moist_adiabat(self):
         psa = jnp.ones((ix, il)) #normalized surface pressure
@@ -213,3 +216,76 @@ class TestConvectionUnit(unittest.TestCase):
         self.assertAlmostEqual(physics_tendencies.specific_humidity[5,0,0], test_qtend[5], places=2)
         self.assertAlmostEqual(physics_tendencies.temperature[6,0,0], test_ttend[6], places=2)
         self.assertAlmostEqual(physics_tendencies.specific_humidity[6,0,0], test_qtend[6], places=2)
+
+
+    # # Gradient checks
+    def test_diagnose_convection_varying_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        se = cp * ta + phi
+        
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(ps, se, qa, qsat, parameters_f, boundaries_f,geometry_f):
+            iptop, qdif = diagnose_convection(ps, se, qa, qsat, 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(iptop), convert_to_float(qdif)
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+
+
+    def test_get_convection_tendencies_varying_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        ps = jnp.ones((ix, il))
+        ta = 300 * jnp.ones((kx, ix, il)) * (fsg[:, jnp.newaxis, jnp.newaxis]**(.05 * jnp.cos(3*jnp.arange(il)[jnp.newaxis, jnp.newaxis, :] / il)**3))
+        qsat = get_qsat(ta, ps, fsg[:, jnp.newaxis, jnp.newaxis])
+        qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
+        phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
+        state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        boundaries = BoundaryData.zeros((ix,il))
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out), convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.001)
+
+
+    

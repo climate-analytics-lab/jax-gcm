@@ -2,6 +2,9 @@ import jax
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import functools
+from jax.test_util import check_vjp, check_jvp
+
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def setUp(self):
@@ -65,3 +68,39 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
+
+    def test_get_vertical_diffusion_gradient_check(self):
+        """Test that we get correct gradient values"""
+        from jcm.utils import convert_back, convert_to_float
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(zxy)
+        boundaries = BoundaryData.ones(xy)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_vertical_diffusion_tend(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+
+        

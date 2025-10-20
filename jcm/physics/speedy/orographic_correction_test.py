@@ -15,6 +15,9 @@ os.environ['JAX_PLATFORMS'] = 'cpu'
 import jax
 import jax.numpy as jnp
 import numpy as np
+import functools
+import pytest
+from jax.test_util import check_vjp, check_jvp
 from jcm.physics.speedy.orographic_correction import (
     compute_temperature_correction_vertical_profile,
     compute_humidity_correction_vertical_profile,
@@ -53,7 +56,7 @@ def create_test_boundaries(lon_points=96, lat_points=48):
         -((lon_grid - center_lon) ** 2 / (2 * sigma_lon ** 2) +
           (lat_grid - center_lat) ** 2 / (2 * sigma_lat ** 2))
     )
-    
+
     class TestBoundaries:
         def __init__(self):
             self.orog = orog
@@ -426,6 +429,195 @@ class TestOrographicCorrection:
         max_corr_idx = jnp.unravel_index(jnp.argmax(tcorh_extreme), tcorh_extreme.shape)
         assert max_orog_idx == max_corr_idx
 
+    def test_temperature_vertical_profile_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test computation of temperature correction vertical profile gradient check."""
+        geometry = create_test_geometry(layers=8)
+        parameters = Parameters.default()
+
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(parameters_f, geometry_f):
+            return compute_temperature_correction_vertical_profile(parameters=convert_back(parameters_f, parameters), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (parameters_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (parameters_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        
+    
+    def test_humidity_vertical_profile_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test computation of humidity correction vertical profile gradient check."""
+        geometry = create_test_geometry(layers=8)
+        parameters = Parameters.default()
+
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(parameters_f, geometry_f):
+            return compute_humidity_correction_vertical_profile(parameters=convert_back(parameters_f, parameters), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (parameters_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (parameters_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        
+
+    
+    def test_temperature_horizontal_correction_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test computation of temperature horizontal correction gradient check."""
+        lon, lat = 96, 48
+        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
+        geometry = create_test_geometry()
+        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
+                                       phis0 = test_boundaries.phis0,
+                                       fmask = test_boundaries.fmask,
+                                       tsea = test_boundaries.tsea)
+
+        # Set float inputs
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(boundaries_f, geometry_f):
+            return compute_temperature_correction_horizontal(boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+        check_jvp(f, f_jvp, args = (boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        
+    
+    def test_humidity_horizontal_correction_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test computation of humidity horizontal correction gradient check."""
+        lon, lat = 96, 48
+        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
+        geometry = create_test_geometry()
+        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
+                                       phis0 = test_boundaries.phis0,
+                                       fmask = test_boundaries.fmask,
+                                       tsea = test_boundaries.tsea)
+        # Compute temperature correction needed for the new humidity correction
+        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
+
+        # Set float inputs
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(boundaries_f, geometry_f, tcorh, land_temp):
+            return compute_humidity_correction_horizontal(boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry),
+                                       temperature_correction=tcorh, 
+                                       land_temperature=land_temp)
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (boundaries_floats, geometry_floats, tcorh, land_temp), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (boundaries_floats, geometry_floats, tcorh, land_temp), 
+                                atol=None, rtol=1, eps=0.00001)
+    
+    def test_get_orographic_correction_tendencies_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test the main tendency computation function gradient check."""
+        lon, lat = 96, 48
+        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
+        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
+                                       phis0 = test_boundaries.phis0,
+                                       fmask = test_boundaries.fmask,
+                                       tsea = test_boundaries.tsea)
+        state = create_test_physics_state()
+        geometry = create_test_geometry()
+        parameters = Parameters.default()
+        nodal_shape = state.temperature.shape[1:]  # (lon, lat)
+        node_levels = state.temperature.shape[0]   # layers
+        physics_data = PhysicsData.zeros(nodal_shape, node_levels)
+
+        # Set float inputs
+        state_floats = convert_to_float(state)
+        physics_data_floats = convert_to_float(physics_data)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(state_f, physics_data_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_orographic_correction_tendencies(state=convert_back(state_f, state), 
+                                       physics_data=convert_back(physics_data_f, physics_data),
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(tend_out), convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+        check_jvp(f, f_jvp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.001)
+    
+    def test_apply_orographic_corrections_to_state_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test direct application of corrections to state gradient check."""
+        lon, lat = 96, 48
+        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
+        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
+                                       phis0 = test_boundaries.phis0,
+                                       fmask = test_boundaries.fmask,
+                                       tsea = test_boundaries.tsea)
+        state = create_test_physics_state()
+        geometry = create_test_geometry()
+        parameters = Parameters.default()
+
+        # Set float inputs
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(state_f, parameters_f, boundaries_f,geometry_f):
+            state_out = apply_orographic_corrections_to_state(state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(state_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        
+
+
 
 if __name__ == "__main__":
     # Run tests
@@ -439,3 +631,9 @@ if __name__ == "__main__":
     test_instance.test_jax_compatibility()    
     test_instance.test_speedy_fortran_numerical_equivalence()
     test_instance.test_edge_cases()
+    test_instance.test_temperature_vertical_profile_gradient_check()    
+    test_instance.test_humidity_vertical_profile_gradient_check()    
+    test_instance.test_temperature_horizontal_correction_gradient_check()    
+    test_instance.test_humidity_horizontal_correction_gradient_check()    
+    test_instance.test_get_orographic_correction_tendencies_gradient_check()    
+    test_instance.test_apply_orographic_corrections_to_state_gradient_check() 

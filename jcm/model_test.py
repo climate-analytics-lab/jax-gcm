@@ -2,6 +2,8 @@ import unittest
 import jax.tree_util as jtu
 import numpy as np
 import pytest
+from jax.test_util import check_vjp, check_jvp
+import functools
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -270,4 +272,29 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+    @pytest.mark.skip(reason="finite differencing produces nans")
+    def test_speedy_model_state_gradient_check(self):
+        import jax
+        import jax.numpy as jnp
+        from jcm.model import Model
+        from jcm.utils import ones_like, convert_back, convert_to_float
 
+        # Create model that goes through one timestep
+        model = Model()
+        state = model._prepare_initial_modal_state()
+
+        state_floats = convert_to_float(state)
+
+        def f(state_f):
+            _ = model.run(total_time=0) # to set up model fields
+            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
+            return model._final_modal_state, predictions
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f) 
+
+        check_vjp(f, f_vjp, args = (state,), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (state,), 
+                                atol=None, rtol=1, eps=0.001)
