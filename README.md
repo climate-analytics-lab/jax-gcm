@@ -4,7 +4,7 @@ A fully differentiable General Circulation Model (GCM) for climate science and m
 
 ## Overview
 
-JCM is a physical climate model that combines the [Dinosaur](https://github.com/google-research/dinosaur) dynamical core with JAX implementations of atmospheric physics parameterizations. The entire model is differentiable, enabling gradient-based optimization, data assimilation, and the potential for, ML-enhanced climate modeling.
+JCM is a physical climate model that combines the [Dinosaur](https://github.com/google-research/dinosaur) dynamical core with JAX implementations of atmospheric physics parameterizations. The entire model is differentiable, enabling gradient-based optimization, data assimilation, and ML-enhanced climate modeling.
 
 ### Key Features
 
@@ -66,24 +66,6 @@ Example notebooks are available in the `notebooks/` directory:
 - **`run-speedy-gradients.ipynb`**: Computing gradients through the model
 - **`optimization_example.ipynb`**: Parameter optimization examples
 - **`autodiff_userguide.ipynb`**: Guide to automatic differentiation features
-
-## Computing Gradients
-
-JAX-GCM supports automatic differentiation through the entire model:
-
-```python
-import jax
-
-def loss_function(sea_surface_temp):
-    boundaries = boundaries_with_sst(sea_surface_temp)
-    predictions = model.run(boundaries=boundaries, total_time=30.0)
-    # Compute loss (e.g., match target temperature)
-    return jnp.mean((predictions.dynamics.temperature - target_temp)**2)
-
-# Compute gradient of loss with respect to SST
-grad_fn = jax.grad(loss_function)
-gradients = grad_fn(initial_sst)
-```
 
 ## Physics Packages
 
@@ -151,6 +133,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 - **Dinosaur**: JAX-GCM builds on the [Dinosaur](https://github.com/google-research/dinosaur) dynamical core developed by Google Research
 - **SPEEDY**: Physics parameterizations adapted from the [SPEEDY](https://users.ictp.it/~kucharsk/speedy-net.html) model by F. Molteni
+- **SPEEDY.f90**: We referenced the [Fortran 90 version](https://github.com/samhatfield/speedy.f90) of SPEEDY by Sam Hatfield and Leo Saffin for our specific implementation.
 
 ## Contact
 
