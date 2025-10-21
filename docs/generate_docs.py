@@ -126,6 +126,7 @@ def main():
         with open(csv_path, 'r') as f:
             reader = csv.DictReader(f)
             total_vars = sum(1 for row in reader if row.get('Variable', '').strip())
+            print(f"Updated documentation for {total_vars} variables.")
     else:
         sys.exit(1)
 
