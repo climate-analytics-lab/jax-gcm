@@ -11,12 +11,10 @@ import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 os.environ['JAX_PLATFORMS'] = 'cpu'
 
-# import pytest  # Comment out for environments without pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
 import functools
-import pytest
 from jax.test_util import check_vjp, check_jvp
 from jcm.physics.speedy.orographic_correction import (
     compute_temperature_correction_vertical_profile,
@@ -31,8 +29,7 @@ from jcm.boundaries import BoundaryData
 from jcm.geometry import Geometry
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import rgas, grav, gamma, hscale, hshum
-
+from jcm.physics.speedy.physical_constants import grav
 
 def create_test_geometry(layers=8, lon_points=96, lat_points=48):
     """Create a test geometry object using the actual Geometry class."""
@@ -62,7 +59,6 @@ def create_test_boundaries(lon_points=96, lat_points=48):
             self.orog = orog
             # For temperature correction, we need phis0 (spectrally-filtered surface geopotential)
             # In this test, we'll approximate it as geopotential = gravity * height
-            from jcm.physics.speedy.physical_constants import grav
             self.phis0 = grav * orog  # Approximate phis0 = g * h
             # Add land/sea masks and sea surface temperature for humidity correction
             self.fmask = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
@@ -299,7 +295,6 @@ class TestOrographicCorrection:
         ])
         
         # phis0 = g * orog (as in Fortran)
-        from jcm.physics.speedy.physical_constants import grav
         test_phis0 = grav * test_orog
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
@@ -416,7 +411,6 @@ class TestOrographicCorrection:
         )
         
         boundaries_extreme.orog = extreme_orog
-        from jcm.physics.speedy.physical_constants import grav
         boundaries_extreme.phis0 = grav * extreme_orog  # Update phis0 too
         
         tcorh_extreme = compute_temperature_correction_horizontal(boundaries_extreme, geometry)

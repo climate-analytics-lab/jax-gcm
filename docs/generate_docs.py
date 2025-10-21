@@ -49,7 +49,7 @@ def parse_csv_to_rst_tables(csv_file):
     return rst_content
 
 def generate_sphinx_rst(modules):
-    rst_content = f"""Speedy Variable Translation
+    rst_content = """Speedy Variable Translation
 ===========================
 
 """
@@ -109,7 +109,7 @@ def update_sphinx_doc(csv_file, output_file):
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(rst_content)
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 def main():
