@@ -299,12 +299,11 @@ class TestOrographicCorrection:
         
         # Land/sea masks and temperatures (matching Fortran test values exactly)
         test_fmask = jnp.full((4, 4), 0.7)  # 70% land
-        test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
+        # test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
         test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
         
         class TestBoundariesFortran:
             def __init__(self):
-                self.orog = test_orog
                 self.phis0 = test_phis0
                 self.fmask = test_fmask
                 self.tsea = test_sst_am
