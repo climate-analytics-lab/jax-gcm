@@ -195,12 +195,8 @@ class TestModelUnit(unittest.TestCase):
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
-        if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
-            from jcm.data.bc.upsample import main as upsample_main
-            if not (boundaries_dir / 't30/clim/boundaries_daily.nc').exists():
-                from jcm.data.bc.interpolate import main as interpolate_main
-                interpolate_main()
-            upsample_main(['31'])
+        from jcm.data.bc.interpolate import main as interpolate_main
+        interpolate_main(['31'])
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
@@ -240,12 +236,8 @@ class TestModelUnit(unittest.TestCase):
         from pathlib import Path
         boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
-        if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
-            from jcm.data.bc.upsample import main as upsample_main
-            if not (boundaries_dir / 't30/clim/boundaries_daily.nc').exists():
-                from jcm.data.bc.interpolate import main as interpolate_main
-                interpolate_main()
-            upsample_main(['31'])
+        from jcm.data.bc.interpolate import main as interpolate_main
+        interpolate_main(['31'])
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
