@@ -1,2 +1,2 @@
-[tool.ruff.lint.per-file-ignores]
-"jcm/model.py" = ["E731"]
+[tool.ruff.lint]
+ignore = ["E731"]
