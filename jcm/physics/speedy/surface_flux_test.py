@@ -388,7 +388,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
-        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask=fmask, orog=phi0/grav,soilw_am=soilw_am)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav))
+        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask=fmask,soilw_am=soilw_am)
 
 
         # Set float inputs
