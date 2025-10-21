@@ -410,11 +410,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.000001)
         
     def test_surface_fluxes_drag_test_gradient_check(self):
-        from jcm.utils import convert_back, convert_to_float
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
-
-        # Set float inputs
-        parameters_floats = convert_to_float(parameters)
 
         def f(phi0, parameters_sf_hdrag):
             return get_orog_land_sfc_drag(phi0, parameters_sf_hdrag)

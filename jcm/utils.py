@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
 from jax.tree_util import tree_map
-from jax.tree_util import tree_map
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber

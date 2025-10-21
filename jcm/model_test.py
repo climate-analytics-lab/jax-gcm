@@ -276,7 +276,6 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_state_gradient_check(self):
         import jax
         from jcm.model import Model
-        from jcm.utils import convert_to_float
 
         # Create model that goes through one timestep
         model = Model()
