@@ -23,10 +23,10 @@ def clamp_to_valid_ranges(ds):
     ds['alb'] = ds['alb'].clip(0.0, 1.0)
     return ds
 
-def main(target_resolution):
+def upsample(target_resolution):
     grid = get_coords(spectral_truncation=target_resolution).horizontal
-    ds_boundaries = xr.open_dataset(Path(__file__).parent / 'boundaries_daily.nc')
-    da_orog = xr.open_dataarray(Path(__file__).parent / 'orography.nc')
+    ds_boundaries = xr.open_dataset(Path(__file__).parent / 't30/clim/boundaries_daily.nc')
+    da_orog = xr.open_dataarray(Path(__file__).parent / 't30/clim/orography.nc')
 
     # Pad longitude so edge values are handled correctly
     lon = ds_boundaries['lon'].values
@@ -62,9 +62,40 @@ def main(target_resolution):
 
     ds_boundaries_interp.to_netcdf(Path(__file__).parent / f'./boundaries_daily_t{target_resolution}.nc')
     da_orog_interp.to_netcdf(Path(__file__).parent / f'./orography_t{target_resolution}.nc')
+    ds_boundaries.close()
+    da_orog.close()
+    
+def main(argv=None) -> int:
+    """
+    CLI entrypoint. Parse argv and call `upsample`.
+
+    Args:
+        argv (list[str] | None): list of command-line args (not including program name).
+                                 If None, uses sys.argv[1:].
+    Returns:
+        int: exit code (0 = success, non-zero = failure)
+    """
+    parser = argparse.ArgumentParser(
+        description="Upscale boundaries file to target horizontal spatial resolution."
+    )
+    valid_res = [21, 31, 42, 85, 106, 119, 170, 213, 340, 425]
+    parser.add_argument(
+        "target_resolution",
+        type=int,
+        choices=valid_res,
+        help=f"Target horizontal resolution (choices: {valid_res})"
+    )
+
+    # let argparse handle argument errors (it raises SystemExit on bad args)
+    args = parser.parse_args(argv) # uses sys.argv[1:] if argv is None
+
+    try:
+        upsample(args.target_resolution)
+        return 0
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Upscale boundaries file to target horizontal spatial resolution.")
-    parser.add_argument("target_resolution", type=int, help="Target horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)")
-    args = parser.parse_args()
-    main(args.target_resolution)
+    raise SystemExit(main())

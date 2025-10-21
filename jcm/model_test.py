@@ -191,17 +191,14 @@ class TestModelUnit(unittest.TestCase):
         import xarray as xr
 
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
         if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
-            import subprocess
-            import sys
-            if not (boundaries_dir / 'boundaries_daily.nc').exists():
-                subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-            result = subprocess.run([sys.executable, str(boundaries_dir / 'upsample.py'), '31'], check=True)
-            print(result.stdout)
-            print(result.stderr)
-            result.check_returncode()
+            from jcm.data.bc.upsample import main as upsample_main
+            if not (boundaries_dir / 't30/clim/boundaries_daily.nc').exists():
+                from jcm.data.bc.interpolate import main as interpolate_main
+                interpolate_main()
+            upsample_main(['31'])
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
@@ -239,17 +236,14 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(make_tangent, params)
         
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
         if not (boundaries_dir / 'boundaries_daily_t31.nc').exists():
-            import subprocess
-            import sys
-            if not (boundaries_dir / 'boundaries_daily.nc').exists():
-                subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-            result = subprocess.run([sys.executable, str(boundaries_dir / 'upsample.py'), '31'], check=True)
-            print(result.stdout)
-            print(result.stderr)
-            result.check_returncode()
+            from jcm.data.bc.upsample import main as upsample_main
+            if not (boundaries_dir / 't30/clim/boundaries_daily.nc').exists():
+                from jcm.data.bc.interpolate import main as interpolate_main
+                interpolate_main()
+            upsample_main(['31'])
 
         orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 

@@ -1,11 +1,12 @@
 import xarray as xr
+import sys
 from pathlib import Path
 import numpy as np
 from jcm.physics.speedy.params import Parameters
 
 # Set the input directory path
-input_dir = Path(__file__).parent
-output_file, orography_file = Path(__file__).parent / 'boundaries.nc', Path(__file__).parent / 'orography.nc'
+input_dir = Path(__file__).parent / 't30/clim'
+output_file, orography_file = Path(__file__).parent / 't30/clim/boundaries.nc', Path(__file__).parent / 't30/clim/orography.nc'
 file_names = ['land.nc', 'sea_ice.nc', 'sea_surface_temperature.nc', 'snow.nc', 'soil.nc', 'surface.nc']
 
 def process_boundaries(ds):
@@ -48,7 +49,19 @@ def process_boundaries(ds):
     da_orog = ds['orog']
     return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'orog'}), da_orog
 
-if __name__ == "__main__":
+def main(argv=None):
+    """
+    Main entrypoint for compile CLI and for importable use.
+
+    Args:
+        argv (list|None): list of command-line args (not including program name).
+                          If None, uses sys.argv[1:].
+    Returns:
+        int: exit code (0 = success)
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+
     try:
         print("Compiling dataset...")
         merged_ds = xr.open_mfdataset([input_dir / fname for fname in file_names], combine='by_coords')
@@ -64,6 +77,12 @@ if __name__ == "__main__":
         da_orog.to_netcdf(orography_file)
         da_orog.close()
         
-        print("Done!")        
-    except Exception as e:
-        print(f"Error: {e}")
+        print("Done!")
+        return 0
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())
