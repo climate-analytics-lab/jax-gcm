@@ -29,7 +29,6 @@ class TestHumidityUnit(unittest.TestCase):
 
     def test_spec_hum_to_rel_hum_isnan_ones(self):
         from jcm.constants import grav
-        from jcm.geometry import get_coords
         xy = (ix, il)
         zxy = (kx, ix, il)
         
