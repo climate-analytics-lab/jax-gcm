@@ -6,7 +6,6 @@ from packaging import version
 from flax import __version__ as flax_version
 from flax import nnx
 from numpy import timedelta64
-from typing import Any
 from datetime import datetime
 import dinosaur
 from typing import Callable, Any
@@ -412,7 +411,7 @@ class Model:
             save_interval=10.0,
             total_time=120.0,
             output_averages=False
-    ) -> tuple[primitive_equations.State, Predictions]:
+    ) -> Predictions:
         """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
         
         Args:

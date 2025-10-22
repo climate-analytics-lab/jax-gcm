@@ -251,9 +251,9 @@ class TestModelUnit(unittest.TestCase):
         # Calculate gradients using JVP
         params = Parameters.default()
         tangent = make_ones_parameters_object(params)
-        y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
+        _, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
         state = jvp_sum.dynamics
-        physics_data = jvp_sum.physics
+        # physics_data = jvp_sum.physics
 
         # Check dynamics state
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
@@ -268,15 +268,11 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):
         import jax
-        import jax.numpy as jnp
         from jcm.model import Model
-        from jcm.utils import ones_like, convert_back, convert_to_float
 
         # Create model that goes through one timestep
         model = Model()
         state = model._prepare_initial_modal_state()
-
-        state_floats = convert_to_float(state)
 
         def f(state_f):
             _ = model.run(total_time=0) # to set up model fields

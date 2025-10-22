@@ -131,10 +131,6 @@ def get_convection_tendencies(
 
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
-    # keep indexing consistent with original Speedy
-    nl1 = kx - 1
-    nlp = kx + 1
-
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, geometry.fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)

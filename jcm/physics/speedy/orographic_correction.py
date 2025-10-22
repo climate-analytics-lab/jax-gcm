@@ -6,7 +6,6 @@ in SPEEDY.f90, specifically replicating the corrections from time_stepping.f90 l
 The corrections are applied in grid space as a physics parameterization.
 """
 
-import jax
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.boundaries import BoundaryData

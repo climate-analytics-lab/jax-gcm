@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
 from jax.tree_util import tree_map
-from jax.tree_util import tree_map
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 # Function to take a field in grid space and truncate it to a given wavenumber
@@ -35,25 +34,15 @@ def stack_trees(trees):
     return tree_map(lambda *arrays: jnp.stack(arrays, axis=0).astype(jnp.float32), *trees)
 
 # Convert object to float 
-def check_type_convert_to_float(x): 
-    try:
-        return x.astype(jnp.float32)
-    except AttributeError:
-        return jnp.float32(x)
+def check_type_convert_to_float(x):
+    return jnp.asarray(x, dtype=jnp.float32)
+
 def convert_to_float(x): 
     return tree_map(check_type_convert_to_float, x)
 
-# Revery object with type float back to true type
+# Revert object with type float back to true type
 def check_type_convert_back(x, x0):
-    try: 
-        if x0.dtype == jnp.float32:
-            return x
-        else:
-            return x0
-    except AttributeError:
-        if type(x0) == jnp.float32:
-            return x
-        else:
-            return x0
+    return x if jnp.result_type(x0) == jnp.float32 else x0
+
 def convert_back(x, x0):
     return tree_map(check_type_convert_back, x, x0)
