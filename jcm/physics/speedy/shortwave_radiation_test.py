@@ -2,6 +2,9 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import jax
+import functools
+from jax.test_util import check_vjp, check_jvp
+import pytest
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
@@ -90,6 +93,32 @@ class TestSolar(unittest.TestCase):
             407.84160341, 399.55771912, 390.16792141, 379.89073483,
             369.05250864, 358.18303379, 348.26343559, 341.67600518,
             345.64242972, 350.46165015, 353.81093342, 355.67622859]), atol=1e-4))
+        
+    def test_solar_gradients_isnan(self):
+        """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
+        from jcm.physics.speedy.physical_constants import solc
+        primals, f_vjp = jax.vjp(solar, 0.2, 4.*solc, geometry)
+        input = jnp.ones_like(primals)
+        df_dtyear, df_dcsol, df_dgeo = f_vjp(input)
+
+        self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
+        
+    def test_solar_gradient_check(self): 
+        from jcm.physics.speedy.physical_constants import solc
+        tyear = 0.2
+        csol = 4.*solc
+
+        def f(tyear, csol):
+            return solar(tyear, csol, geometry)
+
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (tyear, csol), 
+                                atol=None, rtol=1, eps=0.0001)
+        check_jvp(f, f_jvp, args = (tyear, csol), 
+                                atol=None, rtol=1, eps=0.000001)
         
 class TestShortWaveRadiation(unittest.TestCase):
 
@@ -339,15 +368,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
 
-    def test_solar_gradients_isnan(self):
-        """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
-        primals, f_vjp = jax.vjp(solar, 0.2, 4.*solc, geometry)
-        input = jnp.ones_like(primals)
-        df_dtyear, df_dcsol, df_dgeo = f_vjp(input)
-
-        self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
-
-    def test_clouds_gradients_isnan_with_realistic_values(self):
+    def test_clouds_gradients_isnan_with_realistic_values_grad(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -388,3 +409,150 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
+
+    @pytest.mark.skip(reason="JAX gradients are producing nans")
+    def test_get_zonal_average_fields_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test whether gradients are close for shortwave radiation"""
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx)
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, boundaries_f,geometry_f):
+            data_out = get_zonal_average_fields(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
+    def test_get_shortwave_rad_fluxes_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        """Test whether gradients are close for shortwave radiation"""
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        state =PhysicsState.ones(zxy)
+        boundaries = BoundaryData.ones(xy)
+        physics_data.shortwave_rad.compute_shortwave = True
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_shortwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
+    @pytest.mark.skip(reason="finite differencing produces nans")
+    def test_clouds_gradient_check_realistic_values(self):
+        from jcm.utils import convert_back, convert_to_float
+
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+
+        psa = jnp.ones(xy)
+        precnv = -1.0 * jnp.ones(xy)
+        precls = 4.0 * jnp.ones(xy)
+        iptop = 8 * jnp.ones(xy, dtype=int)
+        fmask = .7 * jnp.ones(xy)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
+
+        date_data = DateData.zeros()
+        date_data.tyear = 0.6
+
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)

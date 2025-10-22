@@ -1,6 +1,8 @@
 import unittest
 import jax
 import jax.numpy as jnp
+import functools
+from jax.test_util import check_vjp, check_jvp
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def setUp(self):
@@ -33,7 +35,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -72,7 +74,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, jnp.newaxis, jnp.newaxis]
         phi0 = jnp.zeros(xy)
         fmask = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones((ix,il)) * 292 # this needs to overwrite what is in sea_model?
+        tsea = jnp.ones((ix,il,365)) * 292
         rsds = 400 * jnp.ones(xy)
         rlds = 400 * jnp.ones(xy)
         lfluxland = True
@@ -113,7 +115,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -161,7 +163,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -210,7 +212,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -259,7 +261,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -308,7 +310,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
         soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         lfluxland=True
@@ -351,3 +353,78 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         test_data = [1.0000012824780082, 1.0000012824780082, 1.0000012824780082]
         self.assertAlmostEqual(jnp.max(forog_test),test_data[0])
         self.assertAlmostEqual(jnp.min(forog_test),test_data[1])
+
+
+    def test_surface_fluxes_gradient_check_test1(self):
+        from jcm.utils import convert_back, convert_to_float
+        xy = (ix,il)
+        zxy = (kx,ix,il)
+        psa = jnp.ones((ix,il)) #surface pressure
+        ua = jnp.ones(zxy) #zonal wind
+        va = jnp.ones(zxy) #meridional wind
+        ta = 288. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #temperature
+        rh = 0.8 * jnp.ones(zxy) #relative humidity
+        phi = 5000. * jnp.ones(zxy) #geopotential
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+        fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
+        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
+        rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
+        lfluxland=True
+        soilw_am = 0.5* jnp.ones(((ix,il,365)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
+        hum_data = HumidityData.zeros(xy,kx,rh=rh)
+        conv_data = ConvectionData.zeros(xy,kx)
+        sw_rad = SWRadiationData.zeros(xy,kx,rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy,kx)
+        physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
+        boundaries = BoundaryData.zeros(xy,tsea=tsea, lfluxland=lfluxland,fmask=fmask, orog=phi0/grav,soilw_am=soilw_am)
+
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f( state_f, physics_data_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_surface_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out.surface_flux)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (state_floats,physics_data_floats,  parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.000001)
+        
+    def test_surface_fluxes_drag_test_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
+
+        # Set float inputs
+        parameters_floats = convert_to_float(parameters)
+
+        def f(phi0, parameters_sf_hdrag):
+            return get_orog_land_sfc_drag(phi0, parameters_sf_hdrag)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag), 
+                                atol=None, rtol=1, eps=0.000001)
+
