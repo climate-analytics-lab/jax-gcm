@@ -6,7 +6,6 @@ from packaging import version
 from flax import __version__ as flax_version
 from flax import nnx
 from numpy import timedelta64
-from typing import Any
 from datetime import datetime
 import dinosaur
 from typing import Callable, Any

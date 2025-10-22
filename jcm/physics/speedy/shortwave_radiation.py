@@ -8,7 +8,6 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.utils import pass_fn
 
 @jit
 def get_shortwave_rad_fluxes(

@@ -181,7 +181,6 @@ class TestLongwave(unittest.TestCase):
         self.assertFalse(df_dboundaries.isnan().any_true())
 
     def test_radset_gradient_check(self):
-        xy = (ix, il)
         zxy = (kx, ix, il)
         state = PhysicsState.ones(zxy)
         temp = state.temperature

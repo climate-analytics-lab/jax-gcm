@@ -325,7 +325,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -427,7 +426,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)

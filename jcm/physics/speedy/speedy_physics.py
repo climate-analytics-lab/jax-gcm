@@ -56,7 +56,7 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.surface_flux import get_surface_fluxes
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
         from jcm.physics.speedy.forcing import set_forcing
-        from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
+        # from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
 
         physics_terms = [
             set_physics_flags,
