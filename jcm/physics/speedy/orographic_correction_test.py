@@ -293,19 +293,6 @@ class TestOrographicCorrection:
 
         geometry_fortran = geometry_fortran.replace(orog=test_orog, phis0=test_phis0)
         
-        # Land/sea masks and temperatures (matching Fortran test values exactly)
-        test_fmask = jnp.full((4, 4), 0.7)  # 70% land
-        # test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
-        test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
-        
-        class TestBoundariesFortran:
-            def __init__(self):
-                self.phis0 = test_phis0
-                self.fmask = test_fmask
-                self.tsea = test_sst_am
-        
-        boundaries_fortran = TestBoundariesFortran()
-        
         # Reference values from SPEEDY Fortran test output (correct gamma=6.0, grav=9.81)
         fortran_tcorv = jnp.array([
             0.00000000e+00, 6.61537620e-01, 7.53886890e-01, 8.27481090e-01,
@@ -329,8 +316,7 @@ class TestOrographicCorrection:
         # Compute JAX-GCM values
         jax_tcorv = compute_temperature_correction_vertical_profile(geometry_fortran, parameters)
         jax_qcorv = compute_humidity_correction_vertical_profile(geometry_fortran, parameters)
-        jax_tcorh = compute_temperature_correction_horizontal(boundaries_fortran, geometry_fortran)
-        # jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, geometry_fortran, jax_tcorh, test_stl_am) FIXME
+        jax_tcorh = compute_temperature_correction_horizontal(geometry_fortran)
         
         # Test temperature vertical profile - should match within floating-point precision
         np.testing.assert_allclose(jax_tcorv, fortran_tcorv, rtol=1e-3, atol=1e-6,
@@ -343,6 +329,21 @@ class TestOrographicCorrection:
         # Test temperature horizontal correction - should match exactly
         np.testing.assert_allclose(jax_tcorh, fortran_tcorh, rtol=1e-3, atol=1e-12,
                                    err_msg="Temperature horizontal correction does not match SPEEDY Fortran")
+
+        # # Land/sea masks and temperatures (matching Fortran test values exactly)
+        # test_fmask = jnp.full((4, 4), 0.7)  # 70% land
+        # test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
+        # test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
+        
+        # class TestBoundariesFortran:
+        #     def __init__(self):
+        #         self.phis0 = test_phis0
+        #         self.fmask = test_fmask
+        #         self.tsea = test_sst_am
+        
+        # boundaries_fortran = TestBoundariesFortran()
+
+        # jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, geometry_fortran, jax_tcorh, test_stl_am) # FIXME: missing fortran_qcorh
     
     def test_edge_cases(self):
         """Test edge cases and boundary conditions."""
