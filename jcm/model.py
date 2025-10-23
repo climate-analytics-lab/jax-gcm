@@ -15,7 +15,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import sigma_layer_boundaries, Geometry
+from jcm.geometry import Geometry, get_coords
 from jcm.date import DateData, Timedelta, Timestamp
 from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
@@ -121,22 +121,6 @@ def averaged_trajectory_from_step(
 
     return integrate
 
-def get_coords(layers=8, horizontal_resolution=31) -> CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    if layers not in sigma_layer_boundaries:
-        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
-
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
-    )
-
 class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
@@ -144,7 +128,7 @@ class Model:
     #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
-    def __init__(self, time_step=30.0, layers=8, horizontal_resolution=31,
+    def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))) -> None:
@@ -156,9 +140,9 @@ class Model:
                 Model time step in minutes
             layers: 
                 Number of vertical layers
-            horizontal_resolution:
-                Horizontal resolution of the model (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
-            coords:
+            spectral_truncation:
+                Spectral truncation (horizontal resolution) of the model grid (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+            coords: 
                 CoordinateSystem object describing model grid
             orography:
                 Orography data (2D array)
@@ -176,11 +160,10 @@ class Model:
 
         if coords is not None:
             self.coords = coords
-            horizontal_resolution = coords.horizontal.total_wavenumbers - 2
+            spectral_truncation = coords.horizontal.total_wavenumbers - 2
         else:
-            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution)
-        self.geometry = Geometry.from_coords(self.coords)
-
+            self.coords = get_coords(layers=layers, spectral_truncation=spectral_truncation)
+        
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
@@ -193,6 +176,8 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
+        self.geometry = Geometry.from_coords(coords=self.coords, orography=self.orography)
+
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
@@ -411,7 +396,7 @@ class Model:
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
-            boundaries=boundaries or default_boundaries(self.coords.horizontal, self.orography),
+            boundaries=boundaries or default_boundaries(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages

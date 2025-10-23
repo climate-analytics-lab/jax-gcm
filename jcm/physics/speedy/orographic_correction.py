@@ -90,7 +90,7 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
     return qcorv
 
 
-def compute_temperature_correction_horizontal(boundaries: BoundaryData, geometry: Geometry) -> jnp.ndarray:
+def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray:
     """
     Compute horizontal temperature correction in grid space.
     
@@ -108,14 +108,13 @@ def compute_temperature_correction_horizontal(boundaries: BoundaryData, geometry
     gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
     
     # Apply correction: gamlat * phis0 (spectrally-filtered surface geopotential)
-    corh = gamlat * boundaries.phis0
+    corh = gamlat * geometry.phis0
     
     return corh
 
 
 def compute_humidity_correction_horizontal(
     boundaries: BoundaryData, 
-    geometry: Geometry,
     temperature_correction: jnp.ndarray,
     land_temperature: jnp.ndarray,
     day: int = 0
@@ -211,12 +210,12 @@ def get_orographic_correction_tendencies(
     qcorv = compute_humidity_correction_vertical_profile(geometry, parameters)
     
     # Compute horizontal corrections
-    tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+    tcorh = compute_temperature_correction_horizontal(geometry)
     
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
     land_temperature = physics_data.land_model.stl_am
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature, physics_data.date.model_day())
+    qcorh = compute_humidity_correction_horizontal(boundaries, tcorh, land_temperature, physics_data.date.model_day())
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh * tcorv[:, None, None]
@@ -276,14 +275,14 @@ def apply_orographic_corrections_to_state(
     qcorv = compute_humidity_correction_vertical_profile(geometry, parameters)
     
     # Compute horizontal corrections
-    tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+    tcorh = compute_temperature_correction_horizontal(geometry)
     
     # For humidity correction, use provided land temperature or default value
     if land_temperature is None:
         # Use a default land temperature (288K) for testing
-        land_temperature = jnp.full(boundaries.orog.shape, 288.0)
+        land_temperature = jnp.full(geometry.orog.shape, 288.0)
     
-    qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temperature, day)
+    qcorh = compute_humidity_correction_horizontal(boundaries, tcorh, land_temperature, day)
     
     # Apply corrections
     temp_correction = tcorh * tcorv[:, None, None]

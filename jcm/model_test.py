@@ -1,5 +1,6 @@
 import unittest
 import jax.tree_util as jtu
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
@@ -186,29 +187,25 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
-        from jcm.model import Model, get_coords
+        from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
         from jcm.utils import ones_like
+        import xarray as xr
 
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+        from jcm.data.bc.interpolate import main as interpolate_main
+        interpolate_main(['31'])
+
+        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
-        
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -222,8 +219,9 @@ class TestModelUnit(unittest.TestCase):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jcm.model import Model, get_coords
+        from jcm.model import Model
         from jcm.boundaries import boundaries_from_file
+        import xarray as xr
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -236,24 +234,19 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(make_tangent, params)
         
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
+        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
         
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+        from jcm.data.bc.interpolate import main as interpolate_main
+        interpolate_main(['31'])
 
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
 
         # Calculate gradients using JVP
         params = Parameters.default()

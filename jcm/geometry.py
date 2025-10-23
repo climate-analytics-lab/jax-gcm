@@ -5,13 +5,55 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
+from jcm.utils import spectral_truncation
+import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem
+from dinosaur.primitive_equations import PrimitiveEquationsSpecs
+from dinosaur.scales import SI_SCALE
 
 sigma_layer_boundaries = {
     5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
     7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
     8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
 }
+
+truncation_for_nodal_shape = {
+    (64, 32): 21,
+    (96, 48): 31,
+    (128, 64): 42,
+    (256, 128): 85,
+    (320, 160): 106,
+    (360, 180): 119,
+    (512, 256): 170,
+    (640, 320): 213,
+    (1024, 512): 340,
+    (1280, 640): 425,
+}
+
+def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    """
+    if spectral_truncation is None:
+        if nodal_shape is None:
+            spectral_truncation = 31
+        else:
+            spectral_truncation = truncation_for_nodal_shape.get(nodal_shape, None)
+            if spectral_truncation is None:
+                raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {list(truncation_for_nodal_shape.keys())}")
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+    if layers not in sigma_layer_boundaries:
+        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+
+    physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+
+    return CoordinateSystem(
+        horizontal=horizontal_grid(radius=physics_specs.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+    )
 
 def _initialize_vertical(kx):
     # Definition of model levels
@@ -42,6 +84,9 @@ def _initialize_vertical(kx):
 class Geometry:
     nodal_shape: tuple[int, int, int] # (kx, ix, il)
 
+    orog: jnp.ndarray # orography height (m), shape (ix, il)
+    phis0: jnp.ndarray # spectrally truncated surface geopotential
+
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
     coa: jnp.ndarray # cos of latitude
@@ -56,16 +101,22 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem=None):
+    def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
         Args:
-            coords: dinosaur.coordinate_systems.CoordinateSystem object
+            coords: dinosaur.coordinate_systems.CoordinateSystem object.
+            orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
+            truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
             Geometry object
         """
+        # Orography and surface geopotential
+        orog = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
+        phi0 = grav * orog
+        phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
         # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
@@ -76,38 +127,57 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
         return cls(nodal_shape=coords.nodal_shape,
+                   orog=orog, phis0=phis0,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape=None, node_levels=None):
+    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
         Args:
-            nodal_shape: Shape of the nodal grid `(ix,il)`
-            node_levels: Number of vertical levels `kx`
+            nodal_shape: Shape of the nodal grid `(ix,il)`.
+            num_levels (optional): Number of vertical levels `kx` (default 8).
+            orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
+            truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
             Geometry object
         """
+        return cls.from_coords(
+            coords=get_coords(layers=num_levels, nodal_shape=nodal_shape),
+            orography=orography,
+            truncation_number=truncation_number
+        )
 
-        # Horizontal functions of latitude (from south to north)
-        il = nodal_shape[1]
-        iy = (il + 1)//2
-        j = jnp.arange(1, iy + 1)
-        sia_half = jnp.cos(jnp.pi * (j - 0.25) / (il + 0.5))
-        coa_half = jnp.sqrt(1.0 - sia_half ** 2.0)
-        sia = jnp.concatenate((-sia_half, sia_half[::-1]), axis=0).ravel()
-        coa = jnp.concatenate((coa_half, coa_half[::-1]), axis=0).ravel()
-        radang = jnp.concatenate((-jnp.arcsin(sia_half), jnp.arcsin(sia_half)[::-1]), axis=0)
+    @classmethod
+    def single_column_geometry(cls, radang=0., orog=0., phis0=None, num_levels=8):
+        """
+        Initializes a Geometry instance for a single column model.
+
+        Args:
+            radang (optional): Latitude of the single column in radians (default 0).
+            orog (optional): Orography height in meters (default 0).
+            phis0 (optional): Spectrally truncated surface geopotential (default grav * orog).
+            num_levels (optional): Number of vertical levels (default 8).
+        
+        Returns:
+            Geometry object
+        """
+        sia, coa = jnp.sin(radang), jnp.cos(radang)
+
+        # Letting user specify phis0 allows for the case of pulling one column from a full geometry,
+        # where phis0 =/= grav * orog due to spectral truncation.
+        if phis0 is None:
+            phis0 = grav * orog
 
         # Vertical functions of sigma
-        kx = node_levels
-        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
-        
-        return cls(nodal_shape=(node_levels,) + nodal_shape,
-                   radang=radang, sia=sia, coa=coa,
+        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(num_levels)
+
+        return cls(nodal_shape=(num_levels, 1, 1),
+                   orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]),
+                   radang=jnp.array([[radang]]), sia=jnp.array([[sia]]), coa=jnp.array([[coa]]),
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
