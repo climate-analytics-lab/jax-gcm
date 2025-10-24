@@ -5,8 +5,8 @@ import tree_math
 from packaging import version
 from flax import __version__ as flax_version
 from flax import nnx
+import jax_datetime as jdt
 from numpy import timedelta64
-from datetime import datetime
 import dinosaur
 from typing import Callable, Any
 from dinosaur import typing
@@ -16,7 +16,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import Geometry, get_coords
-from jcm.date import DateData, Timedelta, Timestamp
+from jcm.date import DateData
 from jcm.boundaries import BoundaryData, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
@@ -131,7 +131,7 @@ class Model:
     def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
-                 start_date: Timestamp=Timestamp.from_datetime(datetime(2000, 1, 1))) -> None:
+                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -151,7 +151,7 @@ class Model:
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
             start_date: 
-                Timestamp object containing start date of the simulation (default January 1, 2000)
+                jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
         """
 
         self.physics_specs = PHYSICS_SPECS
@@ -248,7 +248,7 @@ class Model:
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
-            model_time=self.start_date + Timedelta(seconds=sim_time),
+            model_time=self.start_date + jdt.Timedelta(seconds=jnp.round(sim_time).astype(jnp.int32)),
             model_step=(sim_time / self.dt_si.m).astype(jnp.int32),
             dt_seconds=self.dt_si.m
         )
