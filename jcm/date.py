@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import tree_math
+import jax_datetime as jdt
 
 _DAYS_YEAR = 365.2425
 
@@ -45,8 +46,8 @@ class DateData:
           model_year=model_year if model_year is not None else self.model_year,
           model_step=model_step if model_step is not None else self.model_step,
           dt_seconds=dt_seconds if dt_seconds is not None else self.dt_seconds)
-    
-def get_year(dt):
+
+def get_year(dt: jdt.Datetime):
     """
     Get the year from a Datetime JAX object.
 
@@ -55,7 +56,7 @@ def get_year(dt):
     """
     return jnp.int32(1970 + dt.delta.days // _DAYS_YEAR)
 
-def fraction_of_year_elapsed(dt):
+def fraction_of_year_elapsed(dt: jdt.Datetime):
     """
     Calculate the fraction of the year that has elapsed at the given datetime.
 
