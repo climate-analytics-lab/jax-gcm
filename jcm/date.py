@@ -37,7 +37,7 @@ class DateData:
           dt_seconds=dt_seconds if dt_seconds is not None else jnp.float32(1800.0))
 
     def model_day(self):
-        return jnp.round(self.tyear*days_year).astype(jnp.int32)
+        return jnp.round(self.tyear*_DAYS_YEAR).astype(jnp.int32)
 
     def copy(self, tyear=None, model_year=None, model_step=None, dt_seconds=None):
         return DateData(
