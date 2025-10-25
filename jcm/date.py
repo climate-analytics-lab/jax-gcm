@@ -58,7 +58,7 @@ def fraction_of_year_elapsed(dt):
     """
 
     # Get days elapsed since start of year, without using non-traceable datetime64
-    days_elapsed_in_year = dt.delta.days % _DAYS_YEAR
+    days_elapsed_in_year = jnp.floor(dt.delta.days % _DAYS_YEAR)
     
     # Add the seconds to the days elapsed
     days_elapsed_in_year += dt.delta.seconds / (24 * 60 * 60)
