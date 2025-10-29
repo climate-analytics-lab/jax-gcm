@@ -16,16 +16,16 @@ class LWRadiationData:
     ftop: jnp.ndarray
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, dfabs=None, ftop=None):
+    def zeros(cls, nodal_shape, num_levels, dfabs=None, ftop=None):
         return cls(
-            dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
+            dfabs = dfabs if dfabs is not None else jnp.zeros((num_levels,)+nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, dfabs=None, ftop=None):
+    def ones(cls, nodal_shape, num_levels, dfabs=None, ftop=None):
         return cls(
-            dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
+            dfabs = dfabs if dfabs is not None else jnp.ones((num_levels,)+nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
         )
 
@@ -75,7 +75,7 @@ class SWRadiationData:
     compute_shortwave: jnp.bool
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
+    def zeros(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
         return cls(
             qcloud = qcloud if qcloud is not None else jnp.zeros(nodal_shape),
             fsol = fsol if fsol is not None else jnp.zeros(nodal_shape),
@@ -90,12 +90,12 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.zeros(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.zeros(nodal_shape),
             ftop = ftop if ftop is not None else jnp.zeros(nodal_shape),
-            dfabs = dfabs if dfabs is not None else jnp.zeros((node_levels,)+nodal_shape),
+            dfabs = dfabs if dfabs is not None else jnp.zeros((num_levels,)+nodal_shape),
             compute_shortwave = compute_shortwave if compute_shortwave is not None else False
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
+    def ones(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None):
         return cls(
             qcloud = qcloud if qcloud is not None else jnp.ones(nodal_shape),
             fsol = fsol if fsol is not None else jnp.ones(nodal_shape),
@@ -110,7 +110,7 @@ class SWRadiationData:
             cloudc = cloudc if cloudc is not None else jnp.ones(nodal_shape),
             cloudstr = cloudstr if cloudstr is not None else jnp.ones(nodal_shape),
             ftop = ftop if ftop is not None else jnp.ones(nodal_shape),
-            dfabs = dfabs if dfabs is not None else jnp.ones((node_levels,)+nodal_shape),
+            dfabs = dfabs if dfabs is not None else jnp.ones((num_levels,)+nodal_shape),
             compute_shortwave = compute_shortwave if compute_shortwave is not None else True
         )
 
@@ -168,29 +168,29 @@ class ModRadConData:
     flux: jnp.ndarray         
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def zeros(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.zeros(nodal_shape),
             alb_s = alb_s if alb_s is not None else jnp.zeros(nodal_shape),
             albsfc = albsfc if albsfc is not None else jnp.zeros(nodal_shape),
             snowc = snowc if snowc is not None else jnp.zeros(nodal_shape),
-            tau2 = tau2 if tau2 is not None else jnp.zeros(((node_levels,)+nodal_shape+(4,))),
-            st4a = st4a if st4a is not None else jnp.zeros(((node_levels,)+nodal_shape+(2,))),
+            tau2 = tau2 if tau2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
+            st4a = st4a if st4a is not None else jnp.zeros(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def ones(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.ones(nodal_shape),
             alb_s = alb_s if alb_s is not None else jnp.ones(nodal_shape),
             albsfc = albsfc if albsfc is not None else jnp.ones(nodal_shape),
             snowc = snowc if snowc is not None else jnp.ones(nodal_shape),
-            tau2 = tau2 if tau2 is not None else jnp.ones(((node_levels,)+nodal_shape+(4,))),
-            st4a = st4a if st4a is not None else jnp.ones(((node_levels,)+nodal_shape+(2,))),
+            tau2 = tau2 if tau2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
+            st4a = st4a if st4a is not None else jnp.ones(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
         )
@@ -224,19 +224,19 @@ class CondensationData:
     dqlsc: jnp.ndarray
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None):
+    def zeros(cls, nodal_shape, num_levels, precls=None, dtlsc=None, dqlsc=None):
         return cls(
             precls = precls if precls is not None else jnp.zeros(nodal_shape),
-            dtlsc = dtlsc if dtlsc is not None else jnp.zeros((node_levels,)+nodal_shape),
-            dqlsc = dqlsc if dqlsc is not None else jnp.zeros((node_levels,)+nodal_shape),
+            dtlsc = dtlsc if dtlsc is not None else jnp.zeros((num_levels,)+nodal_shape),
+            dqlsc = dqlsc if dqlsc is not None else jnp.zeros((num_levels,)+nodal_shape),
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, precls=None, dtlsc=None, dqlsc=None):
+    def ones(cls, nodal_shape, num_levels, precls=None, dtlsc=None, dqlsc=None):
         return cls(
             precls = precls if precls is not None else jnp.ones(nodal_shape),
-            dtlsc = dtlsc if dtlsc is not None else jnp.ones((node_levels,)+nodal_shape),
-            dqlsc = dqlsc if dqlsc is not None else jnp.ones((node_levels,)+nodal_shape),
+            dtlsc = dtlsc if dtlsc is not None else jnp.ones((num_levels,)+nodal_shape),
+            dqlsc = dqlsc if dqlsc is not None else jnp.ones((num_levels,)+nodal_shape),
         )
 
     def copy(self, precls=None, dtlsc=None, dqlsc=None):
@@ -264,18 +264,18 @@ class ConvectionData:
     precnv: jnp.ndarray 
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
+    def zeros(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return cls(
-            se = se if se is not None else jnp.zeros((node_levels,)+nodal_shape),
+            se = se if se is not None else jnp.zeros((num_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
             precnv = precnv if precnv is not None else jnp.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, se=None, iptop=None, cbmf=None, precnv=None):
+    def ones(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, precnv=None):
         return cls(
-            se = se if se is not None else jnp.ones((node_levels,)+nodal_shape),
+            se = se if se is not None else jnp.ones((num_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
@@ -307,17 +307,17 @@ class HumidityData:
     qsat: jnp.ndarray 
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, rh=None, qsat=None):
+    def zeros(cls, nodal_shape, num_levels, rh=None, qsat=None):
         return cls(
-            rh = rh if rh is not None else jnp.zeros((node_levels,)+nodal_shape),
-            qsat = qsat if qsat is not None else jnp.zeros((node_levels,)+nodal_shape)
+            rh = rh if rh is not None else jnp.zeros((num_levels,)+nodal_shape),
+            qsat = qsat if qsat is not None else jnp.zeros((num_levels,)+nodal_shape)
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, rh=None, qsat=None):
+    def ones(cls, nodal_shape, num_levels, rh=None, qsat=None):
         return cls(
-            rh = rh if rh is not None else jnp.ones((node_levels,)+nodal_shape),
-            qsat = qsat if qsat is not None else jnp.ones((node_levels,)+nodal_shape)
+            rh = rh if rh is not None else jnp.ones((num_levels,)+nodal_shape),
+            qsat = qsat if qsat is not None else jnp.ones((num_levels,)+nodal_shape)
         )
 
     def copy(self, rh=None, qsat=None):
@@ -464,28 +464,28 @@ class PhysicsData:
     land_model: LandModelData
 
     @classmethod
-    def zeros(cls, nodal_shape, node_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return cls(
-            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, node_levels),
-            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, node_levels),
-            convection = convection if convection is not None else ConvectionData.zeros(nodal_shape, node_levels),
-            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.zeros(nodal_shape, node_levels),
-            humidity = humidity if humidity is not None else HumidityData.zeros(nodal_shape, node_levels),
-            condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, node_levels),
+            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, num_levels),
+            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, num_levels),
+            convection = convection if convection is not None else ConvectionData.zeros(nodal_shape, num_levels),
+            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.zeros(nodal_shape, num_levels),
+            humidity = humidity if humidity is not None else HumidityData.zeros(nodal_shape, num_levels),
+            condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, num_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.zeros(),
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(cls, nodal_shape, node_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
         return cls(
-            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, node_levels),
-            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, node_levels),
-            convection = convection if convection is not None else ConvectionData.ones(nodal_shape, node_levels),
-            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.ones(nodal_shape, node_levels),
-            humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, node_levels),
-            condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, node_levels),
+            longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, num_levels),
+            shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, num_levels),
+            convection = convection if convection is not None else ConvectionData.ones(nodal_shape, num_levels),
+            mod_radcon = mod_radcon if mod_radcon is not None else ModRadConData.ones(nodal_shape, num_levels),
+            humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, num_levels),
+            condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, num_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
             date = date if date is not None else DateData.ones(),
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
@@ -520,4 +520,4 @@ class PhysicsData:
         )
     
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))

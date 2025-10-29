@@ -2,6 +2,8 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import jax
+import functools
+from jax.test_util import check_vjp, check_jvp
 
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
@@ -28,15 +30,16 @@ class TestLongwave(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
 
-        global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, parameters, geometry, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        global ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData, PhysicsState, PhysicsTendency, BoundaryData, get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset, parameters, geometry
         from jcm.physics.speedy.physics_data import ModRadConData, LWRadiationData, SurfaceFluxData, PhysicsData
         from jcm.physics.speedy.params import Parameters
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.boundaries import BoundaryData
+        from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes, radset
         from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
-        geometry = Geometry.from_grid_shape((ix, il), kx)
-        from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_downward_longwave_rad_fluxes(self):
 
@@ -177,5 +180,107 @@ class TestLongwave(unittest.TestCase):
         self.assertFalse(df_dstates.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dboundaries.isnan().any_true())
+
+    def test_radset_gradient_check(self):
+        zxy = (kx, ix, il)
+        state = PhysicsState.ones(zxy)
+        temp = state.temperature
+        epslw = parameters.mod_radcon.epslw
+
+        def f(temp, epslw):
+            return radset(temp, epslw)
+
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (temp, epslw), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (temp, epslw), 
+                                atol=None, rtol=1, eps=0.000001)
+        
+    def test_downward_longwave_rad_fluxes_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        # FIXME: This array doesn't need to be this big once we fix the interfaces
+        # -> We only test the first 5x5 elements
+        zxy = (kx, ix, il)
+        xy = (ix, il)
+        ta, rlds, st4a, flux = initialize_arrays(ix, il, kx)
+        mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
+        physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon)
+        boundaries = BoundaryData.ones(xy)
+        state = PhysicsState.zeros(zxy,temperature=ta)
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_downward_longwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
+
+    def test_upward_longwave_rad_fluxes_gradient_check(self):
+        from jcm.utils import convert_back, convert_to_float
+        ta = jnp.ones((kx, ix, il)) * 300
+        ts = jnp.ones((ix, il)) * 300
+        rlds = jnp.ones((ix, il))
+        rlus = jnp.ones((ix, il))
+        dfabs = jnp.ones((kx, ix, il))
+        st4a = jnp.ones((kx, ix, il, 2))
+        flux = jnp.ones((ix, il, 4))
+        tau2 = jnp.ones((kx, ix, il, 4)) + jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis, jnp.newaxis] * .1
+        stratc = jnp.ones((ix, il, 2))
+
+        state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
+        input_physics_data = PhysicsData.zeros((ix, il), kx).copy(
+            longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
+            mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
+            surface_flux=SurfaceFluxData.zeros((ix, il), kx).copy(rlus=jnp.zeros((ix,il,3)).at[:,:,2].set(rlus), rlds=rlds, tsfc=ts),
+        )
+        boundaries = BoundaryData.zeros((ix, il))
+
+        # Set float inputs
+        physics_data_floats = convert_to_float(input_physics_data)
+        state_floats = convert_to_float(state)
+        parameters_floats = convert_to_float(parameters)
+        boundaries_floats = convert_to_float(boundaries)
+        geometry_floats = convert_to_float(geometry)
+
+        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+            tend_out, data_out = get_upward_longwave_rad_fluxes(physics_data=convert_back(physics_data_f, input_physics_data), 
+                                       state=convert_back(state_f, state), 
+                                       parameters=convert_back(parameters_f, parameters), 
+                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       geometry=convert_back(geometry_f, geometry)
+                                       )
+            return convert_to_float(data_out)
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f)  
+
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+                                atol=None, rtol=1, eps=0.0001)
+
 
 

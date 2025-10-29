@@ -8,7 +8,6 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.utils import pass_fn
 
 @jit
 def get_shortwave_rad_fluxes(
@@ -81,20 +80,20 @@ def shortwave_rad_fluxes(operand):
     tau2 = tau2.at[0,:,:,0].set(jnp.exp(-psaz*dhs[0]*parameters.shortwave_radiation.absdry))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
-    cloudy = jnp.arange(1, nl1)[:, jnp.newaxis, jnp.newaxis] >= icltop[jnp.newaxis]
+    cloudy = jnp.arange(1, nl1)[:, jnp.newaxis, jnp.newaxis] >= icltop
     
     tau2 = tau2.at[1:nl1, :, :, 0].set(
-        jnp.exp(-psaz[jnp.newaxis] * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
+        jnp.exp(-psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
             abs1[:, jnp.newaxis, jnp.newaxis] +
             parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
-            cloudy * acloud[jnp.newaxis]
+            cloudy * acloud
         ))
     )
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer*fsg[kx - 1]**2
     tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])))
     tau2 = tau2.at[1:kx,:,:,1].set(
-        jnp.exp(-psaz[jnp.newaxis]*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx])
+        jnp.exp(-psaz*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx])
     )
 
     # 3. Shortwave downward flux
@@ -192,13 +191,13 @@ def shortwave_rad_fluxes(operand):
     # Leave absorptivity unchanged
 
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
-    acloud1, acloud2 = (cloudc[jnp.newaxis, :, :, jnp.newaxis]*a for a in (parameters.shortwave_radiation.ablcl1, parameters.shortwave_radiation.ablcl2))
+    acloud1, acloud2 = (cloudc[:, :, jnp.newaxis]*a for a in (parameters.shortwave_radiation.ablcl1, parameters.shortwave_radiation.ablcl2))
 
-    absorptivity = absorptivity.at[2:kx-1, :, :, 0].add(jnp.where(jnp.arange(2, kx-1)[:, jnp.newaxis, jnp.newaxis] > icltop[jnp.newaxis], acloud1[:, :, :, 0], acloud2[:, :, :, 0]))
+    absorptivity = absorptivity.at[2:kx-1, :, :, 0].add(jnp.where(jnp.arange(2, kx-1)[:, jnp.newaxis, jnp.newaxis] > icltop, acloud1[:, :, 0], acloud2[:, :, 0]))
     absorptivity = absorptivity.at[2:kx-1, :, :, 2:].set(jnp.maximum(absorptivity[2:kx-1, :, :, 2:], jnp.tile(acloud2, (kx-3, 1, 1, 2))))
 
     # Compute transmissivity
-    tau2 = jnp.exp(-absorptivity*psa[jnp.newaxis, :, :, jnp.newaxis]*dhs[:, jnp.newaxis, jnp.newaxis, jnp.newaxis])
+    tau2 = jnp.exp(-absorptivity*psa[:, :, jnp.newaxis]*dhs[:, jnp.newaxis, jnp.newaxis, jnp.newaxis])
     
     # 5.2  Stratospheric correction terms
     eps1 = parameters.mod_radcon.epslw/(dhs[0] + dhs[1])
@@ -212,7 +211,7 @@ def shortwave_rad_fluxes(operand):
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
     # Get temperature tendency due to absorbed shortwave flux. Logic from physics.f90:160-162
-    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.normalized_surface_pressure[jnp.newaxis] # physics.f90:160-162
+    ttend_swr = dfabs*geometry.grdscp[:, jnp.newaxis, jnp.newaxis]/state.normalized_surface_pressure # physics.f90:160-162
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape, temperature=ttend_swr)
 
     return (state, physics_data, parameters, boundaries, geometry, physics_tendencies)
@@ -364,14 +363,14 @@ def clouds(operand):
 
     # Second for loop (three levels)
     drh = humidity.rh[2:kx-2] - parameters.shortwave_radiation.rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc[jnp.newaxis]) & (state.specific_humidity[2:kx-2] > parameters.shortwave_radiation.qacl)  # Create a boolean mask where the conditions are met
-    cloudc_update = jnp.where(mask, drh, cloudc[jnp.newaxis])  # Update cloudc where the mask is True
+    mask = (drh > cloudc) & (state.specific_humidity[2:kx-2] > parameters.shortwave_radiation.qacl)  # Create a boolean mask where the conditions are met
+    cloudc_update = jnp.where(mask, drh, cloudc)  # Update cloudc where the mask is True
     cloudc = jnp.max(cloudc_update, axis=0)   # Only update cloudc when the condition is met; use np.max along axis 2
 
     # Update icltop where the mask is True
     k_indices = jnp.arange(2, kx-2)  # Generate the k indices (since range starts from 2)
-    icltop_update = jnp.where(mask, k_indices[:, jnp.newaxis, jnp.newaxis], icltop[jnp.newaxis])  # Use the mask to update icltop only where the cloudc was updated
-    icltop = jnp.where(cloudc[jnp.newaxis] == cloudc_update, icltop_update, icltop[jnp.newaxis]).max(axis=0)
+    icltop_update = jnp.where(mask, k_indices[:, jnp.newaxis, jnp.newaxis], icltop)  # Use the mask to update icltop only where the cloudc was updated
+    icltop = jnp.where(cloudc == cloudc_update, icltop_update, icltop).max(axis=0)
 
     # Third for loop (two levels)
     # Perform the calculations (Two Loops)
@@ -394,7 +393,7 @@ def clouds(operand):
     clstr = fstab * jnp.maximum(parameters.shortwave_radiation.clsmax - clfact * cloudc, 0.0)
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
-    clstr = clstr + boundaries.fmask_l * (clstrl - clstr)
+    clstr = clstr + boundaries.fmask * (clstrl - clstr)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

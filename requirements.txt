@@ -1,4 +1,6 @@
-dinosaur  
+dinosaur
+flax
+jax-datetime
 tree-math
 hydra-core
 

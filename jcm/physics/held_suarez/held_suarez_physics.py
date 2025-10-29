@@ -3,10 +3,10 @@ import tree_math
 from typing import Tuple
 from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from jcm.geometry import Geometry
+from jcm.geometry import Geometry, get_coords
 from jcm.boundaries import BoundaryData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
-from jcm.model import get_coords, PHYSICS_SPECS
+from jcm.model import PHYSICS_SPECS
 from jcm.date import DateData
 
 Quantity = units.Quantity
@@ -73,11 +73,11 @@ class HeldSuarezPhysics(Physics):
         self.parameters = parameters if parameters is not None else Parameters.default()
         # Coordinates
         self.sigma = self.coords.vertical.centers
-        self.lat = self.coords.horizontal.latitudes[jnp.newaxis]
+        self.lat = self.coords.horizontal.latitudes
 
     def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
-            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure[jnp.newaxis]
+            self.sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure
         )
         temperature = p_over_p0**PHYSICS_SPECS.kappa * (
             self.parameters.maxT

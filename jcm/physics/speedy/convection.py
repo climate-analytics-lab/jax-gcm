@@ -77,10 +77,10 @@ def diagnose_convection(
     )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    ktop1 = get_cloud_top(mss0[jnp.newaxis] > mss2[2:kx-3])
+    ktop1 = get_cloud_top(mss0 > mss2[2:kx-3])
 
     # Check 2: gradient of actual moist static energy between lower and upper troposphere
-    ktop2 = get_cloud_top(mse1[jnp.newaxis] > mss2[2:kx-3])
+    ktop2 = get_cloud_top(mse1 > mss2[2:kx-3])
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
     # Check 3: RH > RH_c at both k=kx and k=kx-1
@@ -131,10 +131,6 @@ def get_convection_tendencies(
 
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
-    # keep indexing consistent with original Speedy
-    nl1 = kx - 1
-    nlp = kx + 1
-
     # Entrainment profile (up to sigma = 0.5)
     entr = jnp.maximum(0.0, geometry.fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
@@ -179,14 +175,14 @@ def get_convection_tendencies(
 
     # replace loop with masking
     loop_mask = (kx - 2 >= jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]) & \
-                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop[jnp.newaxis])
+                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop)
     
     #start by making entrainment profile:
-    _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * (psa * cbmf)[jnp.newaxis])
+    _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
 
     # Upward fluxes at upper boundary of mass, energy, moisture
     _fmass_3d, _fus_3d, _fuq_3d = (
-        base_flux[jnp.newaxis] + jnp.cumsum((_enmass_3d * tracer)[::-1], axis=0)[::-1]
+        base_flux + jnp.cumsum((_enmass_3d * tracer)[::-1], axis=0)[::-1]
         for base_flux, tracer in ((fmass, 1), (fus, se), (fuq, qa))
     )
 
@@ -200,7 +196,7 @@ def get_convection_tendencies(
     # Secondary moisture flux
     delq = loop_mask * (parameters.convection.rhil * qsat - qa)
     moisture_flux_mask = delq > 0.
-    fsq_masked = moisture_flux_mask * parameters.convection.smf * cbmf[jnp.newaxis] * delq
+    fsq_masked = moisture_flux_mask * parameters.convection.smf * cbmf * delq
     dfqa += fsq_masked
     dfqa = dfqa.at[-1].add(-jnp.sum(fsq_masked, axis=0))
 
@@ -227,8 +223,8 @@ def get_convection_tendencies(
 
     # Compute tendencies due to convection. Logic from physics.f90:127-130
     rps = 1/psa
-    ttend = dfse.at[1:].set(dfse[1:] * rps[jnp.newaxis] * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
-    qtend = dfqa.at[1:].set(dfqa[1:] * rps[jnp.newaxis] * geometry.grdsig[1:, jnp.newaxis, jnp.newaxis])
+    ttend = dfse.at[1:].set(dfse[1:] * rps * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
+    qtend = dfqa.at[1:].set(dfqa[1:] * rps * geometry.grdsig[1:, jnp.newaxis, jnp.newaxis])
 
     convection_out = physics_data.convection.copy(se=se, iptop=iptop, cbmf=cbmf, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)

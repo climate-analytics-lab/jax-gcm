@@ -23,7 +23,7 @@ def set_forcing(
 
     # total surface albedo
     snowd_am = boundaries.snowd_am[:,:,day]
-    fmask_l = boundaries.fmask_l
+    fmask = boundaries.fmask
     sice_am = boundaries.sice_am[:,:,day]
 
     alb0 = boundaries.alb0
@@ -31,15 +31,12 @@ def set_forcing(
     snowc = jnp.minimum(1.0, snowd_am / parameters.land_model.sd2sc)
     alb_l = alb0 + snowc * (parameters.mod_radcon.albsn - alb0)
     alb_s = parameters.mod_radcon.albsea + sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
-    albsfc = alb_s + fmask_l * (alb_l - alb_s)
+    albsfc = alb_s + fmask * (alb_l - alb_s)
 
-    increase_co2 = parameters.forcing.increase_co2
     iyear_ref = parameters.forcing.co2_year_ref
+    ablco2 = ablco2_ref * jnp.exp(parameters.forcing.increase_co2 * del_co2 * (model_year + tyear - iyear_ref))
 
-    mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc)
-    if increase_co2:
-        ablco2 = ablco2_ref * jnp.exp(del_co2 * (model_year + tyear - iyear_ref))
-        mod_radcon = mod_radcon.copy(ablco2=ablco2)
+    mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc, ablco2=ablco2)
 
     physics_data = physics_data.copy(mod_radcon=mod_radcon)
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
