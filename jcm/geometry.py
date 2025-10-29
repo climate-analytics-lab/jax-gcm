@@ -33,9 +33,83 @@ truncation_for_nodal_shape = {
     (1280, 640): 425,
 }
 
-def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> CoordinateSystem:
+
+class HybridCoordinatesWithCenters(HybridCoordinates):
     """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    Extension of Dinosaur's HybridCoordinates that adds sigma-like attributes.
+    
+    This enables compatibility with isothermal_rest_atmosphere calculations
+    that expect sigma-like coordinate systems with centers and layer_thickness.
+    """
+    
+    def __init__(self, a_boundaries, b_boundaries):
+        super().__init__(a_boundaries, b_boundaries)
+        # Pre-compute centers and layer_thickness as concrete numpy arrays to avoid tracer issues
+        import numpy as np
+        
+        # For hybrid coordinates, we need to handle pure pressure levels (b=0) and hybrid levels (b>0)
+        # Create a monotonic sigma-like coordinate that avoids zeros
+        n_levels = len(b_boundaries) - 1
+        centers = np.zeros(n_levels)
+        
+        # Find the first hybrid level (where b > 0)
+        first_hybrid_idx = np.where(b_boundaries > 0)[0][0] - 1  # -1 for level index
+        
+        # For pure pressure levels, assign small increasing values
+        if first_hybrid_idx > 0:
+            centers[:first_hybrid_idx] = np.linspace(1e-6, 1e-4, first_hybrid_idx)
+        
+        # For hybrid levels, use b-coordinate centers
+        for i in range(first_hybrid_idx, n_levels):
+            centers[i] = (b_boundaries[i] + b_boundaries[i+1]) / 2
+        
+        self.centers = np.asarray(centers)
+        
+        # For layer thickness, we need to handle pure pressure levels differently
+        # Use a small but non-zero thickness for pure pressure levels
+        layer_thickness = np.diff(b_boundaries)
+        
+        # For pure pressure levels (where diff is 0), assign small thicknesses
+        zero_thickness_mask = layer_thickness == 0
+        if np.any(zero_thickness_mask):
+            # Assign small, uniform thickness for pure pressure levels
+            layer_thickness[zero_thickness_mask] = 1e-6
+        
+        self.layer_thickness = np.asarray(layer_thickness)
+
+    # layer_thickness is now a pre-computed attribute, not a property
+    
+    @property
+    def boundaries(self) -> jnp.ndarray:
+        """
+        Return boundaries for sigma-like interface compatibility.
+        
+        Maps to b_boundaries which represent the sigma component of hybrid coordinates.
+        """
+        return self.b_boundaries
+    
+    @property
+    def center_to_center(self) -> jnp.ndarray:
+        """
+        Return distances between consecutive level centers.
+        
+        This is the difference between consecutive centers, used in some
+        vertical integration calculations.
+        """
+        import numpy as np
+        return np.diff(self.centers)
+
+def get_coords(layers=8, spectral_truncation=None, nodal_shape=None, hybrid: bool = False) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given configuration.
+    
+    Args:
+        layers: Number of vertical layers
+        horizontal_resolution: Horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
+        hybrid: If True, use hybrid sigma-pressure coordinates; if False, use sigma coordinates
+        
+    Returns:
+        CoordinateSystem with specified coordinates
     """
     if spectral_truncation is None:
         if nodal_shape is None:
@@ -48,14 +122,24 @@ def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> Coordina
         horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
     except AttributeError:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    if layers not in sigma_layer_boundaries:
-        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+    
+    if hybrid:
+        from jcm.vertical.icon_levels import ICONLevels
+        hybrid_levels = ICONLevels.get_levels(layers)
+        vertical_coords = HybridCoordinatesWithCenters(
+            hybrid_levels.a_boundaries,
+            hybrid_levels.b_boundaries
+        )
+    else:
+        if layers not in sigma_layer_boundaries:
+            raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
+        vertical_coords = dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
 
     physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
 
     return CoordinateSystem(
         horizontal=horizontal_grid(radius=physics_specs.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
+        vertical=vertical_coords
     )
 
 def _initialize_vertical(kx):
@@ -90,6 +174,9 @@ class Geometry:
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
     coa: jnp.ndarray # cos of latitude
+
+    orog: Optional[jnp.ndarray] = None # orography height (m)
+    phis0: Optional[jnp.ndarray] = None # spectrally truncated surface geopotential (m^2/s^2)
 
     hsg: jnp.ndarray # sigma layer boundaries
     fsg: jnp.ndarray # sigma layer midpoints
@@ -236,7 +323,7 @@ class Geometry:
         
         return hsg, fsg, dhs, sigl, grdsig, grdscp, wvi, hybrid_levels
 
-    def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None):
+    def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None, hybrid: bool = False):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
@@ -253,39 +340,11 @@ class Geometry:
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
-        # Horizontal functions of latitude (from south to north)
-        radang = coords.horizontal.latitudes
-        sia, coa = jnp.sin(radang), jnp.cos(radang)
-        
-        # Vertical functions of sigma
-        kx = coords.nodal_shape[0]
-        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
-
-        return cls(nodal_shape=coords.nodal_shape,
-                   orog=orog, phis0=phis0,
-                   radang=radang, sia=sia, coa=coa,
-                   hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
-                   grdsig=grdsig, grdscp=grdscp, wvi=wvi)
-
-    @classmethod
-    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, truncation_number=None):
-        """
-        Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
-
-        Args:
-            nodal_shape: Shape of the nodal grid `(ix,il)`.
-            num_levels (optional): Number of vertical levels `kx` (default 8).
-            orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
-            truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
-
-        Returns:
-            Geometry object
-        """
-
         # Horizontal coordinates
         radang, sia, coa = cls._get_horizontal_coords(coords)
         
         # Vertical coordinates
+        #TODO: This should all be dealt with by the coordinates object so we don't have to pass in the hybrid flag
         kx = coords.nodal_shape[0]
         if hybrid:
             hsg, fsg, dhs, sigl, grdsig, grdscp, wvi, hybrid_levels = cls._get_hybrid_vertical_coords(kx)
@@ -304,7 +363,8 @@ class Geometry:
             latitudes=coords.horizontal.latitudes,
             longitudes=coords.horizontal.longitudes,
             hybrid_a_boundaries=hybrid_a_boundaries,
-            hybrid_b_boundaries=hybrid_b_boundaries
+            hybrid_b_boundaries=hybrid_b_boundaries,
+            orog=orog, phis0=phis0
         )
 
     @classmethod

@@ -30,71 +30,6 @@ _LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
-class HybridCoordinatesWithCenters(HybridCoordinates):
-    """
-    Extension of Dinosaur's HybridCoordinates that adds sigma-like attributes.
-    
-    This enables compatibility with isothermal_rest_atmosphere calculations
-    that expect sigma-like coordinate systems with centers and layer_thickness.
-    """
-    
-    def __init__(self, a_boundaries, b_boundaries):
-        super().__init__(a_boundaries, b_boundaries)
-        # Pre-compute centers and layer_thickness as concrete numpy arrays to avoid tracer issues
-        import numpy as np
-        
-        # For hybrid coordinates, we need to handle pure pressure levels (b=0) and hybrid levels (b>0)
-        # Create a monotonic sigma-like coordinate that avoids zeros
-        n_levels = len(b_boundaries) - 1
-        centers = np.zeros(n_levels)
-        
-        # Find the first hybrid level (where b > 0)
-        first_hybrid_idx = np.where(b_boundaries > 0)[0][0] - 1  # -1 for level index
-        
-        # For pure pressure levels, assign small increasing values
-        if first_hybrid_idx > 0:
-            centers[:first_hybrid_idx] = np.linspace(1e-6, 1e-4, first_hybrid_idx)
-        
-        # For hybrid levels, use b-coordinate centers
-        for i in range(first_hybrid_idx, n_levels):
-            centers[i] = (b_boundaries[i] + b_boundaries[i+1]) / 2
-        
-        self.centers = np.asarray(centers)
-        
-        # For layer thickness, we need to handle pure pressure levels differently
-        # Use a small but non-zero thickness for pure pressure levels
-        layer_thickness = np.diff(b_boundaries)
-        
-        # For pure pressure levels (where diff is 0), assign small thicknesses
-        zero_thickness_mask = layer_thickness == 0
-        if np.any(zero_thickness_mask):
-            # Assign small, uniform thickness for pure pressure levels
-            layer_thickness[zero_thickness_mask] = 1e-6
-        
-        self.layer_thickness = np.asarray(layer_thickness)
-
-    # layer_thickness is now a pre-computed attribute, not a property
-    
-    @property
-    def boundaries(self) -> jnp.ndarray:
-        """
-        Return boundaries for sigma-like interface compatibility.
-        
-        Maps to b_boundaries which represent the sigma component of hybrid coordinates.
-        """
-        return self.b_boundaries
-    
-    @property
-    def center_to_center(self) -> jnp.ndarray:
-        """
-        Return distances between consecutive level centers.
-        
-        This is the difference between consecutive centers, used in some
-        vertical integration calculations.
-        """
-        import numpy as np
-        return np.diff(self.centers)
-
 @tree_math.struct
 class Predictions:
     """Container for model prediction outputs from a single timestep.
@@ -109,44 +44,6 @@ class Predictions:
     physics: Any
     times: Any
 
-def _get_horizontal_grid(horizontal_resolution: int):
-    """Get horizontal grid for given resolution with validation."""
-    try:
-        return getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-
-
-def get_coords(layers: int = 8, horizontal_resolution: int = 31, hybrid: bool = False) -> CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given configuration.
-    
-    Args:
-        layers: Number of vertical layers
-        horizontal_resolution: Horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425)
-        hybrid: If True, use hybrid sigma-pressure coordinates; if False, use sigma coordinates
-        
-    Returns:
-        CoordinateSystem with specified coordinates
-    """
-    horizontal_grid = _get_horizontal_grid(horizontal_resolution)
-    
-    if hybrid:
-        from jcm.vertical.icon_levels import ICONLevels
-        hybrid_levels = ICONLevels.get_levels(layers)
-        vertical_coords = HybridCoordinatesWithCenters(
-            hybrid_levels.a_boundaries,
-            hybrid_levels.b_boundaries
-        )
-    else:
-        if layers not in sigma_layer_boundaries:
-            raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
-        vertical_coords = dinosaur.sigma_coordinates.SigmaCoordinates(sigma_layer_boundaries[layers])
-
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=PHYSICS_SPECS.radius),
-        vertical=vertical_coords
-    )
 class DiagnosticsCollector(nnx.Module):
     data: nnx.Variable
     i: nnx.Variable
@@ -271,7 +168,7 @@ class Model:
             self.coords = coords
             spectral_truncation = coords.horizontal.total_wavenumbers - 2
         else:
-            self.coords = get_coords(layers=layers, horizontal_resolution=horizontal_resolution, hybrid=use_hybrid_coords)
+            self.coords = get_coords(layers=layers, spectral_truncation=spectral_truncation, hybrid=use_hybrid_coords)
         
         # Set up geometry with appropriate coordinate system
         self.geometry = Geometry.from_coords(self.coords, hybrid=use_hybrid_coords)
