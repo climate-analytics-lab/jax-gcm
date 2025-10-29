@@ -124,8 +124,6 @@ def averaged_trajectory_from_step(
 class Model:
     """
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
-
-    #TODO: Factor out the geography and physics choices so you can choose independent of each other.
     """
 
     def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
