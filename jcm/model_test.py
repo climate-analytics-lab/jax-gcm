@@ -272,7 +272,7 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
-        
+
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):
         import jax
@@ -330,8 +330,8 @@ class TestModelUnit(unittest.TestCase):
 
         # save every month, run for 2 months, turn on averaging so that the last prediction is the last monthly average
         predictions = model.run(
-            save_interval=30, 
-            total_time=60,
+            save_interval=30., 
+            total_time=90.,
             output_averages=True,
             boundaries=realistic_boundaries
         )
@@ -341,71 +341,69 @@ class TestModelUnit(unittest.TestCase):
         default_stats = xr.open_dataset(stats_file)
 
         # tolerance in # of standard deviations
-        tol = 3
+        tol = 2
 
-        # check statistics of the model state
+        # check whether zonal averages over the last month are within 2 std deviations of the expected values
         lower_q = default_stats['q_mean'] - tol*default_stats['q_std']
         upper_q = default_stats['q_mean'] + tol*default_stats['q_std']
-        q = pred_ds['specific_humidity'].isel(time=-1)
+        q = pred_ds['specific_humidity'].isel(time=-1).mean(dim='lon')
         assert ((lower_q <= q).all()) & ((q <= upper_q).all())
 
         lower_t = default_stats['t_mean'] - tol*default_stats['t_std']
         upper_t = default_stats['t_mean'] + tol*default_stats['t_std']
-        t = pred_ds['temperature'].isel(time=-1)
+        t = pred_ds['temperature'].isel(time=-1).mean(dim='lon')
         assert ((lower_t <= t).all()) & ((t <= upper_t).all())
 
         lower_u = default_stats['u_mean'] - tol*default_stats['u_std']
         upper_u = default_stats['u_mean'] + tol*default_stats['u_std']
-        u = pred_ds['u_wind'].isel(time=-1)
+        u = pred_ds['u_wind'].isel(time=-1).mean(dim='lon')
         assert ((lower_u <= u).all()) & ((u <= upper_u).all())
 
         lower_v = default_stats['v_mean'] - tol*default_stats['v_std']
         upper_v = default_stats['v_mean'] + tol*default_stats['v_std']
-        v = pred_ds['v_wind'].isel(time=-1)
+        v = pred_ds['v_wind'].isel(time=-1).mean(dim='lon')
         assert ((lower_v <= v).all()) & ((v <= upper_v).all())
 
         lower_nsp = default_stats['nsp_mean'] - tol*default_stats['nsp_std']
         upper_nsp = default_stats['nsp_mean'] + tol*default_stats['nsp_std']
-        nsp = pred_ds['normalized_surface_pressure'].isel(time=-1)
+        nsp = pred_ds['normalized_surface_pressure'].isel(time=-1).mean(dim='lon')
         assert ((lower_nsp <= nsp).all()) & ((nsp <= upper_nsp).all())
 
         lower_phi = default_stats['phi_mean'] - tol*default_stats['phi_std']
         upper_phi = default_stats['phi_mean'] + tol*default_stats['phi_std']
-        phi = pred_ds['geopotential'].isel(time=-1)
+        phi = pred_ds['geopotential'].isel(time=-1).mean(dim='lon')
         assert ((lower_phi <= phi).all()) & ((phi <= upper_phi).all())
 
         # check statistics of some of the physics outputs
-        TOA_rad = (pred_ds['shortwave_rad.ftop']-pred_ds['longwave_rad.ftop']).isel(time=-1)
+        TOA_rad = (pred_ds['shortwave_rad.ftop']-pred_ds['longwave_rad.ftop']).isel(time=-1).mean(dim='lon')
         lower_TOA = default_stats['TOA_rad_mean'] - tol*default_stats['TOA_rad_std']
         upper_TOA = default_stats['TOA_rad_mean'] + tol*default_stats['TOA_rad_std']
         assert ((lower_TOA <= TOA_rad).all()) & ((TOA_rad <= upper_TOA).all())
 
         lower_rh = default_stats['rh_mean'] - tol*default_stats['rh_std']
         upper_rh = default_stats['rh_mean'] + tol*default_stats['rh_std']
-        rh = pred_ds['humidity.rh'].isel(time=-1)
+        rh = pred_ds['humidity.rh'].isel(time=-1).mean(dim='lon')
         assert ((lower_rh <= rh).all()) & ((rh <= upper_rh).all())
 
-        # this is working, except cloudstr, precnv, and precls all have spots where the variability is 0 (std dev of 0) and
-        # those tests fail (likely because there are very small differences)...
-        # lower_cloudstr = default_stats['cloudstr_mean'] - tol*default_stats['cloudstr_std']
-        # upper_cloudstr = default_stats['cloudstr_mean'] + tol*default_stats['cloudstr_std']
-        # cloudstr = pred_ds['shortwave_rad.cloudstr'].isel(time=-1)
-        # assert ((lower_cloudstr <= cloudstr).all()) & ((cloudstr <= upper_cloudstr).all())
+        lower_cloudstr = default_stats['cloudstr_mean'] - tol*default_stats['cloudstr_std']
+        upper_cloudstr = default_stats['cloudstr_mean'] + tol*default_stats['cloudstr_std']
+        cloudstr = pred_ds['shortwave_rad.cloudstr'].isel(time=-1).mean(dim='lon')
+        assert ((lower_cloudstr <= cloudstr).all()) & ((cloudstr <= upper_cloudstr).all())
 
         lower_qcloud = default_stats['qcloud_mean'] - tol*default_stats['qcloud_std']
         upper_qcloud = default_stats['qcloud_mean'] + tol*default_stats['qcloud_std']
-        qcloud = pred_ds['shortwave_rad.qcloud'].isel(time=-1)
+        qcloud = pred_ds['shortwave_rad.qcloud'].isel(time=-1).mean(dim='lon')
         assert ((lower_qcloud <= qcloud).all()) & ((qcloud <= upper_qcloud).all())
 
-        # lower_precnv = default_stats['precnv_mean'] - tol*default_stats['precnv_std']
-        # upper_precnv = default_stats['precnv_mean'] + tol*default_stats['precnv_std']
-        # precnv = pred_ds['convection.precnv'].isel(time=-1)
-        # assert ((lower_precnv <= precnv).all()) & ((precnv <= upper_precnv).all())
+        lower_precnv = default_stats['precnv_mean'] - tol*default_stats['precnv_std']
+        upper_precnv = default_stats['precnv_mean'] + tol*default_stats['precnv_std']
+        precnv = pred_ds['convection.precnv'].isel(time=-1).mean(dim='lon')
+        assert ((lower_precnv <= precnv).all()) & ((precnv <= upper_precnv).all())
 
-        # lower_precls = default_stats['precls_mean'] - tol*default_stats['precls_std']
-        # upper_precls = default_stats['precls_mean'] + tol*default_stats['precls_std']
-        # precls = pred_ds['condensation.precls'].isel(time=-1)
-        # assert ((lower_precls <= precls).all()) & ((precls <= upper_precls).all())
+        lower_precls = default_stats['precls_mean'] - tol*default_stats['precls_std']
+        upper_precls = default_stats['precls_mean'] + tol*default_stats['precls_std']
+        precls = pred_ds['condensation.precls'].isel(time=-1).mean(dim='lon')
+        assert ((lower_precls <= precls).all()) & ((precls <= upper_precls).all())
 
 
 
