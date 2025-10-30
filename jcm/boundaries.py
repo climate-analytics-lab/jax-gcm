@@ -6,8 +6,6 @@ from dinosaur.coordinate_systems import HorizontalGridTypes
 @tree_math.struct
 class BoundaryData:
     fmask: jnp.ndarray # fractional land-sea mask (ix,il)
-    orog: jnp.ndarray # orography in meters
-    phis0: jnp.ndarray # spectrally-filtered surface geopotential
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # FIXME: need to set this
@@ -17,13 +15,11 @@ class BoundaryData:
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     @classmethod
-    def zeros(cls,nodal_shape,fmask=None,orog=None,phis0=None,
+    def zeros(cls,nodal_shape,fmask=None,
               alb0=None,sice_am=None,snowd_am=None,
               soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
-            orog=orog if orog is not None else jnp.zeros((nodal_shape)),
-            phis0=phis0 if phis0 is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
@@ -33,13 +29,11 @@ class BoundaryData:
         )
 
     @classmethod
-    def ones(cls,nodal_shape,fmask=None,orog=None,phis0=None,
+    def ones(cls,nodal_shape,fmask=None,
              alb0=None,sice_am=None,snowd_am=None,
              soilw_am=None,tsea=None,lfluxland=None):
         return cls(
             fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
-            orog=orog if orog is not None else jnp.ones((nodal_shape)),
-            phis0=phis0 if phis0 is not None else jnp.ones((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
             snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
@@ -48,13 +42,11 @@ class BoundaryData:
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
-    def copy(self,fmask=None,orog=None,phis0=None,alb0=None,
+    def copy(self,fmask=None,alb0=None,
              sice_am=None,snowd_am=None,soilw_am=None,
              tsea=None,lfluxland=None):
         return BoundaryData(
             fmask=fmask if fmask is not None else self.fmask,
-            orog=orog if orog is not None else self.orog,
-            phis0=phis0 if phis0 is not None else self.phis0,
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
@@ -84,39 +76,27 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
 
 def default_boundaries(
     grid: HorizontalGridTypes,
-    orography,
-    truncation_number=None
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
     """
-    from jcm.utils import spectral_truncation
-    from jcm.physics.speedy.physical_constants import grav
-
-    phi0 = grav * orography
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
-
     # land-sea mask
-    fmask = jnp.zeros_like(orography)
-    alb0 = jnp.zeros_like(orography)
+    fmask = jnp.zeros(grid.nodal_shape)
+    alb0 = jnp.zeros(grid.nodal_shape)
     tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
         
     return BoundaryData.zeros(
-        nodal_shape=orography.shape,
-        orog=orography, fmask=fmask, phis0=phis0, tsea=tsea, alb0=alb0
+        nodal_shape=grid.nodal_shape,
+        fmask=fmask, tsea=tsea, alb0=alb0
     )
 
 def boundaries_from_file(
     filename: str,
-    grid: HorizontalGridTypes,
-    truncation_number=None,
     fmask_threshold=0.1,
 ) -> BoundaryData:
     """
     Initialize the boundary conditions
     """
-    from jcm.physics.speedy.physical_constants import grav
-    from jcm.utils import spectral_truncation
     import xarray as xr
 
     # Read boundaries from file
@@ -128,12 +108,6 @@ def boundaries_from_file(
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
     # Set values close to 0 or 1 to exactly 0 or 1
     fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
-
-    # orography
-    orog = jnp.asarray(ds["orog"])
-    # Also store spectrally truncated surface geopotential for the land drag term
-    phi0 = grav * orog
-    phis0 = spectral_truncation(grid, phi0, truncation_number=truncation_number)
 
     # annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
@@ -157,6 +131,6 @@ def boundaries_from_file(
 
     return BoundaryData.zeros(
         nodal_shape=fmask.shape, fmask=fmask,
-        orog=orog, phis0=phis0, alb0=alb0, sice_am=sice_am,
-        snowd_am=snowd_am, soilw_am=soilw_am, tsea=tsea
+        alb0=alb0, sice_am=sice_am, snowd_am=snowd_am,
+        soilw_am=soilw_am, tsea=tsea
     )

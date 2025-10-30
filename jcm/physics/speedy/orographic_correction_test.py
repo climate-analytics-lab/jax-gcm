@@ -11,12 +11,10 @@ import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 os.environ['JAX_PLATFORMS'] = 'cpu'
 
-# import pytest  # Comment out for environments without pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
 import functools
-import pytest
 from jax.test_util import check_vjp, check_jvp
 from jcm.physics.speedy.orographic_correction import (
     compute_temperature_correction_vertical_profile,
@@ -27,22 +25,14 @@ from jcm.physics.speedy.orographic_correction import (
     apply_orographic_corrections_to_state
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.boundaries import BoundaryData
-from jcm.geometry import Geometry
+from jcm.boundaries import default_boundaries, BoundaryData
+from jcm.geometry import Geometry, get_coords
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import rgas, grav, gamma, hscale, hshum
+from jcm.physics.speedy.physical_constants import grav
 
-
-def create_test_geometry(layers=8, lon_points=96, lat_points=48):
-    """Create a test geometry object using the actual Geometry class."""
-    # Use the actual Geometry class from the codebase
-    nodal_shape = (lon_points, lat_points)
-    return Geometry.from_grid_shape(nodal_shape=nodal_shape, node_levels=layers)
-
-
-def create_test_boundaries(lon_points=96, lat_points=48):
-    """Create test boundary data with simple orography."""
+def create_test_orography(lon_points=96, lat_points=48):
+    """Create test orography."""
     # Create simple mountain orography (Gaussian peak)
     lon_idx = jnp.arange(lon_points)
     lat_idx = jnp.arange(lat_points)
@@ -52,24 +42,26 @@ def create_test_boundaries(lon_points=96, lat_points=48):
     center_lon, center_lat = lon_points // 2, lat_points // 2
     sigma_lon, sigma_lat = lon_points / 8, lat_points / 8
     
-    orog = 1000.0 * jnp.exp(
+    return 1000.0 * jnp.exp(
         -((lon_grid - center_lon) ** 2 / (2 * sigma_lon ** 2) +
           (lat_grid - center_lat) ** 2 / (2 * sigma_lat ** 2))
     )
 
-    class TestBoundaries:
-        def __init__(self):
-            self.orog = orog
-            # For temperature correction, we need phis0 (spectrally-filtered surface geopotential)
-            # In this test, we'll approximate it as geopotential = gravity * height
-            from jcm.physics.speedy.physical_constants import grav
-            self.phis0 = grav * orog  # Approximate phis0 = g * h
-            # Add land/sea masks and sea surface temperature for humidity correction
-            self.fmask = jnp.ones((lon_points, lat_points)) * 0.7  # 70% land
-            self.tsea = jnp.full((lon_points, lat_points, 365), 285.0)     # Sea surface temperature
-    
-    return TestBoundaries()
+def create_test_geometry(layers=8, lon_points=96, lat_points=48, orography=False):
+    """Create a test geometry object using the actual Geometry class."""
+    # Use the actual Geometry class from the codebase
+    nodal_shape = (lon_points, lat_points)
+    orog = None
+    if orography:
+        orog = create_test_orography(lon_points, lat_points)
+    return Geometry.from_grid_shape(nodal_shape=nodal_shape, num_levels=layers, orography=orog)
 
+def create_test_boundaries(lon_points=96, lat_points=48):
+    boundaries = default_boundaries(get_coords(nodal_shape=(lon_points, lat_points)).horizontal)
+    return boundaries.replace(
+        fmask = jnp.ones((lon_points, lat_points)) * 0.7,
+        tsea = jnp.full((lon_points, lat_points, 365), 285.0)
+    )
 
 def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     """Create a test physics state with realistic values."""
@@ -112,7 +104,6 @@ def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
         normalized_surface_pressure=surface_pressure
     )
 
-
 class TestOrographicCorrection:
     """Test suite for orographic correction functions."""
     
@@ -154,29 +145,28 @@ class TestOrographicCorrection:
     
     def test_temperature_horizontal_correction(self):
         """Test computation of temperature horizontal correction."""
-        boundaries = create_test_boundaries(lon_points=96, lat_points=48)
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(orography=True)
         
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         
         # Check shape
         assert tcorh.shape == (96, 48)
         
         # Check that maximum correction occurs where orography is highest
-        max_orog_idx = jnp.unravel_index(jnp.argmax(boundaries.orog), boundaries.orog.shape)
+        max_orog_idx = jnp.unravel_index(jnp.argmax(geometry.orog), geometry.orog.shape)
         max_corr_idx = jnp.unravel_index(jnp.argmax(tcorh), tcorh.shape)
         assert max_orog_idx == max_corr_idx
     
     def test_humidity_horizontal_correction(self):
         """Test computation of humidity horizontal correction."""
         boundaries = create_test_boundaries(lon_points=96, lat_points=48)
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(orography=True)
         
         # Compute temperature correction needed for the new humidity correction
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
         
-        qcorh = compute_humidity_correction_horizontal(boundaries, geometry, tcorh, land_temp)
+        qcorh = compute_humidity_correction_horizontal(boundaries, tcorh, land_temp)
         
         # Check shape
         assert qcorh.shape == (96, 48)
@@ -192,11 +182,11 @@ class TestOrographicCorrection:
         """Test the main tendency computation function."""
         state = create_test_physics_state()
         boundaries = create_test_boundaries()
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
-        node_levels = state.temperature.shape[0]   # layers
-        physics_data = PhysicsData.zeros(nodal_shape, node_levels)
+        num_levels = state.temperature.shape[0]   # layers
+        physics_data = PhysicsData.zeros(nodal_shape, num_levels)
         
         tendencies, updated_physics_data = get_orographic_correction_tendencies(
             state, physics_data, parameters, boundaries, geometry
@@ -233,7 +223,7 @@ class TestOrographicCorrection:
         """Test direct application of corrections to state."""
         state = create_test_physics_state()
         boundaries = create_test_boundaries()
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         
         corrected_state = apply_orographic_corrections_to_state(
@@ -257,7 +247,7 @@ class TestOrographicCorrection:
         
         # Check that corrections are applied correctly
         tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         expected_temp_correction = tcorh * tcorv[:, None, None]
 
         actual_temp_correction = corrected_state.temperature - state.temperature
@@ -268,7 +258,7 @@ class TestOrographicCorrection:
         """Test that functions are JAX-compatible (can be differentiated and JIT compiled)."""
         state = create_test_physics_state()
         boundaries = create_test_boundaries()
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         
         # Test gradient computation (JIT with non-array arguments is complex, so just test gradients)
@@ -299,22 +289,9 @@ class TestOrographicCorrection:
         ])
         
         # phis0 = g * orog (as in Fortran)
-        from jcm.physics.speedy.physical_constants import grav
         test_phis0 = grav * test_orog
-        
-        # Land/sea masks and temperatures (matching Fortran test values exactly)
-        test_fmask = jnp.full((4, 4), 0.7)  # 70% land
-        test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
-        test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
-        
-        class TestBoundariesFortran:
-            def __init__(self):
-                self.orog = test_orog
-                self.phis0 = test_phis0
-                self.fmask = test_fmask
-                self.tsea = test_sst_am
-        
-        boundaries_fortran = TestBoundariesFortran()
+
+        geometry_fortran = geometry_fortran.replace(orog=test_orog, phis0=test_phis0)
         
         # Reference values from SPEEDY Fortran test output (correct gamma=6.0, grav=9.81)
         fortran_tcorv = jnp.array([
@@ -339,8 +316,7 @@ class TestOrographicCorrection:
         # Compute JAX-GCM values
         jax_tcorv = compute_temperature_correction_vertical_profile(geometry_fortran, parameters)
         jax_qcorv = compute_humidity_correction_vertical_profile(geometry_fortran, parameters)
-        jax_tcorh = compute_temperature_correction_horizontal(boundaries_fortran, geometry_fortran)
-        jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, geometry_fortran, jax_tcorh, test_stl_am)
+        jax_tcorh = compute_temperature_correction_horizontal(geometry_fortran)
         
         # Test temperature vertical profile - should match within floating-point precision
         np.testing.assert_allclose(jax_tcorv, fortran_tcorv, rtol=1e-3, atol=1e-6,
@@ -353,29 +329,39 @@ class TestOrographicCorrection:
         # Test temperature horizontal correction - should match exactly
         np.testing.assert_allclose(jax_tcorh, fortran_tcorh, rtol=1e-3, atol=1e-12,
                                    err_msg="Temperature horizontal correction does not match SPEEDY Fortran")
+
+        # # Land/sea masks and temperatures (matching Fortran test values exactly)
+        # test_fmask = jnp.full((4, 4), 0.7)  # 70% land
+        # test_stl_am = jnp.full((4, 4), 288.0)  # Land surface temperature
+        # test_sst_am = jnp.full((4, 4, 365), 285.0)  # Sea surface temperature
+        
+        # class TestBoundariesFortran:
+        #     def __init__(self):
+        #         self.phis0 = test_phis0
+        #         self.fmask = test_fmask
+        #         self.tsea = test_sst_am
+        
+        # boundaries_fortran = TestBoundariesFortran()
+
+        # jax_qcorh = compute_humidity_correction_horizontal(boundaries_fortran, geometry_fortran, jax_tcorh, test_stl_am) # FIXME: missing fortran_qcorh
     
     def test_edge_cases(self):
         """Test edge cases and boundary conditions."""
         geometry = create_test_geometry()
         parameters = Parameters.default()
-        
-        # Test with zero orography using proper model boundary initialization
-        from jcm.boundaries import default_boundaries
-        from dinosaur import spherical_harmonic
-        
+                
         # Create grid and flat orography
-        grid = spherical_harmonic.Grid.T31()
-        flat_orography = jnp.zeros(grid.nodal_shape)
+        grid = get_coords().horizontal
         
         # Use the actual model boundary initialization (now fixed)
-        boundaries_flat = default_boundaries(grid, flat_orography)
+        boundaries_flat = default_boundaries(grid)
         
-        tcorh_flat = compute_temperature_correction_horizontal(boundaries_flat, geometry)
+        tcorh_flat = compute_temperature_correction_horizontal(geometry)
         assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)
         
         # Humidity correction should also be zero when orography is zero
-        land_temp_flat = jnp.full(boundaries_flat.orog.shape, 288.0)
-        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry, tcorh_flat, land_temp_flat)
+        land_temp_flat = jnp.full(geometry.orog.shape, 288.0)
+        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, tcorh_flat, land_temp_flat)
         assert jnp.allclose(qcorh_flat, 0.0, atol=1e-5)
         
         # test that total corrections are zero for flat orography
@@ -399,12 +385,13 @@ class TestOrographicCorrection:
         assert tcorv_5layer.shape == (5,)
         assert tcorv_5layer[0] == 0.0
         
+        ix, il = 64, 32
+
         # Test with extreme orography (very tall, steep mountain)
-        boundaries_extreme = create_test_boundaries(lon_points=32, lat_points=32)
+        geometry = create_test_geometry(layers=8, lon_points=ix, lat_points=il, orography=True)
         
         # Create an extremely tall, steep mountain (like Everest: 8849m)
-        lon_idx = jnp.arange(32)
-        lat_idx = jnp.arange(32)
+        lon_idx, lat_idx = jnp.arange(ix), jnp.arange(il)
         lon_grid, lat_grid = jnp.meshgrid(lon_idx, lat_idx, indexing='ij')
         
         # Very steep mountain: 8000m peak with small footprint (sigma=2 grid points)
@@ -414,12 +401,10 @@ class TestOrographicCorrection:
         extreme_orog = 8000.0 * jnp.exp(
             -((lon_grid - center_lon) ** 2 + (lat_grid - center_lat) ** 2) / (2 * sigma ** 2)
         )
+
+        geometry = geometry.replace(orog=extreme_orog, phis0=grav * extreme_orog)
         
-        boundaries_extreme.orog = extreme_orog
-        from jcm.physics.speedy.physical_constants import grav
-        boundaries_extreme.phis0 = grav * extreme_orog  # Update phis0 too
-        
-        tcorh_extreme = compute_temperature_correction_horizontal(boundaries_extreme, geometry)
+        tcorh_extreme = compute_temperature_correction_horizontal(geometry)
         assert jnp.all(jnp.isfinite(tcorh_extreme))  # Should not have infinities
         assert jnp.max(tcorh_extreme) > 0.0  # Should have positive values where mountain exists
         assert jnp.min(tcorh_extreme) < 1e-20  # Should be essentially zero where no orography
@@ -452,7 +437,6 @@ class TestOrographicCorrection:
         check_jvp(f, f_jvp, args = (parameters_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
         
-    
     def test_humidity_vertical_profile_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test computation of humidity correction vertical profile gradient check."""
@@ -476,36 +460,24 @@ class TestOrographicCorrection:
         check_jvp(f, f_jvp, args = (parameters_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
         
-
-    
     def test_temperature_horizontal_correction_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test computation of temperature horizontal correction gradient check."""
-        lon, lat = 96, 48
-        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
         geometry = create_test_geometry()
-        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
-                                       phis0 = test_boundaries.phis0,
-                                       fmask = test_boundaries.fmask,
-                                       tsea = test_boundaries.tsea)
 
         # Set float inputs
-        boundaries_floats = convert_to_float(boundaries)
         geometry_floats = convert_to_float(geometry)
 
-        def f(boundaries_f, geometry_f):
-            return compute_temperature_correction_horizontal(boundaries=convert_back(boundaries_f, boundaries), 
-                                       geometry=convert_back(geometry_f, geometry)
-                                       )
+        def f(geometry_f):
+            return compute_temperature_correction_horizontal(geometry=convert_back(geometry_f, geometry))
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (geometry_floats,), 
                                 atol=None, rtol=1, eps=0.000001)
-        check_jvp(f, f_jvp, args = (boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (geometry_floats,), 
                                 atol=None, rtol=1, eps=0.00001)
-        
     
     def test_humidity_horizontal_correction_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
@@ -513,30 +485,27 @@ class TestOrographicCorrection:
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
         geometry = create_test_geometry()
-        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
-                                       phis0 = test_boundaries.phis0,
+        boundaries = BoundaryData.ones((lon, lat),
                                        fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         # Compute temperature correction needed for the new humidity correction
-        tcorh = compute_temperature_correction_horizontal(boundaries, geometry)
+        tcorh = compute_temperature_correction_horizontal(geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
 
         # Set float inputs
         boundaries_floats = convert_to_float(boundaries)
-        geometry_floats = convert_to_float(geometry)
 
-        def f(boundaries_f, geometry_f, tcorh, land_temp):
+        def f(boundaries_f, tcorh, land_temp):
             return compute_humidity_correction_horizontal(boundaries=convert_back(boundaries_f, boundaries), 
-                                       geometry=convert_back(geometry_f, geometry),
                                        temperature_correction=tcorh, 
                                        land_temperature=land_temp)
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (boundaries_floats, geometry_floats, tcorh, land_temp), 
+        check_vjp(f, f_vjp, args = (boundaries_floats, tcorh, land_temp), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (boundaries_floats, geometry_floats, tcorh, land_temp), 
+        check_jvp(f, f_jvp, args = (boundaries_floats, tcorh, land_temp), 
                                 atol=None, rtol=1, eps=0.00001)
     
     def test_get_orographic_correction_tendencies_gradient_check(self):
@@ -544,8 +513,7 @@ class TestOrographicCorrection:
         """Test the main tendency computation function gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
-        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
-                                       phis0 = test_boundaries.phis0,
+        boundaries = BoundaryData.ones((lon, lat),
                                        fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         state = create_test_physics_state()
@@ -585,8 +553,7 @@ class TestOrographicCorrection:
         """Test direct application of corrections to state gradient check."""
         lon, lat = 96, 48
         test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
-        boundaries = BoundaryData.ones((lon, lat), orog = test_boundaries.orog,
-                                       phis0 = test_boundaries.phis0,
+        boundaries = BoundaryData.ones((lon, lat),
                                        fmask = test_boundaries.fmask,
                                        tsea = test_boundaries.tsea)
         state = create_test_physics_state()
@@ -616,9 +583,6 @@ class TestOrographicCorrection:
         check_jvp(f, f_jvp, args = (state_floats, parameters_floats, boundaries_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
         
-
-
-
 if __name__ == "__main__":
     # Run tests
     test_instance = TestOrographicCorrection()    

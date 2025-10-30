@@ -14,9 +14,10 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.boundaries import BoundaryData
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
         fsg = geometry.fsg
         grdscp = geometry.grdscp
         grdsig = geometry.grdsig

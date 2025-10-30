@@ -16,7 +16,7 @@ from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.boundaries import BoundaryData
 from jcm.date import DateData
-from typing import Tuple, Dict, Any
+from typing import Tuple, Any
 from jcm.diffusion import DiffusionFilter
 
 @tree_math.struct

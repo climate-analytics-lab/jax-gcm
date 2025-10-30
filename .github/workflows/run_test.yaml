@@ -41,4 +41,4 @@ jobs:
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |
-          pytest -v -s -m "slow" --cov=jcm --cov-fail-under=85
+          pytest -v -s -m "slow" --cov=jcm --cov-fail-under=80

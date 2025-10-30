@@ -2,10 +2,10 @@ import jax.numpy as jnp
 from typing import Tuple
 from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from jcm.geometry import Geometry
+from jcm.geometry import Geometry, get_coords
 from jcm.boundaries import BoundaryData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
-from jcm.model import get_coords, PHYSICS_SPECS
+from jcm.model import PHYSICS_SPECS
 from jcm.date import DateData
 
 Quantity = units.Quantity

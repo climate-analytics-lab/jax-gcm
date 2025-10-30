@@ -2,6 +2,7 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import jax
+import jax_datetime as jdt
 import functools
 from jax.test_util import check_vjp, check_jvp
 import pytest
@@ -16,7 +17,8 @@ class TestSolar(unittest.TestCase):
         global solar, geometry
         from jcm.physics.speedy.shortwave_radiation import solar
         from jcm.geometry import Geometry
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_solar(self):
         self.assertTrue(np.allclose(solar(0.2, geometry=geometry), np.array([
@@ -135,9 +137,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physics.speedy.physical_constants import epssw, solc
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
-        geometry = Geometry.from_grid_shape((ix, il), kx)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_shortwave_radiation(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
@@ -218,13 +221,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         ], atol=1e-4))
 
     def test_output_shapes(self):
-        from datetime import datetime
-        from jcm.date import Timestamp
         # Ensure that the output shapes are correct
         xy = (ix, il)
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
         boundaries = BoundaryData.zeros(xy)
@@ -239,12 +240,10 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_solar_radiation_values(self):
         # Test that the solar radiation values are computed correctly
-        from datetime import datetime
-        from jcm.date import Timestamp
         xy = (ix, il)
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
@@ -256,12 +255,10 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_polar_night_cooling(self):
         # Ensure polar night cooling behaves correctly
-        from datetime import datetime
-        from jcm.date import Timestamp
         xy = (ix, il)
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
@@ -274,11 +271,9 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_ozone_absorption(self):
         # Check that ozone absorption is being calculated correctly
-        from datetime import datetime
-        from jcm.date import Timestamp
         xy = (ix, il)
         zxy = (kx, ix, il)
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 4, 1,12)))
+        date_data = DateData.set_date(model_time=jdt.to_datetime('2000-04-01 12:00:00'))
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
@@ -290,12 +285,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
     def test_random_input_consistency(self):
-        from datetime import datetime
-        from jcm.date import Timestamp
         xy = (ix, il)
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
-        date_data = DateData.set_date(model_time=Timestamp.from_datetime(datetime(2000, 3, 21)))
+        date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
@@ -325,7 +318,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -427,7 +419,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
