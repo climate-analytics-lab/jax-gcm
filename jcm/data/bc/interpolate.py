@@ -45,7 +45,7 @@ def clamp_to_valid_ranges(ds):
     ds['stl'] = np.maximum(0, ds['stl'])
     ds['icec'] = ds['icec'].clip(0.0, 1.0)
     ds['sst'] = np.maximum(0, ds['sst'])
-    ds['snowd'] = np.maximum(0, ds['snowd'])
+    ds['snowc'] = np.maximum(0, ds['snowc'])
     ds['soilw_am'] = ds['soilw_am'].clip(0.0, 1.0)
     # skipping orog to avoid clamping valid areas below sea level, but this might cause problems at edges
     ds['lsm'] = ds['lsm'].clip(0.0, 1.0)
