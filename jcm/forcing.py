@@ -110,6 +110,7 @@ def forcing_from_file(filename: str,) -> ForcingData:
     tsea = jnp.asarray(ds["sst"])
 
     forcing_data = ForcingData.zeros(
+        nodal_shape=alb0.shape,
         alb0=alb0, sice_am=sice_am, snowd_am=snowd_am,
         soilw_am=soilw_am, tsea=tsea
     )
