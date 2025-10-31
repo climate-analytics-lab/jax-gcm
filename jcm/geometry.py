@@ -32,7 +32,7 @@ truncation_for_nodal_shape = {
 }
 
 def get_terrain(fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
-                terrain_file=None, nodal_shape=None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                terrain_file=None, nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
@@ -43,30 +43,30 @@ def get_terrain(fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
         orography: Orography height (m) (ix, il). If None but fmask is provided, defaults to zeros (flat).
         terrain_file: Path to a file containing orography and land_sea_mask data.
         nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
+        fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
     Returns:
         Orography height (m) (ix, il)
         Land-sea mask (ix, il)
     """
-    # Handle the case where at least one of fmask or orography is provided
-    if fmask is not None or orography is not None:
-        # If orography provided but fmask not, default fmask to any orography > 0
-        if orography is not None and fmask is None:
-            fmask = (orography > 0.0).astype(jnp.float32)
-        # If fmask provided but orography not, default orography to zeros (flat)
-        elif fmask is not None and orography is None:
-            orography = jnp.zeros_like(fmask)
-        # Both provided, use both as-is
-        return orography, fmask
-    elif terrain_file is not None:
+    if fmask is None and orography is None:
+        if terrain_file is None:
+            if nodal_shape is None:
+                raise ValueError("Must provide at least one of: fmask, orography, terrain_file, or nodal_shape.")
+            return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
         import xarray as xr
         ds = xr.open_dataset(terrain_file)
-        orog_data = jnp.asarray(ds['orog'])
-        fmask_data = jnp.asarray(ds['lsm'])
-        return orog_data, fmask_data
-    elif nodal_shape is not None:
-        return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
-    else:
-        raise ValueError("Must provide at least one of: fmask, orography, terrain_file, or nodal_shape.")
+        orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
+    elif fmask is None:
+        # If orography provided but fmask not, default fmask to any orography > 0
+        fmask = (orography > 0.0).astype(jnp.float32)
+    elif orography is None:
+        # If fmask provided but orography not, default orography to zeros (flat)
+        orography = jnp.zeros_like(fmask)
+
+    # Set values close to 0 or 1 to exactly 0 or 1
+    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+
+    return orography, fmask
 
 def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
     """
@@ -220,9 +220,6 @@ class Geometry:
         Returns:
             Geometry object
         """
-        # Create a minimal coordinate system for single column
-        coords = get_coords(layers=num_levels, spectral_truncation=21)  # T21 is the smallest resolution
-
         sia, coa = jnp.sin(radang), jnp.cos(radang)
 
         # Letting user specify phis0 allows for the case of pulling one column from a full geometry,
