@@ -8,7 +8,7 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -18,7 +18,7 @@ def spec_hum_to_rel_hum(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """

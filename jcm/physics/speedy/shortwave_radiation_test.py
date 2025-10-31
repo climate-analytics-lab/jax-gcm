@@ -128,9 +128,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
 
-        global BoundaryData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, boundaries, geometry
-        from jcm.boundaries import BoundaryData
+        global ForcingData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
+               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, forcing, geometry
+        from jcm.forcing import ForcingData
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
@@ -139,10 +139,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.geometry import Geometry
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
-        boundaries = BoundaryData.zeros((ix, il))
+        forcing = ForcingData.zeros((ix, il))
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
     def test_shortwave_radiation(self):
+        from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -160,6 +162,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * np.ones(xy, dtype=int)
         fmask = .7 * np.ones(xy)
 
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
+
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
@@ -171,10 +175,10 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
-        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
-        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
-        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
+        forcing = ForcingData.zeros(xy)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
         
         np.testing.assert_allclose(physics_data.shortwave_rad.rsds[0, :], [
             0., 0., 0., 0., 1.08102491, 7.9856262, 17.54767508, 28.67351887, 40.8631746, 53.79605732,
@@ -228,9 +232,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
-        boundaries = BoundaryData.zeros(xy)
+        forcing = ForcingData.zeros(xy)
 
-        new_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        new_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
         self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
@@ -248,7 +252,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
        
-        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
 
         topsr = solar(date_data.tyear, geometry=geometry)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
@@ -263,7 +267,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         
-        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
 
         fs0 = 6.0
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
@@ -277,7 +281,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
 
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * geometry.sia**2 - 0.5
@@ -291,7 +295,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data)
         state = PhysicsState.zeros(zxy)
-        physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
         
         # Ensure outputs are consistent and within expected ranges
         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
@@ -332,7 +336,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, boundaries, geometry)
+        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, forcing, geometry)
         datas = PhysicsData.ones(xy,kx)
         df_dstates, df_ddatas, _, _ = f_vjp(datas)
 
@@ -345,22 +349,25 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
         physics_data.shortwave_rad.compute_shortwave = True
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, boundaries, geometry)
+        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, forcing, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstates, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
-        self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_dforcing.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
 
     def test_clouds_gradients_isnan_with_realistic_values_grad(self):
+        from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -378,6 +385,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = 8 * jnp.ones(xy, dtype=int)
         fmask = .7 * jnp.ones(xy)
 
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
+
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
@@ -389,18 +398,18 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        forcing = ForcingData.zeros(xy)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
+        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, forcing, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
-        self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_dforcing.isnan().any_true())
 
     @pytest.mark.skip(reason="JAX gradients are producing nans")
     def test_get_zonal_average_fields_gradient_check(self):
@@ -429,18 +438,18 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
         def f(physics_data_f, state_f, boundaries_f,geometry_f):
             data_out = get_zonal_average_fields(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(boundaries_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -449,9 +458,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.0001)
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
@@ -461,21 +470,21 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
         physics_data.shortwave_rad.compute_shortwave = True
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
         def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
             tend_out, data_out = get_shortwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(boundaries_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -484,9 +493,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.0001)
 
     @pytest.mark.skip(reason="finite differencing produces nans")
@@ -521,20 +530,20 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        forcing = ForcingData.zeros(xy, fmask=fmask)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
         def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
             tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(boundaries_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -543,7 +552,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.000001)

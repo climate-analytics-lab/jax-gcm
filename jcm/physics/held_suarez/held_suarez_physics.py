@@ -3,7 +3,7 @@ from typing import Tuple
 from dinosaur.scales import units
 from dinosaur import coordinate_systems
 from jcm.geometry import Geometry, get_coords
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import PHYSICS_SPECS
 from jcm.date import DateData
@@ -74,7 +74,7 @@ class HeldSuarezPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        boundaries: BoundaryData,
+        forcing: ForcingData,
         geometry: Geometry,
         date: DateData,
     ) -> Tuple[PhysicsTendency, None]:

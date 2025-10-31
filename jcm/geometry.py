@@ -86,6 +86,7 @@ class Geometry:
 
     orog: jnp.ndarray # orography height (m), shape (ix, il)
     phis0: jnp.ndarray # spectrally truncated surface geopotential
+    fmask: jnp.ndarray # fractional land-sea mask (ix, il)
 
     radang: jnp.ndarray # latitude in radians
     sia: jnp.ndarray # sin of latitude
@@ -101,13 +102,14 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None):
+    def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
         Args:
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
+            fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
@@ -118,22 +120,25 @@ class Geometry:
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
+        # Land-sea mask
+        fmask = jnp.zeros(coords.horizontal.nodal_shape) if fmask is None else fmask
+
         # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
         sia, coa = jnp.sin(radang), jnp.cos(radang)
-        
+
         # Vertical functions of sigma
         kx = coords.nodal_shape[0]
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(kx)
 
         return cls(nodal_shape=coords.nodal_shape,
-                   orog=orog, phis0=phis0,
+                   orog=orog, phis0=phis0, fmask=fmask,
                    radang=radang, sia=sia, coa=coa,
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, truncation_number=None):
+    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, fmask=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
@@ -141,6 +146,7 @@ class Geometry:
             nodal_shape: Shape of the nodal grid `(ix,il)`.
             num_levels (optional): Number of vertical levels `kx` (default 8).
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
+            fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
@@ -149,20 +155,22 @@ class Geometry:
         return cls.from_coords(
             coords=get_coords(layers=num_levels, nodal_shape=nodal_shape),
             orography=orography,
+            fmask=fmask,
             truncation_number=truncation_number
         )
 
     @classmethod
-    def single_column_geometry(cls, radang=0., orog=0., phis0=None, num_levels=8):
+    def single_column_geometry(cls, radang=0., orog=0., fmask=0., phis0=None, num_levels=8):
         """
         Initializes a Geometry instance for a single column model.
 
         Args:
             radang (optional): Latitude of the single column in radians (default 0).
             orog (optional): Orography height in meters (default 0).
+            fmask (optional): Fractional land-sea mask (default 0, all ocean).
             phis0 (optional): Spectrally truncated surface geopotential (default grav * orog).
             num_levels (optional): Number of vertical levels (default 8).
-        
+
         Returns:
             Geometry object
         """
@@ -177,7 +185,7 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(num_levels)
 
         return cls(nodal_shape=(num_levels, 1, 1),
-                   orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]),
+                   orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]), fmask=jnp.array([[fmask]]),
                    radang=jnp.array([[radang]]), sia=jnp.array([[sia]]), coa=jnp.array([[coa]]),
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)

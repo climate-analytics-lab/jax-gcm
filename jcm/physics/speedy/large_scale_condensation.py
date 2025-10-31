@@ -5,7 +5,7 @@ Parametrization of large-scale condensation.
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -16,7 +16,7 @@ def get_large_scale_condensation_tendencies(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """

@@ -17,7 +17,7 @@ from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import Geometry, get_coords
 from jcm.date import DateData
-from jcm.boundaries import BoundaryData, default_boundaries
+from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.utils import stack_trees
@@ -251,12 +251,12 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _get_step_fn_factory(self, boundaries: BoundaryData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
+    def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
         """
-        For given surface boundary conditions, returns a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
+        For given surface forcing conditions, returns a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
 
         Args:
-            boundaries: BoundaryData object containing surface boundary conditions.
+            forcing: ForcingData object containing surface forcing conditions.
 
         Returns:
             A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
@@ -267,7 +267,7 @@ class Model:
                 dynamics=self.primitive,
                 time_step=self.dt_si.m,
                 physics=self.physics,
-                boundaries=boundaries,
+                forcing=forcing,
                 diffusion=self.diffusion,
                 geometry=self.geometry,
                 date=self._date_from_sim_time(state.sim_time),
@@ -278,7 +278,7 @@ class Model:
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
         return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
-    def _post_process(self, state: primitive_equations.State, boundaries: BoundaryData, output_averages: bool) -> Predictions:
+    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
         """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
@@ -300,7 +300,7 @@ class Model:
         if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, boundaries, self.geometry, date)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.geometry, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
@@ -325,7 +325,7 @@ class Model:
     @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
     def run_from_state(self,
                        initial_state: primitive_equations.State,
-                       boundaries: BoundaryData,
+                       forcing: ForcingData,
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
@@ -336,8 +336,8 @@ class Model:
         Args:
             initial_state:
                 dinosaur.primitive_equations.State containing initial state of the run.
-            boundaries:
-                BoundaryData containing boundary conditions for the run.
+            forcing:
+                ForcingData containing forcing conditions for the run.
             save_interval:
                 (float) interval at which to save model outputs in days (default 10.0).
             total_time:
@@ -348,7 +348,7 @@ class Model:
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
         """
-        step_fn_factory = self._get_step_fn_factory(boundaries)
+        step_fn_factory = self._get_step_fn_factory(forcing)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
         step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())
 
@@ -363,7 +363,7 @@ class Model:
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries, output_averages),
+            post_process_fn=lambda state: self._post_process(state, forcing, output_averages),
             output_averages=output_averages
         )
         
@@ -371,16 +371,16 @@ class Model:
         return final_modal_state, predictions.replace(times=times)
 
     def resume(self,
-               boundaries: BoundaryData=None,
+               forcing: ForcingData=None,
                save_interval=10.0,
                total_time=120.0,
                output_averages=False
     ) -> Predictions:
         """Runs the full simulation forward in time starting from end of previous call to model.run or model.resume.
-        
+
         Args:
-            boundaries:
-                BoundaryData containing boundary conditions for the run.
+            forcing:
+                ForcingData containing forcing conditions for the run.
             save_interval:
                 Interval at which to save model outputs (float).
             total_time:
@@ -394,7 +394,7 @@ class Model:
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
-            boundaries=boundaries or default_boundaries(self.coords.horizontal),
+            forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages
@@ -405,18 +405,18 @@ class Model:
 
     def run(self,
             initial_state: PhysicsState | primitive_equations.State = None,
-            boundaries: BoundaryData=None,
+            forcing: ForcingData=None,
             save_interval=10.0,
             total_time=120.0,
             output_averages=False
     ) -> Predictions:
         """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
-        
+
         Args:
             initial_state:
                 PhysicsState or dinosaur.primitive_equations.State containing initial state of the model (default isothermal atmosphere).
-            boundaries:
-                BoundaryData containing boundary conditions for the run (default aquaplanet).
+            forcing:
+                ForcingData containing forcing conditions for the run (default aquaplanet).
             save_interval:
                 (float) interval at which to save model outputs in days (default 10.0).
             total_time:
@@ -434,7 +434,7 @@ class Model:
             self.initial_nodal_state = initial_state
             self._final_modal_state = self._prepare_initial_modal_state(initial_state)
 
-        return self.resume(boundaries=boundaries, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
+        return self.resume(forcing=forcing, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
 
     def predictions_to_xarray(self, predictions):
         """Converts the full prediction trajectory to a final xarray.Dataset.

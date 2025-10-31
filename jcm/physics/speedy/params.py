@@ -166,6 +166,8 @@ class SurfaceFluxParameters:
     # 0 : constant specific hum. ( = lowest level)
     fhum0: jnp.ndarray
 
+    lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
+
     cdl: jnp.ndarray   # Drag coefficient for momentum over land
     cds: jnp.ndarray   # Drag coefficient for momentum over sea
     chl: jnp.ndarray  # Heat exchange coefficient over land
@@ -200,12 +202,14 @@ class SurfaceFluxParameters:
             clambsn = jnp.array(7.0),
             lscasym = True,
             lskineb = True,
+            lfluxland = True,
             hdrag = jnp.array(2000.0)
         )
 
     def isnan(self):
         self.lscasym = 0
         self.lskineb = 0
+        self.lfluxland = 0
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct

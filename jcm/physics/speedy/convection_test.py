@@ -10,13 +10,13 @@ class TestConvectionUnit(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
         
-        global ConvectionData, HumidityData, BoundaryData, PhysicsData, PhysicsState, parameters, boundaries, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
-        from jcm.boundaries import BoundaryData
+        global ConvectionData, HumidityData, ForcingData, PhysicsData, PhysicsState, parameters, forcing, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
+        from jcm.forcing import ForcingData
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
-        boundaries = BoundaryData.zeros((ix, il))
+        forcing = ForcingData.zeros((ix, il))
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
         fsg = geometry.fsg
         grdscp = geometry.grdscp
@@ -35,7 +35,7 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
         
-        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, boundaries, geometry)
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, forcing, geometry)
 
         from pathlib import Path
         test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
@@ -57,7 +57,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat, (1, ix, il))
         
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast, qsat_broadcast, parameters, boundaries, geometry)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast, qsat_broadcast, parameters, forcing, geometry)
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
@@ -70,20 +70,20 @@ class TestConvectionUnit(unittest.TestCase):
         
         state = PhysicsState.ones(zxy)
 
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
         
-        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, boundaries, geometry)
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, forcing, geometry)
         
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy, kx)
         input = (tends, datas)
         
-        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
-        self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_dforcing.isnan().any_true())
 
 
     def test_diagnose_convection_moist_adiabat(self):
@@ -98,7 +98,7 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
 
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, boundaries, geometry)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, forcing, geometry)
 
         test_itop = 5
         test_qdif = 1.1395
@@ -116,9 +116,9 @@ class TestConvectionUnit(unittest.TestCase):
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
-        boundaries = BoundaryData.zeros((ix,il))
+        forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
 
         from pathlib import Path
         test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
@@ -158,9 +158,9 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros((kx, ix, il), temperature=temp, geopotential=phi, specific_humidity=qa_broadcast, normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
 
-        boundaries = BoundaryData.zeros((ix,il))
+        forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
 
         self.assertTrue(jnp.allclose(physics_data.convection.iptop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
@@ -190,9 +190,9 @@ class TestConvectionUnit(unittest.TestCase):
         state = PhysicsState.zeros(zxy, temperature=temp, geopotential=phi, specific_humidity=qa_broadcast*1000.,normalized_surface_pressure=psa)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
 
-        boundaries = BoundaryData.zeros((ix,il))
+        forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, boundaries, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
 
         test_cbmf = jnp.array(0.019614903)
         test_precnv = jnp.array(0.21752352)
@@ -231,13 +231,13 @@ class TestConvectionUnit(unittest.TestCase):
         
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
         def f(ps, se, qa, qsat, parameters_f, boundaries_f,geometry_f):
             iptop, qdif = diagnose_convection(ps, se, qa, qsat, 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(boundaries_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(iptop), convert_to_float(qdif)
@@ -245,9 +245,9 @@ class TestConvectionUnit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
 
 
@@ -261,20 +261,20 @@ class TestConvectionUnit(unittest.TestCase):
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
         physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
-        boundaries = BoundaryData.zeros((ix,il))
+        forcing = ForcingData.zeros((ix,il))
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
         def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
             tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(boundaries_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
@@ -283,9 +283,9 @@ class TestConvectionUnit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.001)
 
 

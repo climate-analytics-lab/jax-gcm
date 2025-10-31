@@ -14,7 +14,7 @@ from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.date import DateData
 from typing import Tuple, Any
 from jcm.diffusion import DiffusionFilter
@@ -135,13 +135,13 @@ Attributes:
 """
 
 class Physics:    
-    def compute_tendencies(self, state: PhysicsState, boundaries: BoundaryData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
-            boundaries: Boundary data
+            forcing: Forcing data
             geometry: Geometry data
             date: Date data
 
@@ -346,7 +346,7 @@ def get_physical_tendencies(
     dynamics: PrimitiveEquations,
     time_step: float,
     physics: Physics,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry,
     diffusion: DiffusionFilter,
     date: DateData,
@@ -360,7 +360,7 @@ def get_physical_tendencies(
         dynamics: PrimitiveEquations object
         time_step: Time step in seconds
         physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
-        boundaries: BoundaryData object
+        forcing: ForcingData object
         geometry: Geometry object
         date: DateData object
         diagnostics_collector: DiagnosticsCollector object
@@ -371,7 +371,7 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, boundaries, geometry, date)
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, geometry, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     

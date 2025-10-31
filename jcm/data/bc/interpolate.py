@@ -88,7 +88,7 @@ def interpolate(target_resolution):
         if not boundaries_input_file.exists():
             create_boundaries_daily()
         print(f"Interpolating boundaries_daily.nc to T{target_resolution} resolution...")
-        ds_boundaries = xr.open_dataset(boundaries_input_file)
+        ds_forcing = xr.open_dataset(boundaries_input_file)
         ds_boundaries_interp = upsample_ds(ds_boundaries, target_resolution)
         ds_boundaries_interp = clamp_to_valid_ranges(ds_boundaries_interp)
         ds_boundaries_interp.to_netcdf(boundaries_output_file)

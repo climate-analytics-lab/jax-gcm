@@ -5,7 +5,7 @@ from collections import abc
 from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.geometry import Geometry
 from jcm.date import DateData
@@ -14,7 +14,7 @@ def set_physics_flags(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData=None,
+    forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     from jcm.physics.speedy.physical_constants import nstrad
@@ -82,7 +82,7 @@ class SpeedyPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        boundaries: BoundaryData,
+        forcing: ForcingData,
         geometry: Geometry,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
@@ -92,7 +92,7 @@ class SpeedyPhysics(Physics):
         Args:
             state: Current state variables
             parameters: Parameters object
-            boundaries: Boundary data
+            forcing: Forcing data
             geometry: Geometry data
             date: Date data
 
@@ -108,11 +108,11 @@ class SpeedyPhysics(Physics):
         # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
-        
+
         for term in self.terms:
-            tend, data = term(state, data, self.parameters, boundaries, geometry)
+            tend, data = term(state, data, self.parameters, forcing, geometry)
             physics_tendency += tend
-        
+
         return physics_tendency, data
 
     def get_empty_data(self, geometry: Geometry) -> PhysicsData:

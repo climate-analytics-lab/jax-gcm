@@ -6,7 +6,7 @@ version of the Tiedke (1993) mass-flux convection scheme.
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -16,7 +16,7 @@ from jcm.physics.speedy.physical_constants import p0, alhc, grav, cp
 def diagnose_convection(
     psa, se, qa, qsat,
     parameters: Parameters,
-    boundaries: BoundaryData=None,
+    forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
@@ -101,7 +101,7 @@ def get_convection_tendencies(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData=None,
+    forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
@@ -141,7 +141,7 @@ def get_convection_tendencies(
     rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, boundaries, geometry)
+    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, forcing, geometry)
 
     # 3. Convection over selected grid-points
     mask = iptop < kx
