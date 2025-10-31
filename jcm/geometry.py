@@ -10,6 +10,7 @@ import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
+from typing import Tuple
 
 sigma_layer_boundaries = {
     5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
@@ -30,17 +31,47 @@ truncation_for_nodal_shape = {
     (1280, 640): 425,
 }
 
-def get_coords(layers=8, spectral_truncation=None, nodal_shape=None) -> CoordinateSystem:
+def get_terrain(fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
+                terrain_file=None, nodal_shape=None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
+    (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
+    Otherwise, default both to zeros with shape nodal_shape.
+
+    Args:
+        fmask: Fractional land-sea mask (ix, il). If None but orography is provided, defaults to zeros (all ocean).
+        orography: Orography height (m) (ix, il). If None but fmask is provided, defaults to zeros (flat).
+        terrain_file: Path to a file containing orography and land_sea_mask data.
+        nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
+    Returns:
+        Orography height (m) (ix, il)
+        Land-sea mask (ix, il)
+    """
+    # Handle the case where at least one of fmask or orography is provided
+    if fmask is not None or orography is not None:
+        # If orography provided but fmask not, default fmask to any orogoraphy > 0
+        if orography is not None and fmask is None:
+            fmask = (orography > 0.0).astype(jnp.float32)
+        # If fmask provided but orography not, default orography to zeros (flat)
+        elif fmask is not None and orography is None:
+            orography = jnp.zeros_like(fmask)
+        # Both provided, use both as-is
+        return orography, fmask
+    elif terrain_file is not None:
+        import xarray as xr
+        ds = xr.open_dataset(terrain_file)
+        orog_data = ds['orography'].values
+        fmask_data = ds['land_sea_mask'].values
+        return orog_data, fmask_data
+    elif nodal_shape is not None:
+        return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
+    else:
+        raise ValueError("Must provide at least one of: fmask, orography, terrain_file, or nodal_shape.")
+
+def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
-    if spectral_truncation is None:
-        if nodal_shape is None:
-            spectral_truncation = 31
-        else:
-            spectral_truncation = truncation_for_nodal_shape.get(nodal_shape, None)
-            if spectral_truncation is None:
-                raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {list(truncation_for_nodal_shape.keys())}")
     try:
         horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
     except AttributeError:
@@ -102,7 +133,7 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, truncation_number=None):
+    def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, terrain_file=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
@@ -110,18 +141,17 @@ class Geometry:
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
+            terrain_file (optional): Path to a file containing orography and land-sea mask data.
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
             Geometry object
         """
         # Orography and surface geopotential
-        orog = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
+        orog, fmask = get_terrain(fmask=fmask, orography=orography, terrain_file=terrain_file, 
+                                  nodal_shape=coords.horizontal.nodal_shape)
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
-
-        # Land-sea mask
-        fmask = jnp.zeros(coords.horizontal.nodal_shape) if fmask is None else fmask
 
         # Horizontal functions of latitude (from south to north)
         radang = coords.horizontal.latitudes
@@ -138,7 +168,7 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, fmask=None, truncation_number=None):
+    def from_grid_shape(cls, nodal_shape, **kwargs):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
@@ -147,17 +177,32 @@ class Geometry:
             num_levels (optional): Number of vertical levels `kx` (default 8).
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
-            truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
+            terrain_file (optional): Path to a file containing orography and land-sea mask data.
 
         Returns:
             Geometry object
         """
-        return cls.from_coords(
-            coords=get_coords(layers=num_levels, nodal_shape=nodal_shape),
-            orography=orography,
-            fmask=fmask,
-            truncation_number=truncation_number
-        )
+        try:
+            spectral_truncation = truncation_for_nodal_shape[nodal_shape]
+        except KeyError:
+            raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {list(truncation_for_nodal_shape.keys())}")
+
+        return cls.from_spectral_truncation(spectral_truncation, **kwargs)
+    
+    @classmethod
+    def from_spectral_truncation(cls, spectral_truncation, num_levels=8, **kwargs):
+        """
+        Initializes all of the speedy model geometry variables from spectral truncation (legacy code from speedy.f90).
+
+        Args:
+            spectral_truncation: Spectral truncation number for horizontal resolution.
+            num_levels (optional): Number of vertical levels `kx` (default 8).
+            orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
+            fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
+        Returns:
+            Geometry object
+        """
+        return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
     @classmethod
     def single_column_geometry(cls, radang=0., orog=0., fmask=0., phis0=None, num_levels=8):
@@ -174,6 +219,9 @@ class Geometry:
         Returns:
             Geometry object
         """
+        # Create a minimal coordinate system for single column
+        coords = get_coords(layers=num_levels, spectral_truncation=21)  # T21 is the smallest resolution
+
         sia, coa = jnp.sin(radang), jnp.cos(radang)
 
         # Letting user specify phis0 allows for the case of pulling one column from a full geometry,

@@ -115,6 +115,7 @@ def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray
 
 def compute_humidity_correction_horizontal(
     forcing: ForcingData, 
+    fmask: jnp.ndarray,
     temperature_correction: jnp.ndarray,
     land_temperature: jnp.ndarray,
     day: int = 0
@@ -130,8 +131,8 @@ def compute_humidity_correction_horizontal(
     5. Apply humidity correction: corh = refrh1 * (qref - qsfc)
     
     Args:
-        boundaries: Boundary data containing orography and masks
-        geometry: Model geometry
+        forcing: Forcing data containing SST
+        fmask: Land-sea mask 
         temperature_correction: Horizontal temperature correction (tcorh)
         land_temperature: Land surface temperature from land model
         day: day of year (for SST)
@@ -142,8 +143,7 @@ def compute_humidity_correction_horizontal(
     from jcm.physics.speedy.humidity import get_qsat
     
     # 1. Calculate surface temperature (land/sea mixture)
-    # tsfc = fmask * stl_am + (1 - fmask) * sst_am
-    tsfc = geometry.fmask * land_temperature + (1.0 - geometry.fmask) * boundaries.tsea[:,:,day]
+    tsfc = fmask * land_temperature + (1.0 - fmask) * forcing.tsea[:,:,day]
     
     # 2. Calculate reference temperature with orographic correction
     # tref = tsfc + corh (where corh is the temperature correction)
@@ -215,7 +215,7 @@ def get_orographic_correction_tendencies(
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
     land_temperature = physics_data.land_model.stl_am
-    qcorh = compute_humidity_correction_horizontal(forcing, tcorh, land_temperature, physics_data.date.model_day())
+    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature, physics_data.date.model_day())
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh * tcorv[:, None, None]
@@ -282,7 +282,7 @@ def apply_orographic_corrections_to_state(
         # Use a default land temperature (288K) for testing
         land_temperature = jnp.full(geometry.orog.shape, 288.0)
     
-    qcorh = compute_humidity_correction_horizontal(forcing, tcorh, land_temperature, day)
+    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature, day)
     
     # Apply corrections
     temp_correction = tcorh * tcorv[:, None, None]

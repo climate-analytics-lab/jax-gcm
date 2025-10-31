@@ -126,8 +126,7 @@ class Model:
     Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
     """
 
-    def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
-                 coords: CoordinateSystem=None, orography: jnp.ndarray=None,
+    def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
         """
@@ -136,14 +135,10 @@ class Model:
         Args:
             time_step:
                 Model time step in minutes
-            layers: 
-                Number of vertical layers
-            spectral_truncation:
-                Spectral truncation (horizontal resolution) of the model grid (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-            coords: 
-                CoordinateSystem object describing model grid
-            orography:
-                Orography data (2D array)
+            geometry: 
+                Geometry object describing the model grid and orography of the model
+            coords:
+                CoordinateSystem object describing the model coordinates
             physics: 
                 Physics object describing the model physics
             diffusion:
@@ -156,12 +151,10 @@ class Model:
         self.dt_si = (time_step * units.minute).to(units.second)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
-        if coords is not None:
-            self.coords = coords
-            spectral_truncation = coords.horizontal.total_wavenumbers - 2
-        else:
-            self.coords = get_coords(layers=layers, spectral_truncation=spectral_truncation)
-        
+        # Store coords separately - it's used by dynamics but not physics (and can't easily be jitted)
+        self.coords = coords if coords is not None else get_coords()
+        self.geometry = geometry if geometry is not None else Geometry.from_coords(coords=self.coords)
+
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
@@ -169,20 +162,15 @@ class Model:
             p0=p0*units.pascal,
         )
         
-        self.ref_temps = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
-        
         self.physics = physics or SpeedyPhysics()
-
-        self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
-        self.geometry = Geometry.from_coords(coords=self.coords, orography=self.orography)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.truncated_orography = primitive_equations.truncated_modal_orography(self.orography, self.coords, wavenumbers_to_clip=2)
-        
+        self.truncated_orography = primitive_equations.truncated_modal_orography(self.geometry.orog, self.coords, wavenumbers_to_clip=2)
+
         self.primitive = primitive_equations.PrimitiveEquations(
-            reference_temperature=self.ref_temps,
+            reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
             orography=self.truncated_orography,
             coords=self.coords,
             physics_specs=self.physics_specs,

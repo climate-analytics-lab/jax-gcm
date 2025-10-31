@@ -234,10 +234,10 @@ class TestConvectionUnit(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(ps, se, qa, qsat, parameters_f, boundaries_f,geometry_f):
+        def f(ps, se, qa, qsat, parameters_f, forcing_f,geometry_f):
             iptop, qdif = diagnose_convection(ps, se, qa, qsat, 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(iptop), convert_to_float(qdif)
@@ -270,11 +270,11 @@ class TestConvectionUnit(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)

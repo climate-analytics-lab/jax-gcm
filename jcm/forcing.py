@@ -38,7 +38,7 @@ class ForcingData:
 
     def copy(self,alb0=None,
              sice_am=None,snowd_am=None,soilw_am=None,
-             tsea=None,lfluxland=None):
+             tsea=None):
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
@@ -79,28 +79,17 @@ def default_forcing(
         tsea=tsea, alb0=alb0
     )
 
-def forcing_from_file(
-    filename: str,
-    fmask_threshold=0.1,
-) -> tuple[ForcingData, jnp.ndarray]:
+def forcing_from_file(filename: str,) -> ForcingData:
     """
     Initialize the forcing data from a file.
 
     Returns:
         ForcingData: Time-varying forcing data
-        jnp.ndarray: Land-sea mask (fmask) to be added to Geometry
     """
     import xarray as xr
 
     # Read forcing data from file
     ds = xr.open_dataset(filename)
-
-    # land-sea mask
-    fmask = jnp.asarray(ds["lsm"])
-    # Apply some sanity checks -- might want to check this shape against the model shape?
-    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-    # Set values close to 0 or 1 to exactly 0 or 1
-    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
 
     # annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
@@ -116,16 +105,13 @@ def forcing_from_file(
 
     # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
-    soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
-    assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
 
     # Prescribe SSTs
     tsea = jnp.asarray(ds["sst"])
 
     forcing_data = ForcingData.zeros(
-        nodal_shape=fmask.shape,
         alb0=alb0, sice_am=sice_am, snowd_am=snowd_am,
         soilw_am=soilw_am, tsea=tsea
     )
 
-    return forcing_data, fmask
+    return forcing_data

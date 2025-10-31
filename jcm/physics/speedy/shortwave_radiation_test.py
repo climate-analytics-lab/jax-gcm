@@ -446,10 +446,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, forcing_f,geometry_f):
             data_out = get_zonal_average_fields(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -480,11 +480,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_shortwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -539,11 +539,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)

@@ -15,9 +15,10 @@ class TestModelUnit(unittest.TestCase):
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.model import Model
-        layers = 8
+        from jcm.geometry import Geometry
+        geometry = Geometry.from_spectral_truncation(spectral_truncation=31, num_levels=8)
         model = Model(
-            layers=layers,
+            geometry=geometry,
             time_step=180,
             physics=HeldSuarezPhysics(),
         )
@@ -69,7 +70,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=total_time,
         )
         final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
-        
+
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 

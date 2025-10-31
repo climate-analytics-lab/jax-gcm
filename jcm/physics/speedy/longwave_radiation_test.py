@@ -218,11 +218,11 @@ class TestLongwave(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_downward_longwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
@@ -264,11 +264,11 @@ class TestLongwave(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_upward_longwave_rad_fluxes(physics_data=convert_back(physics_data_f, input_physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(boundaries_f, forcing), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(data_out)
