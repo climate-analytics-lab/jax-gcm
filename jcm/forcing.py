@@ -8,41 +8,41 @@ class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # sea ice concentration
-    snowd_am: jnp.ndarray # snow depth (used to be snowcl_ob in fortran - but one day of that was snowd_am)
+    snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     @classmethod
     def zeros(cls,nodal_shape,
-              alb0=None,sice_am=None,snowd_am=None,
+              alb0=None,sice_am=None,snowc_am=None,
               soilw_am=None,tsea=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            snowd_am=snowd_am if snowd_am is not None else jnp.zeros((nodal_shape)+(365,)),
+            snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
     def ones(cls,nodal_shape,
-             alb0=None,sice_am=None,snowd_am=None,
+             alb0=None,sice_am=None,snowc_am=None,
              soilw_am=None,tsea=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
-            snowd_am=snowd_am if snowd_am is not None else jnp.ones((nodal_shape)+(365,)),
+            snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowd_am=None,soilw_am=None,
+             sice_am=None,snowc_am=None,soilw_am=None,
              tsea=None):
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
-            snowd_am=snowd_am if snowd_am is not None else self.snowd_am,
+            snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
         )
@@ -98,10 +98,10 @@ def forcing_from_file(filename: str,) -> ForcingData:
     sice_am = jnp.asarray(ds["icec"])
 
     # snow depth
-    snowd_am = jnp.asarray(ds["snowd"])
-    snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
-    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
-    snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
+    snowc_am = jnp.asarray(ds["snowc"])
+    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
+    # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
+    snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
 
     # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
@@ -111,7 +111,7 @@ def forcing_from_file(filename: str,) -> ForcingData:
 
     forcing_data = ForcingData.zeros(
         nodal_shape=alb0.shape,
-        alb0=alb0, sice_am=sice_am, snowd_am=snowd_am,
+        alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,
         soilw_am=soilw_am, tsea=tsea
     )
 

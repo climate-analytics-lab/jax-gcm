@@ -2,7 +2,7 @@ import xarray as xr
 import sys
 from pathlib import Path
 import numpy as np
-from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.physical_constants import sd2sc, swcap, swwil
 
 # Set the input directory path
 input_dir = Path(__file__).parent / 't30/clim'
@@ -32,7 +32,7 @@ def process_forcing(ds):
         ds[var] = arr.where(~mask, fill_val)
 
     # Compute soil moisture variable used by jcm
-    def compute_soilw_am(veg_high, veg_low, swl1, swl2, swcap, swwil):
+    def compute_soilw_am(veg_high, veg_low, swl1, swl2):
         assert np.all(0.0 <= veg_high) and np.all(veg_high <= 1.0)
         assert np.all(0.0 <= veg_low) and np.all(veg_low <= 1.0)
         veg = veg_high + 0.8 * veg_low
@@ -42,12 +42,13 @@ def process_forcing(ds):
         soilw_raw = rsw * (swl1 + np.maximum(0.0, swl2_raw))
         return np.minimum(1.0, soilw_raw)
 
-    p = Parameters.default()
-    soilw_am = compute_soilw_am(ds.vegh.values, ds.vegl.values, ds.swl1.values, ds.swl2.values, p.land_model.swcap, p.land_model.swwil)
+    soilw_am = compute_soilw_am(ds.vegh.values, ds.vegl.values, ds.swl1.values, ds.swl2.values)
     ds['soilw_am'] = xr.DataArray(soilw_am, dims=ds['swl1'].dims, coords=ds['swl1'].coords)
+
+    ds['snowc'] = ds['snowd'] / sd2sc # Convert snow depth to snow cover
     
     ds_terrain = ds[['lsm', 'orog']]
-    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'orog', 'lsm'}), ds_terrain
+    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'snowd', 'orog', 'lsm'}), ds_terrain
 
 def main(argv=None):
     """
