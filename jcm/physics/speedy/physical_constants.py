@@ -33,6 +33,12 @@ thds   = 12.0      # Max damping time (in hours) for extra diffusion
 tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
                                              # in the stratosphere
 
+sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1 # FIXME: divide snowd by this in .nc (convert it to snow cover)
+
+# Soil moisture parameters (now used in boundaries preprocessing, so moved here from parameters)
+swcap = 0.30 # Soil wetness at field capacity (volume fraction)
+swwil = 0.17 # Soil wetness at wilting point  (volume fraction)
+
 # to prevent blowup of gradients
 epsilon = 1e-9
 
