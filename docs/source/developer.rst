@@ -24,14 +24,14 @@ For more information about JAX profiling, refer to the official documentation: `
    jax.profiler.start_trace("./tensorboard_logs", create_perfetto_trace=True)
 
    model = Model(
-       # orography=realistic_boundaries.orog,
+       # geometry=realistic_geometry,
    )
 
    # Run the model
    predictions = model.run(
        save_interval=.5/24,
        total_time=1/24,
-       # boundaries=realistic_boundaries,
+       # forcing=realistic_forcing,
    )
 
    # Ensure all computations are complete before stopping the trace
