@@ -99,7 +99,6 @@ def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray
     where gamlat = gamma / (1000 * grav) (constant)
     
     Args:
-        boundaries: Boundary data containing orography
         geometry: Model geometry
         
     Returns:
@@ -197,7 +196,7 @@ def get_orographic_correction_tendencies(
         state: Current physics state
         physics_data: Physics data structure (passed through unchanged)
         parameters: SPEEDY parameters
-        boundaries: Boundary data containing orography
+        forcing: Forcing data containing orography
         geometry: Model geometry
         
     Returns:
@@ -261,7 +260,7 @@ def apply_orographic_corrections_to_state(
     
     Args:
         state: Physics state to correct
-        boundaries: Boundary data containing orography
+        forcing: Forcing data containing orography
         geometry: Model geometry
         parameters: SPEEDY parameters
         land_temperature: Land surface temperature (if None, uses a default value)

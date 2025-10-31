@@ -83,7 +83,7 @@ class HeldSuarezPhysics(Physics):
 
         Args:
             state: Current state variables
-            boundaries: Boundary data (unused)
+            forcing: Forcing data (unused)
             geometry: Geometry data (unused)
             date: Date data (unused)
 

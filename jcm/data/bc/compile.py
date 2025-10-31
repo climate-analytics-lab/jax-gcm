@@ -6,10 +6,10 @@ from jcm.physics.speedy.params import Parameters
 
 # Set the input directory path
 input_dir = Path(__file__).parent / 't30/clim'
-output_file, terrain_file = Path(__file__).parent / 't30/clim/boundaries.nc', Path(__file__).parent / 't30/clim/terrain.nc'
+output_file, terrain_file = Path(__file__).parent / 't30/clim/forcing.nc', Path(__file__).parent / 't30/clim/terrain.nc'
 file_names = ['land.nc', 'sea_ice.nc', 'sea_surface_temperature.nc', 'snow.nc', 'soil.nc', 'surface.nc']
 
-def process_boundaries(ds):
+def process_forcing(ds):
     """
     Convert compiled speedy.f90 boundary conditions to format expected by jcm.
 
@@ -67,7 +67,7 @@ def main(argv=None):
         merged_ds = xr.open_mfdataset([input_dir / fname for fname in file_names], combine='by_coords')
 
         print("Processing dataset...")
-        processed_ds, ds_terrain = process_boundaries(merged_ds)
+        processed_ds, ds_terrain = process_forcing(merged_ds)
         
         print(f"Saving processed dataset to {output_file}")
         processed_ds.to_netcdf(output_file)

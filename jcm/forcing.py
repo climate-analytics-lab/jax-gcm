@@ -100,7 +100,7 @@ def forcing_from_file(filename: str,) -> ForcingData:
     # snow depth
     snowd_am = jnp.asarray(ds["snowd"])
     snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
-    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
+    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
     snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
 
     # soil moisture
