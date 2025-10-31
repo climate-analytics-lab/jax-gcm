@@ -300,3 +300,30 @@ class Parameters:
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
+    @classmethod
+    def float_zeros(cls):
+        """
+        Return a Parameters instance with all fields replaced by float zeros. 
+        This is useful for creating parameter co-tangents.
+        """
+        import jax
+
+        def _float_zeros(x):
+            if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
+                return jnp.zeros((), dtype=jax.dtypes.float0)
+            elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
+                return jnp.zeros((), dtype=jax.dtypes.float0)
+            else:
+                return jnp.zeros_like(x)
+        return tree_util.tree_map(lambda x: _float_zeros(x), cls.default())
+
+    def __str__(self):
+        from pprint import pformat
+
+        def to_readable_format(x):
+            if isinstance(x, jnp.ndarray):
+                return x.tolist()
+            return x
+
+        return pformat(tree_util.tree_map(to_readable_format, self))
