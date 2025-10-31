@@ -4,59 +4,50 @@ from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
 @tree_math.struct
-class BoundaryData:
-    fmask: jnp.ndarray # fractional land-sea mask (ix,il)
+class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
-    sice_am: jnp.ndarray # FIXME: need to set this
-    snowc_am: jnp.ndarray # used to be snowcl_ob in fortran - but one day of that was snowc_am
-    soilw_am: jnp.ndarray # used to be soilwcl_ob in fortran - but one day of that was soilw_am
-    lfluxland: jnp.bool # flag to compute land skin temperature and latent fluxes
+    sice_am: jnp.ndarray # sea ice concentration
+    snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
+    soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     @classmethod
-    def zeros(cls,nodal_shape,fmask=None,
+    def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
-              soilw_am=None,tsea=None,lfluxland=None):
+              soilw_am=None,tsea=None):
         return cls(
-            fmask=fmask if fmask is not None else jnp.zeros((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
         )
 
     @classmethod
-    def ones(cls,nodal_shape,fmask=None,
+    def ones(cls,nodal_shape,
              alb0=None,sice_am=None,snowc_am=None,
-             soilw_am=None,tsea=None,lfluxland=None):
+             soilw_am=None,tsea=None):
         return cls(
-            fmask=fmask if fmask is not None else jnp.ones((nodal_shape)),
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)+(365,)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
-            lfluxland=lfluxland if lfluxland is not None else True,
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
 
-    def copy(self,fmask=None,alb0=None,
+    def copy(self,alb0=None,
              sice_am=None,snowc_am=None,soilw_am=None,
-             tsea=None,lfluxland=None):
-        return BoundaryData(
-            fmask=fmask if fmask is not None else self.fmask,
+             tsea=None):
+        return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
-            lfluxland=lfluxland if lfluxland is not None else self.lfluxland,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             tsea=tsea if tsea is not None else self.tsea,
         )
 
     def isnan(self):
-        self.lfluxland = 0
         return tree_util.tree_map(jnp.isnan, self)
 
     def any_true(self):
@@ -74,40 +65,31 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     sst_profile = jnp.where(jnp.abs(radang) < jnp.pi/3, 27*jnp.cos(3*radang/2)**2, 0) + 273.15
     return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
 
-def default_boundaries(
+def default_forcing(
     grid: HorizontalGridTypes,
-) -> BoundaryData:
+) -> ForcingData:
     """
-    Initialize the boundary conditions
+    Initialize the default forcing data with prescribed SSTs
     """
-    # land-sea mask
-    fmask = jnp.zeros(grid.nodal_shape)
     alb0 = jnp.zeros(grid.nodal_shape)
     tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
-        
-    return BoundaryData.zeros(
+
+    return ForcingData.zeros(
         nodal_shape=grid.nodal_shape,
-        fmask=fmask, tsea=tsea, alb0=alb0
+        tsea=tsea, alb0=alb0
     )
 
-def boundaries_from_file(
-    filename: str,
-    fmask_threshold=0.1,
-) -> BoundaryData:
+def forcing_from_file(filename: str,) -> ForcingData:
     """
-    Initialize the boundary conditions
+    Initialize the forcing data from a file.
+
+    Returns:
+        ForcingData: Time-varying forcing data
     """
     import xarray as xr
 
-    # Read boundaries from file
+    # Read forcing data from file
     ds = xr.open_dataset(filename)
-
-    # land-sea mask
-    fmask = jnp.asarray(ds["lsm"])
-    # Apply some sanity checks -- might want to check this shape against the model shape?
-    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-    # Set values close to 0 or 1 to exactly 0 or 1
-    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
 
     # annual-mean surface albedo
     alb0 = jnp.asarray(ds["alb"])
@@ -117,20 +99,20 @@ def boundaries_from_file(
 
     # snow depth
     snowc_am = jnp.asarray(ds["snowc"])
-    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 335.)
-    # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
+    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
+    # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
     snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
 
     # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
-    soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
-    assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
 
     # Prescribe SSTs
     tsea = jnp.asarray(ds["sst"])
 
-    return BoundaryData.zeros(
-        nodal_shape=fmask.shape, fmask=fmask,
+    forcing_data = ForcingData.zeros(
+        nodal_shape=alb0.shape,
         alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,
         soilw_am=soilw_am, tsea=tsea
     )
+
+    return forcing_data

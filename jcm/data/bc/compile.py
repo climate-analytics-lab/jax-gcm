@@ -6,10 +6,10 @@ from jcm.physics.speedy.physical_constants import sd2sc, swcap, swwil
 
 # Set the input directory path
 input_dir = Path(__file__).parent / 't30/clim'
-output_file, orography_file = Path(__file__).parent / 't30/clim/boundaries.nc', Path(__file__).parent / 't30/clim/orography.nc'
+output_file, terrain_file = Path(__file__).parent / 't30/clim/forcing.nc', Path(__file__).parent / 't30/clim/terrain.nc'
 file_names = ['land.nc', 'sea_ice.nc', 'sea_surface_temperature.nc', 'snow.nc', 'soil.nc', 'surface.nc']
 
-def process_boundaries(ds):
+def process_forcing(ds):
     """
     Convert compiled speedy.f90 boundary conditions to format expected by jcm.
 
@@ -47,8 +47,8 @@ def process_boundaries(ds):
 
     ds['snowc'] = ds['snowd'] / sd2sc # Convert snow depth to snow cover
     
-    da_orog = ds['orog']
-    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'orog', 'snowd'}), da_orog
+    ds_terrain = ds[['lsm', 'orog']]
+    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'snowd', 'orog', 'lsm'}), ds_terrain
 
 def main(argv=None):
     """
@@ -68,16 +68,16 @@ def main(argv=None):
         merged_ds = xr.open_mfdataset([input_dir / fname for fname in file_names], combine='by_coords')
 
         print("Processing dataset...")
-        processed_ds, da_orog = process_boundaries(merged_ds)
+        processed_ds, ds_terrain = process_forcing(merged_ds)
         
         print(f"Saving processed dataset to {output_file}")
         processed_ds.to_netcdf(output_file)
         processed_ds.close()
 
-        print(f"Saving orography to {orography_file}")
-        da_orog.to_netcdf(orography_file)
-        da_orog.close()
-        
+        print(f"Saving terrain to {terrain_file}")
+        ds_terrain.to_netcdf(terrain_file)
+        ds_terrain.close()
+
         print("Done!")
         return 0
     except Exception:

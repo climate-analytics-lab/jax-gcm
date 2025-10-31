@@ -1,10 +1,9 @@
 from jcm.geometry import Geometry
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.shortwave_radiation import get_zonal_average_fields
-from jcm.physics.speedy.physical_constants import sd2sc
 import jax.numpy as jnp
 # linear trend of co2 absorptivity (del_co2: rate of change per year)
 del_co2   = 0.005
@@ -13,21 +12,21 @@ def set_forcing(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData=None,
+    forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     # 2. daily-mean radiative forcing
-    physics_data = get_zonal_average_fields(state, physics_data, boundaries=boundaries, geometry=geometry)
+    physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, geometry=geometry)
     tyear = physics_data.date.tyear
     day = physics_data.date.model_day()
     model_year = physics_data.date.model_year
 
     # total surface albedo
-    snowc_am = boundaries.snowc_am[:,:,day]
-    fmask = boundaries.fmask
-    sice_am = boundaries.sice_am[:,:,day]
+    snowc_am = forcing.snowc_am[:,:,day]
+    fmask = geometry.fmask
+    sice_am = forcing.sice_am[:,:,day]
 
-    alb0 = boundaries.alb0
+    alb0 = forcing.alb0
 
     snowc = jnp.minimum(1.0, snowc_am)
     alb_l = alb0 + snowc * (parameters.mod_radcon.albsn - alb0)

@@ -25,7 +25,7 @@ from jcm.physics.speedy.orographic_correction import (
     apply_orographic_corrections_to_state
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.boundaries import default_boundaries, BoundaryData
+from jcm.forcing import default_forcing, ForcingData
 from jcm.geometry import Geometry, get_coords
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -51,17 +51,16 @@ def create_test_geometry(layers=8, lon_points=96, lat_points=48, orography=False
     """Create a test geometry object using the actual Geometry class."""
     # Use the actual Geometry class from the codebase
     nodal_shape = (lon_points, lat_points)
+    fmask = jnp.ones(nodal_shape) * 0.7
     orog = None
     if orography:
         orog = create_test_orography(lon_points, lat_points)
-    return Geometry.from_grid_shape(nodal_shape=nodal_shape, num_levels=layers, orography=orog)
+    return Geometry.from_grid_shape(nodal_shape=nodal_shape, num_levels=layers, orography=orog, fmask=fmask)
 
-def create_test_boundaries(lon_points=96, lat_points=48):
-    boundaries = default_boundaries(get_coords(nodal_shape=(lon_points, lat_points)).horizontal)
-    return boundaries.replace(
-        fmask = jnp.ones((lon_points, lat_points)) * 0.7,
-        tsea = jnp.full((lon_points, lat_points, 365), 285.0)
-    )
+def create_test_forcing(lon_points=96, lat_points=48):
+    forcing = ForcingData.zeros((lon_points, lat_points), 
+                                tsea=jnp.full((lon_points, lat_points, 365), 285.0))
+    return forcing
 
 def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     """Create a test physics state with realistic values."""
@@ -159,14 +158,14 @@ class TestOrographicCorrection:
     
     def test_humidity_horizontal_correction(self):
         """Test computation of humidity horizontal correction."""
-        boundaries = create_test_boundaries(lon_points=96, lat_points=48)
+        forcing = create_test_forcing(lon_points=96, lat_points=48)
         geometry = create_test_geometry(orography=True)
         
         # Compute temperature correction needed for the new humidity correction
         tcorh = compute_temperature_correction_horizontal(geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
         
-        qcorh = compute_humidity_correction_horizontal(boundaries, tcorh, land_temp)
+        qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temp)
         
         # Check shape
         assert qcorh.shape == (96, 48)
@@ -181,7 +180,7 @@ class TestOrographicCorrection:
     def test_get_orographic_correction_tendencies(self):
         """Test the main tendency computation function."""
         state = create_test_physics_state()
-        boundaries = create_test_boundaries()
+        forcing = create_test_forcing()
         geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         nodal_shape = state.temperature.shape[1:]  # (lon, lat)
@@ -189,7 +188,7 @@ class TestOrographicCorrection:
         physics_data = PhysicsData.zeros(nodal_shape, num_levels)
         
         tendencies, updated_physics_data = get_orographic_correction_tendencies(
-            state, physics_data, parameters, boundaries, geometry
+            state, physics_data, parameters, forcing, geometry
         )
         
         # Check return types
@@ -222,12 +221,12 @@ class TestOrographicCorrection:
     def test_apply_orographic_corrections_to_state(self):
         """Test direct application of corrections to state."""
         state = create_test_physics_state()
-        boundaries = create_test_boundaries()
+        forcing = create_test_forcing()
         geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         
         corrected_state = apply_orographic_corrections_to_state(
-            state, boundaries, geometry, parameters
+            state, forcing, geometry, parameters
         )
         
         # Check that state type is preserved
@@ -257,13 +256,13 @@ class TestOrographicCorrection:
     def test_jax_compatibility(self):
         """Test that functions are JAX-compatible (can be differentiated and JIT compiled)."""
         state = create_test_physics_state()
-        boundaries = create_test_boundaries()
+        forcing = create_test_forcing()
         geometry = create_test_geometry(orography=True)
         parameters = Parameters.default()
         
         # Test gradient computation (JIT with non-array arguments is complex, so just test gradients)
         def loss_fn(state):
-            corrected = apply_orographic_corrections_to_state(state, boundaries, geometry, parameters)
+            corrected = apply_orographic_corrections_to_state(state, forcing, geometry, parameters)
             return jnp.sum(corrected.temperature ** 2)
         
         grad_fn = jax.grad(loss_fn)
@@ -354,14 +353,14 @@ class TestOrographicCorrection:
         grid = get_coords().horizontal
         
         # Use the actual model boundary initialization (now fixed)
-        boundaries_flat = default_boundaries(grid)
+        boundaries_flat = default_forcing(grid)
         
         tcorh_flat = compute_temperature_correction_horizontal(geometry)
         assert jnp.allclose(tcorh_flat, 0.0, atol=1e-5)
         
         # Humidity correction should also be zero when orography is zero
         land_temp_flat = jnp.full(geometry.orog.shape, 288.0)
-        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, tcorh_flat, land_temp_flat)
+        qcorh_flat = compute_humidity_correction_horizontal(boundaries_flat, geometry.fmask, tcorh_flat, land_temp_flat)
         assert jnp.allclose(qcorh_flat, 0.0, atol=1e-5)
         
         # test that total corrections are zero for flat orography
@@ -483,39 +482,40 @@ class TestOrographicCorrection:
         from jcm.utils import convert_back, convert_to_float
         """Test computation of humidity horizontal correction gradient check."""
         lon, lat = 96, 48
-        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
+        test_forcing = create_test_forcing(lon_points=lon, lat_points=lat)
         geometry = create_test_geometry()
-        boundaries = BoundaryData.ones((lon, lat),
-                                       fmask = test_boundaries.fmask,
-                                       tsea = test_boundaries.tsea)
+        forcing = ForcingData.ones((lon, lat),
+                                       tsea = test_forcing.tsea)
         # Compute temperature correction needed for the new humidity correction
         tcorh = compute_temperature_correction_horizontal(geometry)
         land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
 
         # Set float inputs
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
 
-        def f(boundaries_f, tcorh, land_temp):
-            return compute_humidity_correction_horizontal(boundaries=convert_back(boundaries_f, boundaries), 
-                                       temperature_correction=tcorh, 
-                                       land_temperature=land_temp)
+        def f(forcing_f, tcorh, land_temp):
+            return compute_humidity_correction_horizontal(
+                forcing=convert_back(forcing_f, forcing), 
+                fmask=geometry.fmask,
+                temperature_correction=tcorh, 
+                land_temperature=land_temp
+            )
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (boundaries_floats, tcorh, land_temp), 
+        check_vjp(f, f_vjp, args = (forcing_floats, tcorh, land_temp), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (boundaries_floats, tcorh, land_temp), 
+        check_jvp(f, f_jvp, args = (forcing_floats, tcorh, land_temp), 
                                 atol=None, rtol=1, eps=0.00001)
     
     def test_get_orographic_correction_tendencies_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test the main tendency computation function gradient check."""
         lon, lat = 96, 48
-        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
-        boundaries = BoundaryData.ones((lon, lat),
-                                       fmask = test_boundaries.fmask,
-                                       tsea = test_boundaries.tsea)
+        test_forcing = create_test_forcing(lon_points=lon, lat_points=lat)
+        forcing = ForcingData.ones((lon, lat),
+                                       tsea = test_forcing.tsea)
         state = create_test_physics_state()
         geometry = create_test_geometry()
         parameters = Parameters.default()
@@ -527,14 +527,14 @@ class TestOrographicCorrection:
         state_floats = convert_to_float(state)
         physics_data_floats = convert_to_float(physics_data)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(state_f, physics_data_f, parameters_f, boundaries_f,geometry_f):
+        def f(state_f, physics_data_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_orographic_correction_tendencies(state=convert_back(state_f, state), 
                                        physics_data=convert_back(physics_data_f, physics_data),
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
@@ -543,19 +543,18 @@ class TestOrographicCorrection:
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.000001)
-        check_jvp(f, f_jvp, args = (state_floats, physics_data_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (state_floats, physics_data_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.001)
     
     def test_apply_orographic_corrections_to_state_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test direct application of corrections to state gradient check."""
         lon, lat = 96, 48
-        test_boundaries = create_test_boundaries(lon_points=lon, lat_points=lat)
-        boundaries = BoundaryData.ones((lon, lat),
-                                       fmask = test_boundaries.fmask,
-                                       tsea = test_boundaries.tsea)
+        test_forcing = create_test_forcing(lon_points=lon, lat_points=lat)
+        forcing = ForcingData.ones((lon, lat),
+                                       tsea = test_forcing.tsea)
         state = create_test_physics_state()
         geometry = create_test_geometry()
         parameters = Parameters.default()
@@ -563,13 +562,13 @@ class TestOrographicCorrection:
         # Set float inputs
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(state_f, parameters_f, boundaries_f,geometry_f):
+        def f(state_f, parameters_f, forcing_f,geometry_f):
             state_out = apply_orographic_corrections_to_state(state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(state_out)
@@ -578,9 +577,9 @@ class TestOrographicCorrection:
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
         
 if __name__ == "__main__":

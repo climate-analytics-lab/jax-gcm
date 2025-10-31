@@ -5,13 +5,13 @@ from pathlib import Path
 import argparse
 from jcm.geometry import get_coords
 
-def create_boundaries_daily():
+def create_forcing_daily():
     """
-    Generate boundaries_daily.nc by interpolating boundaries.nc to daily frequency.
+    Generate forcing_daily.nc by interpolating forcing.nc to daily frequency.
     """
     cwd = Path(__file__).resolve().parent
 
-    ds_monthly = xr.open_dataset(cwd / "t30/clim/boundaries.nc")
+    ds_monthly = xr.open_dataset(cwd / "t30/clim/forcing.nc")
 
     time_vars = [var for var in ds_monthly.data_vars if 'time' in ds_monthly[var].dims]
     non_time_vars = [var for var in ds_monthly.data_vars if 'time' not in ds_monthly[var].dims]
@@ -28,7 +28,7 @@ def create_boundaries_daily():
     daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
     ds_daily = xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
-    output_file = cwd / "t30/clim/boundaries_daily.nc"
+    output_file = cwd / "t30/clim/forcing_daily.nc"
     ds_daily.to_netcdf(output_file)
     ds_monthly.close()
     print(f"Generated {output_file.name}")
@@ -48,7 +48,6 @@ def clamp_to_valid_ranges(ds):
     ds['snowc'] = np.maximum(0, ds['snowc'])
     ds['soilw_am'] = ds['soilw_am'].clip(0.0, 1.0)
     # skipping orog to avoid clamping valid areas below sea level, but this might cause problems at edges
-    ds['lsm'] = ds['lsm'].clip(0.0, 1.0)
     ds['alb'] = ds['alb'].clip(0.0, 1.0)
     return ds
 
@@ -71,39 +70,37 @@ def upsample_ds(ds, target_resolution):
     )
 
     # Fill missing data at latitude extremes by padding with nearest non-nan values
-    if isinstance(ds_interp, xr.DataArray):
-        ds_interp.values = pad_1st_axis(ds_interp.values)
-    else:
-        for var in ds_interp.data_vars:
-            ds_interp[var].values = pad_1st_axis(ds_interp[var].values)
+    for var in ds_interp.data_vars:
+        ds_interp[var].values = pad_1st_axis(ds_interp[var].values)
 
     return ds_interp
 
 def interpolate(target_resolution):
-    boundaries_output_file = Path(__file__).parent / f"boundaries_daily_t{target_resolution}.nc"
-    if boundaries_output_file.exists():
-        print(f"{boundaries_output_file.name} already exists.")
+    forcing_output_file = Path(__file__).parent / f"forcing_daily_t{target_resolution}.nc"
+    if forcing_output_file.exists():
+        print(f"{forcing_output_file.name} already exists.")
     else:
-        boundaries_input_file = Path(__file__).parent / "t30/clim/boundaries_daily.nc"
-        if not boundaries_input_file.exists():
-            create_boundaries_daily()
-        print(f"Interpolating boundaries_daily.nc to T{target_resolution} resolution...")
-        ds_boundaries = xr.open_dataset(boundaries_input_file)
-        ds_boundaries_interp = upsample_ds(ds_boundaries, target_resolution)
-        ds_boundaries_interp = clamp_to_valid_ranges(ds_boundaries_interp)
-        ds_boundaries_interp.to_netcdf(boundaries_output_file)
-        ds_boundaries.close()
-        print(f"Generated {boundaries_output_file.name}")
+        forcing_input_file = Path(__file__).parent / "t30/clim/forcing_daily.nc"
+        if not forcing_input_file.exists():
+            create_forcing_daily()
+        print(f"Interpolating forcing_daily.nc to T{target_resolution} resolution...")
+        ds_forcing = xr.open_dataset(forcing_input_file)
+        ds_forcing_interp = upsample_ds(ds_forcing, target_resolution)
+        ds_forcing_interp = clamp_to_valid_ranges(ds_forcing_interp)
+        ds_forcing_interp.to_netcdf(forcing_output_file)
+        ds_forcing.close()
+        print(f"Generated {forcing_output_file.name}")
 
-    orography_output_file = Path(__file__).parent / f"orography_t{target_resolution}.nc"
-    if orography_output_file.exists():
-        print(f"{orography_output_file.name} already exists.")
+    terrain_output_file = Path(__file__).parent / f"terrain_t{target_resolution}.nc"
+    if terrain_output_file.exists():
+        print(f"{terrain_output_file.name} already exists.")
         return
-    print(f"Interpolating orography.nc to T{target_resolution} resolution...")
-    da_orog = xr.open_dataarray(Path(__file__).parent / 't30/clim/orography.nc')
-    da_orog_interp = upsample_ds(da_orog, target_resolution)
-    da_orog_interp.to_netcdf(orography_output_file)
-    da_orog.close()
+    print(f"Interpolating terrain.nc to T{target_resolution} resolution...")
+    ds_terrain = xr.open_dataset(Path(__file__).parent / 't30/clim/terrain.nc')
+    ds_terrain_interp = upsample_ds(ds_terrain, target_resolution)
+    ds_terrain_interp['lsm'] = ds_terrain_interp['lsm'].clip(0.0, 1.0)
+    ds_terrain_interp.to_netcdf(terrain_output_file)
+    ds_terrain.close()
     
 def main(argv=None) -> int:
     """
@@ -116,7 +113,7 @@ def main(argv=None) -> int:
         int: exit code (0 = success, non-zero = failure)
     """
     parser = argparse.ArgumentParser(
-        description="Upscale boundaries file to target horizontal spatial resolution."
+        description="Upscale forcing file to target horizontal spatial resolution."
     )
     valid_res = [21, 31, 42, 85, 106, 119, 170, 213, 340, 425]
     parser.add_argument(
