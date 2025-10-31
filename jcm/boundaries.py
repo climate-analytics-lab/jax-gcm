@@ -117,7 +117,7 @@ def boundaries_from_file(
 
     # snow depth
     snowc_am = jnp.asarray(ds["snowc"])
-    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
+    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 335.)
     # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes
     snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
 
