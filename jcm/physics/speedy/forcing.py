@@ -23,7 +23,7 @@ def set_forcing(
 
     # total surface albedo
     snowd_am = boundaries.snowd_am[:,:,day]
-    fmask = boundaries.fmask
+    fmask = geometry.fmask
     sice_am = boundaries.sice_am[:,:,day]
 
     alb0 = boundaries.alb0

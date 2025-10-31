@@ -140,7 +140,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         parameters = Parameters.default()
         boundaries = BoundaryData.zeros((ix, il))
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask = 0.7 * jnp.ones((ix, il))))
 
     def test_shortwave_radiation(self):
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
@@ -158,7 +158,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * np.ones(xy)
         precls = 4.0 * np.ones(xy)
         iptop = 8 * np.ones(xy, dtype=int)
-        fmask = .7 * np.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -171,7 +170,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        boundaries = BoundaryData.zeros(xy)
         _, physics_data = get_clouds(state, physics_data, parameters, boundaries, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, boundaries, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, boundaries, geometry)
@@ -376,7 +375,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -389,7 +387,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        boundaries = BoundaryData.zeros(xy)
         # Calculate gradient
         primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, boundaries, geometry)
         tends = PhysicsTendency.ones(zxy)
@@ -508,7 +506,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -521,7 +518,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        boundaries = BoundaryData.zeros(xy, fmask=fmask)
+        boundaries = BoundaryData.zeros(xy)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)

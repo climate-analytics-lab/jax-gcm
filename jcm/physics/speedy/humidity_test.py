@@ -45,8 +45,8 @@ class TestHumidityUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav))
-        boundaries = BoundaryData.ones(xy,tsea=tsea,fmask=fmask,lfluxland=True)
+        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask, orography=phi0/grav))
+        boundaries = BoundaryData.ones(xy,tsea=tsea,lfluxland=True)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)

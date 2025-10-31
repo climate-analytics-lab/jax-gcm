@@ -84,6 +84,7 @@ def _initialize_vertical(kx):
 class Geometry:
     nodal_shape: tuple[int, int, int] # (kx, ix, il)
 
+    fmask: jnp.ndarray # fractional land-sea mask (ix,il)
     orog: jnp.ndarray # orography height (m), shape (ix, il)
     phis0: jnp.ndarray # spectrally truncated surface geopotential
 
@@ -101,19 +102,27 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None):
+    def from_coords(cls, coords: CoordinateSystem, fmask=None, orography=None, truncation_number=None, fmask_threshold=0.1):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
         Args:
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
+            fmask (optional): Fractional land-sea mask (ix, il). If None, defaults to zeros.
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
             Geometry object
         """
-        # Orography and surface geopotential
+        # Land-sea mask, orography, and surface geopotential
+        if fmask is None:
+            fmask = jnp.zeros(coords.horizontal.nodal_shape)
+        else:
+            assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
+            # Set values close to 0 or 1 to exactly 0 or 1
+            fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+
         orog = jnp.zeros(coords.horizontal.nodal_shape) if orography is None else orography
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
@@ -133,13 +142,14 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
     @classmethod
-    def from_grid_shape(cls, nodal_shape, num_levels=8, orography=None, truncation_number=None):
+    def from_grid_shape(cls, nodal_shape, num_levels=8, fmask=None, orography=None, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
         Args:
             nodal_shape: Shape of the nodal grid `(ix,il)`.
             num_levels (optional): Number of vertical levels `kx` (default 8).
+            fmask (optional): Fractional land-sea mask (ix, il). If None, defaults to zeros.
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
@@ -148,17 +158,19 @@ class Geometry:
         """
         return cls.from_coords(
             coords=get_coords(layers=num_levels, nodal_shape=nodal_shape),
+            fmask=fmask,
             orography=orography,
             truncation_number=truncation_number
         )
 
     @classmethod
-    def single_column_geometry(cls, radang=0., orog=0., phis0=None, num_levels=8):
+    def single_column_geometry(cls, radang=0., fmask=0., orog=0., phis0=None, num_levels=8):
         """
         Initializes a Geometry instance for a single column model.
 
         Args:
             radang (optional): Latitude of the single column in radians (default 0).
+            fmask (optional): Fractional land-sea mask (default 0).
             orog (optional): Orography height in meters (default 0).
             phis0 (optional): Spectrally truncated surface geopotential (default grav * orog).
             num_levels (optional): Number of vertical levels (default 8).
@@ -177,7 +189,7 @@ class Geometry:
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = _initialize_vertical(num_levels)
 
         return cls(nodal_shape=(num_levels, 1, 1),
-                   orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]),
+                   fmask=jnp.array([[fmask]]), orog=jnp.array([[orog]]), phis0=jnp.array([[phis0]]),
                    radang=jnp.array([[radang]]), sia=jnp.array([[sia]]), coa=jnp.array([[coa]]),
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)

@@ -40,7 +40,7 @@ def get_surface_fluxes(
     phi0 : 2D array
         - Surface geopotential, geometry.orog * grav
     fmask : 2D array
-        - Fractional land-sea mask, physics_data.surface_flux.fmask
+        - Fractional land-sea mask, geometry.fmask
     tsea : 2D array
         - Sea-surface temperature, boundaries.tsea
     rsds : 2D array
@@ -60,7 +60,7 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = boundaries.fmask
+    fmask = geometry.fmask
 
     lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
