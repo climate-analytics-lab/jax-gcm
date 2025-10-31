@@ -24,6 +24,7 @@ For more information about JAX profiling, refer to the official documentation: `
    jax.profiler.start_trace("./tensorboard_logs", create_perfetto_trace=True)
 
    model = Model(
+       # fmask=realistic_boundaries.fmask, FIXME out of date
        # orography=realistic_boundaries.orog,
    )
 

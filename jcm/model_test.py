@@ -198,9 +198,12 @@ class TestModelUnit(unittest.TestCase):
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
+        terrain = xr.open_dataset(boundaries_dir / 'terrain_t31.nc')
+        fmask = jnp.asarray(terrain['lsm'])
+        orography = jnp.asarray(terrain['orog'])
 
         create_model = lambda params=Parameters.default(): Model(
+            fmask=fmask,
             orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )
@@ -239,9 +242,12 @@ class TestModelUnit(unittest.TestCase):
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
+        terrain = xr.open_dataset(boundaries_dir / 'terrain_t31.nc')
+        fmask = jnp.asarray(terrain['lsm'])
+        orography = jnp.asarray(terrain['orog'])
 
         create_model = lambda params=Parameters.default(): Model(
+            fmask=fmask,
             orography=orography,
             physics=SpeedyPhysics(parameters=params),
         )

@@ -48,7 +48,6 @@ def clamp_to_valid_ranges(ds):
     ds['snowd'] = np.maximum(0, ds['snowd'])
     ds['soilw_am'] = ds['soilw_am'].clip(0.0, 1.0)
     # skipping orog to avoid clamping valid areas below sea level, but this might cause problems at edges
-    ds['lsm'] = ds['lsm'].clip(0.0, 1.0)
     ds['alb'] = ds['alb'].clip(0.0, 1.0)
     return ds
 
@@ -71,11 +70,8 @@ def upsample_ds(ds, target_resolution):
     )
 
     # Fill missing data at latitude extremes by padding with nearest non-nan values
-    if isinstance(ds_interp, xr.DataArray):
-        ds_interp.values = pad_1st_axis(ds_interp.values)
-    else:
-        for var in ds_interp.data_vars:
-            ds_interp[var].values = pad_1st_axis(ds_interp[var].values)
+    for var in ds_interp.data_vars:
+        ds_interp[var].values = pad_1st_axis(ds_interp[var].values)
 
     return ds_interp
 
@@ -95,15 +91,16 @@ def interpolate(target_resolution):
         ds_boundaries.close()
         print(f"Generated {boundaries_output_file.name}")
 
-    orography_output_file = Path(__file__).parent / f"orography_t{target_resolution}.nc"
-    if orography_output_file.exists():
-        print(f"{orography_output_file.name} already exists.")
+    terrain_output_file = Path(__file__).parent / f"terrain_t{target_resolution}.nc"
+    if terrain_output_file.exists():
+        print(f"{terrain_output_file.name} already exists.")
         return
-    print(f"Interpolating orography.nc to T{target_resolution} resolution...")
-    da_orog = xr.open_dataarray(Path(__file__).parent / 't30/clim/orography.nc')
-    da_orog_interp = upsample_ds(da_orog, target_resolution)
-    da_orog_interp.to_netcdf(orography_output_file)
-    da_orog.close()
+    print(f"Interpolating terrain.nc to T{target_resolution} resolution...")
+    ds_terrain = xr.open_dataset(Path(__file__).parent / 't30/clim/terrain.nc')
+    ds_terrain_interp = upsample_ds(ds_terrain, target_resolution)
+    ds_terrain_interp['lsm'] = ds_terrain_interp['lsm'].clip(0.0, 1.0)
+    ds_terrain_interp.to_netcdf(terrain_output_file)
+    ds_terrain.close()
     
 def main(argv=None) -> int:
     """

@@ -127,7 +127,7 @@ class Model:
     """
 
     def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
-                 coords: CoordinateSystem=None, orography: jnp.ndarray=None,
+                 coords: CoordinateSystem=None, fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
         """
@@ -142,6 +142,8 @@ class Model:
                 Spectral truncation (horizontal resolution) of the model grid (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
             coords: 
                 CoordinateSystem object describing model grid
+            fmask:
+                Land fraction mask (2D array)
             orography:
                 Orography data (2D array)
             physics: 
@@ -173,8 +175,9 @@ class Model:
         
         self.physics = physics or SpeedyPhysics()
 
+        self.fmask = fmask if fmask is not None else aux_features[dinosaur.xarray_utils.LAND_SEA_MASK]
         self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
-        self.geometry = Geometry.from_coords(coords=self.coords, orography=self.orography)
+        self.geometry = Geometry.from_coords(coords=self.coords, fmask=self.fmask, orography=self.orography)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
