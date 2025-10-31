@@ -2,7 +2,7 @@ import xarray as xr
 import sys
 from pathlib import Path
 import numpy as np
-from jcm.physics.speedy.physical_constants import swcap, swwil 
+from jcm.physics.speedy.physical_constants import sd2sc, swcap, swwil
 
 # Set the input directory path
 input_dir = Path(__file__).parent / 't30/clim'
@@ -44,9 +44,11 @@ def process_boundaries(ds):
 
     soilw_am = compute_soilw_am(ds.vegh.values, ds.vegl.values, ds.swl1.values, ds.swl2.values)
     ds['soilw_am'] = xr.DataArray(soilw_am, dims=ds['swl1'].dims, coords=ds['swl1'].coords)
+
+    ds['snowc'] = ds['snowd'] / sd2sc # Convert snow depth to snow cover
     
     da_orog = ds['orog']
-    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'orog'}), da_orog
+    return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'orog', 'snowd'}), da_orog
 
 def main(argv=None):
     """
