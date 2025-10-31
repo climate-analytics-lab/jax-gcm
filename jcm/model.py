@@ -15,7 +15,7 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import Geometry, get_coords
+from jcm.geometry import Geometry, coords_from_geometry, get_coords
 from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
@@ -152,8 +152,12 @@ class Model:
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
         # Store coords separately - it's used by dynamics but not physics (and can't easily be jitted)
-        self.coords = coords if coords is not None else get_coords()
-        self.geometry = geometry if geometry is not None else Geometry.from_coords(coords=self.coords)
+        if geometry is not None: # user-specified geometry takes precedence
+            self.geometry = geometry
+            self.coords = coords_from_geometry(geometry)
+        else:
+            self.coords = coords if coords is not None else get_coords()
+            self.geometry = Geometry.from_coords(coords=self.coords)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(

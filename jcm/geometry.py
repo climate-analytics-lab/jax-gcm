@@ -199,6 +199,7 @@ class Geometry:
             num_levels (optional): Number of vertical levels `kx` (default 8).
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
+            terrain_file (optional): Path to a file containing orography and land-sea mask data.
         Returns:
             Geometry object
         """
@@ -237,3 +238,18 @@ class Geometry:
                    radang=jnp.array([[radang]]), sia=jnp.array([[sia]]), coa=jnp.array([[coa]]),
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
+
+def coords_from_geometry(geometry: Geometry) -> CoordinateSystem:
+    """
+    Extracts a dinosaur CoordinateSystem from a Geometry object.
+
+    Args:
+        geometry: Geometry object.
+
+    Returns:
+        Compatible CoordinateSystem object.
+    """
+    return get_coords(
+        layers=geometry.nodal_shape[0],
+        spectral_truncation=truncation_for_nodal_shape[geometry.nodal_shape[1:]]
+    )
