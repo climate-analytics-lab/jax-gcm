@@ -494,10 +494,12 @@ class TestOrographicCorrection:
         forcing_floats = convert_to_float(forcing)
 
         def f(forcing_f, tcorh, land_temp):
-            return compute_humidity_correction_horizontal(forcing=convert_back(forcing_f, forcing), 
-                                        fmask=geometry.fmask,
-                                       temperature_correction=tcorh, 
-                                       land_temperature=land_temp)
+            return compute_humidity_correction_horizontal(
+                forcing=convert_back(forcing_f, forcing), 
+                fmask=geometry.fmask,
+                temperature_correction=tcorh, 
+                land_temperature=land_temp
+            )
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  

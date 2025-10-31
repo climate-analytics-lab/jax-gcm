@@ -49,7 +49,7 @@ def get_terrain(fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
     """
     # Handle the case where at least one of fmask or orography is provided
     if fmask is not None or orography is not None:
-        # If orography provided but fmask not, default fmask to any orogoraphy > 0
+        # If orography provided but fmask not, default fmask to any orography > 0
         if orography is not None and fmask is None:
             fmask = (orography > 0.0).astype(jnp.float32)
         # If fmask provided but orography not, default orography to zeros (flat)
@@ -60,8 +60,8 @@ def get_terrain(fmask: jnp.ndarray=None, orography: jnp.ndarray=None,
     elif terrain_file is not None:
         import xarray as xr
         ds = xr.open_dataset(terrain_file)
-        orog_data = ds['orography'].values
-        fmask_data = ds['land_sea_mask'].values
+        orog_data = jnp.asarray(ds['orog'])
+        fmask_data = jnp.asarray(ds['lsm'])
         return orog_data, fmask_data
     elif nodal_shape is not None:
         return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
