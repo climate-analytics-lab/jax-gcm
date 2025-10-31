@@ -17,7 +17,7 @@ from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.geometry import Geometry, get_coords
 from jcm.date import DateData
-from jcm.boundaries import BoundaryData, default_boundaries
+from jcm.boundaries import BoundaryData, validate_boundaries, default_boundaries
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
 from jcm.utils import stack_trees
@@ -175,14 +175,14 @@ class Model:
         
         self.physics = physics or SpeedyPhysics()
 
-        self.fmask = fmask if fmask is not None else aux_features[dinosaur.xarray_utils.LAND_SEA_MASK]
-        self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
-        self.geometry = Geometry.from_coords(coords=self.coords, fmask=self.fmask, orography=self.orography)
+        fmask = fmask if fmask is not None else aux_features[dinosaur.xarray_utils.LAND_SEA_MASK]
+        orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
+        self.geometry = Geometry.from_coords(coords=self.coords, fmask=fmask, orography=orography)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.truncated_orography = primitive_equations.truncated_modal_orography(self.orography, self.coords, wavenumbers_to_clip=2)
+        self.truncated_orography = primitive_equations.truncated_modal_orography(self.geometry.orog, self.coords, wavenumbers_to_clip=2)
         
         self.primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=self.ref_temps,
@@ -351,6 +351,7 @@ class Model:
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
         """
+        validate_boundaries(boundaries, self.geometry.fmask)
         step_fn_factory = self._get_step_fn_factory(boundaries)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
         step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())

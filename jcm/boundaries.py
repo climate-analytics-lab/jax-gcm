@@ -58,6 +58,18 @@ class BoundaryData:
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
 
+def validate_boundaries(boundaries: BoundaryData, fmask: jnp.ndarray):
+    """
+    Validate boundary conditions to ensure they are within physical ranges.
+
+    Args:
+        boundaries (BoundaryData): Boundary conditions to validate.
+        fmask (jnp.ndarray): Fractional land-sea mask (ix, il).
+    """
+    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes - also would need to add fmask as argument...
+    soilw_valid = (0.0 <= boundaries.soilw_am) & (boundaries.soilw_am <= 1.0)
+    assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0))
+
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
@@ -105,13 +117,10 @@ def boundaries_from_file(
     # snow depth
     snowd_am = jnp.asarray(ds["snowd"])
     snowd_valid = (0.0 <= snowd_am) & (snowd_am <= 20000.0)
-    # assert jnp.all(snowd_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the boundaries.nc file so this passes - also would need to add fmask as argument...
     snowd_am = jnp.where(snowd_valid, snowd_am, 0.0)
 
     # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
-    soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
-    # assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need fmask
 
     # Prescribe SSTs
     tsea = jnp.asarray(ds["sst"])
