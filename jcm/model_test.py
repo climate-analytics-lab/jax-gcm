@@ -198,7 +198,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        geometry = Geometry.from_spectral_truncation(spectral_truncation=31, terrain_file=forcing_dir / 'terrain_t31.nc')
+        geometry = Geometry.from_terrain_file(forcing_dir / 'terrain_t31.nc')
 
         create_model = lambda params=Parameters.default(): Model(
             geometry=geometry,
@@ -239,7 +239,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        geometry = Geometry.from_spectral_truncation(spectral_truncation=31, terrain_file=forcing_dir / 'terrain_t31.nc')
+        geometry = Geometry.from_terrain_file(forcing_dir / 'terrain_t31.nc')
 
         create_model = lambda params=Parameters.default(): Model(
             geometry=geometry,
