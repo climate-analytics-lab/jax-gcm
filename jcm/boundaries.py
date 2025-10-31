@@ -111,7 +111,7 @@ def boundaries_from_file(
     # soil moisture
     soilw_am = jnp.asarray(ds["soilw_am"])
     soilw_valid = (0.0 <= soilw_am) & (soilw_am <= 1.0)
-    assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need fmask
+    # assert jnp.all(soilw_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need fmask
 
     # Prescribe SSTs
     tsea = jnp.asarray(ds["sst"])
