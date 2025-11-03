@@ -80,7 +80,7 @@ def upsample_ds(ds, target_resolution):
     return ds_interp
 
 def interpolate(target_resolution):
-    boundaries_output_file = Path(__file__).parent / f"boundaries_daily_t{target_resolution}.nc"
+    boundaries_output_file = Path(__file__).parent / f"t30/clim/boundaries_daily_t{target_resolution}.nc"
     if boundaries_output_file.exists():
         print(f"{boundaries_output_file.name} already exists.")
     else:
@@ -95,7 +95,7 @@ def interpolate(target_resolution):
         ds_boundaries.close()
         print(f"Generated {boundaries_output_file.name}")
 
-    orography_output_file = Path(__file__).parent / f"orography_t{target_resolution}.nc"
+    orography_output_file = Path(__file__).parent / f"t30/clim/orography_t{target_resolution}.nc"
     if orography_output_file.exists():
         print(f"{orography_output_file.name} already exists.")
         return
