@@ -4,6 +4,10 @@ import jax.numpy as jnp
 import xarray as xr
 from pathlib import Path
 
+default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specific_humidity',
+                     'normalized_surface_pressure','humidity.rh','shortwave_rad.ftop','longwave_rad.ftop',
+                     'shortwave_rad.cloudstr','shortwave_rad.qcloud','convection.precnv','condensation.precls']
+
 def run_default_speedy_model(save_interval=None):
     '''
         Run the speedy physics at default settings with realistic forcing and terrain

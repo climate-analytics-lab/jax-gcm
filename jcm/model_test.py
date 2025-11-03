@@ -291,108 +291,27 @@ class TestModelUnit(unittest.TestCase):
     
     @pytest.mark.slow
     def test_speedy_model_default_statistics(self):
-        from jcm.model import Model, get_coords
-        from jcm.boundaries import boundaries_from_file
+        from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
         import xarray as xr
-
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
-        
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-
-        realistic_boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
-
-        stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
-
-        # default model settings
-        # use reslistic orography from boundaries file
-        model = Model(
-            orography=realistic_boundaries.orog,
-            time_step=60.,
-        )
-
-        # save every month, run for 2 months, turn on averaging so that the last prediction is the last monthly average
-        predictions = model.run(
-            save_interval=30., 
-            total_time=90.,
-            output_averages=True,
-            boundaries=realistic_boundaries
-        )
-        pred_ds = model.predictions_to_xarray(predictions)
 
         # load test file for comparison
+        stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
         default_stats = xr.open_dataset(stats_file)
+
+        model, predictions = run_default_speedy_model()
+        pred_ds = model.predictions_to_xarray(predictions)
+        pred_ds_monthly = pred_ds.mean(dim='lon').resample(time='1ME').mean().isel(time=-1) # zonal monthly means, take the last month
 
         # tolerance in # of standard deviations
         tol = 2
 
         # check whether zonal averages over the last month are within 2 std deviations of the expected values
-        lower_q = default_stats['q_mean'] - tol*default_stats['q_std']
-        upper_q = default_stats['q_mean'] + tol*default_stats['q_std']
-        q = pred_ds['specific_humidity'].isel(time=-1).mean(dim='lon')
-        assert ((lower_q <= q).all()) & ((q <= upper_q).all())
+        for var in default_stat_vars:
+            lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
+            upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
+            assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
-        lower_t = default_stats['t_mean'] - tol*default_stats['t_std']
-        upper_t = default_stats['t_mean'] + tol*default_stats['t_std']
-        t = pred_ds['temperature'].isel(time=-1).mean(dim='lon')
-        assert ((lower_t <= t).all()) & ((t <= upper_t).all())
-
-        lower_u = default_stats['u_mean'] - tol*default_stats['u_std']
-        upper_u = default_stats['u_mean'] + tol*default_stats['u_std']
-        u = pred_ds['u_wind'].isel(time=-1).mean(dim='lon')
-        assert ((lower_u <= u).all()) & ((u <= upper_u).all())
-
-        lower_v = default_stats['v_mean'] - tol*default_stats['v_std']
-        upper_v = default_stats['v_mean'] + tol*default_stats['v_std']
-        v = pred_ds['v_wind'].isel(time=-1).mean(dim='lon')
-        assert ((lower_v <= v).all()) & ((v <= upper_v).all())
-
-        lower_nsp = default_stats['nsp_mean'] - tol*default_stats['nsp_std']
-        upper_nsp = default_stats['nsp_mean'] + tol*default_stats['nsp_std']
-        nsp = pred_ds['normalized_surface_pressure'].isel(time=-1).mean(dim='lon')
-        assert ((lower_nsp <= nsp).all()) & ((nsp <= upper_nsp).all())
-
-        lower_phi = default_stats['phi_mean'] - tol*default_stats['phi_std']
-        upper_phi = default_stats['phi_mean'] + tol*default_stats['phi_std']
-        phi = pred_ds['geopotential'].isel(time=-1).mean(dim='lon')
-        assert ((lower_phi <= phi).all()) & ((phi <= upper_phi).all())
-
-        # check statistics of some of the physics outputs
-        TOA_rad = (pred_ds['shortwave_rad.ftop']-pred_ds['longwave_rad.ftop']).isel(time=-1).mean(dim='lon')
-        lower_TOA = default_stats['TOA_rad_mean'] - tol*default_stats['TOA_rad_std']
-        upper_TOA = default_stats['TOA_rad_mean'] + tol*default_stats['TOA_rad_std']
-        assert ((lower_TOA <= TOA_rad).all()) & ((TOA_rad <= upper_TOA).all())
-
-        lower_rh = default_stats['rh_mean'] - tol*default_stats['rh_std']
-        upper_rh = default_stats['rh_mean'] + tol*default_stats['rh_std']
-        rh = pred_ds['humidity.rh'].isel(time=-1).mean(dim='lon')
-        assert ((lower_rh <= rh).all()) & ((rh <= upper_rh).all())
-
-        lower_cloudstr = default_stats['cloudstr_mean'] - tol*default_stats['cloudstr_std']
-        upper_cloudstr = default_stats['cloudstr_mean'] + tol*default_stats['cloudstr_std']
-        cloudstr = pred_ds['shortwave_rad.cloudstr'].isel(time=-1).mean(dim='lon')
-        assert ((lower_cloudstr <= cloudstr).all()) & ((cloudstr <= upper_cloudstr).all())
-
-        lower_qcloud = default_stats['qcloud_mean'] - tol*default_stats['qcloud_std']
-        upper_qcloud = default_stats['qcloud_mean'] + tol*default_stats['qcloud_std']
-        qcloud = pred_ds['shortwave_rad.qcloud'].isel(time=-1).mean(dim='lon')
-        assert ((lower_qcloud <= qcloud).all()) & ((qcloud <= upper_qcloud).all())
-
-        lower_precnv = default_stats['precnv_mean'] - tol*default_stats['precnv_std']
-        upper_precnv = default_stats['precnv_mean'] + tol*default_stats['precnv_std']
-        precnv = pred_ds['convection.precnv'].isel(time=-1).mean(dim='lon')
-        assert ((lower_precnv <= precnv).all()) & ((precnv <= upper_precnv).all())
-
-        lower_precls = default_stats['precls_mean'] - tol*default_stats['precls_std']
-        upper_precls = default_stats['precls_mean'] + tol*default_stats['precls_std']
-        precls = pred_ds['condensation.precls'].isel(time=-1).mean(dim='lon')
-        assert ((lower_precls <= precls).all()) & ((precls <= upper_precls).all())
 
 
 
