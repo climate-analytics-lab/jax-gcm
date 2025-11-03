@@ -1,4 +1,5 @@
 import unittest
+import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
 import numpy as np
@@ -130,8 +131,6 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
-        import jax
-        import jax.numpy as jnp
         from jcm.model import Model
         from jcm.utils import ones_like
 
@@ -160,8 +159,6 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
-        import jax
-        import jax.numpy as jnp
         from jcm.model import Model
         from jcm.utils import ones_like
 
@@ -186,7 +183,6 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
-        import jax
         from jcm.model import Model
         from jcm.geometry import Geometry
         from jcm.forcing import ForcingData
@@ -216,9 +212,6 @@ class TestModelUnit(unittest.TestCase):
     
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
-        import jax
-        import jax.numpy as jnp
-        import numpy as np
         from jcm.model import Model
         from jcm.geometry import Geometry
         from jcm.forcing import ForcingData
@@ -267,7 +260,6 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):
-        import jax
         from jcm.model import Model
 
         # Create model that goes through one timestep
