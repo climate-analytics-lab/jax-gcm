@@ -12,13 +12,13 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         ix, il, kx = 1, 1, 8
 
         global HumidityData, ConvectionData, PhysicsData, PhysicsState, PhysicsTendency, get_vertical_diffusion_tend, \
-            parameters, geometry, BoundaryData
+            parameters, geometry, ForcingData
         from jcm.physics.speedy.physics_data import HumidityData, ConvectionData, PhysicsData
         from jcm.physics.speedy.params import Parameters
         from jcm.geometry import Geometry
         geometry = Geometry.single_column_geometry(num_levels=kx)
         parameters = Parameters.default()
-        from jcm.boundaries import BoundaryData
+        from jcm.forcing import ForcingData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
 
@@ -36,10 +36,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         convection_data = ConvectionData.zeros((ix,il), kx, iptop=iptop, se=se)
         physics_data = PhysicsData.zeros((ix,il), kx, humidity=humidity_data, convection=convection_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=phi)
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
         
         # utenvd, vtenvd, ttenvd, qtenvd = get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv)
-        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, boundaries, geometry)
+        physics_tendencies, _ = get_vertical_diffusion_tend(state, physics_data, parameters, forcing, geometry)
 
         utenvd, vtenvd, ttenvd, qtenvd = physics_tendencies.u_wind, physics_tendencies.v_wind, physics_tendencies.temperature, physics_tendencies.specific_humidity
 
@@ -55,19 +55,19 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
 
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, boundaries, geometry)
+        primals, f_vjp = jax.vjp(get_vertical_diffusion_tend, state, physics_data, parameters, forcing, geometry)
         tends = PhysicsTendency.ones(zxy)
         datas = PhysicsData.ones(xy,kx)
         input = (tends, datas)
-        df_dstate, df_ddatas, df_dparams, df_dboundaries, df_dgeometry = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
         self.assertFalse(df_dparams.isnan().any_true())
-        self.assertFalse(df_dboundaries.isnan().any_true())
+        self.assertFalse(df_dforcing.isnan().any_true())
 
     def test_get_vertical_diffusion_gradient_check(self):
         """Test that we get correct gradient values"""
@@ -76,20 +76,20 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         zxy = (kx, ix, il)
         physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
-        boundaries = BoundaryData.ones(xy)
+        forcing = ForcingData.ones(xy)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
-        boundaries_floats = convert_to_float(boundaries)
+        forcing_floats = convert_to_float(forcing)
         geometry_floats = convert_to_float(geometry)
 
-        def f(physics_data_f, state_f, parameters_f, boundaries_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
             tend_out, data_out = get_vertical_diffusion_tend(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
-                                       boundaries=convert_back(boundaries_f, boundaries), 
+                                       forcing=convert_back(forcing_f, forcing), 
                                        geometry=convert_back(geometry_f, geometry)
                                        )
             return convert_to_float(tend_out)
@@ -98,9 +98,9 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, boundaries_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
                                 atol=None, rtol=1, eps=0.000001)
 
         

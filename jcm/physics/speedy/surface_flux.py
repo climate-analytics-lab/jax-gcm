@@ -4,7 +4,7 @@ from jax import jit
 
 # importing custom functions from library
 from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -17,7 +17,7 @@ def get_surface_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
@@ -42,7 +42,7 @@ def get_surface_fluxes(
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
     tsea : 2D array
-        - Sea-surface temperature, boundaries.tsea
+        - Sea-surface temperature, forcing.tsea
     rsds : 2D array
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array
@@ -51,7 +51,7 @@ def get_surface_fluxes(
     """
     day = physics_data.date.model_day()
     stl_am = physics_data.land_model.stl_am
-    soilw_am = boundaries.soilw_am[:,:,day]
+    soilw_am = forcing.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
 
     psa = state.normalized_surface_pressure
@@ -60,15 +60,15 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = boundaries.fmask
+    fmask = geometry.fmask
 
-    lfluxland = boundaries.lfluxland
+    lfluxland = parameters.surface_flux.lfluxland
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
     phi0 = geometry.orog * grav # surface geopotential
-    tsea = boundaries.tsea[:,:,day]
+    tsea = forcing.tsea[:,:,day]
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l

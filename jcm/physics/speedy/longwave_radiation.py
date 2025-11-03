@@ -2,7 +2,7 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import sbc
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -15,7 +15,7 @@ def get_downward_longwave_rad_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
@@ -41,7 +41,7 @@ def get_downward_longwave_rad_fluxes(
 
     # 1. Blackbody emission from atmospheric levels.
     # The linearized gradient of the blakbody emission is computed
-    # from temperatures at layer boundaries, which are interpolated
+    # from temperatures at layer forcing, which are interpolated
     # assuming a linear dependence of T on log_sigma.
     # Above the first (top) level, the atmosphere is assumed isothermal.
     
@@ -121,7 +121,7 @@ def get_upward_longwave_rad_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
+    forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """

@@ -15,9 +15,10 @@ class TestModelUnit(unittest.TestCase):
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.model import Model
-        layers = 8
+        from jcm.geometry import Geometry
+        geometry = Geometry.from_spectral_truncation(spectral_truncation=31, num_levels=8)
         model = Model(
-            layers=layers,
+            geometry=geometry,
             time_step=180,
             physics=HeldSuarezPhysics(),
         )
@@ -58,7 +59,6 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model(self):
         from jcm.model import Model
 
-        # optionally add a boundary conditions file
         model = Model(
             time_step=720,
         )
@@ -69,7 +69,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=total_time,
         )
         final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
-        
+
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
@@ -188,24 +188,24 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_param_gradients_isnan_vjp(self):
         import jax
         from jcm.model import Model
-        from jcm.boundaries import boundaries_from_file
+        from jcm.geometry import Geometry
+        from jcm.forcing import ForcingData
         from jcm.utils import ones_like
-        import xarray as xr
 
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
+        forcing_dir = Path(__file__).resolve().parent / 'data/bc'
         
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
+        geometry = Geometry.from_terrain_file(forcing_dir / 'terrain_t31.nc')
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=orography,
+            geometry=geometry,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_daily_t31.nc'))
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -220,8 +220,8 @@ class TestModelUnit(unittest.TestCase):
         import jax.numpy as jnp
         import numpy as np
         from jcm.model import Model
-        from jcm.boundaries import boundaries_from_file
-        import xarray as xr
+        from jcm.geometry import Geometry
+        from jcm.forcing import ForcingData
 
         def make_ones_parameters_object(params):
             def make_tangent(x):
@@ -234,19 +234,19 @@ class TestModelUnit(unittest.TestCase):
             return jtu.tree_map(make_tangent, params)
         
         from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc'
-        
+        forcing_dir = Path(__file__).resolve().parent / 'data/bc'
+
         from jcm.data.bc.interpolate import main as interpolate_main
         interpolate_main(['31'])
 
-        orography = jnp.asarray(xr.open_dataarray(boundaries_dir / 'orography_t31.nc'))
+        geometry = Geometry.from_terrain_file(forcing_dir / 'terrain_t31.nc')
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=orography,
+            geometry=geometry,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., boundaries=boundaries_from_file(boundaries_dir / 'boundaries_daily_t31.nc'))
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_daily_t31.nc'))
 
         # Calculate gradients using JVP
         params = Parameters.default()
