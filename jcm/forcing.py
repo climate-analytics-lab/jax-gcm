@@ -35,6 +35,43 @@ class ForcingData:
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
             tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
         )
+    
+    @classmethod
+    def from_file(cls, filename: str):
+        """
+        Initialize forcing data from a file.
+
+        Returns:
+            ForcingData: Time-varying forcing data
+        """
+        import xarray as xr
+
+        # Read forcing data from file
+        ds = xr.open_dataset(filename)
+
+        # annual-mean surface albedo
+        alb0 = jnp.asarray(ds["alb"])
+
+        # sea ice concentration
+        sice_am = jnp.asarray(ds["icec"])
+
+        # snow depth
+        snowc_am = jnp.asarray(ds["snowc"])
+        snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
+        # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
+        snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
+
+        # soil moisture
+        soilw_am = jnp.asarray(ds["soilw_am"])
+
+        # Prescribe SSTs
+        tsea = jnp.asarray(ds["sst"])
+
+        return cls.zeros(
+            nodal_shape=alb0.shape,
+            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,
+            soilw_am=soilw_am, tsea=tsea
+        )
 
     def copy(self,alb0=None,
              sice_am=None,snowc_am=None,soilw_am=None,
@@ -78,41 +115,3 @@ def default_forcing(
         nodal_shape=grid.nodal_shape,
         tsea=tsea, alb0=alb0
     )
-
-def forcing_from_file(filename: str,) -> ForcingData:
-    """
-    Initialize the forcing data from a file.
-
-    Returns:
-        ForcingData: Time-varying forcing data
-    """
-    import xarray as xr
-
-    # Read forcing data from file
-    ds = xr.open_dataset(filename)
-
-    # annual-mean surface albedo
-    alb0 = jnp.asarray(ds["alb"])
-
-    # sea ice concentration
-    sice_am = jnp.asarray(ds["icec"])
-
-    # snow depth
-    snowc_am = jnp.asarray(ds["snowc"])
-    snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
-    # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
-    snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
-
-    # soil moisture
-    soilw_am = jnp.asarray(ds["soilw_am"])
-
-    # Prescribe SSTs
-    tsea = jnp.asarray(ds["sst"])
-
-    forcing_data = ForcingData.zeros(
-        nodal_shape=alb0.shape,
-        alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,
-        soilw_am=soilw_am, tsea=tsea
-    )
-
-    return forcing_data
