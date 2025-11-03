@@ -1,6 +1,5 @@
 import unittest
 import jax.tree_util as jtu
-import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp

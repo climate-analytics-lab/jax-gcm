@@ -1,5 +1,3 @@
-import jax.numpy as jnp
-import xarray as xr
 from pathlib import Path
 
 default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specific_humidity',
