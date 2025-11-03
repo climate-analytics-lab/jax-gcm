@@ -51,16 +51,8 @@ class TestChemistryIntegration(TestCase):
         self.boundaries = BoundaryData.zeros(
             nodal_shape=(nlon, nlat),
             fmask=jnp.zeros((nlon, nlat)),  # Land-sea mask
-            forog=jnp.zeros((nlon, nlat)),  # Orographic factor
-            orog=jnp.zeros((nlon, nlat)),   # Orography
-            phi0=jnp.zeros((nlon, nlat)),   # Surface geopotential
-            phis0=jnp.zeros((nlon, nlat)),  # Filtered surface geopotential
             alb0=jnp.ones((nlon, nlat)) * 0.15,  # Albedo
             sice_am=jnp.zeros((nlon, nlat)),  # Sea ice
-            fmask_l=jnp.zeros((nlon, nlat)),  # Land mask
-            rhcapl=jnp.ones((nlon, nlat)),    # Heat capacity
-            cdland=jnp.ones((nlon, nlat)),    # Dissipation time
-            stlcl_ob=jnp.ones((nlon, nlat)) * 280.0,  # Land temperature
             snowd_am=jnp.zeros((nlon, nlat)),  # Snow depth
             soilw_am=jnp.ones((nlon, nlat)) * 0.2,  # Soil water
             lfluxland=jnp.bool_(True),         # Land flux flag

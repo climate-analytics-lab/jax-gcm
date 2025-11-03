@@ -17,6 +17,21 @@ from jcm.physics.icon.convection.tiedtke_nordeng import (
     saturation_mixing_ratio
 )
 
+# Physical constants
+R_D = 287.0  # Gas constant for dry air (J/kg/K)
+
+
+def compute_derived_quantities(atm):
+    """Compute layer_thickness and rho from atmospheric profile"""
+    # Compute layer thickness from height differences
+    height = atm['height']
+    layer_thickness = jnp.diff(height, prepend=height[0] - (height[1] - height[0]))
+    
+    # Compute air density from ideal gas law: rho = p / (R_d * T)
+    rho = atm['pressure'] / (R_D * atm['temperature'])
+    
+    return layer_thickness, rho
+
 
 def create_test_atmosphere(nlev=40, unstable=True):
     """Create a test atmospheric profile"""
@@ -76,6 +91,9 @@ class TestConvectionScheme:
         atm = create_test_atmosphere(unstable=False)
         config = ConvectionParameters.default()
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Run convection scheme
         nlev = len(atm['temperature'])
         qc = jnp.zeros(nlev)  # Cloud water
@@ -84,7 +102,8 @@ class TestConvectionScheme:
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -105,6 +124,9 @@ class TestConvectionScheme:
         atm = create_test_atmosphere(unstable=True)
         config = ConvectionParameters.default()
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Run convection scheme
         nlev = len(atm['temperature'])
         qc = jnp.zeros(nlev)  # Cloud water
@@ -113,7 +135,8 @@ class TestConvectionScheme:
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -156,6 +179,9 @@ class TestConvectionScheme:
         atm = create_test_atmosphere(unstable=True)
         config = ConvectionParameters.default()
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Run convection scheme
         nlev = len(atm['temperature'])
         qc = jnp.zeros(nlev)  # Cloud water
@@ -164,7 +190,8 @@ class TestConvectionScheme:
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -188,6 +215,9 @@ class TestConvectionScheme:
         atm = create_test_atmosphere(unstable=True)
         config = ConvectionParameters.default()
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Run convection scheme
         nlev = len(atm['temperature'])
         qc = jnp.zeros(nlev)  # Cloud water
@@ -196,7 +226,8 @@ class TestConvectionScheme:
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -227,6 +258,9 @@ class TestConvectionScheme:
         atm = create_test_atmosphere(unstable=True)
         config = ConvectionParameters.default()
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Test jit compilation
         jitted_convection = jax.jit(tiedtke_nordeng_convection)
         
@@ -237,7 +271,8 @@ class TestConvectionScheme:
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -252,7 +287,8 @@ class TestConvectionScheme:
                 temperature,
                 atm['humidity'],
                 atm['pressure'],
-                atm['height'],
+                layer_thickness,
+                rho,
                 atm['u_wind'],
                 atm['v_wind'],
                 qc,
@@ -271,6 +307,9 @@ class TestConvectionScheme:
         # Create test profile
         atm = create_test_atmosphere(unstable=True)
         
+        # Compute derived quantities
+        layer_thickness, rho = compute_derived_quantities(atm)
+        
         # Test with different CAPE timescales
         configs = [
             ConvectionParameters.default(tau=jnp.array(3600.0)),   # Fast adjustment
@@ -287,7 +326,8 @@ class TestConvectionScheme:
                 atm['temperature'],
                 atm['humidity'],
                 atm['pressure'],
-                atm['height'],
+                layer_thickness,
+                rho,
                 atm['u_wind'],
                 atm['v_wind'],
                 qc,

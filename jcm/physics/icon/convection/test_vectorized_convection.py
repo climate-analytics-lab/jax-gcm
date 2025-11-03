@@ -137,7 +137,13 @@ def test_vectorized_convection():
     
     # First test single vmap over longitude (axis 1 for 2D arrays -> maps over columns in one latitude band)
     print("   Testing single vmap over longitude...")
-    single_lat_vmap = jax.vmap(apply_convection_column, in_axes=(1, 1, 1, 1, 1, 1), out_axes=1)
+    # out_axes: most fields are (nlev,) so use axis 1, but precip_conv is scalar so use axis 0
+    out_axes_spec = ConvectionTendencies(
+        dtedt=1, dqdt=1, dudt=1, dvdt=1, 
+        qc_conv=1, qi_conv=1, dqc_dt=1, dqi_dt=1,
+        precip_conv=0  # Scalar field - stack along new axis 0
+    )
+    single_lat_vmap = jax.vmap(apply_convection_column, in_axes=(1, 1, 1, 1, 1, 1), out_axes=out_axes_spec)
     
     # Test on first latitude band
     single_lat_result = single_lat_vmap(
@@ -149,7 +155,14 @@ def test_vectorized_convection():
     # Now test double vmap
     print("   Testing double vmap over latitude and longitude...")
     # First vmap over longitude (axis 1 for 2D), then over latitude (axis 1 for 3D)
-    vectorized_convection = jax.vmap(single_lat_vmap, in_axes=(1, 1, 1, 1, 1, 1), out_axes=1)
+    # After first vmap: most fields are (nlev, nlon), precip_conv is (nlon,)
+    # Second vmap needs: most fields axis 1, precip_conv axis 0
+    out_axes_spec_2 = ConvectionTendencies(
+        dtedt=1, dqdt=1, dudt=1, dvdt=1, 
+        qc_conv=1, qi_conv=1, dqc_dt=1, dqi_dt=1,
+        precip_conv=0  # Now 1D, stack along axis 0
+    )
+    vectorized_convection = jax.vmap(single_lat_vmap, in_axes=(1, 1, 1, 1, 1, 1), out_axes=out_axes_spec_2)
     
     # Apply to all columns
     all_results = vectorized_convection(temperature, humidity, pressure, height, u_wind, v_wind)

@@ -25,6 +25,21 @@ from jcm.physics.icon.convection.tiedtke_nordeng import (
 from jcm.physics.icon.convection.updraft import calculate_updraft
 from jcm.physics.icon.convection.downdraft import calculate_downdraft
 
+# Physical constants
+R_D = 287.0  # Gas constant for dry air (J/kg/K)
+
+
+def compute_derived_quantities(atm):
+    """Compute layer_thickness and rho from atmospheric profile"""
+    # Compute layer thickness from height differences
+    height = atm['height']
+    layer_thickness = jnp.diff(height, prepend=height[0] - (height[1] - height[0]))
+    
+    # Compute air density from ideal gas law: rho = p / (R_d * T)
+    rho = atm['pressure'] / (R_D * atm['temperature'])
+    
+    return layer_thickness, rho
+
 
 def create_test_atmosphere(nlev=20, unstable=True):
     """Create a test atmospheric profile"""
@@ -168,6 +183,9 @@ def test_stable_atmosphere():
     atm = create_test_atmosphere(unstable=False)
     config = ConvectionParameters.default()
     
+    # Compute derived quantities
+    layer_thickness, rho = compute_derived_quantities(atm)
+    
     # Initialize fixed qc/qi tracers
     nlev = len(atm['temperature'])
     qc = jnp.zeros(nlev)
@@ -178,7 +196,8 @@ def test_stable_atmosphere():
         atm['temperature'],
         atm['humidity'],
         atm['pressure'],
-        atm['height'],
+        layer_thickness,
+        rho,
         atm['u_wind'],
         atm['v_wind'],
         qc,
@@ -207,6 +226,9 @@ def test_unstable_atmosphere():
     atm = create_test_atmosphere(unstable=True)
     config = ConvectionParameters.default()
     
+    # Compute derived quantities
+    layer_thickness, rho = compute_derived_quantities(atm)
+    
     # Initialize fixed qc/qi tracers
     nlev = len(atm['temperature'])
     qc = jnp.zeros(nlev)
@@ -217,7 +239,8 @@ def test_unstable_atmosphere():
         atm['temperature'],
         atm['humidity'],
         atm['pressure'],
-        atm['height'],
+        layer_thickness,
+        rho,
         atm['u_wind'],
         atm['v_wind'],
         qc,
@@ -262,6 +285,9 @@ def test_jax_compatibility():
     atm = create_test_atmosphere(unstable=True)
     config = ConvectionParameters.default()
     
+    # Compute derived quantities
+    layer_thickness, rho = compute_derived_quantities(atm)
+    
     # Initialize fixed qc/qi tracers for JIT test
     nlev = len(atm['temperature'])
     qc = jnp.zeros(nlev)
@@ -275,7 +301,8 @@ def test_jax_compatibility():
         atm['temperature'],
         atm['humidity'],
         atm['pressure'],
-        atm['height'],
+        layer_thickness,
+        rho,
         atm['u_wind'],
         atm['v_wind'],
         qc,
@@ -293,7 +320,8 @@ def test_jax_compatibility():
             temperature,
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
@@ -318,6 +346,9 @@ def test_fixed_qc_qi_transport():
     atm = create_test_atmosphere(unstable=True)
     config = ConvectionParameters.default()
     
+    # Compute derived quantities
+    layer_thickness, rho = compute_derived_quantities(atm)
+    
     # Initialize fixed qc/qi tracers
     nlev = len(atm['temperature'])
     qc = jnp.zeros(nlev)  # Cloud water initially zero
@@ -330,7 +361,8 @@ def test_fixed_qc_qi_transport():
         atm['temperature'],
         atm['humidity'],
         atm['pressure'],
-        atm['height'],
+        layer_thickness,
+        rho,
         atm['u_wind'],
         atm['v_wind'],
         qc,
@@ -364,6 +396,9 @@ def test_configuration_parameters():
     
     atm = create_test_atmosphere(unstable=True)
     
+    # Compute derived quantities
+    layer_thickness, rho = compute_derived_quantities(atm)
+    
     # Test with different CAPE timescales
     configs = [
         ConvectionParameters.default(tau=1800.0),   # Fast adjustment
@@ -382,7 +417,8 @@ def test_configuration_parameters():
             atm['temperature'],
             atm['humidity'],
             atm['pressure'],
-            atm['height'],
+            layer_thickness,
+            rho,
             atm['u_wind'],
             atm['v_wind'],
             qc,
