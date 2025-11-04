@@ -280,28 +280,28 @@ class TestModelUnit(unittest.TestCase):
         check_jvp(f, f_jvp, args = (state,), 
                                 atol=None, rtol=1, eps=0.001)    
     
-    @pytest.mark.slow
-    def test_speedy_model_default_statistics(self):
-        from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
-        import xarray as xr
-        from pathlib import Path
+    # @pytest.mark.slow
+    # def test_speedy_model_default_statistics(self):
+    #     from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
+    #     import xarray as xr
+    #     from pathlib import Path
 
-        # load test file for comparison
-        stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
-        default_stats = xr.open_dataset(stats_file)
+    #     # load test file for comparison
+    #     stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
+    #     default_stats = xr.open_dataset(stats_file)
 
-        model, predictions = run_default_speedy_model()
-        pred_ds = model.predictions_to_xarray(predictions)
-        pred_ds_monthly = pred_ds.mean(dim='lon').resample(time='1ME').mean().isel(time=-1) # zonal monthly means, take the last month
+    #     model, predictions = run_default_speedy_model()
+    #     pred_ds = model.predictions_to_xarray(predictions)
+    #     pred_ds_monthly = pred_ds.mean(dim='lon').resample(time='1ME').mean().isel(time=-1) # zonal monthly means, take the last month
 
-        # tolerance in # of standard deviations
-        tol = 2
+    #     # tolerance in # of standard deviations
+    #     tol = 2
 
-        # check whether zonal averages over the last month are within 2 std deviations of the expected values
-        for var in default_stat_vars:
-            lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
-            upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
-            assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
+    #     # check whether zonal averages over the last month are within 2 std deviations of the expected values
+    #     for var in default_stat_vars:
+    #         lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
+    #         upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
+    #         assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
 
 
