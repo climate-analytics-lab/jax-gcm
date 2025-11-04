@@ -40,7 +40,7 @@ class BoundaryData:
     @classmethod
     def zeros(cls,nodal_shape,fmask=None,
               alb0=None,sice_am=None,snowd_am=None,
-              soilw_am=None,tsea=None,lfluxland=None, land_coupling_flag=None,
+              soilw_am=None,tsea=None,lfluxland=None, land_coupling_flag=None, fmask_s=None,
               surface_temperature=None, roughness_length=None, solar_zenith_angle=None,
               solar_irradiance=None, co2_concentration=None, ch4_concentration=None,
               n2o_concentration=None, surface_albedo_vis=None, surface_albedo_nir=None,
@@ -72,7 +72,7 @@ class BoundaryData:
     @classmethod
     def ones(cls,nodal_shape,fmask=None,
              alb0=None,sice_am=None,snowd_am=None,
-             soilw_am=None,tsea=None,lfluxland=None, land_coupling_flag=None,
+             soilw_am=None,tsea=None,lfluxland=None, land_coupling_flag=None, fmask_s=None,
              surface_temperature=None, roughness_length=None, solar_zenith_angle=None,
              solar_irradiance=None, co2_concentration=None, ch4_concentration=None,
              n2o_concentration=None, surface_albedo_vis=None, surface_albedo_nir=None,
@@ -103,7 +103,7 @@ class BoundaryData:
 
     def copy(self,fmask=None,alb0=None,
              sice_am=None,snowd_am=None,soilw_am=None,
-             tsea=None,lfluxland=None,
+             tsea=None,lfluxland=None, fmask_s=None,
              land_coupling_flag=None, surface_temperature=None, roughness_length=None, 
              solar_zenith_angle=None, solar_irradiance=None, co2_concentration=None, 
              ch4_concentration=None, n2o_concentration=None, surface_albedo_vis=None, 

@@ -98,6 +98,19 @@ class HybridCoordinatesWithCenters(HybridCoordinates):
         """
         import numpy as np
         return np.diff(self.centers)
+    
+    def asdict(self):
+        """
+        Return dictionary representation for xarray serialization.
+        
+        This enables compatibility with dinosaur's xarray utilities.
+        """
+        return {
+            'a_boundaries': self.a_boundaries,
+            'b_boundaries': self.b_boundaries,
+            'centers': self.centers,
+            'layer_thickness': self.layer_thickness,
+        }
 
 def get_coords(layers=8, spectral_truncation=None, nodal_shape=None, hybrid: bool = False) -> CoordinateSystem:
     """
@@ -175,9 +188,6 @@ class Geometry:
     sia: jnp.ndarray # sin of latitude
     coa: jnp.ndarray # cos of latitude
 
-    orog: Optional[jnp.ndarray] = None # orography height (m)
-    phis0: Optional[jnp.ndarray] = None # spectrally truncated surface geopotential (m^2/s^2)
-
     hsg: jnp.ndarray # sigma layer boundaries
     fsg: jnp.ndarray # sigma layer midpoints
     dhs: jnp.ndarray # sigma layer thicknesses
@@ -186,6 +196,10 @@ class Geometry:
     grdsig: jnp.ndarray # g/(d_sigma p0): to convert fluxes of u,v,q into d(u,v,q)/dt
     grdscp: jnp.ndarray # g/(d_sigma p0 c_p): to convert energy fluxes into dT/dt
     wvi: jnp.ndarray # Weights for vertical interpolation
+
+    # Optional fields (must come after required fields)
+    orog: Optional[jnp.ndarray] = None # orography height (m)
+    phis0: Optional[jnp.ndarray] = None # spectrally truncated surface geopotential (m^2/s^2)
     
     # Coordinate arrays for xarray conversion and physics
     latitudes: Optional[jnp.ndarray] = None
@@ -323,6 +337,7 @@ class Geometry:
         
         return hsg, fsg, dhs, sigl, grdsig, grdscp, wvi, hybrid_levels
 
+    @classmethod
     def from_coords(cls, coords: CoordinateSystem, orography=None, truncation_number=None, hybrid: bool = False):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.

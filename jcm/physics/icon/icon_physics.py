@@ -71,11 +71,11 @@ class IconPhysics(Physics):
             get_simple_aerosol,            # Aerosol before radiation FIXME: get_CDNC issue
             apply_chemistry,               # Chemistry for ozone, methane etc.
             apply_radiation,               # Radiation early for surface fluxes. FIXME: revisit shortwave flux--top of atmosphere is emitting shortwave up while receiving none from below, causing cooling. downward shortwave flux is constant and not heating the atmosphere. Problem seems to be ozone optical depth
-            apply_convection,              # FIXME: surface evaporation drives strong updraft causing temperature blowup in layer 1 in 4-5 hours of model time (or in 1 step if vertical_diffusion is on)
+            # apply_convection,            # TEMPORARILY DISABLED: surface evaporation drives strong updraft causing temperature blowup
             apply_clouds,
             apply_microphysics,
-            apply_surface,                 # Surface after radiation
-            apply_vertical_diffusion,      # FIXME: With convection off, causes all layer temperatures to exponentially decay to 0. With convection on, blows up in one step. Also, it seems to be doing a bunch of redundant calculations and possibly double counting surface fluxes?
+            apply_surface,
+            # apply_vertical_diffusion,    # TEMPORARILY DISABLED: Causes exponential decay to 0
             apply_gravity_waves
         ]
     
@@ -114,21 +114,9 @@ class IconPhysics(Physics):
         nlev, nlon, nlat = state.temperature.shape  # Note: geometry uses (nlev, nlon, nlat) convention
         ncols = nlat * nlon
         
-        # Update boundaries with time-varying conditions before applying physics
-        from jcm.boundaries import compute_time_varying_boundaries
-        # Convert DateData to day_of_year and time_of_day format
-        day_of_year = date.tyear * 365.25  # Convert fractional year to day of year
-        time_of_day = (day_of_year % 1.0) * 24.0  # Extract time of day from fractional part
-        day_of_year = jnp.floor(day_of_year)  # Get integer day of year
-        year = date.model_year
-        
-        updated_boundaries = compute_time_varying_boundaries(
-            boundaries, 
-            geometry,
-            day_of_year=day_of_year,
-            time_of_day=time_of_day,
-            year=year
-        )
+        # Use static boundaries 
+        # TODO: time-varying boundaries functionality should be added back later
+        updated_boundaries = boundaries
         
         # OPTIMIZATION: Single reshape operation using tree_map for TPU efficiency
         vectorized_state = self._reshape_state_to_columns(state, nlev, ncols)
@@ -335,7 +323,9 @@ class IconPhysics(Physics):
             if value.shape[0] == ncols:
                 return value.reshape(1, nlon, nlat)
             elif value.shape[0] != 1:
-                return value.reshape(1, *value.shape)
+                # This is likely a time series or other 1D data
+                # Reshape as (time, 1) not (1, time) for xarray compatibility
+                return value.reshape(value.shape[0], 1)
         
         # 2D arrays
         elif value.ndim == 2:

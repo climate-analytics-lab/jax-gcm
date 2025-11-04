@@ -110,7 +110,6 @@ class ICONLevels:
         """Load ICON level coefficients from table files."""
         # Try to find the vertical coord table file
         base_paths = [
-            Path("/Users/watson-parris/Code/icon_plumeworld/vertical_coord_tables"),
             Path("../icon_plumeworld/vertical_coord_tables"),
             Path("./vertical_coord_tables"),
         ]

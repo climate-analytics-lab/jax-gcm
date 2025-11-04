@@ -132,7 +132,8 @@ class Model:
     def __init__(self, time_step=30.0, layers=8, spectral_truncation=31,
                  coords: CoordinateSystem=None, orography: jnp.ndarray=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
-                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
+                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'),
+                 use_hybrid_coords: bool = None) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
         
@@ -153,6 +154,9 @@ class Model:
                 DiffusionFilter object describing horizontal diffusion filter params
             start_date: 
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
+            use_hybrid_coords:
+                If True, use hybrid sigma-pressure coordinates; if False, use sigma coordinates.
+                If None, auto-detect from physics type (True for IconPhysics, False otherwise)
         """
 
         self.physics_specs = PHYSICS_SPECS
@@ -169,9 +173,6 @@ class Model:
             spectral_truncation = coords.horizontal.total_wavenumbers - 2
         else:
             self.coords = get_coords(layers=layers, spectral_truncation=spectral_truncation, hybrid=use_hybrid_coords)
-        
-        # Set up geometry with appropriate coordinate system
-        self.geometry = Geometry.from_coords(self.coords, hybrid=use_hybrid_coords)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
@@ -185,7 +186,7 @@ class Model:
         self.physics = physics or SpeedyPhysics()
 
         self.orography = orography if orography is not None else aux_features[dinosaur.xarray_utils.OROGRAPHY]
-        self.geometry = Geometry.from_coords(coords=self.coords, orography=self.orography)
+        self.geometry = Geometry.from_coords(coords=self.coords, orography=self.orography, hybrid=use_hybrid_coords)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
