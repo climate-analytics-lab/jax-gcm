@@ -2,7 +2,6 @@ import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
-import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
@@ -112,7 +111,7 @@ class TestModelUnit(unittest.TestCase):
         )
         preds = model.run(save_interval=.5/24., total_time=2/24.)
 
-        true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
+        true_avg_preds = jtu.tree_map(lambda a: jnp.mean(a, axis=0), preds)
 
         avg_model = Model(
             time_step=30,
@@ -124,7 +123,7 @@ class TestModelUnit(unittest.TestCase):
         )
 
         jtu.tree_map(
-            lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
+            lambda a1, a2: self.assertTrue(jnp.allclose(a1, a2, atol=1e-4)),
             true_avg_preds,
             avg_preds
         )
@@ -219,9 +218,9 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_parameters_object(params):
             def make_tangent(x):
                 if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return np.ones((), dtype=jax.dtypes.float0)
+                    return jnp.ones((), dtype=jax.dtypes.float0)
                 elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return np.ones((), dtype=jax.dtypes.float0)
+                    return jnp.ones((), dtype=jax.dtypes.float0)
                 else:
                     return jnp.ones_like(x)
             return jtu.tree_map(make_tangent, params)
@@ -258,6 +257,7 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):
         from jcm.model import Model
@@ -278,4 +278,32 @@ class TestModelUnit(unittest.TestCase):
         check_vjp(f, f_vjp, args = (state,), 
                                 atol=None, rtol=1, eps=0.00001)
         check_jvp(f, f_jvp, args = (state,), 
-                                atol=None, rtol=1, eps=0.001)
+                                atol=None, rtol=1, eps=0.001)    
+    
+    @pytest.mark.slow
+    def test_speedy_model_default_statistics(self):
+        from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
+        import xarray as xr
+        from pathlib import Path
+
+        # load test file for comparison
+        stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
+        default_stats = xr.open_dataset(stats_file)
+
+        model, predictions = run_default_speedy_model(save_interval=30.)
+        pred_ds = model.predictions_to_xarray(predictions)
+        pred_ds_monthly = pred_ds.isel(time=-1).mean(dim='lon') # zonal monthly means, take the last month
+
+        # tolerance in # of standard deviations
+        tol = 2
+
+        # check whether zonal averages over the last month are within 2 std deviations of the expected values
+        for var in default_stat_vars:
+            lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
+            upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
+            assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
+
+
+
+
+
