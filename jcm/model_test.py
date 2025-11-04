@@ -281,6 +281,7 @@ class TestModelUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.001)    
     
     @pytest.mark.slow
+    @pytest.mark.memorycheck
     def test_speedy_model_default_statistics(self):
         from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
         import xarray as xr
