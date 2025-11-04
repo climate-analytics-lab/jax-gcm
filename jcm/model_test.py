@@ -1,7 +1,7 @@
 import unittest
 import jax
 import jax.tree_util as jtu
-import numpy as np
+import jax.numpy as jnp
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
@@ -111,7 +111,7 @@ class TestModelUnit(unittest.TestCase):
         )
         preds = model.run(save_interval=.5/24., total_time=2/24.)
 
-        true_avg_preds = jtu.tree_map(lambda a: np.mean(a, axis=0), preds)
+        true_avg_preds = jtu.tree_map(lambda a: jnp.mean(a, axis=0), preds)
 
         avg_model = Model(
             time_step=30,
@@ -123,7 +123,7 @@ class TestModelUnit(unittest.TestCase):
         )
 
         jtu.tree_map(
-            lambda a1, a2: self.assertTrue(np.allclose(a1, a2, atol=1e-4)),
+            lambda a1, a2: self.assertTrue(jnp.allclose(a1, a2, atol=1e-4)),
             true_avg_preds,
             avg_preds
         )
@@ -218,9 +218,9 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_parameters_object(params):
             def make_tangent(x):
                 if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return np.ones((), dtype=jax.dtypes.float0)
+                    return jnp.ones((), dtype=jax.dtypes.float0)
                 elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return np.ones((), dtype=jax.dtypes.float0)
+                    return jnp.ones((), dtype=jax.dtypes.float0)
                 else:
                     return jnp.ones_like(x)
             return jtu.tree_map(make_tangent, params)
