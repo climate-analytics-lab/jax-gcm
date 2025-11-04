@@ -1,5 +1,4 @@
 import pytest
-import subprocess
 import sys
 
 @pytest.fixture(autouse=True)
