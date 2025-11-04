@@ -32,6 +32,12 @@ def set_physics_flags(
     return physics_tendencies, physics_data
 
 class SpeedyPhysics(Physics):
+    """
+    A set of intermediate complexity atmospheric physics parameterizations from the SPEEDY model.
+
+    Forcing data should be either simple climatological fields (assuming a 365 day year), or constant.
+    Many of the parameterizations assume 8 model levels and a specific vertical coordinate system.
+    """
     parameters: Parameters
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
     
@@ -105,9 +111,15 @@ class SpeedyPhysics(Physics):
             geometry.nodal_shape[0],
             date=date
         )
+
         # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
+        
+        # Slice out the relevant day of the year for time-varying forcings
+        model_day_of_year = date.model_day()
+        if forcing.sea_surface_temperature.ndim > 2:
+            forcing = forcing[model_day_of_year]
 
         for term in self.terms:
             tend, data = term(state, data, self.parameters, forcing, geometry)

@@ -117,7 +117,6 @@ def compute_humidity_correction_horizontal(
     fmask: jnp.ndarray,
     temperature_correction: jnp.ndarray,
     land_temperature: jnp.ndarray,
-    day: int = 0
 ) -> jnp.ndarray:
     """
     Compute horizontal humidity correction in grid space.
@@ -134,7 +133,6 @@ def compute_humidity_correction_horizontal(
         fmask: Land-sea mask 
         temperature_correction: Horizontal temperature correction (tcorh)
         land_temperature: Land surface temperature from land model
-        day: day of year (for SST)
         
     Returns:
         Horizontal correction array of shape (lon, lat)
@@ -142,7 +140,7 @@ def compute_humidity_correction_horizontal(
     from jcm.physics.speedy.humidity import get_qsat
     
     # 1. Calculate surface temperature (land/sea mixture)
-    tsfc = fmask * land_temperature + (1.0 - fmask) * forcing.tsea[:,:,day]
+    tsfc = fmask * land_temperature + (1.0 - fmask) * forcing.sea_surface_temperature
     
     # 2. Calculate reference temperature with orographic correction
     # tref = tsfc + corh (where corh is the temperature correction)
@@ -214,7 +212,7 @@ def get_orographic_correction_tendencies(
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
     land_temperature = physics_data.land_model.stl_am
-    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature, physics_data.date.model_day())
+    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature)
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh * tcorv[:, None, None]
@@ -281,7 +279,7 @@ def apply_orographic_corrections_to_state(
         # Use a default land temperature (288K) for testing
         land_temperature = jnp.full(geometry.orog.shape, 288.0)
     
-    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature, day)
+    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature)
     
     # Apply corrections
     temp_correction = tcorh * tcorv[:, None, None]
