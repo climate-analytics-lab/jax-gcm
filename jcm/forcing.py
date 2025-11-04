@@ -37,9 +37,13 @@ class ForcingData:
         )
     
     @classmethod
-    def from_file(cls, filename: str):
+    def from_file(cls, filename: str, interpolate=False):
         """
         Initialize forcing data from a file.
+
+        Args:
+            filename: Path to the forcing data file
+            interpolate (optional): Whether to interpolate the data to the model grid (default False).
 
         Returns:
             ForcingData: Time-varying forcing data

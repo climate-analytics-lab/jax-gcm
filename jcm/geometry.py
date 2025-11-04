@@ -32,7 +32,7 @@ truncation_for_nodal_shape = {
 }
 
 def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
-                terrain_file=None, nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                terrain_file=None, interpolate=False, nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
@@ -42,6 +42,7 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
         orography: Orography height (m) (ix, il). If None but fmask is provided, defaults to zeros (flat).
         fmask: Fractional land-sea mask (ix, il). If None but orography is provided, defaults to zeros (all ocean).
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+        interpolate: Whether to interpolate the terrain data (default False).
         nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
     Returns:
@@ -133,7 +134,7 @@ class Geometry:
     wvi: jnp.ndarray # Weights for vertical interpolation
 
     @classmethod
-    def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, terrain_file=None, truncation_number=None):
+    def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, terrain_file=None, interpolate=False, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
@@ -142,6 +143,7 @@ class Geometry:
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
             terrain_file (optional): Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+            interpolate (optional): Whether to interpolate the terrain data (default False).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from coords.
 
         Returns:
@@ -149,7 +151,7 @@ class Geometry:
         """
         # Orography and surface geopotential
         orog, fmask = get_terrain(fmask=fmask, orography=orography, terrain_file=terrain_file, 
-                                  nodal_shape=coords.horizontal.nodal_shape)
+                                  interpolate=interpolate, nodal_shape=coords.horizontal.nodal_shape)
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
@@ -178,6 +180,7 @@ class Geometry:
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
             terrain_file (optional): Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+            interpolate (optional): Whether to interpolate the terrain data (default False).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from nodal_shape.
 
         Returns:
@@ -201,6 +204,7 @@ class Geometry:
             orography (optional): Orography height (m), shape (ix, il). If None, defaults to zeros.
             fmask (optional): Fractional land-sea mask, shape (ix, il). If None, defaults to zeros (all ocean).
             terrain_file (optional): Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+            interpolate (optional): Whether to interpolate the terrain data (default False).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from spectral_truncation.
 
         Returns:
@@ -209,19 +213,20 @@ class Geometry:
         return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
     @classmethod
-    def from_terrain_file(cls, terrain_file, num_levels=8, truncation_number=None):
+    def from_terrain_file(cls, terrain_file, interpolate=False, num_levels=8, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
         Args:
             terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+            interpolate (optional): Whether to interpolate the terrain data (default False).
             num_levels (optional): Number of vertical levels `kx` (default 8).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from nodal_shape.
         
         Returns:
             Geometry object
         """
-        orography, fmask = get_terrain(terrain_file=terrain_file)
+        orography, fmask = get_terrain(terrain_file=terrain_file, interpolate=interpolate)
         return cls.from_grid_shape(
             nodal_shape=orography.shape,
             num_levels=num_levels,
