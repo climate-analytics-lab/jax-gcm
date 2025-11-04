@@ -281,7 +281,6 @@ class TestModelUnit(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.001)    
     
     @pytest.mark.slow
-    @pytest.mark.memorycheck
     def test_speedy_model_default_statistics(self):
         from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
         import xarray as xr
@@ -291,9 +290,9 @@ class TestModelUnit(unittest.TestCase):
         stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
         default_stats = xr.open_dataset(stats_file)
 
-        model, predictions = run_default_speedy_model()
+        model, predictions = run_default_speedy_model(save_interval=30.)
         pred_ds = model.predictions_to_xarray(predictions)
-        pred_ds_monthly = pred_ds.mean(dim='lon').resample(time='1ME').mean().isel(time=-1) # zonal monthly means, take the last month
+        pred_ds_monthly = pred_ds.isel(time=-1).mean(dim='lon') # zonal monthly means, take the last month
 
         # tolerance in # of standard deviations
         tol = 2
