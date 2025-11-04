@@ -381,6 +381,14 @@ class IconPhysics(Physics):
             # [time, nlev+1, ncols] -> [time, nlev+1, nlon, nlat] (interfaces)
             ntime = value.shape[0]
             return value.reshape(ntime, nlev + 1, nlon, nlat)
+        elif value.shape[1] == ncols and value.shape[2] == 1:
+            # [time, ncols, 1] -> [time, nlon, nlat] (squeeze out the last dimension)
+            ntime = value.shape[0]
+            return value.reshape(ntime, nlon, nlat)
+        elif value.shape[2] == ncols and value.shape[1] == 1:
+            # [time, 1, ncols] -> [time, nlon, nlat]
+            ntime = value.shape[0]
+            return value.reshape(ntime, nlon, nlat)
         
         return None
     
