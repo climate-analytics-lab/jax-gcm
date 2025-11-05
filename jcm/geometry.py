@@ -5,7 +5,7 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
-from jcm.utils import SIGMA_LAYER_BOUNDARIES, TRUNCATION_FOR_NODAL_SHAPE, get_coords, spectral_truncation
+from jcm.utils import SIGMA_LAYER_BOUNDARIES, TRUNCATION_FOR_NODAL_SHAPE, VALID_NODAL_SHAPES, get_coords, spectral_truncation, validate_ds
 from jcm.data.bc.interpolate import upsample_terrain_ds
 from dinosaur.coordinate_systems import CoordinateSystem
 from typing import Tuple
@@ -35,15 +35,23 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
             if nodal_shape is None:
                 raise ValueError("Must provide at least one of: fmask, orography, terrain_file, or nodal_shape.")
             return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
+        
         import xarray as xr
         ds = xr.open_dataset(terrain_file)
+        validate_ds(ds, expected_structure={"lsm": ("lon", "lat"), "orog": ("lon", "lat")})
         orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
         if interpolate:
-            if target_resolution is None:
-                if nodal_shape is None:
-                    raise ValueError("Must provide at least one of nodal_shape or target_resolution when interpolating terrain data.")
-                target_resolution = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape] # FIXME: use try block
+            if target_resolution is None and nodal_shape is None:
+                raise ValueError("Must provide at least one of nodal_shape or target_resolution when interpolating terrain data.")
+            elif target_resolution is None:
+                if nodal_shape not in VALID_NODAL_SHAPES: # FIXME: maybe unnecessary to validate here
+                    raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
+                target_resolution = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
+            elif target_resolution not in VALID_TRUNCATIONS:
+                raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
             ds = upsample_terrain_ds(ds, target_resolution=target_resolution)
+        elif orography.shape not in VALID_NODAL_SHAPES:
+            raise ValueError(f"Invalid terrain data shape: {orography.shape}. Must be one of: {VALID_NODAL_SHAPES}.")
 
     elif fmask is None:
         # If orography provided but fmask not, default fmask to any orography > 0
@@ -177,12 +185,9 @@ class Geometry:
         Returns:
             Geometry object
         """
-        try:
-            spectral_truncation = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
-        except KeyError:
-            raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())}")
-
-        return cls.from_spectral_truncation(spectral_truncation, **kwargs)
+        if nodal_shape not in VALID_NODAL_SHAPES:
+            raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
+        return cls.from_spectral_truncation(TRUNCATION_FOR_NODAL_SHAPE[nodal_shape], **kwargs)
     
     @classmethod
     def from_terrain_file(cls, terrain_file, interpolate=False, target_resolution=31, num_levels=8, truncation_number=None):

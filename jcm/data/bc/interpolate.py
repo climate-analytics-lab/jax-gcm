@@ -13,17 +13,14 @@ def _pad_1st_axis(arr):
     arr_padded = np.pad(arr_valid, pad_width=[(num_leading, num_trailing)] + [(0, 0)] * (arr.ndim - 1), mode='edge')
     return np.swapaxes(arr_padded, 0, 1)
 
-def _clamp_forcings_to_valid_ranges(ds):
-    ds['stl'] = np.maximum(0, ds['stl'])
-    ds['icec'] = ds['icec'].clip(0.0, 1.0)
-    ds['sst'] = np.maximum(0, ds['sst'])
-    ds['snowc'] = np.maximum(0, ds['snowc'])
-    ds['soilw_am'] = ds['soilw_am'].clip(0.0, 1.0)
-    # skipping orog to avoid clamping valid areas below sea level, but this might cause problems at edges
-    ds['alb'] = ds['alb'].clip(0.0, 1.0)
-    return ds
-
 def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
+    # validate that time coordinate is monthly
+    time = pd.DatetimeIndex(ds_monthly["time"].values)
+    if len(time) != 12:
+        raise ValueError(f"'time' has {len(time)} entries, expected 12 monthly timestamps.")
+    elif pd.infer_freq(time) not in ("MS", "M"):
+        raise ValueError(f"Timestamps do not have a monthly frequency")
+
     time_vars = [var for var in ds_monthly.data_vars if 'time' in ds_monthly[var].dims]
     non_time_vars = [var for var in ds_monthly.data_vars if 'time' not in ds_monthly[var].dims]
 
@@ -65,22 +62,26 @@ def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
 
 def upsample_forcings_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
     ds_interp = _upsample_ds(ds, target_resolution)
-    ds_interp = _clamp_forcings_to_valid_ranges(ds_interp)
+    for v in ds_interp.data_vars:
+        ds_interp[v] = ds_interp[v].clip(min=0.)
+    for v in ['icec', 'soilw_am', 'alb']:
+        ds_interp[v] = ds_interp[v].clip(max=1.)
     return ds_interp
 
 def upsample_terrain_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
     ds_interp = _upsample_ds(ds, target_resolution)
     ds_interp['lsm'] = ds_interp['lsm'].clip(0.0, 1.0)
+    # not clamping orog to avoid erasing real areas below sea level, but this might allow bad extrapolated values at the extreme latitudes
     return ds_interp
 
 def interpolate(target_resolution):
     cwd = Path(__file__).resolve().parent
     forcing_original_file = cwd / "t30/clim/forcing.nc"
     forcing_daily_file = cwd / "t30/clim/forcing_daily.nc"
-    forcing_interpolated_file = cwd / f"forcing_t{target_resolution}.nc"
+    forcing_upscaled_file = cwd / f"forcing_t{target_resolution}.nc"
 
-    if forcing_interpolated_file.exists():
-        print(f"{forcing_interpolated_file.name} already exists.")
+    if forcing_upscaled_file.exists():
+        print(f"{forcing_upscaled_file.name} already exists.")
 
     else:
         if not forcing_daily_file.exists():
@@ -93,22 +94,23 @@ def interpolate(target_resolution):
         print(f"Interpolating {forcing_daily_file.name} to T{target_resolution} resolution...")
         with xr.open_dataset(forcing_daily_file) as ds_forcing:
             ds_forcing_interp = upsample_forcings_ds(ds_forcing, target_resolution)
-            ds_forcing_interp.to_netcdf(forcing_interpolated_file)
-        print(f"Generated {forcing_interpolated_file.name}")
+            ds_forcing_interp.to_netcdf(forcing_upscaled_file)
+        print(f"Generated {forcing_upscaled_file.name}")
+
 
     terrain_original_file = cwd / "t30/clim/terrain.nc"
-    terrain_interpolated_file = cwd / f"terrain_t{target_resolution}.nc"
+    terrain_upscaled_file = cwd / f"terrain_t{target_resolution}.nc"
 
-    if terrain_interpolated_file.exists():
-        print(f"{terrain_interpolated_file.name} already exists.")
+    if terrain_upscaled_file.exists():
+        print(f"{terrain_upscaled_file.name} already exists.")
         return
     
     print(f"Interpolating {terrain_original_file.name} to T{target_resolution} resolution...")
     with xr.open_dataset(terrain_original_file) as ds_terrain:
         ds_terrain_interp = upsample_terrain_ds(ds_terrain, target_resolution)
-        ds_terrain_interp.to_netcdf(terrain_interpolated_file)
-    print(f"Generated {terrain_interpolated_file.name}")
-    
+        ds_terrain_interp.to_netcdf(terrain_upscaled_file)
+    print(f"Generated {terrain_upscaled_file.name}")
+
 def main(argv=None) -> int:
     """
     CLI entrypoint. Parse argv and call `interpolate`.

@@ -25,16 +25,16 @@ TRUNCATION_FOR_NODAL_SHAPE = {
     (1280, 640): 425,
 }
 
+VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
 
 def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
     f"""
     Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
-    except AttributeError:
+    if spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
+    horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
     if layers not in SIGMA_LAYER_BOUNDARIES:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
 
@@ -65,7 +65,16 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
 
     return truncated_grid_field
 
-def 
+def validate_ds(ds, expected_structure):
+    missing_vars = set(expected_structure) - set(ds.data_vars)
+    if missing_vars:
+        raise ValueError(f"Missing variables: {missing_vars}")
+    for var, expected_dims in expected_structure.items():
+        actual_dims = ds[var].dims
+        if actual_dims != expected_dims:
+            raise ValueError(
+                f"Variable '{var}' has dims {actual_dims}, expected {expected_dims}"
+            )
 
 @jit
 def pass_fn(operand):

@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
-from jcm.utils import VALID_TRUNCATIONS
+from jcm.utils import VALID_TRUNCATIONS, VALID_NODAL_SHAPES, validate_ds
 from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 
 @tree_math.struct
@@ -56,11 +56,24 @@ class ForcingData:
         # Read forcing data from file
         ds = xr.open_dataset(filename)
 
-        # validate that the dataset has the expected coordinates and variables
+        expected_structure = {
+            "stl":      ("lon", "lat", "time"),
+            "icec":     ("lon", "lat", "time"),
+            "sst":      ("lon", "lat", "time"),
+            "alb":      ("lon", "lat"),
+            "soilw_am": ("lon", "lat", "time"),
+            "snowc":    ("lon", "lat", "time"),
+        }
 
+        validate_ds(ds, expected_structure)
+    
         if not interpolate:
-            # verify that dataset has a valid time and space resolution
-            pass
+            ix, il, n_times = ds.stl.shape
+            if (ix, il) not in VALID_NODAL_SHAPES:
+                raise ValueError(f"Invalid nodal shape: {(ix, il)}. Must be one of: {VALID_NODAL_SHAPES}.")
+            if n_times != 365:
+                raise ValueError(f"Expected 365 time steps, got {n_times}.")
+            # FIXME: Consider validating lat/lon values here - would have to construct a coords object to get expected values though
         elif target_resolution not in VALID_TRUNCATIONS:
             raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
         else:
