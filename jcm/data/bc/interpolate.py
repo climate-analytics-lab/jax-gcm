@@ -3,8 +3,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import argparse
-from jcm.utils import VALID_TRUNCATIONS
-from jcm.geometry import get_coords
+from jcm.utils import VALID_TRUNCATIONS, get_coords
 
 def _pad_1st_axis(arr):
     arr = np.swapaxes(arr, 0, 1)

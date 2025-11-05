@@ -2,7 +2,8 @@ import jax.numpy as jnp
 from typing import Tuple
 from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from jcm.geometry import Geometry, get_coords
+from jcm.utils import get_coords
+from jcm.geometry import Geometry
 from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.model import PHYSICS_SPECS

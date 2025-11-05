@@ -1,9 +1,18 @@
 import jax.numpy as jnp
 from jax import jit
 from jax.tree_util import tree_map
-from dinosaur.coordinate_systems import HorizontalGridTypes
+import dinosaur
+from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
+from dinosaur.primitive_equations import PrimitiveEquationsSpecs
+from dinosaur.scales import SI_SCALE
 
-truncation_for_nodal_shape = {
+SIGMA_LAYER_BOUNDARIES = {
+    5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
+    7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+    8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+}
+
+TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
     (96, 48): 31,
     (128, 64): 42,
@@ -16,7 +25,25 @@ truncation_for_nodal_shape = {
     (1280, 640): 425,
 }
 
-VALID_TRUNCATIONS = tuple(truncation_for_nodal_shape.values())
+VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
+
+def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
+    f"""
+    Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
+    """
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
+    if layers not in SIGMA_LAYER_BOUNDARIES:
+        raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
+
+    physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+
+    return CoordinateSystem(
+        horizontal=horizontal_grid(radius=physics_specs.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers])
+    )
 
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
@@ -37,6 +64,8 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
     truncated_grid_field = grid.to_nodal(spectral_field)
 
     return truncated_grid_field
+
+def 
 
 @jit
 def pass_fn(operand):

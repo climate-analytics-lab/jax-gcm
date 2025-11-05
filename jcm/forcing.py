@@ -3,7 +3,7 @@ import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
 from jcm.utils import VALID_TRUNCATIONS
-from jcm.data.bc.interpolate import interpolate_to_daily, upsample_ds
+from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 
 @tree_math.struct
 class ForcingData:
@@ -39,13 +39,14 @@ class ForcingData:
         )
     
     @classmethod
-    def from_file(cls, filename: str, interpolate_to_resolution=None):
+    def from_file(cls, filename: str, interpolate=False, target_resolution=31):
         """
         Initialize forcing data from a file.
 
         Args:
             filename: Path to the forcing data file
-            interpolate_to_resolution (optional): Spectral truncation to interpolate the data to (default None).
+            interpolate (optional): Whether to interpolate the data to a target resolution (default False).
+            target_resolution (optional): Target spectral truncation for interpolation (default 31).
 
         Returns:
             ForcingData: Time-varying forcing data
@@ -57,13 +58,13 @@ class ForcingData:
 
         # validate that the dataset has the expected coordinates and variables
 
-        if interpolate_to_resolution is None:
+        if not interpolate:
             # verify that dataset has a valid time and space resolution
             pass
-        elif interpolate_to_resolution not in VALID_TRUNCATIONS:
-            raise ValueError(f"Invalid target resolution: {interpolate_to_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
+        elif target_resolution not in VALID_TRUNCATIONS:
+            raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
         else:
-            ds = upsample_ds(interpolate_to_daily(ds), target_resolution=interpolate_to_resolution)
+            ds = upsample_forcings_ds(interpolate_to_daily(ds), target_resolution=target_resolution)
 
         # annual-mean surface albedo
         alb0 = jnp.asarray(ds["alb"])
