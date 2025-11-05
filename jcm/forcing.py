@@ -2,6 +2,8 @@ import jax.numpy as jnp
 import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes
+from jcm.utils import VALID_TRUNCATIONS
+from jcm.data.bc.interpolate import interpolate_to_daily, upsample_ds
 
 @tree_math.struct
 class ForcingData:
@@ -37,13 +39,13 @@ class ForcingData:
         )
     
     @classmethod
-    def from_file(cls, filename: str, interpolate=False):
+    def from_file(cls, filename: str, interpolate_to_resolution=None):
         """
         Initialize forcing data from a file.
 
         Args:
             filename: Path to the forcing data file
-            interpolate (optional): Whether to interpolate the data to the model grid (default False).
+            interpolate_to_resolution (optional): Spectral truncation to interpolate the data to (default None).
 
         Returns:
             ForcingData: Time-varying forcing data
@@ -52,6 +54,16 @@ class ForcingData:
 
         # Read forcing data from file
         ds = xr.open_dataset(filename)
+
+        # validate that the dataset has the expected coordinates and variables
+
+        if interpolate_to_resolution is None:
+            # verify that dataset has a valid time and space resolution
+            pass
+        elif interpolate_to_resolution not in VALID_TRUNCATIONS:
+            raise ValueError(f"Invalid target resolution: {interpolate_to_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
+        else:
+            ds = upsample_ds(interpolate_to_daily(ds), target_resolution=interpolate_to_resolution)
 
         # annual-mean surface albedo
         alb0 = jnp.asarray(ds["alb"])

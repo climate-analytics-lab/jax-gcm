@@ -5,7 +5,8 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
-from jcm.utils import spectral_truncation
+from jcm.utils import truncation_for_nodal_shape, VALID_TRUNCATIONS, spectral_truncation
+from jcm.data.bc.interpolate import upsample_terrain_ds
 import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
@@ -18,21 +19,9 @@ sigma_layer_boundaries = {
     8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
 }
 
-truncation_for_nodal_shape = {
-    (64, 32): 21,
-    (96, 48): 31,
-    (128, 64): 42,
-    (256, 128): 85,
-    (320, 160): 106,
-    (360, 180): 119,
-    (512, 256): 170,
-    (640, 320): 213,
-    (1024, 512): 340,
-    (1280, 640): 425,
-}
-
 def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
-                terrain_file=None, interpolate=False, nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                terrain_file=None, interpolate=False, target_truncation=None,
+                nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
@@ -43,6 +32,7 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
         fmask: Fractional land-sea mask (ix, il). If None but orography is provided, defaults to zeros (all ocean).
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
         interpolate: Whether to interpolate the terrain data (default False).
+        target_truncation: Spectral truncation to interpolate the terrain data to (if interpolate is True).
         nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
     Returns:
@@ -57,9 +47,17 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
         import xarray as xr
         ds = xr.open_dataset(terrain_file)
         orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
+        if interpolate:
+            if target_truncation is None:
+                if nodal_shape is None:
+                    raise ValueError("Must provide at least one of nodal_shape or target_truncation when interpolating terrain data.")
+                target_truncation = truncation_for_nodal_shape[nodal_shape] # FIXME: use try block
+            ds = upsample_terrain_ds(ds, target_resolution=target_truncation)
+
     elif fmask is None:
         # If orography provided but fmask not, default fmask to any orography > 0
         fmask = (orography > 0.0).astype(jnp.float32)
+
     elif orography is None:
         # If fmask provided but orography not, default orography to zeros (flat)
         orography = jnp.zeros_like(fmask)
@@ -70,13 +68,13 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
     return orography, fmask
 
 def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    f"""
+    Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
     try:
         horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
     except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+        raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
     if layers not in sigma_layer_boundaries:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {list(sigma_layer_boundaries.keys())}")
 
@@ -213,20 +211,21 @@ class Geometry:
         return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
     @classmethod
-    def from_terrain_file(cls, terrain_file, interpolate=False, num_levels=8, truncation_number=None):
+    def from_terrain_file(cls, terrain_file, interpolate_to_resolution=None, num_levels=8, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
         Args:
             terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
-            interpolate (optional): Whether to interpolate the terrain data (default False).
+            interpolate_to_resolution (optional): Spectral truncation to interpolate the terrain data to. Defaults to None (no interpolation).
             num_levels (optional): Number of vertical levels `kx` (default 8).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from nodal_shape.
         
         Returns:
             Geometry object
         """
-        orography, fmask = get_terrain(terrain_file=terrain_file, interpolate=interpolate)
+        interpolate = interpolate_to_resolution is not None
+        orography, fmask = get_terrain(terrain_file=terrain_file, interpolate=interpolate, target_truncation=interpolate_to_resolution)
         return cls.from_grid_shape(
             nodal_shape=orography.shape,
             num_levels=num_levels,

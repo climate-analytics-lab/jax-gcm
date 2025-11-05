@@ -3,6 +3,21 @@ from jax import jit
 from jax.tree_util import tree_map
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
+truncation_for_nodal_shape = {
+    (64, 32): 21,
+    (96, 48): 31,
+    (128, 64): 42,
+    (256, 128): 85,
+    (320, 160): 106,
+    (360, 180): 119,
+    (512, 256): 170,
+    (640, 320): 213,
+    (1024, 512): 340,
+    (1280, 640): 425,
+}
+
+VALID_TRUNCATIONS = tuple(truncation_for_nodal_shape.values())
+
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
     """
