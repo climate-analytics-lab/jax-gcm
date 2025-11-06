@@ -17,6 +17,7 @@ Contents
    :caption: Contents:
 
    getting_started
+   speedy_physics
    speedy_translation
    api
    design
