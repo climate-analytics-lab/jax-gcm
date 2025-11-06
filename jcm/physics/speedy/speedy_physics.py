@@ -1,6 +1,5 @@
 import jax
 import jax.numpy as jnp
-from jax.tree_util import tree_map
 from collections import abc
 from typing import Callable, Tuple
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -9,6 +8,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.geometry import Geometry
 from jcm.date import DateData
+from jcm.utils import tree_index_3d
 
 def set_physics_flags(
     state: PhysicsState,
@@ -118,16 +118,16 @@ class SpeedyPhysics(Physics):
         
         # Slice out the relevant day of the year for time-varying forcings
         model_day_of_year = date.model_day()
-        if forcing.sea_surface_temperature.ndim > 2:
-            forcing = forcing[model_day_of_year]
+        forcing_2d = tree_index_3d(forcing, model_day_of_year)
 
         for term in self.terms:
-            tend, data = term(state, data, self.parameters, forcing, geometry)
+            tend, data = term(state, data, self.parameters, forcing_2d, geometry)
             physics_tendency += tend
 
         return physics_tendency, data
 
     def get_empty_data(self, geometry: Geometry) -> PhysicsData:
+        from jax.tree_util import tree_map
         # PhysicsData.zeros creates an 'initial' physics data,
         # but we need a completely zeroed one (including fields like model_year) for accumulating averages
         return tree_map(lambda x: 0*x, PhysicsData.zeros(geometry.nodal_shape[1:], geometry.nodal_shape[0]))

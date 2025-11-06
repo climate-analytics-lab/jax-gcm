@@ -482,13 +482,12 @@ class TestOrographicCorrection:
         from jcm.utils import convert_back, convert_to_float
         """Test computation of humidity horizontal correction gradient check."""
         lon, lat = 96, 48
-        test_forcing = create_test_forcing(lon_points=lon, lat_points=lat)
-        geometry = create_test_geometry()
+        geometry = create_test_geometry(lat_points=lat, lon_points=lon)
         forcing = ForcingData.ones((lon, lat),
-                                       sea_surface_temperature = test_forcing.sea_surface_temperature)
+                                       sea_surface_temperature = jnp.full((lon, lat), 285.0))
         # Compute temperature correction needed for the new humidity correction
         tcorh = compute_temperature_correction_horizontal(geometry)
-        land_temp = jnp.full((96, 48), 288.0)  # Constant land temperature
+        land_temp = jnp.full((lon, lat), 288.0)  # Constant land temperature
 
         # Set float inputs
         forcing_floats = convert_to_float(forcing)

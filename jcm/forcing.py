@@ -90,15 +90,6 @@ class ForcingData:
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
     
-    def __getitem__(self, key):
-        return self.copy(
-            alb0=self.alb0,
-            sice_am=self.sice_am[:, :, key],
-            snowc_am=self.snowc_am[:, :, key],
-            soilw_am=self.soilw_am[:, :, key],
-            sea_surface_temperature=self.sea_surface_temperature[:, :, key],
-        )
-
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
