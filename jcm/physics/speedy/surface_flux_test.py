@@ -35,7 +35,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
             
@@ -47,7 +47,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature)
 
         _, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, parameters, forcing, geometry)
 
@@ -74,10 +74,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, jnp.newaxis, jnp.newaxis]
         phi0 = jnp.zeros(xy)
         fmask = 0.5 * jnp.ones(xy)
-        tsea = jnp.ones((ix,il,365)) * 292
+        sea_surface_temperature = jnp.ones((ix,il)) * 292
         rsds = 400 * jnp.ones(xy)
         rlds = 400 * jnp.ones(xy)
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
+        soilw_am = 0.5* jnp.ones(((ix,il)))
         state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -86,7 +86,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.ones(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.ones(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
@@ -115,11 +115,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -128,7 +128,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
 
@@ -163,11 +163,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -176,7 +176,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
@@ -212,11 +212,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -225,7 +225,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
@@ -260,12 +260,12 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
-        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -274,7 +274,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
@@ -309,8 +309,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
@@ -322,7 +322,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea,soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature,soilw_am=soilw_am)
 
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
         sflux_data = physics_data.surface_flux
@@ -368,11 +368,11 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il, 365)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
-        soilw_am = 0.5* jnp.ones(((ix,il,365)))
-        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,tsea,rsds,rlds,lfluxland)
+        soilw_am = 0.5* jnp.ones(((ix,il)))
+        # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
@@ -381,7 +381,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         lw_rad = LWRadiationData.zeros(xy,kx)
         physics_data = PhysicsData.zeros(xy,kx,convection=conv_data,humidity=hum_data,surface_flux=sflux_data,shortwave_rad=sw_rad,longwave_rad=lw_rad)
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.zeros(xy,tsea=tsea, soilw_am=soilw_am)
+        forcing = ForcingData.zeros(xy,sea_surface_temperature=sea_surface_temperature, soilw_am=soilw_am)
 
 
         # Set float inputs

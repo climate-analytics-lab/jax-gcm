@@ -18,19 +18,14 @@ def set_forcing(
     # 2. daily-mean radiative forcing
     physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, geometry=geometry)
     tyear = physics_data.date.tyear
-    day = physics_data.date.model_day()
     model_year = physics_data.date.model_year
 
     # total surface albedo
-    snowc_am = forcing.snowc_am[:,:,day]
     fmask = geometry.fmask
-    sice_am = forcing.sice_am[:,:,day]
 
-    alb0 = forcing.alb0
-
-    snowc = jnp.minimum(1.0, snowc_am)
-    alb_l = alb0 + snowc * (parameters.mod_radcon.albsn - alb0)
-    alb_s = parameters.mod_radcon.albsea + sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
+    snowc = jnp.minimum(1.0, forcing.snowc_am)
+    alb_l = forcing.alb0 + snowc * (parameters.mod_radcon.albsn - forcing.alb0)
+    alb_s = parameters.mod_radcon.albsea + forcing.sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
     albsfc = alb_s + fmask * (alb_l - alb_s)
 
     iyear_ref = parameters.forcing.co2_year_ref

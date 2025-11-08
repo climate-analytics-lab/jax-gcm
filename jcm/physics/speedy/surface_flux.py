@@ -41,17 +41,15 @@ def get_surface_fluxes(
         - Surface geopotential, geometry.orog * grav
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
-    tsea : 2D array
-        - Sea-surface temperature, forcing.tsea
+    sea_surface_temperature : 2D array
+        - Sea-surface temperature, forcing.sea_surface_temperature
     rsds : 2D array
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array
         - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
-    day = physics_data.date.model_day()
     stl_am = physics_data.land_model.stl_am
-    soilw_am = forcing.soilw_am[:,:,day]
     kx, ix, il = state.temperature.shape
 
     psa = state.normalized_surface_pressure
@@ -68,7 +66,6 @@ def get_surface_fluxes(
 
     rh = physics_data.humidity.rh
     phi0 = geometry.orog * grav # surface geopotential
-    tsea = forcing.tsea[:,:,day]
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
@@ -175,7 +172,7 @@ def get_surface_fluxes(
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
         evap = evap.at[:, :, 0].set(parameters.surface_flux.chl * denvvs[:, :, 1] *\
-                    jnp.maximum(0.0, soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
+                    jnp.maximum(0.0, forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
 
         # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
         # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
@@ -202,7 +199,7 @@ def get_surface_fluxes(
             qsat0 = qsat0.at[:, :, 1].set(
                     jnp.where(
                         evap[:, :, 0] > 0.0,
-                        soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
+                        forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
                         0.0
                     )
                 )
@@ -224,9 +221,9 @@ def get_surface_fluxes(
         )
 
         dths = jnp.where(
-            tsea > t2[:, :, 1],
-            jnp.minimum(parameters.surface_flux.dtheta, tsea - t2[:, :, 1]),
-            jnp.maximum(-parameters.surface_flux.dtheta, astab * (tsea - t2[:, :, 1]))
+            forcing.sea_surface_temperature > t2[:, :, 1],
+            jnp.minimum(parameters.surface_flux.dtheta, forcing.sea_surface_temperature - t2[:, :, 1]),
+            jnp.maximum(-parameters.surface_flux.dtheta, astab * (forcing.sea_surface_temperature - t2[:, :, 1]))
         )
         
         denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
@@ -253,14 +250,14 @@ def get_surface_fluxes(
     ks = 2
 
     # 4.3 Sensible heat flux
-    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
+    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
 
     # 4.4 Evaporation
-    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
+    qsat0 = qsat0.at[:, :, 1].set(get_qsat(forcing.sea_surface_temperature, psa, 1.0))
     evap = evap.at[:, :, 1].set(parameters.surface_flux.chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
     
     # 4.5 Lw emission and net heat fluxes
-    rlus = rlus.at[:, :, 1].set(esbc * (tsea ** 4.0))
+    rlus = rlus.at[:, :, 1].set(esbc * (forcing.sea_surface_temperature ** 4.0))
     hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
@@ -277,8 +274,8 @@ def get_surface_fluxes(
 
         t0 = weighted_average(t1)
 
-        tsfc  = tsea + fmask * (stl_am - tsea)
-        tskin = tsea + fmask * (tskin  - tsea)
+        tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
+        tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
 
         return (ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
     
