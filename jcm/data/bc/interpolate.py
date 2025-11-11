@@ -5,14 +5,6 @@ from pathlib import Path
 import argparse
 from jcm.utils import VALID_TRUNCATIONS, get_coords
 
-def _pad_1st_axis(arr):
-    arr = np.swapaxes(arr, 0, 1)
-    nan_rows = np.all(np.isnan(arr), axis=tuple(range(1, arr.ndim)))
-    num_leading, num_trailing = np.argmax(~nan_rows), np.argmax(~nan_rows[::-1])
-    arr_valid = arr[num_leading: arr.shape[0] - num_trailing]
-    arr_padded = np.pad(arr_valid, pad_width=[(num_leading, num_trailing)] + [(0, 0)] * (arr.ndim - 1), mode='edge')
-    return np.swapaxes(arr_padded, 0, 1)
-
 def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     # validate that time coordinate is monthly
     time = pd.DatetimeIndex(ds_monthly["time"].values)
@@ -38,13 +30,22 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
 
 def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
     grid = get_coords(spectral_truncation=target_resolution).horizontal
-    
-    # Pad longitude so edge values are handled correctly
-    lon = ds['lon'].values
+
+    # Pad latitude with extra rows at poles so data can be interpolated to higher latitudes than exist in T30 grid
+    south_pole = ds.isel(lat=0).mean(dim="lon", keep_attrs=True)
+    north_pole = ds.isel(lat=-1).mean(dim="lon", keep_attrs=True)
     ds_pad = xr.concat([
-        ds.assign_coords(lon=lon - 360),
+        south_pole.expand_dims(lon=ds.lon, lat=[-90]).transpose(*ds.dims),
         ds,
-        ds.assign_coords(lon=lon + 360)
+        north_pole.expand_dims(lon=ds.lon, lat=[90]).transpose(*ds.dims),
+    ], dim="lat")
+
+    # Pad longitude to enforce periodicity
+    lon = ds_pad['lon'].values
+    ds_pad = xr.concat([
+        ds_pad.assign_coords(lon=lon - 360),
+        ds_pad,
+        ds_pad.assign_coords(lon=lon + 360)
     ], dim='lon')
     
     # Interpolate to new grid
@@ -53,10 +54,6 @@ def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
         lon=grid.longitudes * 180 / np.pi,
         method="linear"
     )
-
-    # Fill missing data at latitude extremes by padding with nearest non-nan values
-    for var in ds_interp.data_vars:
-        ds_interp[var].values = _pad_1st_axis(ds_interp[var].values)
 
     return ds_interp
 
