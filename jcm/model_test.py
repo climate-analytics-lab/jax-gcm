@@ -2,6 +2,7 @@ import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
@@ -218,9 +219,9 @@ class TestModelUnit(unittest.TestCase):
         def make_ones_parameters_object(params):
             def make_tangent(x):
                 if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return jnp.ones((), dtype=jax.dtypes.float0)
+                    return np.ones((), dtype=jax.dtypes.float0)
                 elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return jnp.ones((), dtype=jax.dtypes.float0)
+                    return np.ones((), dtype=jax.dtypes.float0)
                 else:
                     return jnp.ones_like(x)
             return jtu.tree_map(make_tangent, params)
