@@ -5,12 +5,7 @@ import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
-
-SIGMA_LAYER_BOUNDARIES = {
-    5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]),
-    7: jnp.array([0.02, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-    8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-}
+from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
 
 TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
@@ -66,6 +61,13 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
     return truncated_grid_field
 
 def validate_ds(ds, expected_structure):
+    """
+    Validate that an xarray Dataset has the expected variables and dimensions.
+
+    Args:
+        ds (xr.Dataset): The dataset to validate.
+        expected_structure (dict): A dictionary where keys are variable names and values are tuples of expected dimension names.
+    """
     missing_vars = set(expected_structure) - set(ds.data_vars)
     if missing_vars:
         raise ValueError(f"Missing variables: {missing_vars}")
