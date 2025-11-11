@@ -41,12 +41,12 @@ class TestHumidityUnit(unittest.TestCase):
         phi = 5000. * jnp.ones(((kx, ix, il))) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
         fmask = 0.5 * jnp.ones((ix, il)) #land fraction mask
-        tsea = 290. * jnp.ones((ix, il)) #ssts
+        sea_surface_temperature = 290. * jnp.ones((ix, il)) #ssts
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask))
-        forcing = ForcingData.ones(xy,tsea=tsea)
+        forcing = ForcingData.ones(xy,sea_surface_temperature=sea_surface_temperature)
             
         state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)

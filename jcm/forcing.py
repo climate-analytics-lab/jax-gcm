@@ -12,30 +12,30 @@ class ForcingData:
     sice_am: jnp.ndarray # sea ice concentration
     snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
-    tsea: jnp.ndarray # SST, should come from sea_model.py or some default value
+    sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
 
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
-              soilw_am=None,tsea=None):
+              soilw_am=None,sea_surface_temperature=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
-            sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)+(365,)),
-            tsea=tsea if tsea is not None else jnp.zeros((nodal_shape)+(365,)),
+            sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
+            snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
+            soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
+            sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros((nodal_shape)),
         )
 
     @classmethod
     def ones(cls,nodal_shape,
              alb0=None,sice_am=None,snowc_am=None,
-             soilw_am=None,tsea=None):
+             soilw_am=None,sea_surface_temperature=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
-            sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)+(365,)),
-            snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)+(365,)),
-            soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)+(365,)),
-            tsea=tsea if tsea is not None else jnp.ones((nodal_shape)+(365,)),
+            sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
+            snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
+            soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
+            sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
         )
     
     @classmethod
@@ -95,23 +95,23 @@ class ForcingData:
         soilw_am = jnp.asarray(ds["soilw_am"])
 
         # Prescribe SSTs
-        tsea = jnp.asarray(ds["sst"])
+        sea_surface_temperature = jnp.asarray(ds["sst"])
 
         return cls.zeros(
             nodal_shape=alb0.shape,
             alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,
-            soilw_am=soilw_am, tsea=tsea
+            soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature
         )
 
     def copy(self,alb0=None,
              sice_am=None,snowc_am=None,soilw_am=None,
-             tsea=None):
+             sea_surface_temperature=None):
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
-            tsea=tsea if tsea is not None else self.tsea,
+            sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else self.sea_surface_temperature,
         )
 
     def isnan(self):
@@ -119,7 +119,7 @@ class ForcingData:
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
-
+    
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     """
@@ -138,10 +138,8 @@ def default_forcing(
     """
     Initialize the default forcing data with prescribed SSTs
     """
-    alb0 = jnp.zeros(grid.nodal_shape)
-    tsea = jnp.tile(_fixed_ssts(grid)[:, :, jnp.newaxis], (1, 1, 365))
+    sea_surface_temperature = _fixed_ssts(grid)
 
     return ForcingData.zeros(
-        nodal_shape=grid.nodal_shape,
-        tsea=tsea, alb0=alb0
+        nodal_shape=grid.nodal_shape, sea_surface_temperature=sea_surface_temperature, 
     )

@@ -88,6 +88,12 @@ def ones_like(x):
 def stack_trees(trees):
     return tree_map(lambda *arrays: jnp.stack(arrays, axis=0).astype(jnp.float32), *trees)
 
+def index_if_3d(arr, key):
+    return arr[:, :, key] if arr.ndim > 2 else arr
+
+def tree_index_3d(tree, key):
+    return tree_map(lambda arr: index_if_3d(arr, key), tree)
+
 # Convert object to float 
 def check_type_convert_to_float(x):
     return jnp.asarray(x, dtype=jnp.float32)
