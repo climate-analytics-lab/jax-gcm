@@ -39,14 +39,13 @@ class ForcingData:
         )
     
     @classmethod
-    def from_file(cls, filename: str, interpolate=False, target_resolution=31):
+    def from_file(cls, filename: str, target_resolution=None):
         """
         Initialize forcing data from a file.
 
         Args:
             filename: Path to the forcing data file
-            interpolate (optional): Whether to interpolate the data to a target resolution (default False).
-            target_resolution (optional): Target spectral truncation for interpolation (default 31).
+            target_resolution (optional): Target spectral truncation for interpolation, default None (no interpolation).
 
         Returns:
             ForcingData: Time-varying forcing data
@@ -66,9 +65,9 @@ class ForcingData:
         }
 
         validate_ds(ds, expected_structure)
-    
-        if not interpolate:
-            ix, il, n_times = ds.stl.shape
+
+        if target_resolution is None:
+            ix, il, n_times = ds['stl'].shape
             if (ix, il) not in VALID_NODAL_SHAPES:
                 raise ValueError(f"Invalid nodal shape: {(ix, il)}. Must be one of: {VALID_NODAL_SHAPES}.")
             if n_times != 365:

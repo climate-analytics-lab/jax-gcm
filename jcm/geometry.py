@@ -5,13 +5,13 @@ For storing all variables related to the model's grid space.
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
-from jcm.utils import SIGMA_LAYER_BOUNDARIES, TRUNCATION_FOR_NODAL_SHAPE, VALID_NODAL_SHAPES, get_coords, spectral_truncation, validate_ds
+from jcm.utils import SIGMA_LAYER_BOUNDARIES, TRUNCATION_FOR_NODAL_SHAPE, VALID_NODAL_SHAPES, VALID_TRUNCATIONS, get_coords, spectral_truncation, validate_ds
 from jcm.data.bc.interpolate import upsample_terrain_ds
 from dinosaur.coordinate_systems import CoordinateSystem
 from typing import Tuple
 
 def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
-                terrain_file=None, interpolate=False, target_resolution=None,
+                terrain_file=None, target_resolution=None,
                 nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
@@ -22,8 +22,7 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
         orography: Orography height (m) (ix, il). If None but fmask is provided, defaults to zeros (flat).
         fmask: Fractional land-sea mask (ix, il). If None but orography is provided, defaults to zeros (all ocean).
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
-        interpolate: Whether to interpolate the terrain data (default False).
-        target_resolution: Spectral truncation to interpolate the terrain data to (if interpolate is True).
+        target_resolution: Spectral truncation to interpolate the terrain data to, default None (no interpolation).
         nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
     Returns:
@@ -40,14 +39,8 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
         ds = xr.open_dataset(terrain_file)
         validate_ds(ds, expected_structure={"lsm": ("lon", "lat"), "orog": ("lon", "lat")})
         orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
-        if interpolate:
-            if target_resolution is None and nodal_shape is None:
-                raise ValueError("Must provide at least one of nodal_shape or target_resolution when interpolating terrain data.")
-            elif target_resolution is None:
-                if nodal_shape not in VALID_NODAL_SHAPES: # FIXME: maybe unnecessary to validate here
-                    raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
-                target_resolution = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
-            elif target_resolution not in VALID_TRUNCATIONS:
+        if target_resolution is not None:
+            if target_resolution not in VALID_TRUNCATIONS:
                 raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
             ds = upsample_terrain_ds(ds, target_resolution=target_resolution)
         elif orography.shape not in VALID_NODAL_SHAPES:
@@ -130,7 +123,7 @@ class Geometry:
         """
         # Orography and surface geopotential
         orog, fmask = get_terrain(fmask=fmask, orography=orography, terrain_file=terrain_file, 
-                                  interpolate=interpolate, nodal_shape=coords.horizontal.nodal_shape)
+                                  target_resolution=coords.horizontal.total_wavenumbers-2 if interpolate else None)
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
@@ -190,21 +183,20 @@ class Geometry:
         return cls.from_spectral_truncation(TRUNCATION_FOR_NODAL_SHAPE[nodal_shape], **kwargs)
     
     @classmethod
-    def from_terrain_file(cls, terrain_file, interpolate=False, target_resolution=31, num_levels=8, truncation_number=None):
+    def from_terrain_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
         Args:
             terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
-            interpolate (optional): Whether to interpolate the terrain data (default False).
-            target_resolution (optional): Spectral truncation to interpolate the terrain data to. Defaults to 31.
+            target_resolution (optional): Spectral truncation to interpolate the terrain data to, default None (no interpolation).
             num_levels (optional): Number of vertical levels `kx` (default 8).
             truncation_number (optional): Spectral truncation number for surface geopotential. If None, inferred from nodal_shape.
         
         Returns:
             Geometry object
         """
-        orography, fmask = get_terrain(terrain_file=terrain_file, interpolate=interpolate, target_resolution=target_resolution)
+        orography, fmask = get_terrain(terrain_file=terrain_file, target_resolution=target_resolution)
         return cls.from_grid_shape(
             nodal_shape=orography.shape,
             num_levels=num_levels,
