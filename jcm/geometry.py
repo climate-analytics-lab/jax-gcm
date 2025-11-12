@@ -10,9 +10,8 @@ from jcm.data.bc.interpolate import upsample_terrain_ds
 from dinosaur.coordinate_systems import CoordinateSystem
 from typing import Tuple
 
-def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
-                terrain_file=None, target_resolution=None,
-                nodal_shape=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shape=None,
+                terrain_file=None, target_resolution=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
@@ -21,9 +20,9 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None,
     Args:
         orography: Orography height (m) (ix, il). If None but fmask is provided, defaults to zeros (flat).
         fmask: Fractional land-sea mask (ix, il). If None but orography is provided, defaults to zeros (all ocean).
+        nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
         target_resolution: Spectral truncation to interpolate the terrain data to, default None (no interpolation).
-        nodal_shape: Shape of the nodal grid (ix, il). Used when neither fmask, orography, nor terrain_file are provided.
         fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
     Returns:
         Orography height (m) (ix, il)
@@ -122,8 +121,8 @@ class Geometry:
             Geometry object
         """
         # Orography and surface geopotential
-        orog, fmask = get_terrain(fmask=fmask, orography=orography, terrain_file=terrain_file, 
-                                  target_resolution=coords.horizontal.total_wavenumbers-2 if interpolate else None)
+        orog, fmask = get_terrain(fmask=fmask, orography=orography, nodal_shape=coords.horizontal.nodal_shape,
+                                  terrain_file=terrain_file, target_resolution=coords.horizontal.total_wavenumbers-2 if interpolate else None)
         phi0 = grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0, truncation_number=truncation_number)
 
