@@ -15,12 +15,12 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import Geometry, coords_from_geometry, get_coords
+from jcm.geometry import Geometry, coords_from_geometry
 from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.utils import stack_trees
+from jcm.utils import stack_trees, get_coords
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial

@@ -65,21 +65,19 @@ def main(argv=None):
 
     try:
         print("Compiling dataset...")
-        merged_ds = xr.open_mfdataset([input_dir / fname for fname in file_names], combine='by_coords')
+        with xr.open_mfdataset([input_dir / fname for fname in file_names], combine='by_coords') as merged_ds:
+            print("Processing dataset...")
+            processed_ds, ds_terrain = process_forcing(merged_ds)
 
-        print("Processing dataset...")
-        processed_ds, ds_terrain = process_forcing(merged_ds)
-        
-        print(f"Saving processed dataset to {output_file}")
-        processed_ds.to_netcdf(output_file)
-        processed_ds.close()
-
-        print(f"Saving terrain to {terrain_file}")
-        ds_terrain.to_netcdf(terrain_file)
-        ds_terrain.close()
-
-        print("Done!")
+            print(f"Saving processed dataset to {output_file}")
+            processed_ds.to_netcdf(output_file)
+            
+            print(f"Saving terrain to {terrain_file}")
+            ds_terrain.to_netcdf(terrain_file)
+            
+        print("Done!")    
         return 0
+    
     except Exception:
         import traceback
         traceback.print_exc()
