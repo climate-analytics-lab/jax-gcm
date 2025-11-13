@@ -381,11 +381,11 @@ class TestOrographicCorrection:
         np.testing.assert_allclose(corrected_state_flat.specific_humidity, test_state.specific_humidity, atol=1e-6,
                                     err_msg="Specific humidity should be unchanged with flat orography")
         
-        # Test with minimum supported layers (5)
-        geometry_5layer = create_test_geometry(layers=5)
-        tcorv_5layer = compute_temperature_correction_vertical_profile(geometry_5layer, parameters)
-        assert tcorv_5layer.shape == (5,)
-        assert tcorv_5layer[0] == 0.0
+        # Test with minimum supported layers (7)
+        geometry_7layer = create_test_geometry(layers=7)
+        tcorv_7layer = compute_temperature_correction_vertical_profile(geometry_7layer, parameters)
+        assert tcorv_7layer.shape == (5,)
+        assert tcorv_7layer[0] == 0.0
         
         ix, il = 64, 32
 
