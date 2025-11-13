@@ -71,7 +71,7 @@ For a more realistic simulation with orography and time-varying boundary conditi
    geometry = Geometry.from_file(terrain_file)
 
    # Load realistic forcing data (SST, sea ice, soil moisture, etc.)
-   forcing_file = data_dir / "forcing_daily_t31.nc"
+   forcing_file = data_dir / "forcing_t31.nc"
    forcing = ForcingData.from_file(forcing_file)
 
    # Create model with realistic configuration
