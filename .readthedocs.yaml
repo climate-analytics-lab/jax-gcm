@@ -1,8 +1,4 @@
-# Read the Docs configuration file
-# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
-
-# Required
-version: 1
+version: 2
 
 build:
   os: ubuntu-24.04
@@ -14,5 +10,4 @@ sphinx:
 
 python:
    install:
-   - requirements: docs/requirements.txt
-        
+   - requirements: requirements.txt
