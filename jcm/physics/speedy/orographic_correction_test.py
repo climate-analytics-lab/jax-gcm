@@ -384,7 +384,7 @@ class TestOrographicCorrection:
         # Test with minimum supported layers (7)
         geometry_7layer = create_test_geometry(layers=7)
         tcorv_7layer = compute_temperature_correction_vertical_profile(geometry_7layer, parameters)
-        assert tcorv_7layer.shape == (5,)
+        assert tcorv_7layer.shape == (7,)
         assert tcorv_7layer[0] == 0.0
         
         ix, il = 64, 32
