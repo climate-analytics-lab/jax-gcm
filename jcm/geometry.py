@@ -181,7 +181,7 @@ class Geometry:
         return cls.from_spectral_truncation(TRUNCATION_FOR_NODAL_SHAPE[nodal_shape], **kwargs)
     
     @classmethod
-    def from_terrain_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
+    def from_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
