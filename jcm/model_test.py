@@ -214,16 +214,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.geometry import Geometry
         from jcm.forcing import ForcingData
-
-        def make_ones_parameters_object(params):
-            def make_tangent(x):
-                if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return jnp.ones((), dtype=jax.dtypes.float0)
-                elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return jnp.ones((), dtype=jax.dtypes.float0)
-                else:
-                    return jnp.ones_like(x)
-            return jtu.tree_map(make_tangent, params)
+        from jcm.utils import ones_like_tangent
         
         from pathlib import Path
         forcing_dir = Path(__file__).resolve().parent / 'data/bc'
@@ -242,7 +233,7 @@ class TestModelUnit(unittest.TestCase):
 
         # Calculate gradients using JVP
         params = Parameters.default()
-        tangent = make_ones_parameters_object(params)
+        tangent = ones_like_tangent(params)
         _, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
         state = jvp_sum.dynamics
         # physics_data = jvp_sum.physics
