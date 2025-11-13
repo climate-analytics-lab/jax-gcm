@@ -11,7 +11,7 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     if len(time) != 12:
         raise ValueError(f"'time' has {len(time)} entries, expected 12 monthly timestamps.")
     elif pd.infer_freq(time) not in ("MS", "M"):
-        raise ValueError(f"Timestamps do not have a monthly frequency")
+        raise ValueError("Timestamps do not have a monthly frequency")
 
     time_vars = [var for var in ds_monthly.data_vars if 'time' in ds_monthly[var].dims]
     non_time_vars = [var for var in ds_monthly.data_vars if 'time' not in ds_monthly[var].dims]
