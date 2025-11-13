@@ -159,7 +159,6 @@ class Geometry:
         """
         return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
-
     @classmethod
     def from_grid_shape(cls, nodal_shape, **kwargs):
         """
