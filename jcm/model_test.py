@@ -200,7 +200,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
 
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_daily_t31.nc'))
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_t31.nc'))
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -229,7 +229,7 @@ class TestModelUnit(unittest.TestCase):
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_daily_t31.nc'))
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_t31.nc'))
 
         # Calculate gradients using JVP
         params = Parameters.default()
