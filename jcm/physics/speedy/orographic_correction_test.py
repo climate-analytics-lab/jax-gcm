@@ -28,7 +28,8 @@ from jcm.physics.speedy.orographic_correction import (
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import default_forcing, ForcingData
-from jcm.geometry import Geometry, get_coords
+from jcm.geometry import Geometry
+from jcm.utils import get_coords
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics.speedy.physical_constants import grav
