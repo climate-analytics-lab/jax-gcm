@@ -37,7 +37,7 @@ class ForcingParameters:
     @classmethod
     def default(cls):
         return cls(
-            increase_co2 = True,
+            increase_co2 = False,
             co2_year_ref = 1950,
         )
 
