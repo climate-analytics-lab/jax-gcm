@@ -11,7 +11,7 @@ class TestGeometryUnit(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
     def test_from_coords(self):
-        from jcm.geometry import get_coords
+        from jcm.utils import get_coords
         coords = get_coords(layers=kx, spectral_truncation=31)
         geo = Geometry.from_coords(coords)
         has_nans = any(jnp.isnan(x).any() for x in jtu.tree_leaves(geo) if isinstance(x, jnp.ndarray))
