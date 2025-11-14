@@ -133,7 +133,7 @@ JAX Considerations
 When writing code for JAX-GCM, keep in mind:
 
 - **Pure Functions**: Functions should be pure (no side effects) to work with JAX transformations
-- **Immutable Data**: Use ``dataclasses`` or ``tree_math.struct`` for data structures
+- **Immutable Data**: Use ``tree_math.struct`` for data structures
 - **No Python Control Flow**: Use ``jax.lax.cond`` instead of ``if`` in JIT-compiled code
 - **Static Shapes**: Array shapes should be statically known where possible
 

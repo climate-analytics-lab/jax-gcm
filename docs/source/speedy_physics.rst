@@ -22,7 +22,7 @@ Physics Parameterizations
 
 The SPEEDY physics package includes the following components, executed in sequence:
 
-1. Convection (Simplified Tiedke Scheme)
+1. Convection (Simplified Tiedtke Scheme)
 2. Large-Scale Condensation
 3. Cloud Diagnostics
 4. Shortwave Radiation
@@ -35,7 +35,7 @@ Each parameterization is described in detail below.
 Convection
 ^^^^^^^^^^
 
-**Type**: Simplified mass-flux scheme based on Tiedke (1993)
+**Type**: Simplified mass-flux scheme based on Tiedtke (1993)
 
 **Description**: Represents subgrid-scale moist convection using a bulk mass-flux approach. The scheme diagnoses convectively unstable grid boxes where saturation moist static energy decreases with height.
 

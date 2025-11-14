@@ -11,7 +11,7 @@ import jcm
 
 project = 'Jax-GCM'
 copyright = '2025 Jax-GCM team'
-author = 'Varan Madan, Ellen Davenport, Nicholas Ho, Rebecca Gjini, Duncan Watson-Parris'
+author = 'J. Varan Madan, Ellen Davenport, Nicholas Ho, Rebecca Gjini, Duncan Watson-Parris'
 release = jcm.__version__
 
 # -- General configuration ---------------------------------------------------
