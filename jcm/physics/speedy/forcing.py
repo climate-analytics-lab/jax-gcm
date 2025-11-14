@@ -32,8 +32,9 @@ def set_forcing(
     ablco2 = ablco2_ref * jnp.exp(parameters.forcing.increase_co2 * del_co2 * (model_year + tyear - iyear_ref))
 
     mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc, ablco2=ablco2)
+    land_model = physics_data.land_model.copy(stl_am=forcing.stl_am)
 
-    physics_data = physics_data.copy(mod_radcon=mod_radcon)
+    physics_data = physics_data.copy(mod_radcon=mod_radcon, land_model=land_model)
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
     return physics_tendencies, physics_data

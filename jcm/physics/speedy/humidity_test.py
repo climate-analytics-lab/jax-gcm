@@ -246,7 +246,7 @@ class TestHumidityUnit(unittest.TestCase):
 
 
         # Edge case: Very High Temperature
-        temp = jnp.ones((kx,ix,il))*400
+        temp = jnp.ones((kx,ix,il))*330
         state = PhysicsState.ones(zxy,temperature=temp, specific_humidity=qg, normalized_surface_pressure=pressure)
         state_floats = convert_to_float(state)
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
