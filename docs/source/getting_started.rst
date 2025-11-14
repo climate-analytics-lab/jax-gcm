@@ -102,14 +102,11 @@ You can customize various aspects of the model:
 
    from jcm.geometry import Geometry
 
-   # Higher resolution: T63 (192x96 grid) with 12 levels
-   geometry = Geometry.from_grid_shape(
-       nodal_shape=(192, 96),
-       num_levels=12
-   )
+   # Higher resolution: T85 (256x128 grid)
+   geometry = Geometry.from_spectral_truncation(spectral_truncation=85)
 
    model = Model(
-       time_step=15.0,  # smaller timestep for stability
+       time_step=20.0,  # smaller timestep for stability
        geometry=geometry
    )
 
@@ -118,11 +115,11 @@ You can customize various aspects of the model:
 .. code-block:: python
 
    from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-   from jcm.physics.speedy.parameters import Parameters
+   from jcm.physics.speedy.params import Parameters
 
    # Customize physics parameters
    params = Parameters.default()
-   params = params.copy(...)  # modify parameters as needed
+   params = params.replace(...)  # modify parameters as needed
 
    physics = SpeedyPhysics(parameters=params)
 
@@ -162,7 +159,7 @@ The model output is a :py:class:`Predictions` object containing the model state 
    print(ds.data_vars)
 
    # Plot surface temperature evolution
-   ds['temperature'].isel(z=7).mean(dim='lon').plot()
+   ds['temperature'].isel(level=7).mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 

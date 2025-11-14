@@ -136,14 +136,12 @@ The model is designed to be composable at multiple levels:
 
 .. code-block:: python
 
-   geometry = Geometry.from_grid_shape(nodal_shape=(192, 96), num_levels=12)
+   geometry = Geometry.from_grid_shape(nodal_shape=(256, 128), num_levels=8)
    physics = SpeedyPhysics(parameters=custom_params)
-   diffusion = DiffusionFilter(tau=6*hours, order=4)
-
+   
    model = Model(
        geometry=geometry,
        physics=physics,
-       diffusion=diffusion,
    )
 
 Differentiability

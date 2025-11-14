@@ -159,7 +159,6 @@ class Geometry:
         """
         return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
-
     @classmethod
     def from_grid_shape(cls, nodal_shape, **kwargs):
         """
@@ -182,7 +181,7 @@ class Geometry:
         return cls.from_spectral_truncation(TRUNCATION_FOR_NODAL_SHAPE[nodal_shape], **kwargs)
     
     @classmethod
-    def from_terrain_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
+    def from_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
         """
         Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
