@@ -49,7 +49,8 @@ def get_surface_fluxes(
         - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
-    stl_am = physics_data.land_model.stl_am
+    stl_am = forcing.stl_am
+    lfluxland = forcing.lfluxland
     kx, ix, il = state.temperature.shape
 
     psa = state.normalized_surface_pressure
@@ -60,7 +61,6 @@ def get_surface_fluxes(
     phi = state.geopotential
     fmask = geometry.fmask
 
-    lfluxland = parameters.surface_flux.lfluxland
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
 
