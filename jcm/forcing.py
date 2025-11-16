@@ -14,7 +14,7 @@ class ForcingData:
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
-    lfluxland: jnp.bool
+    lfluxland: jnp.bool_
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -27,7 +27,7 @@ class ForcingData:
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             stl_am =stl_am if stl_am is not None else jnp.zeros((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros((nodal_shape)),
-            lfluxland=lfluxland if lfluxland is not None else False,
+            lfluxland=lfluxland if lfluxland is not None else jnp.bool_(False),
         )
 
     @classmethod
@@ -41,7 +41,7 @@ class ForcingData:
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
             stl_am =stl_am if stl_am is not None else jnp.ones((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
-            lfluxland=lfluxland if lfluxland is not None else True,
+            lfluxland=lfluxland if lfluxland is not None else jnp.bool_(True),
         )
     
     @classmethod
