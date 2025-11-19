@@ -4,17 +4,145 @@
 .. role:: py:attr(xref)
 .. role:: py:mod(xref)
 
-Developer Docs
-==============
+Developer Guide
+===============
 
-Profiling Model
----------------
+Contributing to JAX-GCM
+-----------------------
 
-To profile a JAX model, you can use the :py:mod:`jax.profiler` module. The following code snippet shows how to start a trace, run your model, and then stop the trace. This will generate a trace file in the specified directory, which can be visualized using tools like TensorBoard or Perfetto.
+We welcome contributions to JAX-GCM! Whether you're fixing bugs, adding features, improving documentation, or expanding the physics packages, your help is appreciated.
 
-For more information about JAX profiling, refer to the official documentation: `https://docs.jax.dev/en/latest/profiling.html`_
+Getting Started
+^^^^^^^^^^^^^^^
 
-.. _`https://docs.jax.dev/en/latest/profiling.html`: https://docs.jax.dev/en/latest/profiling.html
+1. **Find or Create an Issue**
+
+   - Check the `GitHub Issues <https://github.com/climate-analytics-lab/jax-gcm/issues>`_ for existing work
+   - Pick up an existing issue or create a new one describing what you'd like to work on
+   - Assign yourself to the issue to let others know you're working on it
+
+2. **Fork and Clone**
+
+   .. code-block:: console
+
+      $ git clone https://github.com/your-username/jax-gcm.git
+      $ cd jax-gcm
+      $ pip install -e .
+
+3. **Create a Branch**
+
+   .. code-block:: console
+
+      $ git checkout -b fix-issue-123
+
+Issue Management
+^^^^^^^^^^^^^^^^
+
+Good issue management helps everyone stay coordinated:
+
+- **Keep Issues Updated**: If you make progress on an issue, add a comment. If you get stuck or need help, mention it.
+- **Assign Yourself**: When you start working on an issue, assign yourself. When you stop, unassign yourself.
+- **Be Specific**: When creating issues, clearly describe the problem or feature request with examples if possible.
+
+Pull Request Guidelines
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Submitting Quality PRs
+"""""""""""""""""""""""
+
+- **One Issue Per PR**: Keep pull requests focused on a single issue or feature
+- **Small is Beautiful**: Smaller, incremental changes are easier to review and merge
+- **Link to Issues**: Every PR should reference an issue that explains *why* the change is needed
+- **Write Tests**: Except for documentation changes, PRs should include tests that:
+
+  - Demonstrate the issue (if it's a bug fix)
+  - Show that the issue is now fixed
+  - Cover the new functionality (if it's a feature)
+
+PR Checklist
+""""""""""""
+
+Before submitting your PR, ensure:
+
+.. code-block:: text
+
+   ☐ Code follows the existing style and conventions
+   ☐ New tests are added and all tests pass
+   ☐ Documentation is updated if needed
+   ☐ The PR description clearly explains what and why
+   ☐ The PR is linked to a relevant issue
+   ☐ Code is rebased on the latest main branch
+
+Testing Your Changes
+^^^^^^^^^^^^^^^^^^^^^
+
+Run the test suite to ensure your changes don't break existing functionality:
+
+.. code-block:: console
+
+   # Run all tests
+   $ pytest
+
+   # Run specific test file
+   $ pytest jcm/model_test.py
+
+   # Run with verbose output
+   $ pytest -v
+
+   # Run only fast tests (skip slow integration tests)
+   $ pytest -m "not slow"
+
+Write tests for your changes in the appropriate test file (e.g., ``jcm/module_name_test.py``). We aim for high unit test coverage to support the increasing complexity of physics going forward.
+
+Code Quality
+^^^^^^^^^^^^
+
+We strive for high-quality, maintainable code:
+
+- **Functional Design**: Follow the functional programming paradigm used in the physics code. This makes individual physics terms clear and composable.
+- **Type Hints**: Add type hints to function signatures where appropriate.
+- **Documentation**: Add docstrings to public functions and classes using NumPy style.
+- **JAX Compatibility**: Ensure code is compatible with JAX transformations (jit, grad, vmap).
+
+Example of well-documented function:
+
+.. code-block:: python
+
+   def compute_temperature_tendency(
+       state: PhysicsState,
+       parameters: Parameters
+   ) -> jnp.ndarray:
+       """Compute temperature tendency from heating rates.
+
+       Args:
+           state: Current physics state containing temperature and pressure.
+           parameters: Model parameters for physics calculations.
+
+       Returns:
+           Temperature tendency array of shape (levels, lon, lat).
+       """
+       # Implementation here
+       pass
+
+Development Tips
+----------------
+
+JAX Considerations
+^^^^^^^^^^^^^^^^^^
+
+When writing code for JAX-GCM, keep in mind:
+
+- **Pure Functions**: Functions should be pure (no side effects) to work with JAX transformations
+- **Immutable Data**: Use ``dataclasses`` or ``tree_math.struct`` for data structures
+- **No Python Control Flow**: Use ``jax.lax.cond`` instead of ``if`` in JIT-compiled code
+- **Static Shapes**: Array shapes should be statically known where possible
+
+See ``JAX_gotchas.md`` in the repository for more details.
+
+Profiling
+^^^^^^^^^
+
+To profile the model and identify performance bottlenecks:
 
 .. code-block:: python
 
@@ -23,18 +151,15 @@ For more information about JAX profiling, refer to the official documentation: `
    # Start a trace and create a Perfetto trace file
    jax.profiler.start_trace("./tensorboard_logs", create_perfetto_trace=True)
 
-   model = Model(
-       # geometry=realistic_geometry,
-   )
+   model = Model(time_step=30.0)
 
    # Run the model
    predictions = model.run(
-       save_interval=.5/24,
+       save_interval=0.5/24,
        total_time=1/24,
-       # forcing=realistic_forcing,
    )
 
-   # Ensure all computations are complete before stopping the trace
+   # Ensure all computations are complete
    jax.tree_util.tree_map(
        lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x,
        predictions
@@ -43,113 +168,25 @@ For more information about JAX profiling, refer to the official documentation: `
    # Stop the trace
    jax.profiler.stop_trace()
 
-You can visualize the generated trace file using **Perfetto**, a performance analysis tool for a variety of platforms.
-To use Perfetto, navigate to https://ui.perfetto.dev/ in your web browser. Then, click "Open trace file" and select the
-`.perfetto-trace` file generated by :py:func:`jax.profiler.start_trace`. This will display a detailed timeline of your
-model's execution, showing CPU and GPU activity, memory usage, and other performance metrics, which is useful for debugging performance bottlenecks.
+Visualize the trace at `https://ui.perfetto.dev/ <https://ui.perfetto.dev/>`_ by opening the ``.perfetto-trace`` file.
 
-Multi-Device Parallelization
------------------------------
+Documentation
+^^^^^^^^^^^^^
 
-JCM supports multi-device parallelization using JAX's SPMD (Single Program Multiple Data) sharding. This allows you to split computation across multiple GPUs or TPUs for faster execution, especially useful for higher resolution simulations.
+Documentation is built with Sphinx. To build locally:
 
-Basic Concepts
-^^^^^^^^^^^^^^
+.. code-block:: console
 
-**SPMD Mesh**: Defines how to partition data across devices. The mesh has three dimensions corresponding to ``(x, y, z)`` or ``(longitude, latitude, vertical)``.
+   $ cd docs
+   $ make html
 
-**FastSphericalHarmonics**: An optimized spherical harmonics implementation that works efficiently with sharded arrays. Use this when enabling SPMD sharding.
+Then open ``docs/build/html/index.html`` in your browser.
 
-**Sharding Strategy**: Typically, you want to shard the longitude dimension first since it usually has the most grid points.
+Communication
+-------------
 
-Enabling Parallelization
-^^^^^^^^^^^^^^^^^^^^^^^^
+- **GitHub Issues**: For bugs, feature requests, and discussions
+- **Pull Requests**: For code reviews and merging changes
+- **Code Comments**: For explaining complex logic in the code
 
-To enable multi-device parallelization, pass ``spmd_mesh`` and ``use_fast_harmonics=True`` when creating your geometry:
-
-.. code-block:: python
-
-   import jax
-   from jcm.model import Model
-   from jcm.geometry import Geometry
-
-   # Check available devices
-   print(f"Available devices: {jax.devices()}")
-   print(f"Number of devices: {len(jax.devices())}")
-
-   # Create a mesh to split longitude across 4 devices
-   # Mesh shape (4, 1, 1) means:
-   #   - Split longitude dimension across 4 devices
-   #   - Don't split latitude (1)
-   #   - Don't split vertical (1)
-   mesh = jax.make_mesh((4, 1, 1), ('x', 'y', 'z'))
-
-   # Create geometry with sharding enabled
-   geometry = Geometry.from_spectral_truncation(
-       spectral_truncation=85,  # Higher resolution benefits from parallelization
-       num_levels=8,
-       spmd_mesh=mesh,
-       use_fast_harmonics=True  # Necessary when using spmd_mesh
-   )
-
-   # Create and run model as usual
-   model = Model(geometry=geometry, time_step=30.0)
-   predictions = model.run(save_interval=5.0, total_time=30.0)
-
-Mesh Configuration Guidelines
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The product of mesh dimensions must equal the number of available devices:
-
-- ``(4, 1, 1)``: Split longitude across 4 devices
-- ``(2, 2, 1)``: Split longitude (2) and latitude (2) across 4 devices total
-- ``(8, 1, 1)``: Split longitude across 8 devices (for higher resolutions)
-
-**Rules of thumb:**
-
-1. Product of mesh dimensions = number of devices
-2. Longitude (x) usually has most grid points → split first
-3. Always use ``use_fast_harmonics=True`` when ``spmd_mesh`` is provided
-4. Higher resolutions (T85+) benefit more from sharding
-5. Match mesh to your device count: 4 GPUs → mesh product should equal 4
-
-Using with Terrain Files
-^^^^^^^^^^^^^^^^^^^^^^^^^
-
-You can also enable sharding when loading realistic terrain:
-
-.. code-block:: python
-
-   from jcm.forcing import ForcingData
-
-   mesh = jax.make_mesh((4, 1, 1), ('x', 'y', 'z'))
-
-   geometry = Geometry.from_terrain_file(
-       terrain_file='jcm/data/bc/terrain_t85.nc',
-       spmd_mesh=mesh,
-       use_fast_harmonics=True
-   )
-
-   forcing = ForcingData.from_file('jcm/data/bc/forcing_daily_t85.nc')
-
-   model = Model(geometry=geometry, time_step=30.0)
-   predictions = model.run(
-       save_interval=5.0,
-       total_time=30.0,
-       forcing=forcing
-   )
-
-Single Device (Default Behavior)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-If you don't specify ``spmd_mesh``, JCM runs on a single device using the default ``RealSphericalHarmonics`` implementation:
-
-.. code-block:: python
-
-   # No sharding - runs on single device
-   geometry = Geometry.from_spectral_truncation(
-       spectral_truncation=31,
-       num_levels=8
-   )
-
-This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
+We appreciate your contributions and look forward to working with you!

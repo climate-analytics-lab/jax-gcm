@@ -21,7 +21,7 @@ def run_default_speedy_model(save_interval=None):
 
     # Load the terrain and forcing data
     realistic_geometry = Geometry.from_terrain_file(forcing_dir / 'terrain_t31.nc')
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing_daily_t31.nc')
+    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing_t31.nc')
 
 
     # in the default scenario output every timestep and don't average
