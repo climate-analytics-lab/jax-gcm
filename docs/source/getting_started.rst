@@ -159,7 +159,9 @@ Basic Concepts
 
 **SPMD Mesh**: Defines how to partition data across devices. The mesh has three dimensions corresponding to ``(x, y, z)`` or ``(longitude, latitude, vertical)``.
 
-**Sharding Strategy**: Typically, you want to shard the longitude dimension first since it usually has the most grid points.
+**Sharding Strategy**: Typically, for SPEEDY Physics simulations,  you want to shard the longitude dimension first since it usually has the most grid points. 
+For Physics implementations with more layers (e.g. 32 or 64 layers) however, you may find that sharding the dycore in the vertical dimension to be most effective. 
+Future implementations may allow for more flexible sharding strategies.
 
 Enabling Parallelization
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -198,8 +200,6 @@ The product of mesh dimensions must equal the number of available devices:
 1. Product of mesh dimensions = number of devices
 2. Longitude (x) usually has most grid points → split first
 3. Higher resolutions (T85+) benefit more from sharding
-4. Match mesh to your device count: 4 GPUs → mesh product should equal 4
-
 
 Analyzing Output
 ----------------
