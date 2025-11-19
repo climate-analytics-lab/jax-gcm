@@ -422,28 +422,23 @@ class LandModelData:
     """
     Parameters:
         stl_lm: Land surface temperature calculated by the land model
-        stl_am: Land surface temperature used by the atmospheric model
     """
     stl_lm: jnp.ndarray
-    stl_am: jnp.ndarray
     
     @classmethod
-    def zeros(cls, nodal_shape, stl_lm=None, stl_am=None):
+    def zeros(cls, nodal_shape, stl_lm=None):
         return cls(
-            stl_am = stl_am if stl_am is not None else jnp.full((nodal_shape), 288.0),
             stl_lm = stl_lm if stl_lm is not None else jnp.full((nodal_shape), 288.0)
         )
     
     @classmethod
-    def ones(cls, nodal_shape, stl_lm=None, stl_am=None):
+    def ones(cls, nodal_shape, stl_lm=None):
         return cls(
-            stl_am = stl_am if stl_am is not None else jnp.ones(nodal_shape),
             stl_lm = stl_lm if stl_lm is not None else jnp.ones(nodal_shape)
         )
 
-    def copy(self, stl_lm=None, stl_am=None):
+    def copy(self, stl_lm=None):
         return LandModelData(
-            stl_am = stl_am if stl_am is not None else self.stl_am,
             stl_lm = stl_lm if stl_lm is not None else self.stl_lm
         )
 

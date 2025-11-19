@@ -211,7 +211,7 @@ def get_orographic_correction_tendencies(
     
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
-    land_temperature = physics_data.land_model.stl_am
+    land_temperature = forcing.stl_am
     qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature)
     
     # Apply corrections: field_corrected = field + horizontal * vertical
