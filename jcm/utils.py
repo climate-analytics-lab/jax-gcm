@@ -29,9 +29,12 @@ def get_coords(layers=8, spectral_truncation=31, spmd_mesh=None) -> CoordinateSy
     f"""
     Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
+    from dinosaur.spherical_harmonic import FastSphericalHarmonics, RealSphericalHarmonics
+    
     if spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
     horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
+
     if layers not in SIGMA_LAYER_BOUNDARIES:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
 
@@ -39,9 +42,13 @@ def get_coords(layers=8, spectral_truncation=31, spmd_mesh=None) -> CoordinateSy
 
     if spmd_mesh is not None:
         spmd_mesh = jax.make_mesh(spmd_mesh, ('x', 'y', 'z'))
+        spherical_harmonics_impl = FastSphericalHarmonics(spmd_mesh=spmd_mesh)
+    else:
+        spherical_harmonics_impl = RealSphericalHarmonics()
 
     return CoordinateSystem(
-        horizontal=horizontal_grid(radius=physics_specs.radius),
+        horizontal=horizontal_grid(radius=physics_specs.radius, 
+                                   spherical_harmonics_impl=spherical_harmonics_impl),
         vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers]),
         spmd_mesh=spmd_mesh
     )
