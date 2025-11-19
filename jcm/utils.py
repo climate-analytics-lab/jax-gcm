@@ -25,7 +25,7 @@ TRUNCATION_FOR_NODAL_SHAPE = {
 VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
 
-def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
+def get_coords(layers=8, spectral_truncation=31, spmd_mesh=None) -> CoordinateSystem:
     f"""
     Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
@@ -37,9 +37,13 @@ def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
 
     physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
 
+    if spmd_mesh is not None:
+        spmd_mesh = jax.make_mesh(spmd_mesh, ('x', 'y', 'z'))
+
     return CoordinateSystem(
         horizontal=horizontal_grid(radius=physics_specs.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers])
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers]),
+        spmd_mesh=spmd_mesh
     )
 
 # Function to take a field in grid space and truncate it to a given wavenumber
