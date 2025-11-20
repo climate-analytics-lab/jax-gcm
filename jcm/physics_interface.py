@@ -379,9 +379,8 @@ def get_physical_tendencies(
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
 
-    return filtered_dynamics_tendency
+    return dynamics_tendency
 
 def filter_tendencies(dynamics_tendency: State, 
                       diffusion: DiffusionFilter,
