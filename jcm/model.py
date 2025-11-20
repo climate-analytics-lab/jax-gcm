@@ -188,7 +188,7 @@ class Model:
         
         # create diffusion filter function handles
         diffuse_div = DiffusionFilter.make_diffusion_fn(
-            self.coords.hoorizontal,
+            self.coords.horizontal,
             self.dt,
             self.diffusion.div_timescale,
             self.diffusion.div_order,
@@ -196,7 +196,7 @@ class Model:
         )
 
         diffuse_vor_q = DiffusionFilter.make_diffusion_fn(
-            self.coords.hoorizontal,
+            self.coords.horizontal,
             self.dt,
             self.diffusion.vor_q_timescale,
             self.diffusion.vor_q_order,
@@ -204,7 +204,7 @@ class Model:
         )
 
         diffuse_temp = DiffusionFilter.make_diffusion_fn(
-            self.coords.hoorizontal,
+            self.coords.horizontal,
             self.dt,
             self.diffusion.temp_timescale,
             self.diffusion.temp_order,
