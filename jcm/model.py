@@ -455,8 +455,9 @@ class Model:
         physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
 
         times = jax.device_get(predictions.times)
+        coords = jax.device_get(self.coords)
 
-        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
+        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=coords, times=times - times[0])
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")
