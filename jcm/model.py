@@ -186,10 +186,36 @@ class Model:
                 log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
             )
         
+        # create diffusion filter function handles
+        diffuse_div = DiffusionFilter.make_diffusion_fn(
+            self.coords.hoorizontal,
+            self.dt,
+            self.diffusion.div_timescale,
+            self.diffusion.div_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(divergence=u_temp.divergence)
+        )
+
+        diffuse_vor_q = DiffusionFilter.make_diffusion_fn(
+            self.coords.hoorizontal,
+            self.dt,
+            self.diffusion.vor_q_timescale,
+            self.diffusion.vor_q_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(vorticity=u_temp.vorticity,tracers={'specific_humidity': u_temp.tracers['specific_humidity']})
+        )
+
+        diffuse_temp = DiffusionFilter.make_diffusion_fn(
+            self.coords.hoorizontal,
+            self.dt,
+            self.diffusion.temp_timescale,
+            self.diffusion.temp_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(temperature_variation=u_temp.temperature_variation)
+        )
+        
         self.filters = [
             conserve_global_mean_surface_pressure,
-            dinosaur.time_integration.horizontal_diffusion_step_filter(
-                self.coords.horizontal, self.dt, tau=self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
+            diffuse_div,
+            diffuse_vor_q,
+            diffuse_temp,
         ]
 
         self.start_date = start_date
