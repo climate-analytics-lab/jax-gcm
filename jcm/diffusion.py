@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
-from dinosaur.spherical_harmonic import Grid
 
 @tree_math.struct
 class DiffusionFilter:
