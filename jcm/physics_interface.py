@@ -400,12 +400,18 @@ def filter_tendencies(dynamics_tendency: State,
         Filtered dynamics tendencies in dinosaur.primitive_equations.State format
     '''
 
-    tau = diffusion.tendency_diff_timescale
-    order = diffusion.tendency_diff_order
-
+    tau = diffusion.div_timescale
+    order = diffusion.div_order
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
     filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
-    filtered_tendency = filter_fn(dynamics_tendency)
-    
-    return filtered_tendency
+    filtered_div = filter_fn(dynamics_tendency)
+
+    return State(
+        vorticity=dynamics_tendency.vorticity,
+        divergence=filtered_div.divergence,
+        temperature_variation=dynamics_tendency.temperature_variation,
+        log_surface_pressure=dynamics_tendency.log_surface_pressure,
+        sim_time=dynamics_tendency.sim_time,
+        tracers={'specific_humidity': dynamics_tendency.tracers['specific_humidity']}
+    )
