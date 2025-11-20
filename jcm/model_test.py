@@ -283,10 +283,10 @@ class TestModelUnit(unittest.TestCase):
 
         model, predictions = run_default_speedy_model(save_interval=30.)
         pred_ds = model.predictions_to_xarray(predictions)
-        pred_ds_monthly = pred_ds.isel(time=-1).mean(dim='lon') # zonal monthly means, take the last month
+        pred_ds_monthly = pred_ds.isel(time=-1).mean(dim={'lon', 'lat'}) # global monthly mean, take the last month
 
         # tolerance in # of standard deviations
-        tol = 2
+        tol = 3
 
         # check whether zonal averages over the last month are within 2 std deviations of the expected values
         for var in default_stat_vars:

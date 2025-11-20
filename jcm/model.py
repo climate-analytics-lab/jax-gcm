@@ -186,10 +186,30 @@ class Model:
                 log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
             )
         
+        # create diffusion filter function handles
+        diffuse_div = self._make_diffusion_fn(
+            self.diffusion.div_timescale,
+            self.diffusion.div_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(divergence=u_temp.divergence)
+        )
+
+        diffuse_vor_q = self._make_diffusion_fn(
+            self.diffusion.vor_q_timescale,
+            self.diffusion.vor_q_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(vorticity=u_temp.vorticity,tracers={'specific_humidity': u_temp.tracers['specific_humidity']})
+        )
+
+        diffuse_temp = self._make_diffusion_fn(
+            self.diffusion.temp_timescale,
+            self.diffusion.temp_order,
+            replace_fn=lambda u_next, u_temp: u_next.replace(temperature_variation=u_temp.temperature_variation)
+        )
+        
         self.filters = [
             conserve_global_mean_surface_pressure,
-            dinosaur.time_integration.horizontal_diffusion_step_filter(
-                self.coords.horizontal, self.dt, tau=self.diffusion.state_diff_timescale, order=self.diffusion.state_diff_order),
+            diffuse_div,
+            diffuse_vor_q,
+            diffuse_temp,
         ]
 
         self.start_date = start_date
@@ -199,7 +219,27 @@ class Model:
 
         # spectral space primitive_equations.State updated by model.run and model.resume
         self._final_modal_state = None
-        
+    
+    def _make_diffusion_fn(self, timescale: jnp.float_, order: jnp.int_, replace_fn):
+        '''
+        Returns diffusion filter function handle for use in the model time step.
+
+        timescale: diffusion timescale (s)
+        order: order of diffusion operator
+        replace_fn: function that takes (u_next, u_temp) and returns the updated u_next after diffusion (selects which variables to diffuse)
+        '''
+        from dinosaur.filtering import horizontal_diffusion_filter
+
+        def diffusion_filter(u, u_next):
+            eigenvalues = self.coords.horizontal.laplacian_eigenvalues
+            scale = self.dt / (timescale * abs(eigenvalues[-1]) ** order)
+
+            filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
+
+            u_temp = filter_fn(u_next)
+            return replace_fn(u_next, u_temp)
+        return diffusion_filter
+    
     def _prepare_initial_modal_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
         """Prepares initial dinosaur.primitive_equations.State for a model run.
 

@@ -379,16 +379,15 @@ def get_physical_tendencies(
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
-    filtered_dynamics_tendency = filter_tendencies(dynamics_tendency, diffusion, time_step, dynamics.coords.horizontal)
 
-    return filtered_dynamics_tendency
+    return dynamics_tendency
 
 def filter_tendencies(dynamics_tendency: State, 
                       diffusion: DiffusionFilter,
                       time_step, 
                       grid) -> State:
     '''
-    Apply dinsoaur horizontal diffusion filter to the dynamics tendencies
+    Apply dinsoaur horizontal diffusion filter to the dynamics divergence tendency
 
     Args:
         dynamics_tendency: Dynamics tendencies in dinosaur.primitive_equations.State format
@@ -400,12 +399,18 @@ def filter_tendencies(dynamics_tendency: State,
         Filtered dynamics tendencies in dinosaur.primitive_equations.State format
     '''
 
-    tau = diffusion.tendency_diff_timescale
-    order = diffusion.tendency_diff_order
-
+    tau = diffusion.div_timescale
+    order = diffusion.div_order
     scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
 
     filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
-    filtered_tendency = filter_fn(dynamics_tendency)
-    
-    return filtered_tendency
+    filtered_div = filter_fn(dynamics_tendency)
+
+    return State(
+        vorticity=dynamics_tendency.vorticity,
+        divergence=filtered_div.divergence,
+        temperature_variation=dynamics_tendency.temperature_variation,
+        log_surface_pressure=dynamics_tendency.log_surface_pressure,
+        sim_time=dynamics_tendency.sim_time,
+        tracers={'specific_humidity': dynamics_tendency.tracers['specific_humidity']}
+    )
