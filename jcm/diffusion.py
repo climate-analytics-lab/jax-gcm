@@ -4,12 +4,12 @@ from jax import tree_util
 
 @tree_math.struct
 class DiffusionFilter:
-    vor_q_timescale: jnp.float32 # Diffusion timescale (s)
-    vor_q_order: jnp.int32 # Order of diffusion operator for tendencies
-    temp_timescale: jnp.float32 # Diffusion timescale (s)
-    temp_order: jnp.int32  # Order of diffusion operator for state variables
-    div_timescale: jnp.float32 # Diffusion timescale (s)
-    div_order: jnp.int32  # Order of diffusion operator for state variables
+    vor_q_timescale: jnp.float_ # Diffusion timescale (s)
+    vor_q_order: jnp.int_ # Order of diffusion operator for tendencies
+    temp_timescale: jnp.float_ # Diffusion timescale (s)
+    temp_order: jnp.int_  # Order of diffusion operator for state variables
+    div_timescale: jnp.float_ # Diffusion timescale (s)
+    div_order: jnp.int_  # Order of diffusion operator for state variables
 
     @classmethod
     def default(cls):
