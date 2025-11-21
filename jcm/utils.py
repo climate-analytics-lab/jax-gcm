@@ -107,6 +107,14 @@ def _check_type_ones_like_tangent(x):
 def ones_like_tangent(pytree):
     return tree_map(_check_type_ones_like_tangent, pytree)
 
+def _check_type_zeros_like_tangent(x):
+        if jnp.result_type(x) == jnp.float32:
+            return jnp.zeros_like(x)
+        return np.zeros((), dtype=jax.dtypes.float0)
+
+def zeros_like_tangent(pytree):
+    return tree_map(_check_type_zeros_like_tangent, pytree)
+
 def _check_type_convert_to_float(x):
     return jnp.asarray(x, dtype=jnp.float32)
 

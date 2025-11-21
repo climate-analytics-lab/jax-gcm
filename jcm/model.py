@@ -483,6 +483,10 @@ class Model:
         """
         from dinosaur.xarray_utils import data_to_xarray
         from pathlib import Path
+
+        # Clearing any float0s allows us to use this method on derivatives of predictions objects
+        predictions = tree_map(lambda x: jnp.zeros(x.shape) if x.dtype == jax.dtypes.float0 else x, predictions)
+
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions from postprocessed output
         dynamics_predictions = predictions.dynamics
