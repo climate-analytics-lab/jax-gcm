@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import functools
 from jax.test_util import check_vjp, check_jvp
+
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
     def setUp(self):
@@ -422,13 +423,367 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         def f(phi0, parameters_sf_hdrag):
             return get_orog_land_sfc_drag(phi0, parameters_sf_hdrag)
-        
+
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+        f_vjp = functools.partial(jax.vjp, f)
 
-        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag), 
+        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag),
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag), 
+        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag),
                                 atol=None, rtol=1, eps=0.000001)
+
+
+class TestLandSurfaceFluxesIdealized(unittest.TestCase):
+    """Idealized tests for land surface flux calculations to check physical plausibility."""
+
+    def setUp(self):
+        from jcm.physics.speedy.params import Parameters
+        from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        from jcm.constants import grav
+        from jcm.physics.speedy.surface_flux import compute_land_surface_fluxes
+        from jcm.physics.speedy.physical_constants import p0, rgas, cp, sbc
+
+        self.parameters = Parameters.default()
+        self.compute_land_surface_fluxes = compute_land_surface_fluxes
+        self.grav = grav
+        self.p0 = p0
+        self.rgas = rgas
+        self.cp = cp
+        self.sbc = sbc
+        self.convert_to_speedy_latitudes = convert_to_speedy_latitudes
+        self.Geometry = Geometry
+
+        # Small grid for fast tests
+        self.ix, self.il, self.kx = 64, 32, 8
+
+    def test_evaporation_is_nonnegative(self):
+        """Test that evaporation is always non-negative."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        # Create realistic inputs
+        ua = jnp.ones((kx, ix, il)) * 5.0  # 5 m/s wind
+        va = jnp.ones((kx, ix, il)) * 5.0
+        ta = jnp.ones((kx, ix, il)) * 288.0  # 15°C
+        qa = jnp.ones((kx, ix, il)) * 0.008  # ~8 g/kg
+        rh = jnp.ones((kx, ix, il)) * 0.7  # 70% RH
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))  # 100% land
+        stl_am = jnp.ones((ix, il)) * 285.0
+        soilw_am = jnp.ones((ix, il)) * 0.5  # 50% soil moisture
+        rsds = jnp.ones((ix, il)) * 400.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        # Create geometry
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Evaporation should always be non-negative
+        self.assertTrue(jnp.all(evap >= 0.0),
+                       f"Evaporation should be non-negative, but got min={jnp.min(evap)}, max={jnp.max(evap)}")
+
+    def test_evaporation_zero_with_zero_soil_moisture(self):
+        """Test that evaporation is zero when soil moisture is zero."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        ua = jnp.ones((kx, ix, il)) * 5.0
+        va = jnp.ones((kx, ix, il)) * 5.0
+        ta = jnp.ones((kx, ix, il)) * 288.0
+        qa = jnp.ones((kx, ix, il)) * 0.005
+        rh = jnp.ones((kx, ix, il)) * 0.5
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 290.0
+        soilw_am = jnp.zeros((ix, il))  # Zero soil moisture
+        rsds = jnp.ones((ix, il)) * 400.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # With zero soil moisture, evaporation should be zero
+        self.assertTrue(jnp.allclose(evap, 0.0, atol=1e-10),
+                       f"Evaporation should be zero with zero soil moisture, but got {evap}")
+
+    def test_evaporation_reasonable_values(self):
+        """Test that evaporation has reasonable magnitude under normal conditions."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        # Normal midlatitude summer conditions
+        ua = jnp.ones((kx, ix, il)) * 3.0  # Light wind
+        va = jnp.ones((kx, ix, il)) * 3.0
+        ta = jnp.ones((kx, ix, il)) * 293.0  # 20°C
+        qa = jnp.ones((kx, ix, il)) * 0.010  # ~10 g/kg
+        rh = jnp.ones((kx, ix, il)) * 0.6  # 60% RH
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 290.0
+        soilw_am = jnp.ones((ix, il)) * 0.7  # Moist soil
+        rsds = jnp.ones((ix, il)) * 600.0  # Strong solar radiation
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Evaporation should be positive and reasonable (0.01 to 1.0 kg/m^2/s roughly)
+        self.assertTrue(jnp.all(evap >= 0.0), "Evaporation should be non-negative")
+        self.assertTrue(jnp.all(evap < 1.0),
+                       f"Evaporation seems unreasonably high: max={jnp.max(evap)} kg/m^2/s")
+        # With moist soil and warm conditions, should have some evaporation
+        self.assertTrue(jnp.all(evap > 0.0),
+                       f"Expected positive evaporation with moist soil, got min={jnp.min(evap)}")
+
+    def test_sensible_heat_flux_sign(self):
+        """Test that sensible heat flux has correct sign based on temperature gradient."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        # Case 1: Surface warmer than air -> positive heat flux (into atmosphere)
+        ua = jnp.ones((kx, ix, il)) * 3.0
+        va = jnp.ones((kx, ix, il)) * 3.0
+        ta = jnp.ones((kx, ix, il)) * 285.0  # Cool air
+        qa = jnp.ones((kx, ix, il)) * 0.008
+        rh = jnp.ones((kx, ix, il)) * 0.7
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 295.0  # Warm surface
+        soilw_am = jnp.ones((ix, il)) * 0.5
+        rsds = jnp.ones((ix, il)) * 600.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Surface warmer than air -> positive sensible heat flux
+        self.assertTrue(jnp.all(shf > 0.0),
+                       f"Expected positive heat flux with warm surface, got min={jnp.min(shf)}, max={jnp.max(shf)}")
+
+    def test_fluxes_with_zero_wind(self):
+        """Test that fluxes are computed reasonably even with zero wind (due to gustiness)."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        ua = jnp.zeros((kx, ix, il))  # Zero wind
+        va = jnp.zeros((kx, ix, il))
+        ta = jnp.ones((kx, ix, il)) * 288.0
+        qa = jnp.ones((kx, ix, il)) * 0.008
+        rh = jnp.ones((kx, ix, il)) * 0.7
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 290.0
+        soilw_am = jnp.ones((ix, il)) * 0.5
+        rsds = jnp.ones((ix, il)) * 400.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Even with zero wind, gustiness should produce some fluxes
+        self.assertTrue(jnp.all(evap >= 0.0), "Evaporation should be non-negative")
+        self.assertTrue(jnp.all(jnp.isfinite(shf)), "Heat flux should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(evap)), "Evaporation should be finite")
+        # Wind stress should be zero with zero wind
+        self.assertTrue(jnp.allclose(ustr, 0.0, atol=1e-10), "U wind stress should be zero with zero wind")
+        self.assertTrue(jnp.allclose(vstr, 0.0, atol=1e-10), "V wind stress should be zero with zero wind")
+
+    def test_evaporation_saturated_vs_dry_air(self):
+        """Test that evaporation is higher with dry air than saturated air."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        # Common setup
+        ua = jnp.ones((kx, ix, il)) * 5.0
+        va = jnp.ones((kx, ix, il)) * 5.0
+        ta = jnp.ones((kx, ix, il)) * 288.0
+        qa_base = jnp.ones((kx, ix, il)) * 0.008
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 290.0
+        soilw_am = jnp.ones((ix, il)) * 1.0  # Fully saturated soil
+        rsds = jnp.ones((ix, il)) * 400.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        # Case 1: Dry air (30% RH)
+        rh_dry = jnp.ones((kx, ix, il)) * 0.3
+        _, _, _, evap_dry, _, _, _ = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_base, rh=rh_dry,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Case 2: Nearly saturated air (95% RH)
+        rh_sat = jnp.ones((kx, ix, il)) * 0.95
+        _, _, _, evap_sat, _, _, _ = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_base, rh=rh_sat,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Dry air should produce more evaporation than saturated air
+        self.assertTrue(jnp.all(evap_dry > evap_sat),
+                       f"Evaporation with dry air (mean={jnp.mean(evap_dry)}) should exceed "
+                       f"evaporation with saturated air (mean={jnp.mean(evap_sat)})")
+
+    def test_no_negative_values_in_all_outputs(self):
+        """Test that certain outputs (evap, rlus) are never negative."""
+        ix, il, kx = self.ix, self.il, self.kx
+
+        # Use varied but realistic inputs
+        ua = jnp.ones((kx, ix, il)) * 5.0
+        va = jnp.ones((kx, ix, il)) * 3.0
+        ta = jnp.ones((kx, ix, il)) * 288.0
+        qa = jnp.ones((kx, ix, il)) * 0.008
+        rh = jnp.ones((kx, ix, il)) * 0.6
+        phi = jnp.ones((kx, ix, il)) * 5000.0
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        fmask = jnp.ones((ix, il))
+        stl_am = jnp.ones((ix, il)) * 285.0
+        soilw_am = jnp.ones((ix, il)) * 0.4
+        rsds = jnp.ones((ix, il)) * 500.0
+        rlds = jnp.ones((ix, il)) * 350.0
+        alb_l = jnp.ones((ix, il)) * 0.2
+        snowc = jnp.zeros((ix, il))
+
+        geometry = self.convert_to_speedy_latitudes(
+            self.Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/self.grav, fmask=fmask)
+        )
+
+        u0 = self.parameters.surface_flux.fwind0 * ua[kx-1]
+        v0 = self.parameters.surface_flux.fwind0 * va[kx-1]
+        esbc = self.parameters.mod_radcon.emisfc * self.sbc
+        ghum0 = 1.0 - self.parameters.surface_flux.fhum0
+
+        ustr, vstr, shf, evap, rlus, hfluxn, tskin = self.compute_land_surface_fluxes(
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa, rh=rh,
+            phi=phi, phi0=phi0, psa=psa, fmask=fmask,
+            stl_am=stl_am, soilw_am=soilw_am,
+            rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
+            phis0=geometry.phis0, wvi=geometry.wvi, sigl=geometry.sigl, coa=geometry.coa,
+            parameters=self.parameters, esbc=esbc, ghum0=ghum0
+        )
+
+        # Check non-negativity of physically constrained variables
+        self.assertTrue(jnp.all(evap >= 0.0), f"Evaporation should be non-negative, min={jnp.min(evap)}")
+        self.assertTrue(jnp.all(rlus >= 0.0), f"Upward LW radiation should be non-negative, min={jnp.min(rlus)}")
+        self.assertTrue(jnp.all(tskin > 0.0), f"Skin temperature should be positive, min={jnp.min(tskin)}")
+        # Check all outputs are finite
+        self.assertTrue(jnp.all(jnp.isfinite(ustr)), "Wind stress U should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(vstr)), "Wind stress V should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(shf)), "Sensible heat flux should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(evap)), "Evaporation should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(rlus)), "Upward LW radiation should be finite")
+        self.assertTrue(jnp.all(jnp.isfinite(hfluxn)), "Net heat flux should be finite")
 
