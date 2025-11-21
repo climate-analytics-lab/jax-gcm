@@ -24,7 +24,7 @@ mod_radcon.st4a.0,W/m²,st4a,Blackbody emission from full and half atmospheric l
 mod_radcon.flux.1,W/m²,flux,Radiative flux in different spectral bands
 surface_flux.tsfc,K,tsfc,Surface temperature
 shortwave_rad.qcloud,1,qcloud,Equivalent specific humidity of clouds
-surface_flux.evap.0,kg/m²/s,evap,Evaporation
+surface_flux.evap.0,g/m²/s,evap,Evaporation
 shortwave_rad.cloudstr,1,clstr,Stratiform cloud cover
 convection.cbmf,kg/m²/s,cbmf,Cloud-base mass flux
 shortwave_rad.rsds,W/m²,fsfcd,Total downward flux of short-wave radiation at the surface
@@ -51,7 +51,7 @@ surface_flux.hfluxn.1,W/m²,hfluxn,Net downward heat flux
 humidity.rh,1,rh,relative humidity
 surface_flux.vstr.0,N/m²,vstr,v-stress
 normalized_surface_pressure,1,psa,normalized surface pressure
-surface_flux.evap.1,kg/m²/s,evap,evaporation
+surface_flux.evap.1,g/m²/s,evap,evaporation
 mod_radcon.tau2.3,1,tau2,Transmissivity of atmospheric layers
 shortwave_rad.stratz,W/m²,stratz,Polar night cooling in the stratosphere
 mod_radcon.alb_s,1,alb_s,Daily-mean albedo over sea (open sea + sea ice)
@@ -75,5 +75,5 @@ surface_flux.u0,m/s,u0,Near-surface u-wind
 surface_flux.rlus.0,W/m²,slru,Upward flux of long-wave radiation at the surface
 temperature,K,ta,temperature
 land_model.stl_lm,K,stl_lm,Land surface temperature calculated by the land model
-surface_flux.evap.2,kg/m²/s,evap,Evaporation
+surface_flux.evap.2,g/m²/s,evap,Evaporation
 mod_radcon.stratc.1,W/m²,stratc,Stratospheric correction term
