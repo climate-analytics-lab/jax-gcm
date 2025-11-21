@@ -314,7 +314,7 @@ Surface_flux
      - Speedy Equivalent
      - Description
    * - ``evap``
-     - kg/m²/s
+     - g/m²/s
      - ``evap``
      - Evaporation
    * - ``hfluxn``
