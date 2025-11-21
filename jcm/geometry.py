@@ -42,6 +42,7 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shap
             if target_resolution not in VALID_TRUNCATIONS:
                 raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
             ds = upsample_terrain_ds(ds, target_resolution=target_resolution)
+            orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
         elif orography.shape not in VALID_NODAL_SHAPES:
             raise ValueError(f"Invalid terrain data shape: {orography.shape}. Must be one of: {VALID_NODAL_SHAPES}.")
 
