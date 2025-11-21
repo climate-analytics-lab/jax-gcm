@@ -143,6 +143,61 @@ You can customize various aspects of the model:
        total_time=10.0
    )
 
+
+Multi-Device Parallelization
+-----------------------------
+
+JCM supports multi-device parallelization using JAX's SPMD (Single Program Multiple Data) sharding. This allows you to split computation across multiple GPUs or TPUs for faster execution, especially useful for higher resolution simulations.
+
+If you don't specify ``spmd_mesh``, JCM runs on a single device by default. This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
+
+Basic Concepts
+^^^^^^^^^^^^^^
+
+**SPMD Mesh**: Defines how to partition data across devices. The mesh has three dimensions corresponding to ``(x, y, z)`` or ``(longitude, latitude, vertical)``.
+
+**Sharding Strategy**: Typically, for SPEEDY Physics simulations,  you want to shard the longitude dimension first since it usually has the most grid points. 
+For Physics implementations with more layers (e.g. 32 or 64 layers) however, you may find that sharding the dycore in the vertical dimension to be most effective. 
+Future implementations may allow for more flexible sharding strategies.
+
+Enabling Parallelization
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+To enable multi-device parallelization, simply pass an ``spmd_mesh`` when creating your Model:
+
+.. code-block:: python
+
+   import jax
+   from jcm.model import Model
+
+   # Check available devices
+   print(f"Available devices: {jax.devices()}")
+   print(f"Number of devices: {len(jax.devices())}")
+
+   # Define a mesh to split longitude across 4 devices
+   # Mesh shape (4, 1, 1) means:
+   #   - Split longitude dimension across 4 devices
+   #   - Don't split latitude (1)
+   #   - Don't split vertical (1)
+   # Otherwise, create and run model as usual
+   model = Model(spmd_mesh=(4, 1, 1))
+   predictions = model.run(save_interval=5.0, total_time=30.0)
+
+Mesh Configuration Guidelines
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The product of mesh dimensions must equal the number of available devices:
+
+- ``(4, 1, 1)``: Split longitude across 4 devices
+- ``(2, 2, 1)``: Split longitude (2) and latitude (2) across 4 devices total
+- ``(8, 1, 1)``: Split longitude across 8 devices (for higher resolutions)
+
+**Rules of thumb:**
+
+1. Product of mesh dimensions = number of devices
+2. Longitude (x) usually has most grid points → split first
+3. Higher resolutions (T85+) benefit more from sharding
+
 Analyzing Output
 ----------------
 

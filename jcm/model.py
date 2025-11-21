@@ -127,7 +127,7 @@ class Model:
     """
 
     def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
-                 physics: Physics=None, diffusion: DiffusionFilter=None,
+                 physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
         """
         Initialize the model with the given time step, save interval, and total time.
@@ -143,6 +143,8 @@ class Model:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
+            spmd_mesh:
+                Optional tuple describing the SPMD mesh for parallelization
             start_date: 
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
         """
@@ -154,9 +156,9 @@ class Model:
         # Store coords separately - it's used by dynamics but not physics (and can't easily be jitted)
         if geometry is not None: # user-specified geometry takes precedence
             self.geometry = geometry
-            self.coords = coords_from_geometry(geometry)
+            self.coords = coords_from_geometry(geometry, spmd_mesh=spmd_mesh)
         else:
-            self.coords = coords if coords is not None else get_coords()
+            self.coords = coords if coords is not None else get_coords(spmd_mesh=spmd_mesh)
             self.geometry = Geometry.from_coords(coords=self.coords)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
@@ -493,8 +495,11 @@ class Model:
         physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
 
         times = jax.device_get(predictions.times)
+        coords = jax.device_get(self.coords)
 
-        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, coords=self.coords, times=times - times[0])
+        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
+                                 coords=coords, serialize_coords_to_attrs=False,
+                                 times=times - times[0])
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")

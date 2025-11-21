@@ -235,17 +235,19 @@ class Geometry:
                    hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl,
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
-def coords_from_geometry(geometry: Geometry) -> CoordinateSystem:
+def coords_from_geometry(geometry: Geometry, spmd_mesh=None) -> CoordinateSystem:
     """
     Extracts a dinosaur CoordinateSystem from a Geometry object.
 
     Args:
         geometry: Geometry object.
+        spmd_mesh: Optional tuple describing the SPMD mesh for parallelization.
 
     Returns:
         Compatible CoordinateSystem object.
     """
     return get_coords(
         layers=geometry.nodal_shape[0],
-        spectral_truncation=TRUNCATION_FOR_NODAL_SHAPE[geometry.nodal_shape[1:]]
+        spectral_truncation=TRUNCATION_FOR_NODAL_SHAPE[geometry.nodal_shape[1:]],
+        spmd_mesh=spmd_mesh
     )
