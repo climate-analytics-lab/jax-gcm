@@ -689,7 +689,7 @@ class TestLandSurfaceFluxesIdealized(unittest.TestCase):
         ua = jnp.ones((kx, ix, il)) * 5.0
         va = jnp.ones((kx, ix, il)) * 5.0
         ta = jnp.ones((kx, ix, il)) * 288.0
-        qa_base = jnp.ones((kx, ix, il)) * 0.008
+        rh = jnp.ones((kx, ix, il)) * 0.7
         phi = jnp.ones((kx, ix, il)) * 5000.0
         phi0 = jnp.zeros((ix, il))
         psa = jnp.ones((ix, il))
