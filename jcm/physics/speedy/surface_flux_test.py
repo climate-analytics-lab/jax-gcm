@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import functools
 from jax.test_util import check_vjp, check_jvp
+from jcm.physics.speedy.humidity import get_qsat
 
 class TestSurfaceFluxesUnit(unittest.TestCase):
 
@@ -710,9 +711,10 @@ class TestLandSurfaceFluxesIdealized(unittest.TestCase):
         ghum0 = 1.0 - self.parameters.surface_flux.fhum0
 
         # Case 1: Dry air (30% RH)
-        rh_dry = jnp.ones((kx, ix, il)) * 0.3
+        #rh_dry = jnp.ones((kx, ix, il)) * 0.3
+        qa_dry = jnp.ones((kx, ix, il)) * get_qsat(ta, psa, 1) * 0.3
         _, _, _, evap_dry, _, _, _ = self.compute_land_surface_fluxes(
-            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_base, rh=rh_dry,
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_dry, rh=rh,
             phi=phi, phi0=phi0, psa=psa, fmask=fmask,
             stl_am=stl_am, soilw_am=soilw_am,
             rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
@@ -721,9 +723,10 @@ class TestLandSurfaceFluxesIdealized(unittest.TestCase):
         )
 
         # Case 2: Nearly saturated air (95% RH)
-        rh_sat = jnp.ones((kx, ix, il)) * 0.95
+        #rh_sat = jnp.ones((kx, ix, il)) * 0.95
+        qa_moist = jnp.ones((kx, ix, il)) * get_qsat(ta, psa, 1) * 0.95
         _, _, _, evap_sat, _, _, _ = self.compute_land_surface_fluxes(
-            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_base, rh=rh_sat,
+            u0=u0, v0=v0, ua=ua, va=va, ta=ta, qa=qa_moist, rh=rh,
             phi=phi, phi0=phi0, psa=psa, fmask=fmask,
             stl_am=stl_am, soilw_am=soilw_am,
             rsds=rsds, rlds=rlds, alb_l=alb_l, snowc=snowc,
