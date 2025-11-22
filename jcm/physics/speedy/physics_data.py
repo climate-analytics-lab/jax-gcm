@@ -256,36 +256,41 @@ class ConvectionData:
         se: dry static energy
         iptop: Top of convection (layer index)
         cbmf: Cloud-base mass flux
+        qdif: Excess humidity in convective gridboxes
         precnv: Convective precipitation [g/(m^2 s)]
     """
     se: jnp.ndarray 
     iptop: jnp.ndarray 
     cbmf: jnp.ndarray 
+    qdif: jnp.ndarray
     precnv: jnp.ndarray 
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, precnv=None):
+    def zeros(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, qdif=None, precnv=None):
         return cls(
             se = se if se is not None else jnp.zeros((num_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.zeros((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.zeros(nodal_shape),
+            qdif = qdif if qdif is not None else jnp.zeros(nodal_shape),
             precnv = precnv if precnv is not None else jnp.zeros(nodal_shape),
         )
     
     @classmethod
-    def ones(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, precnv=None):
+    def ones(cls, nodal_shape, num_levels, se=None, iptop=None, cbmf=None, qdif=None, precnv=None):
         return cls(
             se = se if se is not None else jnp.ones((num_levels,)+nodal_shape),
             iptop = iptop if iptop is not None else jnp.ones((nodal_shape),dtype=int),
             cbmf = cbmf if cbmf is not None else jnp.ones(nodal_shape),
+            qdif = qdif if qdif is not None else jnp.ones(nodal_shape),
             precnv = precnv if precnv is not None else jnp.ones(nodal_shape),
         )
     
-    def copy(self, se=None, iptop=None, cbmf=None, precnv=None):
+    def copy(self, se=None, iptop=None, cbmf=None, qdif=None, precnv=None):
         return ConvectionData(
             se=se if se is not None else self.se,
             iptop= iptop if iptop is not None else self.iptop,
             cbmf=cbmf if cbmf is not None else self.cbmf,
+            qdif = qdif if qdif is not None else self.qdif,
             precnv=precnv if precnv is not None else self.precnv
         )
     
