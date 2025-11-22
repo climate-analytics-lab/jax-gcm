@@ -27,6 +27,7 @@ shortwave_rad.qcloud,1,qcloud,Equivalent specific humidity of clouds
 surface_flux.evap.0,g/m²/s,evap,Evaporation
 shortwave_rad.cloudstr,1,clstr,Stratiform cloud cover
 convection.cbmf,kg/m²/s,cbmf,Cloud-base mass flux
+convection.qdif,g/kg,qdif,Excess humidity in convective gridboxes
 shortwave_rad.rsds,W/m²,fsfcd,Total downward flux of short-wave radiation at the surface
 surface_flux.shf.0,W/m²,shf,Sensible heat flux
 surface_flux.shf.2,W/m²,shf,Sensible heat flux
