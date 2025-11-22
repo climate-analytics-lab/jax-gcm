@@ -484,8 +484,10 @@ class Model:
         from dinosaur.xarray_utils import data_to_xarray
         from pathlib import Path
 
-        # Clearing any float0s allows us to use this method on derivatives of predictions objects
-        predictions = tree_map(lambda x: jnp.zeros(x.shape) if x.dtype == jax.dtypes.float0 else x, predictions)
+        # float0s are placeholders representing the lack of tangent space for non-differentiable variables
+        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
+        # substituting jax.numpy arrays here allows us to use the predictions_to_xarray method on derivatives of predictions objects
+        predictions = tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, predictions)
 
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions from postprocessed output
