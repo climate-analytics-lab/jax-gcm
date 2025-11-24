@@ -282,7 +282,7 @@ class TestModelUnit(unittest.TestCase):
         default_stats = xr.open_dataset(stats_file)
 
         model, predictions = run_default_speedy_model(save_interval=30.)
-        pred_ds = model.predictions_to_xarray(predictions)
+        pred_ds = predictions.to_xarray()
         pred_ds_monthly = pred_ds.isel(time=-1).mean(dim={'lon', 'lat'}) # global monthly mean, take the last month
 
         # tolerance in # of standard deviations

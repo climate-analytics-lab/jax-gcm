@@ -19,7 +19,7 @@ def main(cfg: DictConfig):
         total_time=cfg.model.total_time
     )
     
-    ds = model.predictions_to_xarray(predictions)
+    ds = predictions.to_xarray()
     hydra_cfg = HydraConfig.get()
     print(hydra_cfg.mode)
     base_dir = Path('outputs') / hydra_cfg.run.dir.split('outputs/')[-1]

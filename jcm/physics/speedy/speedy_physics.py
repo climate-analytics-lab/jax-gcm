@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from collections import abc
 from typing import Callable, Tuple
+from pathlib import Path
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.forcing import ForcingData
@@ -40,6 +41,7 @@ class SpeedyPhysics(Physics):
     """
     parameters: Parameters
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
+    UNITS_TABLE_CSV_PATH = Path(__file__).parent / "units_table.csv"
     
     def __init__(self,
                  parameters: Parameters=Parameters.default(),

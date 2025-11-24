@@ -134,7 +134,9 @@ Attributes:
         Tendency of specific humidity.
 """
 
-class Physics:    
+class Physics:
+    UNITS_TABLE_CSV_PATH = None
+    
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """
         Compute the physical tendencies given the current state and data structs.
@@ -229,7 +231,6 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
     return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
-
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
     """
