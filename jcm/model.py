@@ -59,13 +59,14 @@ class Predictions:
         
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
-        # substituting jax.numpy arrays here allows us to use the predictions_to_xarray method on derivatives of predictions objects
-        predictions = tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, predictions)
+        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives
+        float0s_to_nans = lambda pytree: tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, pytree)
 
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions from postprocessed output
-        dynamics_predictions = self.dynamics
-        physics_predictions = self.physics
+
+        dynamics_predictions = float0s_to_nans(self.dynamics)
+        physics_predictions = float0s_to_nans(self.physics)
 
         nodal_shape = dynamics_predictions.u_wind.shape[1:]
         coords = get_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
