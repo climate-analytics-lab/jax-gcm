@@ -4,14 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jcm"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "JAX-based General Circulation Model"
 authors = [
     {email = "dwatsonparris@ucsd.edu"}
 ]
 license = {text = "Apache"}
 requires-python = ">=3.11"
-dependencies = {file = ["requirements.txt"]}
 keywords = ["climate", "machine-learning"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,6 +21,9 @@ classifiers = [
 
 [tool.setuptools]
 packages = ["jcm"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools_scm]
 fallback_version = "999"
