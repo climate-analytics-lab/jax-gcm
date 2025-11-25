@@ -48,7 +48,7 @@ An aquaplanet simulation is the simplest configuration - a water-covered planet 
    )
 
    # Convert output to xarray Dataset for analysis
-   ds = model.predictions_to_xarray(predictions)
+   ds = predictions.to_xarray()
    print(ds)
 
 This creates a T31 spectral resolution model (96x48 grid points) with 8 vertical levels using the SPEEDY physics package. The default forcing includes zonally symmetric sea surface temperatures and no land.
@@ -88,7 +88,7 @@ For a more realistic simulation with orography and time-varying boundary conditi
    )
 
    # Convert to xarray and save
-   ds = model.predictions_to_xarray(predictions)
+   ds = predictions.to_xarray()
    ds.to_netcdf("output.nc")
 
 Customizing the Model
@@ -208,7 +208,7 @@ The model output is a :py:class:`Predictions` object containing the model state 
    import matplotlib.pyplot as plt
 
    # Convert to xarray Dataset
-   ds = model.predictions_to_xarray(predictions)
+   ds = predictions.to_xarray()
 
    # Print variables
    print(ds.data_vars)

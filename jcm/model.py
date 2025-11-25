@@ -20,7 +20,7 @@ from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.utils import stack_trees, get_coords
+from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, stack_trees, get_coords
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial
@@ -44,6 +44,66 @@ class Predictions:
     dynamics: PhysicsState
     physics: Any
     times: Any
+
+    def to_xarray(self, physics_module: Physics=None):
+        """Convert the full prediction trajectory to a final xarray.Dataset.
+        This function unpacks the nested dictionary structure from the simulation
+        output, formats the data, and converts the time coordinate to a
+        datetime object.
+
+        Args:
+            physics_module (optional): instance of the Physics module used to generate the predictions, used to parse physics fields (default SpeedyPhysics).
+
+        Returns:
+            A final `xarray.Dataset` ready for analysis and plotting.
+
+        """
+        from dinosaur.xarray_utils import data_to_xarray
+        
+        # float0s are placeholders representing the lack of tangent space for non-differentiable variables
+        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
+        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives
+        float0s_to_nans = lambda pytree: tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, pytree)
+
+        # extract dynamics predictions (PhysicsState format)
+        # and physics predictions from postprocessed output
+
+        dynamics_predictions = float0s_to_nans(self.dynamics)
+        physics_predictions = float0s_to_nans(self.physics)
+
+        nodal_shape = dynamics_predictions.u_wind.shape[1:]
+        coords = get_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
+
+        # prepare physics predictions for xarray conversion
+        # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
+        physics_module = physics_module or SpeedyPhysics()
+        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, geometry=Geometry.from_coords(coords))
+
+        times = jax.device_get(self.times)
+        coords = jax.device_get(coords)
+
+        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
+                                 coords=coords, serialize_coords_to_attrs=False,
+                                 times=times - times[0])
+
+        # Import units attribute associated with each xarray output from units_table.csv
+        units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
+        if physics_module.UNITS_TABLE_CSV_PATH is not None:
+            units_df = pd.concat([units_df, pd.read_csv(physics_module.UNITS_TABLE_CSV_PATH)], ignore_index=True)
+        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
+            if var in pred_ds:
+                pred_ds[var].attrs["units"] = unit
+                pred_ds[var].attrs["description"] = desc
+        
+        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
+        pred_ds = pred_ds.isel(level=slice(None, None, -1))
+
+        # convert time in days to datetime
+        pred_ds['time'] = (
+            times*(timedelta64(1, 'D')/timedelta64(1, 'ns'))
+        ).astype('datetime64[ns]')
+        
+        return pred_ds
 
 class DiagnosticsCollector(nnx.Module):
     data: nnx.Variable
@@ -476,58 +536,3 @@ class Model:
             self._final_modal_state = self._prepare_initial_modal_state(initial_state)
 
         return self.resume(forcing=forcing, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
-
-    def predictions_to_xarray(self, predictions):
-        """Convert the full prediction trajectory to a final xarray.Dataset.
-        This function unpacks the nested dictionary structure from the simulation
-        output, formats the data, and converts the time coordinate to a
-        datetime object.
-
-        Args:
-            predictions: 
-                The raw output from the `run` or `resume` method.
-
-        Returns:
-            A final `xarray.Dataset` ready for analysis and plotting.
-
-        """
-        from dinosaur.xarray_utils import data_to_xarray
-        from pathlib import Path
-
-        # float0s are placeholders representing the lack of tangent space for non-differentiable variables
-        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
-        # substituting jax.numpy arrays here allows us to use the predictions_to_xarray method on derivatives of predictions objects
-        predictions = tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, predictions)
-
-        # extract dynamics predictions (PhysicsState format)
-        # and physics predictions from postprocessed output
-        dynamics_predictions = predictions.dynamics
-        physics_predictions = predictions.physics
-
-        # prepare physics predictions for xarray conversion
-        # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
-        physics_preds_dict = self.physics.data_struct_to_dict(physics_predictions, self.geometry)
-
-        times = jax.device_get(predictions.times)
-        coords = jax.device_get(self.coords)
-
-        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
-                                 coords=coords, serialize_coords_to_attrs=False,
-                                 times=times - times[0])
-
-        # Import units attribute associated with each xarray output from units_table.csv
-        units_df = pd.read_csv(Path(__file__).parent.parent / "jcm" / "physics" / "speedy" / "units_table.csv")
-        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
-            if var in pred_ds:
-                pred_ds[var].attrs["units"] = unit
-                pred_ds[var].attrs["description"] = desc
-        
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
-
-        # convert time in days to datetime
-        pred_ds['time'] = (
-            times*(timedelta64(1, 'D')/timedelta64(1, 'ns'))
-        ).astype('datetime64[ns]')
-        
-        return pred_ds

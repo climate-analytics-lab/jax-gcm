@@ -56,7 +56,7 @@ predictions = model.run(
 )
 
 # Convert output to xarray Dataset for analysis
-ds = model.predictions_to_xarray(predictions)
+ds = predictions.to_xarray()
 print(ds)
 ```
 

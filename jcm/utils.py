@@ -3,11 +3,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax import jit
 from jax.tree_util import tree_map
+from pathlib import Path
 import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+
+DYNAMICS_UNITS_TABLE_CSV_PATH = Path(__file__).parent / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
@@ -25,13 +28,17 @@ TRUNCATION_FOR_NODAL_SHAPE = {
 VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
 
-def get_coords(layers=8, spectral_truncation=31, spmd_mesh=None) -> CoordinateSystem:
+def get_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     f"""
     Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
     from dinosaur.spherical_harmonic import FastSphericalHarmonics, RealSphericalHarmonics
 
-    if spectral_truncation not in VALID_TRUNCATIONS:
+    if nodal_shape is not None:
+        if nodal_shape not in VALID_NODAL_SHAPES:
+            raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
+        spectral_truncation = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
+    elif spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
     horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
 

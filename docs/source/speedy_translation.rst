@@ -86,6 +86,10 @@ Convection
      - g/m²/s
      - ``precnv``
      - Convective precipitation [g/(m^2 s)]
+   * - ``qdif``
+     - g/kg
+     - ``qdif``
+     - Excess humidity in convective gridboxes
    * - ``se``
      - J/kg
      - ``se``

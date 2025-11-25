@@ -1,0 +1,7 @@
+Variable,Units,Speedy,Description
+v_wind,m/s,va,V-wind
+u_wind,m/s,ua,U-wind
+specific_humidity,g/kg,qa,Specific humidity
+normalized_surface_pressure,1,psa,normalized surface pressure
+geopotential,m²/s²,phi,geopotential
+temperature,K,ta,temperature
