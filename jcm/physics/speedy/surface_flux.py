@@ -394,8 +394,7 @@ def get_surface_fluxes(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute surface fluxes for land and sea surfaces.
+    """Compute surface fluxes for land and sea surfaces.
 
     Parameters
     ----------
