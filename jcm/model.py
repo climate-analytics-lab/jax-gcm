@@ -38,7 +38,9 @@ class Predictions:
             the dynamical state.
         physics (Any): Diagnostic physics data computed by the physics package.
         times (Any): Timestamps of the predictions.
+
     """
+
     dynamics: PhysicsState
     physics: Any
     times: Any
@@ -50,6 +52,7 @@ class DiagnosticsCollector(nnx.Module):
     steps_to_average: int
 
     def __init__(self, steps_to_average):
+        """Initialize DiagnosticsCollector for accumulating physics diagnostics over multiple steps."""
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
         self.steps_to_average = steps_to_average
@@ -70,19 +73,22 @@ def averaged_trajectory_from_step(
     post_process_fn=lambda x: x,
     **kwargs
 ) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
-    """Returns a function that accumulates repeated applications of `step_fn`.
+    """Return a function that accumulates repeated applications of `step_fn`.
     Compute a trajectory by repeatedly calling `step_fn()`
     `outer_steps * inner_steps` times.
+
     Args:
         step_fn: function that takes a state and returns state after one time step.
         outer_steps: number of steps to save in the generated trajectory.
         inner_steps: number of repeated calls to step_fn() between saved steps.
         start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
         post_process_fn: function to apply to trajectory outputs.
+
     Returns:
         A function that takes an initial state and returns a tuple consisting of:
         (1) the final frame of the trajectory.
         (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
+
     """
     def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
@@ -122,15 +128,12 @@ def averaged_trajectory_from_step(
     return integrate
 
 class Model:
-    """
-    Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet.
-    """
+    """Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet."""
 
     def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
-        """
-        Initialize the model with the given time step, save interval, and total time.
+        """Initialize the model with the given time step, save interval, and total time.
         
         Args:
             time_step:
@@ -147,8 +150,8 @@ class Model:
                 Optional tuple describing the SPMD mesh for parallelization
             start_date: 
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
-        """
 
+        """
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
@@ -223,13 +226,12 @@ class Model:
         self._final_modal_state = None
     
     def _make_diffusion_fn(self, timescale: jnp.float_, order: jnp.int_, replace_fn):
-        '''
-        Returns diffusion filter function handle for use in the model time step.
+        """Return diffusion filter function handle for use in the model time step.
 
         timescale: diffusion timescale (s)
         order: order of diffusion operator
         replace_fn: function that takes (u_next, u_temp) and returns the updated u_next after diffusion (selects which variables to diffuse)
-        '''
+        """
         from dinosaur.filtering import horizontal_diffusion_filter
 
         def diffusion_filter(u, u_next):
@@ -243,7 +245,7 @@ class Model:
         return diffusion_filter
     
     def _prepare_initial_modal_state(self, physics_state: PhysicsState=None, random_seed=0, sim_time=0.0, humidity_perturbation=False) -> primitive_equations.State:
-        """Prepares initial dinosaur.primitive_equations.State for a model run.
+        """Prepare initial dinosaur.primitive_equations.State for a model run.
 
         Args:
             physics_state:
@@ -257,6 +259,7 @@ class Model:
 
         Returns:
             A `primitive_equations.State` object ready for integration.
+
         """
         from jcm.physics_interface import physics_state_to_dynamics_state
 
@@ -286,14 +289,14 @@ class Model:
         )
 
     def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
-        """
-        For given surface forcing conditions, returns a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
+        """For given surface forcing conditions, return a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
 
         Args:
             forcing: ForcingData object containing surface forcing conditions.
 
         Returns:
             A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
+
         """
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
             get_physical_tendencies(
@@ -313,7 +316,7 @@ class Model:
         return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
     def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
-        """Post-processes a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
+        """Post-process a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
             state: 
@@ -322,6 +325,7 @@ class Model:
         Returns:
             A dictionary containing the `PhysicsState` ('dynamics') and the
             diagnostic physics variables (data structure determined by model.physics).
+
         """
         from jcm.physics_interface import verify_state
 
@@ -364,7 +368,7 @@ class Model:
                        total_time=120.0,
                        output_averages=False,
     ) -> tuple[primitive_equations.State, Predictions]:
-        """Runs the full simulation forward in time starting from given initial state.
+        """Run the full simulation forward in time starting from given initial state.
         Alternative to model.run / model.resume which does not read/write model's internal current state.
         
         Args:
@@ -381,6 +385,7 @@ class Model:
     
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
+
         """
         step_fn_factory = self._get_step_fn_factory(forcing)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
@@ -410,7 +415,7 @@ class Model:
                total_time=120.0,
                output_averages=False
     ) -> Predictions:
-        """Runs the full simulation forward in time starting from end of previous call to model.run or model.resume.
+        """Run the full simulation forward in time starting from end of previous call to model.run or model.resume.
 
         Args:
             forcing:
@@ -424,6 +429,7 @@ class Model:
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
+
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         final_modal_state, predictions = self.run_from_state(
@@ -444,7 +450,7 @@ class Model:
             total_time=120.0,
             output_averages=False
     ) -> Predictions:
-        """Sets model.initial_nodal_state and model.start_date and runs the full simulation forward in time.
+        """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
         Args:
             initial_state:
@@ -460,6 +466,7 @@ class Model:
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
+
         """
         if isinstance(initial_state, primitive_equations.State):
             self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
@@ -471,7 +478,7 @@ class Model:
         return self.resume(forcing=forcing, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
 
     def predictions_to_xarray(self, predictions):
-        """Converts the full prediction trajectory to a final xarray.Dataset.
+        """Convert the full prediction trajectory to a final xarray.Dataset.
         This function unpacks the nested dictionary structure from the simulation
         output, formats the data, and converts the time coordinate to a
         datetime object.
@@ -482,6 +489,7 @@ class Model:
 
         Returns:
             A final `xarray.Dataset` ready for analysis and plotting.
+
         """
         from dinosaur.xarray_utils import data_to_xarray
         from pathlib import Path

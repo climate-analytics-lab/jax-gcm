@@ -1,5 +1,4 @@
-"""
-Date: 2/11/2024
+"""Date: 2/11/2024
 Parametrization of convection. Convection is modelled using a simplified 
 version of the Tiedtke (1993) mass-flux convection scheme.
 """
@@ -19,8 +18,7 @@ def diagnose_convection(
     forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Diagnose convectively unstable gridboxes
+    """Diagnose convectively unstable gridboxes
 
     Convection is activated in gridboxes with conditional instability. This
     is diagnosed by checking for any tropopsheric half level where the
@@ -40,6 +38,7 @@ def diagnose_convection(
     Returns:
     iptop: Top of convection (layer index)
     qdif: Excess humidity in convective gridboxes
+
     """
     kx, ix, il = se.shape
     iptop = jnp.full((ix, il), kx + 1)  # Initialize iptop with nlp
@@ -104,8 +103,7 @@ def get_convection_tendencies(
     forcing: ForcingData=None,
     geometry: Geometry=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
+    """Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
     Args:
     psa: Normalised surface pressure [p/p0]
@@ -119,6 +117,7 @@ def get_convection_tendencies(
     precnv: Convective precipitation [g/(m^2 s)]
     dfse:  Net flux of dry static energy into each atmospheric layer
     dfqa: Net flux of specific humidity into each atmospheric layer
+
     """
     se = cp * state.temperature + state.geopotential
     qa = state.specific_humidity

@@ -1,5 +1,4 @@
-"""
-Date: 2/11/2024
+"""Date: 2/11/2024
 Parametrization of large-scale condensation.
 """
 from jax import jit
@@ -19,8 +18,7 @@ def get_large_scale_condensation_tendencies(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute large-scale condensation and associated tendencies of temperature and moisture
+    """Compute large-scale condensation and associated tendencies of temperature and moisture
 
     Args:
         psa: Normalized surface pressure
@@ -33,6 +31,7 @@ def get_large_scale_condensation_tendencies(
         precls: Precipitation due to large-scale condensation
         dtlsc: Temperature tendency due to large-scale condensation
         dqlsc: Specific humidity tendency due to large-scale condensation
+
     """
     # 1. Initialization
     humidity = physics_data.humidity

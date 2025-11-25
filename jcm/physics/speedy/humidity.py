@@ -1,5 +1,4 @@
-"""
-Date: 2/11/2024
+"""Date: 2/11/2024
 For converting between specific and relative humidity, and computing the 
 saturation specific humidity.
 """
@@ -21,8 +20,7 @@ def spec_hum_to_rel_hum(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Converts specific humidity to relative humidity, and also returns saturation 
+    """Convert specific humidity to relative humidity, and also return saturation
     specific humidity.
 
     Args:
@@ -34,8 +32,8 @@ def spec_hum_to_rel_hum(
     Returns:
         rh: Relative humidity
         qsat: Saturation specific humidity
-    """
 
+    """
     # compute thermodynamic variables: logic from physics.f90:110-114
     psa = state.normalized_surface_pressure
     
@@ -52,8 +50,7 @@ def spec_hum_to_rel_hum(
 
 @jit
 def rel_hum_to_spec_hum(ta, ps, sig, rh):
-    """
-    Converts relative humidity to specific humidity, and also returns saturation 
+    """Convert relative humidity to specific humidity, and also return saturation
     specific humidity.
 
     Args:
@@ -65,6 +62,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
     Returns:
         qa: Specific humidity
         qsat: Saturation specific humidity
+
     """
     qsat = get_qsat(ta, ps, sig)
     qa = rh * qsat
@@ -72,8 +70,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
 
 @jit
 def get_qsat(ta, ps, sig):
-    """
-    Computes saturation specific humidity.
+    """Compute saturation specific humidity.
     
     Args:
         ta: Absolute temperature [K]
@@ -82,8 +79,8 @@ def get_qsat(ta, ps, sig):
     
     Returns:
         qsat: Saturation specific humidity (g/kg)
+
     """
-    
     e0 = 6.108e-3
     c1 = 17.269
     c2 = 21.875

@@ -1,5 +1,4 @@
-"""
-Date: 2/1/2024
+"""Date: 2/1/2024
 For storing all variables related to the model's grid space.
 """
 import jax.numpy as jnp
@@ -12,8 +11,7 @@ from typing import Tuple
 
 def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shape=None,
                 terrain_file=None, target_resolution=None, fmask_threshold=0.1) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
+    """Get the orography data for the model grid. If fmask and/or orography are provided, use them directly
     (defaulting the other to zeros if only one is provided). If terrain_file is provided, load both from file.
     Otherwise, default both to zeros with shape nodal_shape.
 
@@ -24,9 +22,11 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shap
         terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
         target_resolution: Spectral truncation to interpolate the terrain data to, default None (no interpolation).
         fmask_threshold: Threshold for rounding fmask values that are close to 0 or 1.
+
     Returns:
         Orography height (m) (ix, il)
         Land-sea mask (ix, il)
+
     """
     if fmask is None and orography is None:
         if terrain_file is None:
@@ -107,8 +107,7 @@ class Geometry:
 
     @classmethod
     def from_coords(cls, coords: CoordinateSystem, orography=None, fmask=None, terrain_file=None, interpolate=False, truncation_number=None):
-        """
-        Initializes all of the speedy model geometry variables from a dinosaur CoordinateSystem.
+        """Initialize all of the speedy model geometry variables from a dinosaur CoordinateSystem.
 
         Args:
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
@@ -120,6 +119,7 @@ class Geometry:
 
         Returns:
             Geometry object
+
         """
         # Orography and surface geopotential
         orog, fmask = get_terrain(fmask=fmask, orography=orography, nodal_shape=coords.horizontal.nodal_shape,
@@ -143,8 +143,7 @@ class Geometry:
     
     @classmethod
     def from_spectral_truncation(cls, spectral_truncation, num_levels=8, **kwargs):
-        """
-        Initializes all of the speedy model geometry variables from spectral truncation (legacy code from speedy.f90).
+        """Initialize all of the speedy model geometry variables from spectral truncation (legacy code from speedy.f90).
 
         Args:
             spectral_truncation: Spectral truncation number for horizontal resolution.
@@ -157,13 +156,13 @@ class Geometry:
 
         Returns:
             Geometry object
+
         """
         return cls.from_coords(coords=get_coords(layers=num_levels, spectral_truncation=spectral_truncation), **kwargs)
 
     @classmethod
     def from_grid_shape(cls, nodal_shape, **kwargs):
-        """
-        Initializes all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
+        """Initialize all of the speedy model geometry variables from grid dimensions (legacy code from speedy.f90).
 
         Args:
             nodal_shape: Shape of the nodal grid `(ix,il)`.
@@ -176,6 +175,7 @@ class Geometry:
 
         Returns:
             Geometry object
+
         """
         if nodal_shape not in VALID_NODAL_SHAPES:
             raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
@@ -183,8 +183,7 @@ class Geometry:
     
     @classmethod
     def from_file(cls, terrain_file, target_resolution=None, num_levels=8, truncation_number=None):
-        """
-        Initializes all of the speedy model geometry variables from a given terrain file containing orog and lsm.
+        """Initialize all of the speedy model geometry variables from a given terrain file containing orog and lsm.
         
         Args:
             terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
@@ -194,6 +193,7 @@ class Geometry:
         
         Returns:
             Geometry object
+
         """
         orography, fmask = get_terrain(terrain_file=terrain_file, target_resolution=target_resolution)
         return cls.from_grid_shape(
@@ -206,8 +206,7 @@ class Geometry:
 
     @classmethod
     def single_column_geometry(cls, radang=0., orog=0., fmask=0., phis0=None, num_levels=8):
-        """
-        Initializes a Geometry instance for a single column model.
+        """Initialize a Geometry instance for a single column model.
 
         Args:
             radang (optional): Latitude of the single column in radians (default 0).
@@ -218,6 +217,7 @@ class Geometry:
 
         Returns:
             Geometry object
+
         """
         sia, coa = jnp.sin(radang), jnp.cos(radang)
 
@@ -236,8 +236,7 @@ class Geometry:
                    grdsig=grdsig, grdscp=grdscp, wvi=wvi)
 
 def coords_from_geometry(geometry: Geometry, spmd_mesh=None) -> CoordinateSystem:
-    """
-    Extracts a dinosaur CoordinateSystem from a Geometry object.
+    """Extract a dinosaur CoordinateSystem from a Geometry object.
 
     Args:
         geometry: Geometry object.
@@ -245,6 +244,7 @@ def coords_from_geometry(geometry: Geometry, spmd_mesh=None) -> CoordinateSystem
 
     Returns:
         Compatible CoordinateSystem object.
+
     """
     return get_coords(
         layers=geometry.nodal_shape[0],

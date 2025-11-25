@@ -39,7 +39,18 @@ markers = [
 extend-select = ["D"]
 
 [tool.ruff.lint]
-ignore = ["D100", "D104", "D107", "E731"]
+ignore = [
+    "D100", # missing public module docstrings
+    "D101", # missing public class docstrings
+    "D102", # missing public method docstrings
+    "D103", # missing public function docstrings
+    "D104", # missing public package docstrings
+    "D205", # missing blank lines between summary line and description
+    "D400", # first lines missing period
+    "D415", # docstrings missing closing punctuation
+    "D417", # missing argument descriptions
+    "E731"
+]
 
 [tool.ruff.lint.per-file-ignores]
-"*.ipynb" = ["D", "F821"]
+"*.ipynb" = ["F821"]

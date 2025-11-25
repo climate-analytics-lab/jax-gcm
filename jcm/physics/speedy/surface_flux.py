@@ -20,8 +20,7 @@ def get_surface_fluxes(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Parameters
+    """Parameters
     ----------
     psa : 2D array
         - Normalised surface pressure, state.normalized_surface_pressure
@@ -301,13 +300,11 @@ def get_surface_fluxes(
 
 @jit
 def get_orog_land_sfc_drag(phis0, hdrag):
-    """
-    Parameters
+    """Parameters
     ----------
     phi0 : Array
         - Array used for calculating the forog
     """
-
     rhdrag = 1/(grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))

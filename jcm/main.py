@@ -6,9 +6,7 @@ from pathlib import Path
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig):
-    """
-    Allows you to run Speedy Model with adjustable parameters
-    """
+    """Run Speedy Model with adjustable parameters"""
     model = Model(
         time_step=cfg.model.time_step,
         layers=cfg.model.layers

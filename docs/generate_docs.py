@@ -4,8 +4,7 @@ import sys
 from collections import defaultdict
 
 def parse_csv_to_rst_tables(csv_file):
-    """
-    Parse CSV file and create RST tables grouped by module (first word before .)
+    """Parse CSV file and create RST tables grouped by module (first word before .)
     """
     modules = defaultdict(dict)
     
@@ -95,8 +94,7 @@ def create_sphinx_rst_table(module_name, data):
     return rst_table
 
 def update_sphinx_doc(csv_file, output_file):
-    """
-    Update the Sphinx documentation file
+    """Update the Sphinx documentation file
     """
     # Generate RST content
     rst_content = parse_csv_to_rst_tables(csv_file)
@@ -113,8 +111,7 @@ def update_sphinx_doc(csv_file, output_file):
         return False
 
 def main():
-    """
-    Main function for workflow execution
+    """Main function for workflow execution
     """
     output_file = 'docs/source/speedy_translation.rst'
     

@@ -10,11 +10,11 @@ output_file, terrain_file = Path(__file__).parent / 't30/clim/forcing.nc', Path(
 file_names = ['land.nc', 'sea_ice.nc', 'sea_surface_temperature.nc', 'snow.nc', 'soil.nc', 'surface.nc']
 
 def process_forcing(ds):
-    """
-    Convert compiled speedy.f90 boundary conditions to format expected by jcm.
+    """Convert compiled speedy.f90 boundary conditions to format expected by jcm.
 
     Args:
         ds (xarray.Dataset): Dataset containing boundary conditions.
+
     """
     # Reorder coordinates to match jcm expectations
     ds = ds.sortby('lat', ascending=True)
@@ -51,14 +51,15 @@ def process_forcing(ds):
     return ds.drop_vars({'swl1', 'swl2', 'swl3', 'vegh', 'vegl', 'snowd', 'orog', 'lsm'}), ds_terrain
 
 def main(argv=None):
-    """
-    Main entrypoint for compile CLI and for importable use.
+    """Run main entrypoint for compile CLI and for importable use.
 
     Args:
         argv (list|None): list of command-line args (not including program name).
                           If None, uses sys.argv[1:].
+
     Returns:
         int: exit code (0 = success)
+
     """
     if argv is None:
         argv = sys.argv[1:]

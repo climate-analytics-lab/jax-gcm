@@ -15,7 +15,8 @@ def get_vertical_diffusion_tend(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
+    """Get vertical diffusion tendencies.
+    
     Inputs:
         se(ix,il,kx)     !! Dry static energy
         rh(ix,il,kx)     !! Relative humidity
@@ -27,8 +28,8 @@ def get_vertical_diffusion_tend(
     Returns:
         ttenvd(ix,il,kx) !! Temperature tendency
         qtenvd(ix,il,kx) !! Specific humidity tendency
-    """
 
+    """
     se = physics_data.convection.se
     rh = physics_data.humidity.rh
     qsat = physics_data.humidity.qsat

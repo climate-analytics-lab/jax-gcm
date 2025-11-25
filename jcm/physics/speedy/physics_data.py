@@ -7,11 +7,11 @@ ablco2_ref = 6.0
 
 @tree_math.struct
 class LWRadiationData:
+    """Parameters:
+    dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+    ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
     """
-    Parameters:
-        dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
-        ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
-    """
+
     dfabs: jnp.ndarray 
     ftop: jnp.ndarray
 
@@ -40,24 +40,24 @@ class LWRadiationData:
 
 @tree_math.struct
 class SWRadiationData:
+    """Parameters:
+    qcloud: Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
+    fsol: Solar radiation at the top
+    rsds: Total downward flux of short-wave radiation at the surface
+    rsns: Net downward flux of short-wave radiation at the surface
+    ozone: Ozone concentration in lower stratosphere
+    ozupp: Ozone depth in upper stratosphere
+    zenit: The zenith angle
+    stratz: Polar night cooling in the stratosphere
+    gse: Vertical gradient of dry static energy
+    icltop: Cloud top level
+    cloudc: Total cloud cover
+    cloudstr: Stratiform cloud cover
+    ftop: Net downward flux of short-wave radiation at the top of the atmosphere
+    dfabs: Flux of short-wave radiation absorbed in each atmospheric layer
+    compute_shortwave: Flag to compute shortwave radiation
     """
-    Parameters:
-        qcloud: Equivalent specific humidity of clouds - set by clouds() used by get_shortwave_rad_fluxes()
-        fsol: Solar radiation at the top
-        rsds: Total downward flux of short-wave radiation at the surface
-        rsns: Net downward flux of short-wave radiation at the surface
-        ozone: Ozone concentration in lower stratosphere
-        ozupp: Ozone depth in upper stratosphere
-        zenit: The zenith angle
-        stratz: Polar night cooling in the stratosphere
-        gse: Vertical gradient of dry static energy
-        icltop: Cloud top level
-        cloudc: Total cloud cover
-        cloudstr: Stratiform cloud cover
-        ftop: Net downward flux of short-wave radiation at the top of the atmosphere
-        dfabs: Flux of short-wave radiation absorbed in each atmospheric layer
-        compute_shortwave: Flag to compute shortwave radiation
-    """
+
     qcloud: jnp.ndarray  
     fsol: jnp.ndarray  
     rsds: jnp.ndarray   
@@ -140,12 +140,12 @@ class SWRadiationData:
     
 @tree_math.struct
 class ModRadConData:
-    """
-    Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intialized/held somewhere else?
+    """Time-invariant fields (arrays) - #FIXME: since this is time invariant, should it be intialized/held somewhere else?
     Radiative properties of the surface (updated in fordate)
     Albedo and snow cover arrays
 
-    Parameters:
+    Parameters
+    ----------
         ablco2: CO2 absorptivity
         alb_l: Daily-mean albedo over land (bare-land + snow)
         alb_s: Daily-mean albedo over sea (open sea + sea ice)
@@ -155,7 +155,9 @@ class ModRadConData:
         st4a: Blackbody emission from full and half atmospheric levels
         stratc: Stratospheric correction term
         flux: Radiative flux in different spectral bands
+
     """
+
     ablco2: jnp.float32 
     alb_l: jnp.ndarray  
     alb_s: jnp.ndarray  
@@ -213,12 +215,12 @@ class ModRadConData:
 
 @tree_math.struct
 class CondensationData:
+    """Parameters:
+    precls: Precipitation due to large-scale condensation
+    dtlsc: Temperature tendency due to large-scale condensation
+    dqlsc: Specific humidity tendency due to large-scale condensation
     """
-    Parameters:
-        precls: Precipitation due to large-scale condensation
-        dtlsc: Temperature tendency due to large-scale condensation
-        dqlsc: Specific humidity tendency due to large-scale condensation
-    """
+
     precls: jnp.ndarray 
     dtlsc: jnp.ndarray
     dqlsc: jnp.ndarray
@@ -251,13 +253,13 @@ class CondensationData:
 
 @tree_math.struct
 class ConvectionData:
+    """Parameters:
+    se: dry static energy
+    iptop: Top of convection (layer index)
+    cbmf: Cloud-base mass flux
+    precnv: Convective precipitation [g/(m^2 s)]
     """
-    Parameters:
-        se: dry static energy
-        iptop: Top of convection (layer index)
-        cbmf: Cloud-base mass flux
-        precnv: Convective precipitation [g/(m^2 s)]
-    """
+
     se: jnp.ndarray 
     iptop: jnp.ndarray 
     cbmf: jnp.ndarray 
@@ -298,11 +300,11 @@ class ConvectionData:
 
 @tree_math.struct
 class HumidityData:
+    """Parameters:
+    rh: relative humidity
+    qsat: saturation specific humidity
     """
-    Parameters:
-        rh: relative humidity
-        qsat: saturation specific humidity
-    """
+
     rh: jnp.ndarray
     qsat: jnp.ndarray 
 
@@ -331,22 +333,22 @@ class HumidityData:
 
 @tree_math.struct
 class SurfaceFluxData:
+    """Parameters:
+    ustr: u-stress
+    vstr: v-stress
+    shf: Sensible heat flux
+    evap: Evaporation
+    rlus: Upward flux of long-wave radiation at the surface
+    rlds: Downward flux of long-wave radiation at the surface
+    rlns: Net upward flux of long-wave radiation at the surface
+    hfluxn: Net downward heat flux
+    tsfc: Surface temperature
+    tskin: Skin surface temperature
+    u0: Near-surface u-wind
+    v0: Near-surface v-wind
+    t0: Near-surface temperature
     """
-    Parameters:
-        ustr: u-stress
-        vstr: v-stress
-        shf: Sensible heat flux
-        evap: Evaporation
-        rlus: Upward flux of long-wave radiation at the surface
-        rlds: Downward flux of long-wave radiation at the surface
-        rlns: Net upward flux of long-wave radiation at the surface
-        hfluxn: Net downward heat flux
-        tsfc: Surface temperature
-        tskin: Skin surface temperature
-        u0: Near-surface u-wind
-        v0: Near-surface v-wind
-        t0: Near-surface temperature
-    """
+
     ustr: jnp.ndarray 
     vstr: jnp.ndarray 
     shf: jnp.ndarray 
@@ -419,10 +421,10 @@ class SurfaceFluxData:
 
 @tree_math.struct
 class LandModelData:
+    """Parameters:
+    stl_lm: Land surface temperature calculated by the land model
     """
-    Parameters:
-        stl_lm: Land surface temperature calculated by the land model
-    """
+
     stl_lm: jnp.ndarray
     
     @classmethod

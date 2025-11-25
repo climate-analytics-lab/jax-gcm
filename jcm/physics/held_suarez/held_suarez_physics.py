@@ -35,6 +35,7 @@ class HeldSuarezPhysics(Physics):
             maxT: upper temperature bound of radiative equilibrium.
             dTy: horizontal temperature variation of radiative equilibrium.
             dThz: vertical temperature variation of radiative equilibrium.
+
         """
         self.coords = coords
         self.sigma_b = sigma_b
@@ -79,8 +80,7 @@ class HeldSuarezPhysics(Physics):
         geometry: Geometry,
         date: DateData,
     ) -> Tuple[PhysicsTendency, None]:
-        """
-        Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
+        """Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
 
         Args:
             state: Current state variables
@@ -91,6 +91,7 @@ class HeldSuarezPhysics(Physics):
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (unused)
+
         """
         Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)

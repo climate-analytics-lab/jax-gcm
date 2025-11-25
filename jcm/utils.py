@@ -55,9 +55,8 @@ def get_coords(layers=8, spectral_truncation=31, spmd_mesh=None) -> CoordinateSy
 
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
-    """
-        grid_field: field in grid space
-        trunc: truncation level, # of wavenumbers to keep
+    """grid_field: field in grid space
+    trunc: truncation level, # of wavenumbers to keep
     """
     spectral_field = grid.to_modal(grid_field)
     nx,mx = spectral_field.shape
@@ -74,12 +73,12 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
     return truncated_grid_field
 
 def validate_ds(ds, expected_structure):
-    """
-    Validate that an xarray Dataset has the expected variables and dimensions.
+    """Validate that an xarray Dataset has the expected variables and dimensions.
 
     Args:
         ds (xr.Dataset): The dataset to validate.
         expected_structure (dict): A dictionary where keys are variable names and values are tuples of expected dimension names.
+
     """
     missing_vars = set(expected_structure) - set(ds.data_vars)
     if missing_vars:
