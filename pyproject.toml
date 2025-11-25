@@ -1,5 +1,45 @@
+[build-system]
+requires = ["setuptools>=40.4", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jcm"
+dynamic = ["version"]
+description = "JAX-based General Circulation Model"
+authors = [
+    {email = "dwatsonparris@ucsd.edu"}
+]
+license = {text = "Apache"}
+requires-python = ">=3.11"
+dependencies = [
+    "jax",
+    "dinosaur",
+]
+keywords = ["climate", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Topic :: Scientific/Engineering",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.setuptools]
+packages = ["jcm"]
+
+[tool.setuptools_scm]
+fallback_version = "999"
+
+[tool.pytest.ini_options]
+python_files = "*_test.py"
+markers = [
+    "slow: slow tests",
+]
+
+[tool.ruff]
+extend-select = ["D"]
+
 [tool.ruff.lint]
-ignore = ["E731"] # make lambda functions not cause lint errors
+ignore = ["D100", "D104", "D107", "E731"]
 
 [tool.ruff.lint.per-file-ignores]
-"*.ipynb" = ["F821"] # fix spurious 'undefined variable' lint errors on notebooks
+"*.ipynb" = ["F821"]
