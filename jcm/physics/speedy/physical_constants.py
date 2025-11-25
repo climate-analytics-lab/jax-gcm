@@ -21,6 +21,10 @@ sbc = 5.67e-8 # Stefan-Boltzmann constant
 solc = 342.0 # Solar constant (area averaged) in W/m^2
 epssw = 0.020 # Fraction of incoming solar radiation absorbed by ozone
 
+# Additional constants for Simplified Betts-Miller convection scheme
+R_vapour = 461.5  # Gas constant for water vapor (J/(kg·K))
+mol_ratio = 0.622  # Molecular weight ratio of water vapor to dry air (M_v/M_d ≈ 18.015/28.964)
+
 gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
 hscale = 7.5       # Reference scale height for pressure (in km)
 hshum  = 2.5       # Reference scale height for specific humidity (in km)

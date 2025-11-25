@@ -30,6 +30,26 @@ class ConvectionParameters:
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
+class SBMConvectionParameters:
+    """
+    Parameters for the Simplified Betts-Miller convection scheme.
+    
+    Following Frierson (2007): https://doi.org/10.1175/JAS3935.1
+    """
+    time_scale: jnp.ndarray      # Relaxation time for profile adjustment [hours]
+    relative_humidity: jnp.ndarray  # Relative humidity for reference profile [dimensionless, 0-1]
+
+    @classmethod
+    def default(cls):
+        return cls(
+            time_scale=jnp.array(4.0),        # 4 hours, as in Frierson 2007
+            relative_humidity=jnp.array(0.7)  # 70% RH for reference profile
+        )
+
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
 class ForcingParameters:
     increase_co2: jnp.bool # Whether to increase CO2 concentration over time
     co2_year_ref: jnp.int32 # Reference year for CO2 concentration
@@ -233,7 +253,7 @@ class VerticalDiffusionParameters:
 
 @tree_math.struct
 class Parameters:
-    convection: ConvectionParameters
+    convection: SBMConvectionParameters #ConvectionParameters
     condensation: CondensationParameters
     shortwave_radiation: ShortwaveRadiationParameters
     mod_radcon: ModRadConParameters
@@ -244,7 +264,7 @@ class Parameters:
     @classmethod
     def default(cls):
         return cls(
-            convection = ConvectionParameters.default(),
+            convection = SBMConvectionParameters.default(), #ConvectionParameters.default(),
             condensation = CondensationParameters.default(),
             shortwave_radiation = ShortwaveRadiationParameters.default(),
             mod_radcon = ModRadConParameters.default(),
