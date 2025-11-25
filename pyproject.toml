@@ -11,10 +11,7 @@ authors = [
 ]
 license = {text = "Apache"}
 requires-python = ">=3.11"
-dependencies = [
-    "jax",
-    "dinosaur",
-]
+dependencies = {file = ["requirements.txt"]}
 keywords = ["climate", "machine-learning"]
 classifiers = [
     "Development Status :: 3 - Alpha",
