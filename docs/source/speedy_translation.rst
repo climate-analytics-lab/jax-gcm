@@ -1,43 +1,6 @@
 Speedy Variable Translation
 ===========================
 
-Physicsstate
-------------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 15 20 40
-
-   * - Jax Variable
-     - Units
-     - Speedy Equivalent
-     - Description
-   * - ``geopotential``
-     - m²/s²
-     - ``phi``
-     - geopotential
-   * - ``normalized_surface_pressure``
-     - 1
-     - ``psa``
-     - normalized surface pressure
-   * - ``specific_humidity``
-     - g/kg
-     - ``qa``
-     - Specific humidity
-   * - ``temperature``
-     - K
-     - ``ta``
-     - temperature
-   * - ``u_wind``
-     - m/s
-     - ``ua``
-     - U-wind
-   * - ``v_wind``
-     - m/s
-     - ``va``
-     - V-wind
-
-
 Condensation
 ------------
 
