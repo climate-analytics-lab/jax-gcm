@@ -1,5 +1,4 @@
-"""
-Unit tests for orographic correction parameterization.
+"""Unit tests for orographic correction parameterization.
 
 Tests verify that the orographic corrections are computed correctly and that
 applying corrections in grid space produces equivalent results to the SPEEDY

@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from collections import abc
 from typing import Callable, Tuple
+from pathlib import Path
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.forcing import ForcingData
@@ -32,25 +33,26 @@ def set_physics_flags(
     return physics_tendencies, physics_data
 
 class SpeedyPhysics(Physics):
-    """
-    A set of intermediate complexity atmospheric physics parameterizations from the SPEEDY model.
+    """A set of intermediate complexity atmospheric physics parameterizations from the SPEEDY model.
 
     Forcing data should be either simple climatological fields (assuming a 365 day year), or constant.
     Many of the parameterizations assume 8 model levels and a specific vertical coordinate system.
     """
+
     parameters: Parameters
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
+    UNITS_TABLE_CSV_PATH = Path(__file__).parent / "units_table.csv"
     
     def __init__(self,
                  parameters: Parameters=Parameters.default(),
                  checkpoint_terms=True
     ) -> None:
-        """
-        Initialize the SpeedyPhysics class with the specified parameters.
+        """Initialize the SpeedyPhysics class with the specified parameters.
         
         Args:
             parameters (Parameters): Parameters for the physics model.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
+
         """
         self.parameters = parameters
 
@@ -92,8 +94,7 @@ class SpeedyPhysics(Physics):
         geometry: Geometry,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
-        """
-        Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
+        """Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
 
         Args:
             state: Current state variables
@@ -105,6 +106,7 @@ class SpeedyPhysics(Physics):
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
+
         """
         data = PhysicsData.zeros(
             geometry.nodal_shape[1:],

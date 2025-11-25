@@ -5,10 +5,9 @@ default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specifi
                      'shortwave_rad.cloudstr','shortwave_rad.qcloud','convection.precnv','condensation.precls']
 
 def run_default_speedy_model(save_interval=None):
-    '''
-        Run the speedy physics at default settings with realistic forcing and terrain
-        T31, 40min timestep
-    '''
+    """Run the speedy physics at default settings with realistic forcing and terrain
+    T31, 40min timestep
+    """
     from jcm.model import Model
     from jcm.geometry import Geometry
     from jcm.forcing import ForcingData

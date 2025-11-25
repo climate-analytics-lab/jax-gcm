@@ -3,11 +3,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax import jit
 from jax.tree_util import tree_map
+from pathlib import Path
 import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+
+DYNAMICS_UNITS_TABLE_CSV_PATH = Path(__file__).parent / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
@@ -25,28 +28,42 @@ TRUNCATION_FOR_NODAL_SHAPE = {
 VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
 
-def get_coords(layers=8, spectral_truncation=31) -> CoordinateSystem:
+def get_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     f"""
     Returns a CoordinateSystem object for the given number of layers and one of the following horizontal resolutions: {VALID_TRUNCATIONS}.
     """
-    if spectral_truncation not in VALID_TRUNCATIONS:
+    from dinosaur.spherical_harmonic import FastSphericalHarmonics, RealSphericalHarmonics
+
+    if nodal_shape is not None:
+        if nodal_shape not in VALID_NODAL_SHAPES:
+            raise ValueError(f"Invalid nodal shape: {nodal_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
+        spectral_truncation = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
+    elif spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
     horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
+
     if layers not in SIGMA_LAYER_BOUNDARIES:
         raise ValueError(f"Invalid number of layers: {layers}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
 
     physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
 
+    if spmd_mesh is not None:
+        spmd_mesh = jax.make_mesh(spmd_mesh, ('x', 'y', 'z'))
+        spherical_harmonics_impl = FastSphericalHarmonics
+    else:
+        spherical_harmonics_impl = RealSphericalHarmonics
+
     return CoordinateSystem(
-        horizontal=horizontal_grid(radius=physics_specs.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers])
+        horizontal=horizontal_grid(radius=physics_specs.radius, 
+                                   spherical_harmonics_impl=spherical_harmonics_impl),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(SIGMA_LAYER_BOUNDARIES[layers]),
+        spmd_mesh=spmd_mesh
     )
 
 # Function to take a field in grid space and truncate it to a given wavenumber
 def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number=None):
-    """
-        grid_field: field in grid space
-        trunc: truncation level, # of wavenumbers to keep
+    """grid_field: field in grid space
+    trunc: truncation level, # of wavenumbers to keep
     """
     spectral_field = grid.to_modal(grid_field)
     nx,mx = spectral_field.shape
@@ -63,12 +80,12 @@ def spectral_truncation(grid: HorizontalGridTypes, grid_field, truncation_number
     return truncated_grid_field
 
 def validate_ds(ds, expected_structure):
-    """
-    Validate that an xarray Dataset has the expected variables and dimensions.
+    """Validate that an xarray Dataset has the expected variables and dimensions.
 
     Args:
         ds (xr.Dataset): The dataset to validate.
         expected_structure (dict): A dictionary where keys are variable names and values are tuples of expected dimension names.
+
     """
     missing_vars = set(expected_structure) - set(ds.data_vars)
     if missing_vars:
@@ -106,6 +123,14 @@ def _check_type_ones_like_tangent(x):
 
 def ones_like_tangent(pytree):
     return tree_map(_check_type_ones_like_tangent, pytree)
+
+def _check_type_zeros_like_tangent(x):
+        if jnp.result_type(x) == jnp.float32:
+            return jnp.zeros_like(x)
+        return np.zeros((), dtype=jax.dtypes.float0)
+
+def zeros_like_tangent(pytree):
+    return tree_map(_check_type_zeros_like_tangent, pytree)
 
 def _check_type_convert_to_float(x):
     return jnp.asarray(x, dtype=jnp.float32)

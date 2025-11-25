@@ -26,8 +26,7 @@ def get_shortwave_rad_fluxes(
 
 @jit
 def shortwave_rad_fluxes(operand):
-    """
-    psa(ix,il)       # Normalised surface pressure [p/p0]
+    """psa(ix,il)       # Normalised surface pressure [p/p0]
     qa(ix,il,kx)     # Specific humidity [g/kg]
     icltop(ix,il)    # Cloud top level
     cloudc(ix,il)    # Total cloud cover
@@ -37,7 +36,6 @@ def shortwave_rad_fluxes(operand):
     ftop(ix,il)     # Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs(ix,il,kx) # Flux of short-wave radiation absorbed in each atmospheric layer
     """
-
     state, physics_data, parameters, forcing, geometry, tendencies = operand
 
     kx, ix, il = state.temperature.shape
@@ -224,15 +222,16 @@ def get_zonal_average_fields(
     forcing: ForcingData,
     geometry: Geometry
 ) -> PhysicsData:
-    """
-    Calculate zonal average fields including solar radiation, ozone depth, 
+    """Calculate zonal average fields including solar radiation, ozone depth,
     and polar night cooling in the stratosphere using JAX.
     
-    Parameters:
+    Parameters
+    ----------
     tyear : float - physics_data.date.tyear
         Time as fraction of year (0-1, 0 = 1 Jan)
 
-    Returns:
+    Returns
+    -------
     fsol : jnp.ndarray
         Solar radiation at the top
     ozupp : jnp.ndarray
@@ -243,6 +242,7 @@ def get_zonal_average_fields(
         Polar night cooling in the stratosphere
     zenit : jnp.ndarray
         The zenith angle
+
     """
     kx, ix, il = state.temperature.shape
 
@@ -312,8 +312,7 @@ def get_clouds(
 
 @jit
 def clouds(operand):
-    """
-    Simplified cloud cover scheme based on relative humidity and precipitation.
+    """Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
         qa: Specific humidity [g/kg] - PhysicsState.specific_humidity
@@ -328,8 +327,8 @@ def clouds(operand):
         icltop: Cloud top level
         cloudc: Total cloud cover
         clstr: Stratiform cloud cover
-    """
 
+    """
     state, physics_data, parameters, forcing, geometry, tendencies = operand
 
     # Compute gradient of static energy: logic from physics.f90:147
@@ -405,18 +404,19 @@ def clouds(operand):
 
 @jit
 def solar(tyear, csol=4.*solc, geometry: Geometry=None):
-    """
-    Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
+    """Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
     
-    Parameters:
+    Parameters
+    ----------
     tyear : float
         Time as a fraction of the year (0-1, where 0 corresponds to January 1st at midnight).
 
-    Returns:
+    Returns
+    -------
     topsr : array-like
         Daily-average insolation at the top of the atmosphere for each latitude band.
+
     """
-    
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
     alpha = 2.0 * pigr * tyear

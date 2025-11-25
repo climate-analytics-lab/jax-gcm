@@ -109,14 +109,15 @@ def interpolate(target_resolution):
     print(f"Generated {terrain_upscaled_file.name}")
 
 def main(argv=None) -> int:
-    """
-    CLI entrypoint. Parse argv and call `interpolate`.
+    """CLI entrypoint. Parse argv and call `interpolate`.
 
     Args:
         argv (list[str] | None): list of command-line args (not including program name).
                                  If None, uses sys.argv[1:].
+
     Returns:
         int: exit code (0 = success, non-zero = failure)
+
     """
     parser = argparse.ArgumentParser(
         description="Upscale forcing file to target horizontal spatial resolution."

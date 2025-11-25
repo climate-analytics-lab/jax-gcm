@@ -46,8 +46,7 @@ class ForcingData:
     
     @classmethod
     def from_file(cls, filename: str, target_resolution=None):
-        """
-        Initialize forcing data from a file.
+        """Initialize forcing data from a file.
 
         Args:
             filename: Path to the forcing data file
@@ -55,6 +54,7 @@ class ForcingData:
 
         Returns:
             ForcingData: Time-varying forcing data
+
         """
         import xarray as xr
 
@@ -132,8 +132,7 @@ class ForcingData:
     
 
 def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
-    """
-    Returns an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
+    """Return an array of SSTs with simple cos^2 profile from 300K at the equator to 273K at 60 degrees latitude.
     Obtained from Neale, R.B. and Hoskins, B.J. (2000),
     "A standard test for AGCMs including their physical parametrizations: I: the proposal."
     Atmosph. Sci. Lett., 1: 101-107. https://doi.org/10.1006/asle.2000.0022
@@ -145,9 +144,7 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
 def default_forcing(
     grid: HorizontalGridTypes,
 ) -> ForcingData:
-    """
-    Initialize the default forcing data with prescribed SSTs
-    """
+    """Initialize the default forcing data with prescribed SSTs"""
     sea_surface_temperature = _fixed_ssts(grid)
 
     return ForcingData.zeros(

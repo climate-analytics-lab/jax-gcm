@@ -1,5 +1,4 @@
-"""
-Orographic correction parameterization for SPEEDY physics.
+"""Orographic correction parameterization for SPEEDY physics.
 
 This module implements the orographic corrections applied to temperature and specific humidity
 in SPEEDY.f90, specifically replicating the corrections from time_stepping.f90 lines 69 and 91.
@@ -16,8 +15,7 @@ from jcm.physics.speedy.physics_data import PhysicsData
 
 
 def compute_temperature_correction_vertical_profile(geometry: Geometry, parameters: Parameters) -> jnp.ndarray:
-    """
-    Compute vertical profile for temperature orographic correction (tcorv).
+    """Compute vertical profile for temperature orographic correction (tcorv).
     
     From SPEEDY horizontal_diffusion.f90:
     tcorv(1) = 0
@@ -30,6 +28,7 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
         
     Returns:
         Vertical profile array of shape (layers,)
+
     """
     # SPEEDY constants from physical_constants.py
     rgam = rgas * gamma / (1000.0 * grav)
@@ -54,8 +53,7 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
 
 
 def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters: Parameters) -> jnp.ndarray:
-    """
-    Compute vertical profile for humidity orographic correction (qcorv).
+    """Compute vertical profile for humidity orographic correction (qcorv).
     
     From SPEEDY horizontal_diffusion.f90:
     qcorv(1) = qcorv(2) = 0
@@ -68,6 +66,7 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
         
     Returns:
         Vertical profile array of shape (layers,)
+
     """
     qexp = hscale / hshum
     
@@ -91,8 +90,7 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
 
 
 def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray:
-    """
-    Compute horizontal temperature correction in grid space.
+    """Compute horizontal temperature correction in grid space.
     
     From SPEEDY forcing.f90:
     corh(i,j) = gamlat(j) * phis0(i,j)
@@ -103,6 +101,7 @@ def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray
         
     Returns:
         Horizontal correction array of shape (lon, lat)
+
     """
     gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
     
@@ -118,8 +117,7 @@ def compute_humidity_correction_horizontal(
     temperature_correction: jnp.ndarray,
     land_temperature: jnp.ndarray,
 ) -> jnp.ndarray:
-    """
-    Compute horizontal humidity correction in grid space.
+    """Compute horizontal humidity correction in grid space.
     
     This replicates the full SPEEDY humidity correction from forcing.f90:
     1. Calculate surface temperature (land/sea mixture)
@@ -136,6 +134,7 @@ def compute_humidity_correction_horizontal(
         
     Returns:
         Horizontal correction array of shape (lon, lat)
+
     """
     from jcm.physics.speedy.humidity import get_qsat
     
@@ -181,8 +180,7 @@ def get_orographic_correction_tendencies(
     forcing: ForcingData = None,
     geometry: Geometry = None
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute orographic correction tendencies for temperature and specific humidity.
+    """Compute orographic correction tendencies for temperature and specific humidity.
     
     This function applies the orographic corrections in grid space, replicating
     the corrections from SPEEDY time_stepping.f90 lines 69 and 91:
@@ -201,6 +199,7 @@ def get_orographic_correction_tendencies(
         tuple: (PhysicsTendency, updated PhysicsData)
             - PhysicsTendency: Physics tendencies representing the orographic corrections
             - PhysicsData: Updated physics data (unchanged in this implementation)
+
     """
     # Compute vertical profiles
     tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
@@ -250,8 +249,7 @@ def apply_orographic_corrections_to_state(
     land_temperature: jnp.ndarray = None,
     day: int = 0
 ) -> PhysicsState:
-    """
-    Apply orographic corrections directly to a physics state (for testing).
+    """Apply orographic corrections directly to a physics state (for testing).
     
     This function applies the corrections directly to the state fields,
     which is equivalent to how they're applied in SPEEDY before diffusion.
@@ -266,6 +264,7 @@ def apply_orographic_corrections_to_state(
         
     Returns:
         Corrected physics state
+
     """
     # Compute vertical profiles
     tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)

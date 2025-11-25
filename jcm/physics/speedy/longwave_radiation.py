@@ -18,8 +18,7 @@ def get_downward_longwave_rad_fluxes(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Calculate the downward longwave radiation fluxes
+    """Calculate the downward longwave radiation fluxes
     
     Args:
         ta: Absolute temperature - state.temperature
@@ -30,6 +29,7 @@ def get_downward_longwave_rad_fluxes(
     Returns:
         rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
@@ -124,8 +124,7 @@ def get_upward_longwave_rad_fluxes(
     forcing: ForcingData,
     geometry: Geometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Calculate the upward longwave radiation fluxes
+    """Calculate the upward longwave radiation fluxes
     
     Args:
         ta: Absolute temperature
@@ -140,6 +139,7 @@ def get_upward_longwave_rad_fluxes(
         ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
+
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
@@ -203,8 +203,7 @@ def get_upward_longwave_rad_fluxes(
 
 @jit
 def radset(temp, epslw):
-    """
-    Compute energy fractions in longwave bands as a function of temperature
+    """Compute energy fractions in longwave bands as a function of temperature
 
     Args:
         temp: Absolute temperature
@@ -212,6 +211,7 @@ def radset(temp, epslw):
 
     Returns:
         fband: Energy fraction emitted in each LW band
+
     """
     jtemp = jnp.clip(temp, 200, 320) # To retain backwards compatibility with F90 code
     

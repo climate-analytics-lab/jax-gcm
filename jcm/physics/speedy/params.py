@@ -1,5 +1,4 @@
-"""
-Date: 1/25/2024.
+"""Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 """
 import tree_math
@@ -269,8 +268,7 @@ class Parameters:
 
     @classmethod
     def float_zeros(cls):
-        """
-        Return a Parameters instance with all fields replaced by float zeros. 
+        """Return a Parameters instance with all fields replaced by float zeros.
         This is useful for creating parameter co-tangents.
         """
         import jax
@@ -285,6 +283,7 @@ class Parameters:
         return tree_util.tree_map(lambda x: _float_zeros(x), cls.default())
 
     def __str__(self):
+        """Return a human-readable string representation of the Parameters instance."""
         from pprint import pformat
 
         def to_readable_format(x):
