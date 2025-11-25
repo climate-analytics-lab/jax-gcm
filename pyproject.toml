@@ -31,7 +31,7 @@ fallback_version = "999"
 [tool.pytest.ini_options]
 python_files = "*_test.py"
 markers = [
-    "slow: slow tests",
+    "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
 ]
 
 [tool.ruff]
