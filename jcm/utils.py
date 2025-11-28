@@ -111,7 +111,7 @@ def _index_if_3d(arr, key):
     return arr[:, :, key] if arr.ndim > 2 else arr
 
 def tree_index_3d(tree, key):
-    return tree_map(lambda arr: _index_if_3d(arr, key), tree)
+    return tree_map(lambda arr: _index_if_3d(jnp.array(arr), key), tree)
 
 def _check_type_ones_like_tangent(x):
         if jnp.result_type(x) == jnp.float32:

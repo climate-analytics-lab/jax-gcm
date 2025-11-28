@@ -344,7 +344,7 @@ class Model:
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
             model_time=self.start_date + jdt.Timedelta(seconds=jnp.round(sim_time).astype(jnp.int32)),
-            model_step=(sim_time / self.dt_si.m).astype(jnp.int32),
+            model_step=jnp.int32(sim_time / self.dt_si.m),
             dt_seconds=self.dt_si.m
         )
 
