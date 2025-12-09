@@ -144,3 +144,153 @@ def _check_type_convert_back(x, x0):
 
 def convert_back(x, x0):
     return tree_map(_check_type_convert_back, x, x0)
+
+
+# =============================================================================
+# State creation utilities for prescribed state / single column models
+# =============================================================================
+
+def load_states_from_xarray(
+    ds,
+    u_wind_var: str = 'u_wind',
+    v_wind_var: str = 'v_wind',
+    temperature_var: str = 'temperature',
+    specific_humidity_var: str = 'specific_humidity',
+    geopotential_var: str = 'geopotential',
+    surface_pressure_var: str = 'normalized_surface_pressure',
+    tracer_vars: dict[str, str] = None,
+):
+    """Load PhysicsState time series from an xarray Dataset.
+
+    Args:
+        ds: xarray Dataset containing atmospheric state variables.
+        u_wind_var: Variable name for zonal wind.
+        v_wind_var: Variable name for meridional wind.
+        temperature_var: Variable name for temperature.
+        specific_humidity_var: Variable name for specific humidity.
+        geopotential_var: Variable name for geopotential.
+        surface_pressure_var: Variable name for normalized surface pressure.
+        tracer_vars: Dict mapping tracer names to variable names in ds.
+
+    Returns:
+        PhysicsState with time dimension as the first axis.
+    """
+    from jcm.physics_interface import PhysicsState
+
+    # Extract variables and convert to JAX arrays
+    u_wind = jnp.asarray(ds[u_wind_var].values)
+    v_wind = jnp.asarray(ds[v_wind_var].values)
+    temperature = jnp.asarray(ds[temperature_var].values)
+    specific_humidity = jnp.asarray(ds[specific_humidity_var].values)
+    geopotential = jnp.asarray(ds[geopotential_var].values)
+    normalized_surface_pressure = jnp.asarray(ds[surface_pressure_var].values)
+
+    # Load tracers
+    tracers = {}
+    if tracer_vars:
+        for tracer_name, var_name in tracer_vars.items():
+            tracers[tracer_name] = jnp.asarray(ds[var_name].values)
+
+    return PhysicsState(
+        u_wind=u_wind,
+        v_wind=v_wind,
+        temperature=temperature,
+        specific_humidity=specific_humidity,
+        geopotential=geopotential,
+        normalized_surface_pressure=normalized_surface_pressure,
+        tracers=tracers,
+    )
+
+
+def create_single_column_state(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    u_wind: jnp.ndarray = None,
+    v_wind: jnp.ndarray = None,
+    surface_pressure: float = 101325.0,
+    nlev: int = None,
+):
+    """Create a single-column PhysicsState for SCM simulations.
+
+    Args:
+        temperature: Temperature profile [K] (nlev,).
+        specific_humidity: Specific humidity profile [kg/kg] (nlev,).
+        u_wind: Zonal wind profile [m/s] (nlev,). Default zeros.
+        v_wind: Meridional wind profile [m/s] (nlev,). Default zeros.
+        surface_pressure: Surface pressure [Pa]. Default 101325.
+        nlev: Number of levels. Inferred from temperature if not provided.
+
+    Returns:
+        PhysicsState with shape (nlev, 1, 1) suitable for single-column runs.
+    """
+    from jcm.physics_interface import PhysicsState
+    from jcm.constants import grav, rd, p0
+
+    if nlev is None:
+        nlev = temperature.shape[0]
+
+    # Reshape to (nlev, 1, 1) for single column
+    temperature = jnp.asarray(temperature).reshape(nlev, 1, 1)
+    specific_humidity = jnp.asarray(specific_humidity).reshape(nlev, 1, 1)
+
+    if u_wind is None:
+        u_wind = jnp.zeros((nlev, 1, 1))
+    else:
+        u_wind = jnp.asarray(u_wind).reshape(nlev, 1, 1)
+
+    if v_wind is None:
+        v_wind = jnp.zeros((nlev, 1, 1))
+    else:
+        v_wind = jnp.asarray(v_wind).reshape(nlev, 1, 1)
+
+    # Compute approximate geopotential (hydrostatic)
+    # Simple approximation: phi = g * z, where z is computed from hypsometric equation
+    p_levels = surface_pressure * jnp.linspace(0.1, 1.0, nlev)[::-1]
+    scale_height = rd * jnp.mean(temperature) / grav
+    z_approx = -scale_height * jnp.log(p_levels / surface_pressure)
+    geopotential = (grav * z_approx).reshape(nlev, 1, 1)
+
+    # Normalized surface pressure
+    normalized_surface_pressure = jnp.array([[surface_pressure / p0]])
+
+    return PhysicsState(
+        u_wind=u_wind,
+        v_wind=v_wind,
+        temperature=temperature,
+        specific_humidity=specific_humidity,
+        geopotential=geopotential,
+        normalized_surface_pressure=normalized_surface_pressure,
+        tracers={},
+    )
+
+
+def create_initial_tracers(
+    shape: tuple,
+    tracer_names: list[str] = None,
+    cloud_water: float = 0.0,
+    cloud_ice: float = 0.0,
+) -> dict:
+    """Create initial tracer fields for SCM simulation.
+
+    Args:
+        shape: Shape of tracer arrays (nlev, nlon, nlat).
+        tracer_names: List of tracer names to initialize.
+        cloud_water: Initial cloud water mixing ratio (kg/kg).
+        cloud_ice: Initial cloud ice mixing ratio (kg/kg).
+
+    Returns:
+        Dict of initialized tracer arrays.
+    """
+    if tracer_names is None:
+        tracer_names = ['qc', 'qi']  # Default cloud tracers
+
+    tracers = {}
+    for name in tracer_names:
+        if name == 'qc':
+            tracers[name] = jnp.full(shape, cloud_water)
+        elif name == 'qi':
+            tracers[name] = jnp.full(shape, cloud_ice)
+        else:
+            tracers[name] = jnp.zeros(shape)
+
+    return tracers
