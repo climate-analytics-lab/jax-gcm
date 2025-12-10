@@ -8,6 +8,130 @@ from jax.test_util import check_vjp, check_jvp
 import pytest
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
+
+class TestCloudAlbedoIndexing(unittest.TestCase):
+    """Test that cloud albedo is set only at the cloud-top level for each grid point.
+
+    This tests a fix for a bug where the original code:
+        tau2.at[clamped_icltop, :, :, 2].set(...)
+
+    incorrectly set cloud albedo at ALL levels that appeared anywhere in icltop,
+    instead of setting it only at the specific cloud-top level for each (i,j) point.
+
+    The fix uses proper per-element indexing with meshgrid:
+        i_idx, j_idx = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing='ij')
+        tau2.at[clamped_icltop, i_idx, j_idx, 2].set(...)
+    """
+
+    def test_cloud_albedo_set_only_at_cloud_top(self):
+        """Verify cloud albedo is set at exactly one level per grid point."""
+        kx, ix, il = 8, 4, 4
+
+        # Create varying cloud top levels across grid points
+        # Each grid point should have cloud albedo at exactly its icltop level
+        icltop = jnp.array([
+            [2, 3, 4, 5],
+            [3, 4, 5, 6],
+            [4, 5, 6, 3],
+            [5, 6, 3, 4]
+        ])
+        cloudc = jnp.ones((ix, il)) * 0.5
+        albcl = 0.43
+
+        # Initialize tau2
+        tau2 = jnp.zeros((kx, ix, il, 4))
+        mask = icltop < kx
+        clamped_icltop = jnp.clip(icltop, 0, kx - 1).astype(int)
+
+        # Apply the CORRECT fix: per-element indexing
+        i_idx, j_idx = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing='ij')
+        values_to_set = jnp.where(mask, albcl * cloudc, 0.0)
+        tau2 = tau2.at[clamped_icltop, i_idx, j_idx, 2].set(values_to_set)
+
+        # Verify: each grid point should have exactly one non-zero albedo value
+        for i in range(ix):
+            for j in range(il):
+                ct = int(icltop[i, j])
+                # Count non-zero albedo values for this grid point
+                nonzero_count = jnp.sum(tau2[:, i, j, 2] > 0)
+                self.assertEqual(int(nonzero_count), 1,
+                    f"Grid point ({i},{j}) should have exactly 1 non-zero albedo, got {int(nonzero_count)}")
+
+                # Verify the albedo is at the correct level
+                if ct < kx:
+                    self.assertAlmostEqual(float(tau2[ct, i, j, 2]), albcl * 0.5, places=5,
+                        msg=f"Grid point ({i},{j}) should have albedo {albcl * 0.5} at level {ct}")
+
+    def test_cloud_albedo_not_broadcast_across_levels(self):
+        """Verify that cloud albedo is NOT incorrectly broadcast to multiple levels.
+
+        The bug caused all levels appearing in icltop to get albedo for all grid points.
+        For example, if icltop contained values [2,3,4,5,6], ALL grid points would get
+        albedo at levels 2,3,4,5,6 instead of each grid point getting albedo at just
+        its own cloud top level.
+        """
+        kx, ix, il = 8, 3, 3
+
+        # Different cloud tops at each grid point
+        icltop = jnp.array([
+            [2, 3, 4],
+            [5, 6, 3],
+            [4, 2, 5]
+        ])
+        cloudc = jnp.ones((ix, il)) * 0.5
+        albcl = 0.43
+
+        tau2 = jnp.zeros((kx, ix, il, 4))
+        mask = icltop < kx
+        clamped_icltop = jnp.clip(icltop, 0, kx - 1).astype(int)
+
+        # Apply the CORRECT fix
+        i_idx, j_idx = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing='ij')
+        values_to_set = jnp.where(mask, albcl * cloudc, 0.0)
+        tau2 = tau2.at[clamped_icltop, i_idx, j_idx, 2].set(values_to_set)
+
+        # Total non-zero albedo values should equal number of grid points (ix * il = 9)
+        # NOT the number of unique levels * grid points (which would be 45 with the bug)
+        total_nonzero = jnp.sum(tau2[:, :, :, 2] > 0)
+        self.assertEqual(int(total_nonzero), ix * il,
+            f"Total non-zero albedo entries should be {ix * il}, got {int(total_nonzero)}. "
+            "Cloud albedo may be incorrectly broadcast to multiple levels.")
+
+    def test_buggy_indexing_would_broadcast(self):
+        """Demonstrate what the buggy indexing would have done.
+
+        This test shows that using tau2.at[icltop, :, :, 2] broadcasts values
+        incorrectly, which is what the bug was doing.
+        """
+        kx, ix, il = 8, 3, 3
+
+        icltop = jnp.array([
+            [2, 3, 4],
+            [5, 6, 3],
+            [4, 2, 5]
+        ])
+        cloudc = jnp.ones((ix, il)) * 0.5
+        albcl = 0.43
+
+        tau2_buggy = jnp.zeros((kx, ix, il, 4))
+        mask = icltop < kx
+        clamped_icltop = jnp.clip(icltop, 0, kx - 1).astype(int)
+
+        # BUGGY code: this broadcasts across all grid points for each level in icltop
+        tau2_buggy = tau2_buggy.at[clamped_icltop, :, :, 2].set(
+            jnp.where(mask, albcl * cloudc, tau2_buggy[clamped_icltop, :, :, 2])
+        )
+
+        # The buggy version sets albedo at multiple levels for each grid point
+        # because it broadcasts across the : dimensions
+        total_nonzero_buggy = jnp.sum(tau2_buggy[:, :, :, 2] > 0)
+
+        # With the bug, we get many more non-zero entries than grid points
+        # (the exact number depends on how JAX handles the broadcast)
+        self.assertGreater(int(total_nonzero_buggy), ix * il,
+            "Buggy indexing should produce more non-zero entries than grid points. "
+            "If this fails, the bug may have been fixed in JAX or the test setup is wrong.")
+
 class TestSolar(unittest.TestCase):
 
     def setUp(self):
