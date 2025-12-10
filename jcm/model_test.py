@@ -102,6 +102,53 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
 
+    def test_speedy_model_fast_harmonics(self):
+        from jcm.model import Model
+
+        model = Model(
+            time_step=720,
+            spmd_mesh=(1, 1, 1) # No parallelism, but triggers FastSphericalHarmonics
+        )
+
+        save_interval, total_time = 1, 2
+        predictions = model.run(
+            save_interval=save_interval,
+            total_time=total_time,
+        )
+        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
+
+        modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
+        nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
+
+        self.assertIsNotNone(final_state)
+        self.assertIsNotNone(dynamics_predictions)
+
+        self.assertIsNotNone(final_state.divergence)
+        self.assertIsNotNone(final_state.vorticity)
+        self.assertIsNotNone(final_state.temperature_variation)
+        self.assertIsNotNone(final_state.log_surface_pressure)
+        self.assertIsNotNone(final_state.tracers['specific_humidity'])
+
+        self.assertIsNotNone(dynamics_predictions.u_wind)
+        self.assertIsNotNone(dynamics_predictions.v_wind)
+        self.assertIsNotNone(dynamics_predictions.temperature)
+        self.assertIsNotNone(dynamics_predictions.specific_humidity)
+        self.assertIsNotNone(dynamics_predictions.geopotential)
+        self.assertIsNotNone(dynamics_predictions.normalized_surface_pressure)
+
+        self.assertTupleEqual(final_state.divergence.shape, modal_zxy)
+        self.assertTupleEqual(final_state.vorticity.shape, modal_zxy)
+        self.assertTupleEqual(final_state.temperature_variation.shape, modal_zxy)
+        self.assertTupleEqual(final_state.log_surface_pressure.shape, (1,) + modal_zxy[1:])
+        self.assertTupleEqual(final_state.tracers['specific_humidity'].shape, modal_zxy)
+
+        self.assertTupleEqual(dynamics_predictions.u_wind.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.v_wind.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.temperature.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
+        self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
+
     @pytest.mark.slow
     def test_speedy_model_averages(self):
         from jcm.model import Model
