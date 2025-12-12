@@ -180,6 +180,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
+
+        # FIXME: testing against itself at the moment, need to get updated values from speedy.f90
         
         # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
