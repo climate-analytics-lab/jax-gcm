@@ -19,15 +19,9 @@ def run_default_speedy_model(save_interval=None):
     realistic_geometry = Geometry.from_file(forcing_dir / 'terrain.nc', target_resolution=31)
     realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', target_resolution=31)
 
-    # in the default scenario output every timestep and don't average
-    # in the test scenario, output as designated and average
     time_step = 40.0  # default time step in minutes
-    output_averages = False
     if save_interval is None:
-        save_interval = time_step/1440.
-    else:
-        save_interval = save_interval
-        output_averages = True
+        save_interval = 30
 
     model = Model(
         geometry=realistic_geometry,
@@ -37,8 +31,21 @@ def run_default_speedy_model(save_interval=None):
     predictions = model.run(
         save_interval=save_interval,
         total_time=90., # 90 days 
-        output_averages=output_averages,
+        output_averages=True,
         forcing=realistic_forcing,
     )
 
-    return model, predictions
+    model_2 = Model(
+        geometry=realistic_geometry,
+        time_step=time_step,
+    )
+
+    predictions_2 = model_2.run(
+        save_interval=save_interval,
+        total_time=90., # 90 days 
+        output_averages=True,
+        forcing=realistic_forcing,
+        preprocess_fn=lambda x: x**2
+    )
+
+    return predictions, predictions_2

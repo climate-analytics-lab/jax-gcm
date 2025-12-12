@@ -5,6 +5,7 @@ to the specific physics being used.
 
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import tree_math
 from jcm.geometry import Geometry
 from dinosaur import scales
@@ -12,7 +13,6 @@ from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from dinosaur.filtering import horizontal_diffusion_filter
-from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.date import DateData
 from typing import Tuple, Any
@@ -60,10 +60,10 @@ class PhysicsState:
         )
 
     def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
+        return jtu.tree_map(jnp.isnan, self)
 
     def any_true(self):
-        return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
+        return jtu.tree_reduce(lambda x, y: x or y, jtu.tree_map(jnp.any, self))
 
 PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
 
@@ -351,6 +351,7 @@ def get_physical_tendencies(
     diffusion: DiffusionFilter,
     date: DateData,
     diagnostics_collector=None,
+    preprocess_fn=lambda x: x,
 ) -> State:
     """Compute the physical tendencies given the current state and a list of physics functions.
 
@@ -376,7 +377,7 @@ def get_physical_tendencies(
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
     
     if diagnostics_collector is not None:
-            diagnostics_collector.accumulate_if_physical_step(physics_data)
+            diagnostics_collector.accumulate_if_physical_step(jtu.tree_map(preprocess_fn, physics_data))
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
 

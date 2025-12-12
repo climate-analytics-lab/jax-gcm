@@ -348,7 +348,7 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
+    def _get_step_fn_factory(self, forcing: ForcingData, preprocess_fn=lambda x: x) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
         """For given surface forcing conditions, return a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
 
         Args:
@@ -368,14 +368,15 @@ class Model:
                 diffusion=self.diffusion,
                 geometry=self.geometry,
                 date=self._date_from_sim_time(state.sim_time),
-                diagnostics_collector=d
+                diagnostics_collector=d,
+                preprocess_fn=preprocess_fn,
             )
         )
         primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
         return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
-    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
+    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool, preprocess_fn=lambda x: x) -> Predictions:
         """Post-process a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
@@ -390,7 +391,7 @@ class Model:
         from jcm.physics_interface import verify_state
 
         predictions = Predictions(
-            dynamics=dynamics_state_to_physics_state(state, self.primitive),
+            dynamics=tree_map(preprocess_fn, dynamics_state_to_physics_state(state, self.primitive)),
             physics=None,
             times=None
         )
@@ -399,7 +400,7 @@ class Model:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.geometry, date)
-            predictions = predictions.replace(physics=physics_data)
+            predictions = predictions.replace(physics=tree_map(preprocess_fn, physics_data))
 
         return predictions
     
@@ -420,13 +421,14 @@ class Model:
         
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
     def run_from_state(self,
                        initial_state: primitive_equations.State,
                        forcing: ForcingData,
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
+                       preprocess_fn=lambda x: x
     ) -> tuple[primitive_equations.State, Predictions]:
         """Run the full simulation forward in time starting from given initial state.
         Alternative to model.run / model.resume which does not read/write model's internal current state.
@@ -442,12 +444,14 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             output_averages:
                 Whether to output time-averaged quantities (default False).
+            preprocess_fn:
+                Function to apply to data before accumulating in diagnostics (default identity function).
     
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
 
         """
-        step_fn_factory = self._get_step_fn_factory(forcing)
+        step_fn_factory = self._get_step_fn_factory(forcing, preprocess_fn=preprocess_fn)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
         step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())
 
@@ -462,7 +466,7 @@ class Model:
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, forcing, output_averages),
+            post_process_fn=lambda state: self._post_process(state, forcing, output_averages, preprocess_fn=preprocess_fn),
             output_averages=output_averages
         )
         
@@ -473,7 +477,8 @@ class Model:
                forcing: ForcingData=None,
                save_interval=10.0,
                total_time=120.0,
-               output_averages=False
+               output_averages=False,
+               preprocess_fn=lambda x: x
     ) -> Predictions:
         """Run the full simulation forward in time starting from end of previous call to model.run or model.resume.
 
@@ -486,6 +491,8 @@ class Model:
                 Total time to run the model (float).
             output_averages:
                 Whether to output time-averaged quantities (default False).
+            preprocess_fn:
+                Function to apply to data before accumulating in diagnostics (default identity function).
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
@@ -497,7 +504,8 @@ class Model:
             forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
-            output_averages=output_averages
+            output_averages=output_averages,
+            preprocess_fn=preprocess_fn
         )
         
         self._final_modal_state = final_modal_state
@@ -508,7 +516,8 @@ class Model:
             forcing: ForcingData=None,
             save_interval=10.0,
             total_time=120.0,
-            output_averages=False
+            output_averages=False,
+            preprocess_fn=lambda x: x
     ) -> Predictions:
         """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
@@ -523,6 +532,8 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             output_averages:
                 Whether to output time-averaged quantities (default False).
+            preprocess_fn:
+                Function to apply to data before accumulating in diagnostics (default identity function).
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
@@ -535,4 +546,4 @@ class Model:
             self.initial_nodal_state = initial_state
             self._final_modal_state = self._prepare_initial_modal_state(initial_state)
 
-        return self.resume(forcing=forcing, save_interval=save_interval, total_time=total_time, output_averages=output_averages)
+        return self.resume(forcing=forcing, save_interval=save_interval, total_time=total_time, output_averages=output_averages, preprocess_fn=preprocess_fn)
