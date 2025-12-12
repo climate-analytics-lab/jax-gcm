@@ -181,6 +181,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
         
+        # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
             0.,          0.,          0.,          0.,          1.3527119,  10.074685,
             22.306503,   36.703987,   52.63945,    69.695274,   87.54011,   105.88558,
@@ -192,6 +193,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             191.12292,   185.7362,    185.85603,   186.12903,   185.3112,    183.42676,
         ], atol=1e-4))
 
+        # surface net (downward) shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsns[0, :], [
             0.00000000, 0.00000000, 0.00000000, 0.00000000, 1.35271192, 10.07468510,
             22.30650330, 36.70398712, 52.63945007, 69.69527435, 87.54010773,
@@ -205,6 +207,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             185.31120300, 183.42675781
         ], atol=1e-4))
 
+        # top of atmosphere net shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.ftop[0, :], [
             -0.29883093, -0.29883093, -0.29883093, -0.29883093, 2.09915209,
             16.96084595, 36.72006607, 58.85144806, 82.28882599, 106.43119812,
@@ -218,6 +221,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             284.20947266, 288.18334961, 291.08874512
         ], atol=1e-4))
 
+        # column-mean absorbed shortwave flux at all latitudes
         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=0)[0, :], [
             0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.13065891, 0.89812386,
             1.83904934, 2.80578613, 3.74352622, 4.62934351, 5.45546579, 6.22219181,
@@ -229,6 +233,7 @@ class TestShortWaveRadiation(unittest.TestCase):
             11.04026604, 11.15996361, 11.66725826, 12.26005840, 12.85902119, 13.45774651
         ], atol=1e-4))
 
+        # mean across all latitudes of absorbed shortwave flux at each level
         self.assertTrue(np.allclose(np.mean(physics_data.shortwave_rad.dfabs, axis=2)[:, 0], [
             3.83171153, 7.95941877, 14.45124817, 6.03165197,
             7.87542248, 10.84506035, 8.45241356, 5.18130398
