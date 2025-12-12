@@ -159,6 +159,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         psa = jnp.ones(xy)
         precnv = -1.0 * np.ones(xy)
         precls = 4.0 * np.ones(xy)
+        # Construct a varying iptop to catch layer-dependent effects and indexing bugs
         iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:]
         fmask = .7 * np.ones(xy)
 

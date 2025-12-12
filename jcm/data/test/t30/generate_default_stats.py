@@ -12,16 +12,12 @@ def run_default_speedy_model(save_interval=None):
     from jcm.geometry import Geometry
     from jcm.forcing import ForcingData
 
-    # First, generate forcing and terrain files for T31 resolution
-    from jcm.data.bc.interpolate import main as interpolate_main
-    interpolate_main(['31'])
-
-    forcing_dir = Path(__file__).resolve().parent / '../../bc/'
+    forcing_dir = Path(__file__).resolve().parent / '../../bc/t30/clim'
 
     # Load the terrain and forcing data
-    realistic_geometry = Geometry.from_file(forcing_dir / 'terrain_t31.nc')
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing_t31.nc')
-
+    
+    realistic_geometry = Geometry.from_file(forcing_dir / 'terrain.nc', target_resolution=31)
+    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', target_resolution=31)
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average
