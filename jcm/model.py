@@ -407,17 +407,17 @@ class Model:
         trajectory_fn = averaged_trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
 
         def _integrate_fn(state):
-            integrate_fn = jax.jit(trajectory_fn(
+            integrate_fn = trajectory_fn(
                 step_fn=step_fn,
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 **kwargs,
                 post_process_fn=post_process_fn
-            ))
-            
+            )
+
             # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
             return integrate_fn(state, self.physics.get_empty_data(self.geometry)) if output_averages else integrate_fn(state)
-        
+
         return _integrate_fn
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
