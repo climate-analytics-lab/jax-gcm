@@ -21,6 +21,7 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
 
     Raises:
         ValueError: If the dataset doesn't have exactly 12 monthly timestamps.
+
     """
     # validate that time coordinate is monthly
     time = pd.DatetimeIndex(ds_monthly["time"].values)
@@ -57,6 +58,7 @@ def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
 
     Returns:
         Dataset interpolated to the target resolution grid.
+
     """
     grid = get_coords(spectral_truncation=target_resolution).horizontal
 
@@ -99,6 +101,7 @@ def upsample_forcings_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
 
     Returns:
         Upsampled forcing dataset with physical constraints applied.
+
     """
     ds_interp = _upsample_ds(ds, target_resolution)
     for v in ds_interp.data_vars:
@@ -120,6 +123,7 @@ def upsample_terrain_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
 
     Returns:
         Upsampled terrain dataset with land-sea mask clipped to [0, 1].
+
     """
     ds_interp = _upsample_ds(ds, target_resolution)
     ds_interp['lsm'] = ds_interp['lsm'].clip(0.0, 1.0)
@@ -164,7 +168,7 @@ def interpolate(target_resolution, output_dir=None):
     else:
         # Generate daily forcing if needed
         if not forcing_daily_file.exists():
-            print(f"Interpolating forcing.nc to daily resolution...")
+            print(f"Interpolating {forcing_original_file} to daily resolution...")
             with xr.open_dataset(forcing_original_file) as ds_monthly:
                 ds_daily = interpolate_to_daily(ds_monthly)
                 ds_daily.to_netcdf(forcing_daily_file)
@@ -172,7 +176,7 @@ def interpolate(target_resolution, output_dir=None):
         else:
             print(f"{forcing_daily_file} already exists, skipping daily forcing generation.")
 
-        print(f"Interpolating forcing_daily.nc to T{target_resolution} resolution...")
+        print(f"Interpolating {forcing_daily_file} to T{target_resolution} resolution...")
         with xr.open_dataset(forcing_daily_file) as ds_forcing:
             ds_forcing_interp = upsample_forcings_ds(ds_forcing, target_resolution)
             ds_forcing_interp.to_netcdf(forcing_upscaled_file)
@@ -182,7 +186,7 @@ def interpolate(target_resolution, output_dir=None):
     if terrain_upscaled_file.exists():
         print(f"{terrain_upscaled_file} already exists, skipping terrain interpolation.")
     else:
-        print(f"Interpolating terrain.nc to T{target_resolution} resolution...")
+        print(f"Interpolating {terrain_original_file} to T{target_resolution} resolution...")
         with xr.open_dataset(terrain_original_file) as ds_terrain:
             ds_terrain_interp = upsample_terrain_ds(ds_terrain, target_resolution)
             ds_terrain_interp.to_netcdf(terrain_upscaled_file)
