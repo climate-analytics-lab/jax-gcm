@@ -20,7 +20,7 @@ from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, stack_trees, get_coords
+from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, get_coords
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial
@@ -152,7 +152,11 @@ def averaged_trajectory_from_step(
     """
     def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
-        diagnostics_collector.data = nnx.Variable(stack_trees([empty_data] * outer_steps))
+        stacked_empty_data = tree_map(
+            lambda x: jnp.zeros((outer_steps,) + x.shape, dtype=jnp.float32),
+            empty_data
+        )
+        diagnostics_collector.data = nnx.Variable(stacked_empty_data)
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
         empty_sum = tree_map(jnp.zeros_like, x_initial)

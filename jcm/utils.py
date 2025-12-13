@@ -104,9 +104,6 @@ def pass_fn(operand):
 def ones_like(x):
     return tree_map(jnp.ones_like, x)
 
-def stack_trees(trees):
-    return tree_map(lambda *arrays: jnp.stack(arrays, axis=0).astype(jnp.float32), *trees)
-
 def _index_if_3d(arr, key):
     return arr[:, :, key] if arr.ndim > 2 else arr
 

@@ -214,13 +214,17 @@ def radset(temp, epslw):
 
     """
     jtemp = jnp.clip(temp, 200, 320) # To retain backwards compatibility with F90 code
-    
-    fband = jnp.stack((
-        jnp.zeros_like(jtemp),
+
+    fband_123 = jnp.stack((
         0.148 - 3.0e-6 * (jtemp - 247) ** 2,
         0.356 - 5.2e-6 * (jtemp - 282) ** 2,
         0.314 + 1.0e-5 * (jtemp - 315) ** 2,
     ), axis=-1)
-    fband = fband.at[..., 0].set(1. - fband.sum(axis=-1))
+    fband_0 = 1. - fband_123.sum(axis=-1)
+
+    fband = jnp.concatenate([
+        fband_0[..., jnp.newaxis],
+        fband_123
+    ], axis=-1)
     
     return (1. - epslw) * fband
