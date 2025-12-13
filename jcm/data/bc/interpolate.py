@@ -1,7 +1,7 @@
 import xarray as xr
 import numpy as np
 import pandas as pd
-from pathlib import Path
+from importlib import resources
 import argparse
 from jcm.utils import VALID_TRUNCATIONS, get_coords
 
@@ -72,10 +72,10 @@ def upsample_terrain_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
     return ds_interp
 
 def interpolate(target_resolution):
-    cwd = Path(__file__).resolve().parent
-    forcing_original_file = cwd / "t30/clim/forcing.nc"
-    forcing_daily_file = cwd / "t30/clim/forcing_daily.nc"
-    forcing_upscaled_file = cwd / f"forcing_t{target_resolution}.nc"
+    bc_dir = resources.files('jcm.data.bc')
+    forcing_original_file = bc_dir / "t30/clim/forcing.nc"
+    forcing_daily_file = bc_dir / "t30/clim/forcing_daily.nc"
+    forcing_upscaled_file = bc_dir / f"forcing_t{target_resolution}.nc"
 
     if forcing_upscaled_file.exists():
         print(f"{forcing_upscaled_file.name} already exists.")
@@ -95,8 +95,8 @@ def interpolate(target_resolution):
         print(f"Generated {forcing_upscaled_file.name}")
 
 
-    terrain_original_file = cwd / "t30/clim/terrain.nc"
-    terrain_upscaled_file = cwd / f"terrain_t{target_resolution}.nc"
+    terrain_original_file = bc_dir / "t30/clim/terrain.nc"
+    terrain_upscaled_file = bc_dir / f"terrain_t{target_resolution}.nc"
 
     if terrain_upscaled_file.exists():
         print(f"{terrain_upscaled_file.name} already exists.")

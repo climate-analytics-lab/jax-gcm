@@ -37,8 +37,8 @@ class TestConvectionUnit(unittest.TestCase):
         
         iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, forcing, geometry)
 
-        from pathlib import Path
-        test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
+        from importlib import resources
+        test_data_dir = resources.files('jcm.data.test')
         iptop_f90 = jnp.load(test_data_dir / 'iptop.npy')
         qdif_f90 = jnp.load(test_data_dir / 'qdif.npy')
 
@@ -120,8 +120,8 @@ class TestConvectionUnit(unittest.TestCase):
 
         physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
 
-        from pathlib import Path
-        test_data_dir = Path(__file__).resolve().parents[2] / 'data/test'
+        from importlib import resources
+        test_data_dir = resources.files('jcm.data.test')
         iptop_f90 = jnp.load(test_data_dir / 'iptop.npy')
         cmbf_f90 = jnp.load(test_data_dir / 'cbmf.npy')
         precnv_f90 = jnp.load(test_data_dir / 'precnv.npy')
