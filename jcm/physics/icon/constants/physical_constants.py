@@ -4,7 +4,7 @@ Physical constants for ICON atmospheric physics
 This module contains physical constants used throughout the ICON physics
 parameterizations. These constants are based on the ICON mo_physical_constants
 module and are organized by category.
-Some constants are from the ECHAM-6.3 mo_physical_constants module (2025-15-12).
+Some constants are from the ECHAM-6.3 mo_physical_constants module (2025-12-15).
 
 Date: 2025-01-09
 """
@@ -91,7 +91,7 @@ rd = physical_constants.rd
 rv = physical_constants.rv
 cpv = physical_constants.cpv
 cvv = physical_constants.cvv
-vtpc1 = physical_constants.vtmcp1
+vtmpc1 = physical_constants.vtmcp1
 vtmpc2 = physical_constants.vtmcp2
 eps = physical_constants.eps
 t0 = physical_constants.t0
