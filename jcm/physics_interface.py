@@ -229,7 +229,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp))
+    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp, axis=-3))
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
     """Convert state variables from the physics (nodal space) back to the dynamical core (spectral space).
