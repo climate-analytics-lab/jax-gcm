@@ -263,7 +263,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
         vorticity=modal_vorticity,
         divergence=modal_divergence,
         temperature_variation=temperature_modal, # does this need to be referenced to ref_temp ?
-        log_surface_pressure=modal_log_sp,
+        log_surface_pressure=modal_log_sp[..., jnp.newaxis, :, :], # Dinosaur expects log_sp to have a vertical dimension
         tracers={'specific_humidity': q_modal}
     )
 
