@@ -1,8 +1,10 @@
 """
 Two-moment cloud microphysics scheme for ICON physics
 
-This module implements a two-moment bulk cloud microphysics scheme, predicting both mass mixing ratios and number concentrations of hydrometeor species. 
+This module implements a two-moment bulk cloud microphysics scheme, predicting both mass mixing ratios and number 
+concentrations of hydrometeor species. 
 The scheme represents warm, mixed-phase, and ice-phase cloud processes and their coupling to aerosols.
+Based on the mo_cloud_microphysics_2m module from ECHAM6/ICON.
 
 Prognostic hydrometeors:
 - Cloud liquid water (mass and number)
@@ -24,22 +26,16 @@ Represented processes include:
 - Bergeron–Findeisen process (vapor deposition growth of ice at the expense of liquid)
 - Temperature-dependent partitioning between liquid and ice phases
 
-Key characteristics:
-- Two-moment treatment allows explicit simulation of cloud particle size distributions
+Planned features:
 - Consistent coupling to aerosol microphysics via HAM #TODO
-- Designed for global climate simulations (ECHAM6 / ICON heritage)
-- Mixed-phase clouds treated using temperature-dependent ice fraction
 
 Based on the ECHAM6/ICON microphysics as described in:
 - Lohmann et al. (2007): Cloud microphysics and aerosol indirect effects in the global climate model ECHAM5-HAM
 - Lohmann & Hoose (2009): Sensitivity studies of different aerosol indirect effects in mixed-phase clouds
-- Lohmann & Neubauer (2018): The importance of mixed-phase and ice clouds for climate sensitivity in the global aerosolclimate model ECHAM6-HAM2
-- Neubauer et al. (2019): The global aerosol–climate model ECHAM6.3–HAM2.3 – Part 2:  Cloud evaluation, aerosol radiative forcing, and climate sensitivity
-
-Notes for developers:
-- This scheme is diagnostic–prognostic hybrid: cloud fraction is diagnosed, while hydrometeor mass and number are prognosed.
-- Numerical stability relies on sub-stepping and limiter functions for conversion rates.
-- Thresholds for autoconversion and freezing depend on both hydrometeor number concentration and temperature.
+- Lohmann & Neubauer (2018): The importance of mixed-phase and ice clouds for climate sensitivity in the global 
+  aerosolclimate model ECHAM6-HAM2
+- Neubauer et al. (2019): The global aerosol–climate model ECHAM6.3–HAM2.3 – Part 2:  Cloud evaluation, aerosol 
+  radiative forcing, and climate sensitivity
 
 Date: 2025-12-15
 """
@@ -52,6 +48,25 @@ import tree_math
 
 from ..constants.physical_constants import (
     cpd, grav, rgrav, rd, alv, als, rv, vtmpc1, vtmpc2, rhoh2o, ak, tmelt, p0s1_bg 
+)
+
+from cloud_params import (
+    cqtmin, cvtfall, crhosno, cn0s, ccwmin,
+    cthomi,  clmax, clmin, jbmin, jbmax, lonacc,
+    ccraut, ceffmin, ceffmax, crhoi, ccsaut
+)
+
+from cloud_utils import (epsec, xsec, qsec, eps, mi,
+                               ri_vol_mean_1, ri_vol_mean_2,
+                               alfased_1, alfased_2, alfased_3,
+                               betased_1, betased_2, betased_3,
+                               icemin,
+                               cdi, mw0, mi0, mi0_rcp, ka, kb,
+                               alpha, xmw, fall, rhoice, conv_effr2mvr, clc_min, icemax,
+                               dw0, exm1_1, exp_1, exm1_2,
+                               exp_2, pirho_rcp, cap, cons4, cons5,
+                               fact_PK, pow_PK,
+                               get_util_var, get_cloud_bounds, fact_coll_eff, fact_tke
 )
 
 @tree_math.struct
@@ -127,3 +142,4 @@ class MicrophysicsParameters:
             epsilon=jnp.array(epsilon),
             dt_sedi=jnp.array(dt_sedi)
         )
+    

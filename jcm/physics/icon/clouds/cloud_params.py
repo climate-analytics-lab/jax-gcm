@@ -1,17 +1,9 @@
 from jax import jit
-
-"""
-Contains the tunable parameters for the cloud microphysics.
-Based on mo_cloud_params from ECHAM6/ICON.
-
-Date: 2025-12-15
-"""
-
 import jax.numpy as jnp
 
-from ..constants.physical_constants import (
-    tmelt, grav
-)
+# Constants
+tmelt = 273.15  # Melting temperature in Kelvin
+grav = 9.81     # Gravitational acceleration (m/s^2)
 
 # Default values for cloud microphysics
 cthomi = tmelt - 35.0
@@ -94,7 +86,18 @@ def sucloud(nlev, vct, nn=None, is_icon=False):
         else:
             raise ValueError("Truncation not supported.")
 
-    print(f"highest inversion level: jbmin = {jbmin}")
-    print(f"lowest inversion level: jbmax = {jbmax}")
-    print(f"highest level for condensation: ncctop = {ncctop}")
-    print(f"lowest level for tropopause calc.: nccbot = {nccbot}")
+    return {
+        "jbmin": jbmin,
+        "jbmax": jbmax,
+        "ncctop": ncctop,
+        "nccbot": nccbot,
+        "crs": crs,
+        "crt": crt,
+        "cvtfall": cvtfall,
+        "csecfrl": csecfrl,
+        "clwprat": clwprat,
+        "csatsc": csatsc,
+        "cinv": cinv,
+        "nex": nex,
+        "nadd": nadd,
+    }

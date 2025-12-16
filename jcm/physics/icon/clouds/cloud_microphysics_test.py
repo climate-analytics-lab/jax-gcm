@@ -13,6 +13,9 @@ from .cloud_microphysics import (
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
+from .cloud_utils import (
+    get_util_var, get_cloud_bounds
+)
 from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf
 
 
@@ -525,6 +528,115 @@ class TestFullMicrophysics:
         assert grad.shape == (5,)
         assert jnp.all(jnp.isfinite(grad))
 
+# ================= Tests for 2-m Microphysics ================== #
+
+class TestCloudUtils:
+    """Test utility functions for cloud microphysics"""
+
+    def test_get_util_var_geopotential(self):
+        """Test geopotential calculation at half levels."""
+        kproma, kbdim, ktdia, klev, klevp1 = 1, 1, 0, 3, 4
+        paphm1 = jnp.array([[1000.0, 900.0, 800.0, 700.0]])  # Pressure at half levels
+        pgeo = jnp.array([[100.0, 200.0, 300.0]])  # Geopotential at full levels
+        papm1 = jnp.array([[950.0, 850.0, 750.0]])  # Pressure at full levels
+        ptm1 = jnp.array([[280.0, 270.0, 260.0]])  # Temperature at full levels
+        
+        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
+            kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1
+        )
+
+        # Check geopotential at half levels
+        expected_pgeoh = jnp.array([[50.0, 150.0, 250.0, 0.0]])
+        assert jnp.allclose(pgeoh, expected_pgeoh), f"Expected {expected_pgeoh}, got {pgeoh}"
+
+    def test_get_util_var_pressure_differences(self):
+        """Test pressure differences calculation."""
+        kproma, kbdim, ktdia, klev, klevp1 = 1, 1, 0, 3, 4
+        paphm1 = jnp.array([[1000.0, 900.0, 800.0, 700.0]])  # Pressure at half levels
+        pgeo = jnp.array([[100.0, 200.0, 300.0]])  # Geopotential at full levels
+        papm1 = jnp.array([[950.0, 850.0, 750.0]])  # Pressure at full levels
+        ptm1 = jnp.array([[280.0, 270.0, 260.0]])  # Temperature at full levels
+
+        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
+            kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1
+        )
+
+        # Check pressure differences
+        expected_pdp = jnp.array([[-100.0, -100.0, -100.0]])
+        assert jnp.allclose(pdp, expected_pdp), f"Expected {expected_pdp}, got {pdp}"
+
+    def test_get_util_var_height_differences(self):
+        """Test height differences calculation."""
+        kproma, kbdim, ktdia, klev, klevp1 = 1, 1, 0, 3, 4
+        paphm1 = jnp.array([[1000.0, 900.0, 800.0, 700.0]])  # Pressure at half levels
+        pgeo = jnp.array([[100.0, 200.0, 300.0]])  # Geopotential at full levels
+        papm1 = jnp.array([[950.0, 850.0, 750.0]])  # Pressure at full levels
+        ptm1 = jnp.array([[280.0, 270.0, 260.0]])  # Temperature at full levels
+
+        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
+            kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1
+        )
+
+        # Check height differences
+        expected_pdz = jnp.array([[-10.19367991845056, -10.19367991845056, -10.19367991845056]])
+        assert jnp.allclose(pdz, expected_pdz), f"Expected {expected_pdz}, got {pdz}"
+
+    def test_get_util_var_air_density_correction(self):
+        """Test air density correction calculation."""
+        kproma, kbdim, ktdia, klev, klevp1 = 1, 1, 0, 3, 4
+        paphm1 = jnp.array([[1000.0, 900.0, 800.0, 700.0]])  # Pressure at half levels
+        pgeo = jnp.array([[100.0, 200.0, 300.0]])  # Geopotential at full levels
+        papm1 = jnp.array([[950.0, 850.0, 750.0]])  # Pressure at full levels
+        ptm1 = jnp.array([[280.0, 270.0, 260.0]])  # Temperature at full levels
+
+        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
+            kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1
+        )
+
+        # Check air density correction
+        expected_paaa = jnp.array([[1.0, 1.0, 1.0]])
+        assert jnp.allclose(paaa, expected_paaa)
+
+    def test_get_util_var_dynamic_viscosity(self):
+        """Test dynamic viscosity calculation."""
+        kproma, kbdim, ktdia, klev, klevp1 = 1, 1, 0, 3, 4
+        paphm1 = jnp.array([[1000.0, 900.0, 800.0, 700.0]])  # Pressure at half levels
+        pgeo = jnp.array([[100.0, 200.0, 300.0, 400.0]])  # Geopotential at full levels
+        papm1 = jnp.array([[950.0, 850.0, 750.0]])  # Pressure at full levels
+        ptm1 = jnp.array([[280.0, 270.0, 260.0]])  # Temperature at full levels
+
+        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
+            kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1
+        )
+
+        # Check dynamic viscosity
+        expected_pviscos = jnp.array([[0.0, 0.0, 0.0]])
+        assert jnp.allclose(pviscos, expected_pviscos)
+
+    def test_get_cloud_bounds(self):
+        """Test the get_cloud_bounds function."""
+        kproma = 1  # Number of columns
+        kbdim = 1   # Number of rows
+        ktdia = 0   # Starting level index
+        klev = 5    # Number of levels
+
+        # Cloud cover array (paclc)
+        paclc = jnp.array([[0.0, 0.8, 0.6, 0.0, 0.0]])  # Cloud at levels 1 and 2
+
+        # Call the function
+        ktop, kbas, kcl_minustop, kcl_minusbas = get_cloud_bounds(kproma, kbdim, ktdia, klev, paclc)
+
+        # Expected outputs
+        expected_ktop = jnp.array([[0, 1, 0, 0, 0]])  # Cloud top at level 1
+        expected_kbas = jnp.array([[0, 0, 1, 0, 0]])  # Cloud base at level 2
+        expected_kcl_minustop = jnp.array([[0, 0, 1, 0, 0]])  # Cloud levels excluding top
+        expected_kcl_minusbas = jnp.array([[0, 1, 0, 0, 0]])  # Cloud levels excluding base
+
+        # Assertions
+        assert jnp.array_equal(ktop, expected_ktop)
+        assert jnp.array_equal(kbas, expected_kbas)
+        assert jnp.array_equal(kcl_minustop, expected_kcl_minustop)
+        assert jnp.array_equal(kcl_minusbas, expected_kcl_minusbas)
 
 if __name__ == "__main__":
     # Run tests
@@ -558,5 +670,14 @@ if __name__ == "__main__":
     test_full.test_mixed_phase_process()
     test_full.test_conservation()
     test_full.test_jax_compatibility()
+
+    test_utils = TestCloudUtils()
+    test_utils.test_get_util_var_geopotential()
+    test_utils.test_get_util_var_pressure_differences()
+    test_utils.test_get_util_var_height_differences()
+    test_utils.test_get_util_var_air_density_correction()
+    test_utils.test_get_util_var_dynamic_viscosity()
+    test_utils.test_get_cloud_bounds()
     
     print("All tests passed!")
+        

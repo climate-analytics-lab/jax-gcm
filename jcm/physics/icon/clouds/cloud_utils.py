@@ -12,7 +12,7 @@ from math import pi
 from ..constants.physical_constants import (
     grav, rhoh2o
 )
-from cloud_params import (
+from .cloud_params import (
     cqtmin, crhoi, cn0s, crhosno
 )
 
@@ -108,7 +108,7 @@ def get_util_var(kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1):
     pgeoh = pgeoh.at[:, ktdia].set(
         pgeo[:, ktdia] + (pgeo[:, ktdia] - pgeoh[:, ktdia+1])
     )
-    pgeoh = pgeoh.at[:, klevp1-1].set(0.0)
+    pgeoh = pgeoh.at[:, klevp1-1].set(0.0) # highest half-level geopotential set to zero
 
     # Pressure differences
     pdp = pdp.at[:, ktdia:klev].set(

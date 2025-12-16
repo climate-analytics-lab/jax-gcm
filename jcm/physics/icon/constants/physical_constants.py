@@ -21,6 +21,10 @@ class PhysicalConstants(NamedTuple):
     grav: float = 9.81            # Gravitational acceleration (m/s²)
     rgrav: float = 1.0/grav         # Reciprocal of gravitational acceleration (s²/m)
 
+    # Gas constants
+    rd: float = 287.0             # Gas constant for dry air (J/K/kg)
+    rv: float = 461.0             # Gas constant for water vapor (J/K/kg)
+
     # Thermodynamic constants
     p0: float = 1.0e+5            # Reference pressure (Pa)
     cpd: float = 1004.64          # Specific heat at constant pressure for dry air (J/K/kg)
@@ -40,8 +44,6 @@ class PhysicalConstants(NamedTuple):
     ak: float = 1.3806504e-23     # Boltzmann constant (J/K)
 
     # Water vapor constants
-    rd: float = 287.0             # Gas constant for dry air (J/K/kg)
-    rv: float = 461.0             # Gas constant for water vapor (J/K/kg)
     cpv: float = 1869.46          # Specific heat at constant pressure for water vapor (J/K/kg)
     cvv: float = cpv-rv           # Specific heat at constant volume for water vapor (J/K/kg)
     vtmpc1: float = rv/rd-1.0     # Moisture buoyancy parameter (dimensionless)
@@ -91,8 +93,8 @@ rd = physical_constants.rd
 rv = physical_constants.rv
 cpv = physical_constants.cpv
 cvv = physical_constants.cvv
-vtmpc1 = physical_constants.vtmcp1
-vtmpc2 = physical_constants.vtmcp2
+vtmpc1 = physical_constants.vtmpc1
+vtmpc2 = physical_constants.vtmpc2
 eps = physical_constants.eps
 t0 = physical_constants.t0
 tmelt = physical_constants.tmelt
