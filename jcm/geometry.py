@@ -1,6 +1,7 @@
 """Date: 2/1/2024
 For storing all variables related to the model's grid space.
 """
+import numpy as np
 import jax.numpy as jnp
 import tree_math
 from jcm.constants import p0, grav, cp
@@ -32,17 +33,17 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shap
         if terrain_file is None:
             if nodal_shape is None:
                 raise ValueError("Must provide at least one of: fmask, orography, terrain_file, or nodal_shape.")
-            return jnp.zeros(nodal_shape), jnp.zeros(nodal_shape)
+            return np.zeros(nodal_shape), np.zeros(nodal_shape)
         
         import xarray as xr
         ds = xr.open_dataset(terrain_file)
         validate_ds(ds, expected_structure={"lsm": ("lon", "lat"), "orog": ("lon", "lat")})
-        orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
+        orography, fmask = np.asarray(ds['orog']), np.asarray(ds['lsm'])
         if target_resolution is not None:
             if target_resolution not in VALID_TRUNCATIONS:
                 raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
             ds = upsample_terrain_ds(ds, target_resolution=target_resolution)
-            orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
+            orography, fmask = np.asarray(ds['orog']), np.asarray(ds['lsm'])
         elif orography.shape not in VALID_NODAL_SHAPES:
             raise ValueError(f"Invalid terrain data shape: {orography.shape}. Must be one of: {VALID_NODAL_SHAPES}.")
 
@@ -52,10 +53,10 @@ def get_terrain(orography: jnp.ndarray=None, fmask: jnp.ndarray=None, nodal_shap
 
     elif orography is None:
         # If fmask provided but orography not, default orography to zeros (flat)
-        orography = jnp.zeros_like(fmask)
+        orography = np.zeros_like(fmask)
 
     # Set values close to 0 or 1 to exactly 0 or 1
-    fmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+    fmask = np.where(fmask <= fmask_threshold, 0.0, np.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
 
     return orography, fmask
 
