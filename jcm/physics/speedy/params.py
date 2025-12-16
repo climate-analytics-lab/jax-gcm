@@ -2,6 +2,7 @@
 For storing variables used by multiple physics schemes.
 """
 import tree_math
+import numpy as np
 import jax.numpy as jnp
 from jax import tree_util
 
@@ -17,12 +18,12 @@ class ConvectionParameters:
     @classmethod
     def default(cls):
         return cls(
-            psmin = jnp.array(0.8),
-            trcnv = jnp.array(6.0),
-            rhil = jnp.array(0.7),
-            rhbl = jnp.array(0.9),
-            entmax = jnp.array(0.5),
-            smf = jnp.array(0.8)
+            psmin = np.array(0.8),
+            trcnv = np.array(6.0),
+            rhil = np.array(0.7),
+            rhbl = np.array(0.9),
+            entmax = np.array(0.5),
+            smf = np.array(0.8)
         )
 
     def isnan(self):
@@ -55,10 +56,10 @@ class CondensationParameters:
     @classmethod
     def default(cls):
         return cls(
-            trlsc = jnp.array(4.0),
-            rhlsc = jnp.array(0.9),
-            drhlsc = jnp.array(0.1),
-            rhblsc = jnp.array(0.95)
+            trlsc = np.array(4.0),
+            rhlsc = np.array(0.9),
+            drhlsc = np.array(0.1),
+            rhblsc = np.array(0.95)
         )
 
     def isnan(self):
@@ -100,28 +101,28 @@ class ShortwaveRadiationParameters:
     @classmethod
     def default(cls):
         return cls(
-            albcl = jnp.array(0.43),
-            albcls = jnp.array(0.50),
-            absdry = jnp.array(0.033),
-            absaer = jnp.array(0.033),
-            abswv1 = jnp.array(0.022),
-            abswv2 = jnp.array(15.000),
-            abscl1 = jnp.array(0.015),
-            abscl2 = jnp.array(0.15),
-            ablwin = jnp.array(0.3),
-            ablwv1 = jnp.array(0.7),
-            ablwv2 = jnp.array(50.0),
-            ablcl1 = jnp.array(12.0),
-            ablcl2 = jnp.array(0.6),
-            rhcl1 = jnp.array(0.30),
-            rhcl2 = jnp.array(1.00),
-            qacl = jnp.array(0.20),
-            wpcl = jnp.array(0.2),
-            pmaxcl = jnp.array(10.0),
-            clsmax = jnp.array(0.60),
-            clsminl = jnp.array(0.15),
-            gse_s0 = jnp.array(0.25),
-            gse_s1 = jnp.array(0.40)
+            albcl = np.array(0.43),
+            albcls = np.array(0.50),
+            absdry = np.array(0.033),
+            absaer = np.array(0.033),
+            abswv1 = np.array(0.022),
+            abswv2 = np.array(15.000),
+            abscl1 = np.array(0.015),
+            abscl2 = np.array(0.15),
+            ablwin = np.array(0.3),
+            ablwv1 = np.array(0.7),
+            ablwv2 = np.array(50.0),
+            ablcl1 = np.array(12.0),
+            ablcl2 = np.array(0.6),
+            rhcl1 = np.array(0.30),
+            rhcl2 = np.array(1.00),
+            qacl = np.array(0.20),
+            wpcl = np.array(0.2),
+            pmaxcl = np.array(10.0),
+            clsmax = np.array(0.60),
+            clsminl = np.array(0.15),
+            gse_s0 = np.array(0.25),
+            gse_s1 = np.array(0.40)
         )
 
     def isnan(self):
@@ -141,11 +142,11 @@ class ModRadConParameters:
     @classmethod
     def default(cls):
         return cls(
-            albsea = jnp.array(0.07),
-            albice = jnp.array(0.60),
-            albsn = jnp.array(0.60),
-            epslw = jnp.array(0.05),
-            emisfc = jnp.array(0.98)
+            albsea = np.array(0.07),
+            albice = np.array(0.60),
+            albsn = np.array(0.60),
+            epslw = np.array(0.05),
+            emisfc = np.array(0.98)
         )
 
     def isnan(self):
@@ -184,22 +185,22 @@ class SurfaceFluxParameters:
     @classmethod
     def default(cls):
         return cls(
-            fwind0 = jnp.array(0.95),
-            ftemp0 = jnp.array(1.0),
-            fhum0 = jnp.array(0.0),
-            cdl = jnp.array(2.4e-3),
-            cds = jnp.array(1.0e-3),
-            chl = jnp.array(1.2e-3),
-            chs = jnp.array(0.9e-3),
-            vgust = jnp.array(5.0),
-            ctday = jnp.array(1.0e-2),
-            dtheta = jnp.array(3.0),
-            fstab = jnp.array(0.67),
-            clambda = jnp.array(7.0),
-            clambsn = jnp.array(7.0),
+            fwind0 = np.array(0.95),
+            ftemp0 = np.array(1.0),
+            fhum0 = np.array(0.0),
+            cdl = np.array(2.4e-3),
+            cds = np.array(1.0e-3),
+            chl = np.array(1.2e-3),
+            chs = np.array(0.9e-3),
+            vgust = np.array(5.0),
+            ctday = np.array(1.0e-2),
+            dtheta = np.array(3.0),
+            fstab = np.array(0.67),
+            clambda = np.array(7.0),
+            clambsn = np.array(7.0),
             lscasym = True,
             lskineb = True,
-            hdrag = jnp.array(2000.0)
+            hdrag = np.array(2000.0)
         )
 
     def isnan(self):
@@ -219,12 +220,12 @@ class VerticalDiffusionParameters:
     @classmethod
     def default(cls):
         return cls(
-            trshc = jnp.array(6.0),
-            trvdi = jnp.array(24.0),
-            trvds = jnp.array(6.0),
-            redshc = jnp.array(0.5),
-            rhgrad = jnp.array(0.5),
-            segrad = jnp.array(0.1)
+            trshc = np.array(6.0),
+            trvdi = np.array(24.0),
+            trvds = np.array(6.0),
+            redshc = np.array(0.5),
+            rhgrad = np.array(0.5),
+            segrad = np.array(0.1)
         )
 
     def isnan(self):

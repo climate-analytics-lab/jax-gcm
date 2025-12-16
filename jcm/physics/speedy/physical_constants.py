@@ -1,7 +1,7 @@
 """Date: 1/25/2024
 For storing and initializing physical constants.
 """
-import jax.numpy as jnp
+import numpy as np
 import jcm.constants as c
 
 # Physical constants for dynamics
@@ -44,7 +44,7 @@ epsilon = 1e-9
 nstrad = 3 # number of timesteps between shortwave evaluations
 
 SIGMA_LAYER_BOUNDARIES = {
-    # 5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]), # FIXME: not supported at the moment
-    7: jnp.array([0.0, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-    8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+    # 5: np.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]), # FIXME: not supported at the moment
+    7: np.array([0.0, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+    8: np.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
 }
