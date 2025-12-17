@@ -3,14 +3,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax import jit
 from jax.tree_util import tree_map
-from pathlib import Path
+from importlib import resources
 import dinosaur
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
 
-DYNAMICS_UNITS_TABLE_CSV_PATH = Path(__file__).parent / 'dynamics_units_table.csv'
+DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
@@ -103,9 +103,6 @@ def pass_fn(operand):
 
 def ones_like(x):
     return tree_map(jnp.ones_like, x)
-
-def stack_trees(trees):
-    return tree_map(lambda *arrays: jnp.stack(arrays, axis=0).astype(jnp.float32), *trees)
 
 def _index_if_3d(arr, key):
     return arr[:, :, key] if arr.ndim > 2 else arr

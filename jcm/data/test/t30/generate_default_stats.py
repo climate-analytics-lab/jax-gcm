@@ -1,5 +1,3 @@
-from pathlib import Path
-
 default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specific_humidity',
                      'normalized_surface_pressure','humidity.rh','shortwave_rad.ftop','longwave_rad.ftop',
                      'shortwave_rad.cloudstr','shortwave_rad.qcloud','convection.precnv','condensation.precls']
@@ -11,8 +9,9 @@ def run_default_speedy_model(save_interval=None):
     from jcm.model import Model
     from jcm.geometry import Geometry
     from jcm.forcing import ForcingData
+    from importlib import resources
 
-    forcing_dir = Path(__file__).resolve().parent / '../../bc/t30/clim'
+    forcing_dir = resources.files('jcm.data.bc.t30.clim')
 
     # Load the terrain and forcing data
     

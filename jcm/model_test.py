@@ -187,20 +187,17 @@ class TestModelUnit(unittest.TestCase):
         from jcm.forcing import ForcingData
         from jcm.utils import ones_like
 
-        from pathlib import Path
-        forcing_dir = Path(__file__).resolve().parent / 'data/bc'
-        
-        from jcm.data.bc.interpolate import main as interpolate_main
-        interpolate_main(['31'])
-
-        geometry = Geometry.from_file(forcing_dir / 'terrain_t31.nc')
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+        geometry = Geometry.from_file(data_dir / 'terrain.nc', target_resolution=31)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', target_resolution=31)
 
         create_model = lambda params=Parameters.default(): Model(
             geometry=geometry,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_t31.nc'))
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -216,20 +213,17 @@ class TestModelUnit(unittest.TestCase):
         from jcm.forcing import ForcingData
         from jcm.utils import ones_like_tangent
         
-        from pathlib import Path
-        forcing_dir = Path(__file__).resolve().parent / 'data/bc'
-
-        from jcm.data.bc.interpolate import main as interpolate_main
-        interpolate_main(['31'])
-
-        geometry = Geometry.from_file(forcing_dir / 'terrain_t31.nc')
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+        geometry = Geometry.from_file(data_dir / 'terrain.nc', target_resolution=31)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', target_resolution=31)
 
         create_model = lambda params=Parameters.default(): Model(
             geometry=geometry,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=ForcingData.from_file(forcing_dir / 'forcing_t31.nc'))
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)
 
         # Calculate gradients using JVP
         params = Parameters.default()
@@ -275,10 +269,10 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_default_statistics(self):
         from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
         import xarray as xr
-        from pathlib import Path
+        from importlib import resources
 
         # load test file for comparison
-        stats_file = Path(__file__).resolve().parent / 'data/test/t30/default_statistics.nc'
+        stats_file = resources.files('jcm.data.test.t30') / 'default_statistics.nc'
         default_stats = xr.open_dataset(stats_file)
 
         model, predictions = run_default_speedy_model(save_interval=30.)

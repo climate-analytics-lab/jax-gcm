@@ -1,12 +1,12 @@
 import xarray as xr
 import sys
-from pathlib import Path
+from importlib import resources
 import numpy as np
 from jcm.physics.speedy.physical_constants import sd2sc, swcap, swwil
 
 # Set the input directory path
-input_dir = Path(__file__).parent / 't30/clim'
-output_file, terrain_file = Path(__file__).parent / 't30/clim/forcing.nc', Path(__file__).parent / 't30/clim/terrain.nc'
+input_dir = resources.files('jcm.data.bc.t30.clim')
+output_file, terrain_file = input_dir / 'forcing.nc', input_dir / 'terrain.nc'
 file_names = ['land.nc', 'sea_ice.nc', 'sea_surface_temperature.nc', 'snow.nc', 'soil.nc', 'surface.nc']
 
 def process_forcing(ds):

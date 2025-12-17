@@ -6,7 +6,13 @@ Getting Started
 Installation
 ------------
 
-To use JAX-GCM, first install it using pip:
+To use JAX-GCM, first install it:
+
+.. code-block:: console
+
+   $ pip install jcm
+
+or for the development version:
 
 .. code-block:: console
 
@@ -63,16 +69,16 @@ For a more realistic simulation with orography and time-varying boundary conditi
    from jcm.model import Model
    from jcm.geometry import Geometry
    from jcm.forcing import ForcingData
-   from pathlib import Path
+   from importlib import resources
 
-   # Load realistic orography and land-sea mask
-   data_dir = Path("jcm/data/bc")
-   terrain_file = data_dir / "terrain_t31.nc"
-   geometry = Geometry.from_file(terrain_file)
+   # Load realistic orography and land-sea mask, interpolated to T31 grid
+   data_dir = resources.files("jcm.data.bc.t30.clim")
+   terrain_file = data_dir / "terrain.nc"
+   geometry = Geometry.from_file(terrain_file, target_resolution=31)
 
-   # Load realistic forcing data (SST, sea ice, soil moisture, etc.)
-   forcing_file = data_dir / "forcing_t31.nc"
-   forcing = ForcingData.from_file(forcing_file)
+   # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid
+   forcing_file = data_dir / "forcing.nc"
+   forcing = ForcingData.from_file(forcing_file, target_resolution=31)
 
    # Create model with realistic configuration
    model = Model(
@@ -228,5 +234,5 @@ Next Steps
 
 - See :doc:`design` to understand the model architecture
 - See :doc:`api` for detailed API documentation
-- Check example notebooks in the ``notebooks/`` directory
+- Check example notebooks in the ``notebooks/`` directory of the GitHub repo
 - Read :doc:`developer` for contribution guidelines
