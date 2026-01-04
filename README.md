@@ -1,6 +1,6 @@
 # JAX-GCM (JCM)
 
-![Logo](logo.png)
+<img src="logo.png" alt="Logo" width="200">
 
 A fully differentiable General Circulation Model (GCM) for climate science and machine learning applications, written entirely in JAX.
 
