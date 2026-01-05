@@ -106,7 +106,7 @@ def test_planck_bands():
 
 def test_planck_bands_single_temperature():
     """Test planck_bands with single temperature"""
-    temperature = 288.0
+    temperature = jnp.array(288.0)
     
     # Test with single temperature (should work with scalars)
     band_limits = ((100, 500), (500, 1500), (1500, 3000))

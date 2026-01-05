@@ -28,14 +28,14 @@ def test_two_stream_coefficients():
     g = jnp.array([0.85, 0.85, 0.85])
     
     # Test LW (no solar angle)
-    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(tau, ssa, g, mu0=None)
+    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(ssa, g, mu0=None)
     assert gamma1.shape == tau.shape
     assert jnp.all(gamma3 == 0)  # No direct beam
     assert jnp.all(gamma4 == 1)
     
     # Test SW
     mu0 = 0.5
-    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(tau, ssa, g, mu0)
+    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(ssa, g, mu0)
     assert jnp.all(gamma3 > 0)
     assert jnp.all(jnp.abs(gamma3 + gamma4 - 1.0) < 1e-10)
 

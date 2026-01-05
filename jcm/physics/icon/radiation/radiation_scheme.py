@@ -241,11 +241,6 @@ def radiation_scheme(
     nlev = temperature.shape[0]
     
     # For now, assume aerosol properties are spectrally uniform
-    # and expand to radiation band structure
-    # FIXME - this isn't used
-    n_sw_bands = parameters.n_sw_bands
-    n_lw_bands = parameters.n_lw_bands
-    
     # Expand aerosol profiles to radiation bands
     # Handle both 1D (single column from vmap) and 2D (full grid) aerosol data
     if aerosol_data.aod_profile.ndim == 1:
@@ -290,11 +285,10 @@ def radiation_scheme(
     # Now perform the actual radiation calculation
     
     # Solar radiation calculations
-
-    #FIXME: I think this is causing an issue because the I'm not sure what the shape that comes out is.
     toa_flux = radiation_flux(date, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(OrbitalTime.from_datetime(date), longitude, latitude)
-    cos_zenith = jnp.sqrt(1.0 - sin_altitude**2)
+    # cos_zenith = jnp.sqrt(1.0 - sin_altitude**2)
+    cos_zenith = sin_altitude # cos(zenith) = sin(altitude) since they are complementary angles
 
     # Prepare radiation state
     rad_state = prepare_radiation_state(
