@@ -58,7 +58,8 @@ def get_large_scale_condensation_tendencies(
     sig2 = geometry.fsg**2.0
     
     rhref = parameters.condensation.rhlsc + parameters.condensation.drhlsc * (sig2 - 1.0)
-    rhref = jnp.maximum(rhref, parameters.condensation.rhblsc)
+    # Apply rhblsc threshold only at bottom level (k=kx), not all levels
+    rhref = rhref.at[-1].set(jnp.maximum(rhref[-1], parameters.condensation.rhblsc))
     dqmax = qsmax * sig2 * rtlsc
 
     # Compute dqa array
@@ -69,8 +70,14 @@ def get_large_scale_condensation_tendencies(
     dqlsc = dqlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], dqa[1:] * rtlsc, 0.0))
     dtlsc = dtlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2), 0.))
 
-    # The +1 here is because the first element of negative_dqa_mask is not included in the argmin
-    iptop = jnp.minimum(jnp.argmin(dqa[1:]>=0, axis=0)+1, conv.iptop)
+    # Update iptop to first level with condensation (dqa < 0), or keep conv.iptop if no condensation
+    condensation_mask = dqa[1:] < 0
+    first_cond_level = jnp.where(
+        jnp.any(condensation_mask, axis=0),
+        jnp.argmax(condensation_mask, axis=0) + 2,  # +2 for 1-indexed and [1:] slice
+        conv.iptop  # No condensation: keep conv.iptop unchanged
+    )
+    iptop = jnp.minimum(first_cond_level, conv.iptop)
 
     # Large-scale precipitation
     pfact = geometry.dhs * prg
