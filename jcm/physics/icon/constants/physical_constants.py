@@ -19,7 +19,7 @@ class PhysicalConstants(NamedTuple):
     rearth: float = 6.371e+6      # Radius of Earth (m)
     omega: float = 7.292e-05      # Rotation rate of Earth (rad/s)
     grav: float = 9.81            # Gravitational acceleration (m/s²)
-    rgrav: float = 1.0/grav         # Reciprocal of gravitational acceleration (s²/m)
+    rgrav: float = 1.0/grav       # Reciprocal of gravitational acceleration (s²/m)
 
     # Gas constants
     rd: float = 287.0             # Gas constant for dry air (J/K/kg)

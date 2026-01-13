@@ -10,7 +10,7 @@ from jax import lax
 from math import pi
 
 from ..constants.physical_constants import (
-    grav, rhoh2o
+    grav, rgrav, rhoh2o
 )
 from .cloud_params import (
     cqtmin, crhoi, cn0s, crhosno
@@ -82,46 +82,50 @@ fact_tke = 0.7
 fact_PK = 8.253e-3  # 9.17 x 0.9, because m = rho_c x V_c, where rho_c = 0.9 g.cm^-3
 pow_PK = 2.475
 
-def get_util_var(kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1):
+def get_util_var(nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1):
     """
     Get several utility variables:
         - Geopotential at half levels (pgeoh)
         - Pressure- and height-differences (pdp, pdz)
         - Air density correction for computing ice crystal fall velocity (paaa)
         - Dynamic viscosity of air (pviscos)
+
+    Assumes that the highest level is a the surface level.
     """
-    grav = 9.81  # Gravitational acceleration [m/s^2]
-    g_rcp = 1.0 / grav
 
     # Initialize output arrays
-    pgeoh = jnp.zeros((kbdim, klevp1))
-    pdp = jnp.zeros((kbdim, klev))
-    pdpg = jnp.zeros((kbdim, klev))
-    pdz = jnp.zeros((kbdim, klev))
-    paaa = jnp.zeros((kbdim, klev))
-    pviscos = jnp.zeros((kbdim, klev))
+    pgeoh = jnp.zeros((nbdim, nlevp1))
+    pdp = jnp.zeros((nbdim, nlev))
+    pdpg = jnp.zeros((nbdim, nlev))
+    pdz = jnp.zeros((nbdim, nlev))
+    paaa = jnp.zeros((nbdim, nlev))
+    pviscos = jnp.zeros((nbdim, nlev))
 
     # Geopotential at half levels
-    pgeoh = pgeoh.at[:, ktdia+1:klev].set(
-        0.5 * (pgeo[:, ktdia+1:klev] + pgeo[:, ktdia:klev-1])
+    pgeoh = pgeoh.at[:, ntdia+1:nlev].set(
+        0.5 * (pgeo[:, ntdia+1:nlev] + pgeo[:, ntdia:nlev-1])
     )
-    pgeoh = pgeoh.at[:, ktdia].set(
-        pgeo[:, ktdia] + (pgeo[:, ktdia] - pgeoh[:, ktdia+1])
+    pgeoh = pgeoh.at[:, ntdia].set(
+        pgeo[:, ntdia] + (pgeo[:, ntdia] - pgeoh[:, ntdia+1])
     )
-    pgeoh = pgeoh.at[:, klevp1-1].set(0.0) # highest half-level geopotential set to zero
+    pgeoh = pgeoh.at[:, nlevp1-1].set(0.0) # highest half-level geopotential set to zero
 
     # Pressure differences
-    pdp = pdp.at[:, ktdia:klev].set(
-        paphm1[:, ktdia+1:klevp1] - paphm1[:, ktdia:klev]
+    pdp = pdp.at[:, ntdia:nlev].set(                       # absolute pressure difference
+        paphm1[:, ntdia+1:nlevp1] - paphm1[:, ntdia:nlev]
     )
-    pdpg = pdpg.at[:, ktdia:klev].set(
-        g_rcp * pdp[:, ktdia:klev]
+    pdpg = pdpg.at[:, ntdia:nlev].set(                     # pressure gradient force term
+        rgrav * pdp[:, ntdia:nlev]
     )
 
     # Height differences
-    pdz = pdz.at[:, ktdia:klev].set(
-        g_rcp * (pgeoh[:, ktdia:klev] - pgeoh[:, ktdia+1:klevp1])
+    pdz = pdz.at[:, ntdia:nlevp1].set(
+        rgrav * (pgeoh[:, ntdia:nlev] - pgeoh[:, ntdia+1:nlevp1])
     )
+    # Might change it to this to keep it consistent with pressure differ
+    # pdz = pdz.at[:, ntdia:nlevp1].set(
+    #     rgrav * (pgeoh[:, ntdia+1:nlevp1] - pgeoh[:, ntdia:nlev])
+    # )
 
     # Air density correction
     paaa = paaa.at[:, :].set(
@@ -135,80 +139,128 @@ def get_util_var(kproma, kbdim, ktdia, klev, klevp1, paphm1, pgeo, papm1, ptm1):
 
     return pgeoh, pdp, pdpg, pdz, paaa, pviscos
 
-def get_cloud_bounds(kproma, kbdim, ktdia, klev, paclc):
+def get_cloud_bounds(nproma, nbdim, ntdia, nlev, paclc):
     """
     Flags the top, base, and intermediate levels for each cloud.
 
-    Parameters:
-        kproma (int): Number of columns.
-        kbdim (int): Number of rows.
-        ktdia (int): Starting level index.
-        klev (int): Number of levels.
-        paclc (jax.numpy.ndarray): Cloud cover array of shape (kbdim, klev).
+    Assumes that the highest level is a the surface level.
 
-    Returns:
-        ktop (jax.numpy.ndarray): Flag for cloud tops of shape (kbdim, klev).
-        kbas (jax.numpy.ndarray): Flag for cloud bases of shape (kbdim, klev).
-        kcl_minustop (jax.numpy.ndarray): Flag for all cloud levels except their top.
-        kcl_minusbas (jax.numpy.ndarray): Flag for all cloud levels except their base.
     """
-    epsec = 1.0e-12
-
     # Initialize output arrays
-    ktop = jnp.zeros((kbdim, klev), dtype=jnp.int32)
-    kbas = jnp.zeros((kbdim, klev), dtype=jnp.int32)
-    kcl_minustop = jnp.zeros((kbdim, klev), dtype=jnp.int32)
-    kcl_minusbas = jnp.zeros((kbdim, klev), dtype=jnp.int32)
+    ktop = jnp.zeros((nbdim, nlev), dtype=jnp.int32)
+    kbas = jnp.zeros((nbdim, nlev), dtype=jnp.int32)
+    kcl_minustop = jnp.zeros((nbdim, nlev), dtype=jnp.int32)
+    kcl_minusbas = jnp.zeros((nbdim, nlev), dtype=jnp.int32)
 
     # Duplicate paclc at level-1 and level+1
-    zaclcm = jnp.zeros((kbdim, klev))
-    zaclcp = jnp.zeros((kbdim, klev))
-    zaclcm = zaclcm.at[:, ktdia + 1 : klev].set(paclc[:, ktdia : klev - 1])
-    zaclcp = zaclcp.at[:, ktdia : klev - 1].set(paclc[:, ktdia + 1 : klev])
+    zaclcm = jnp.zeros((nbdim, nlev))
+    zaclcp = jnp.zeros((nbdim, nlev))
+    zaclcm = zaclcm.at[:, ntdia + 1 : nlev].set(paclc[:, ntdia : nlev - 1])
+    zaclcp = zaclcp.at[:, ntdia : nlev - 1].set(paclc[:, ntdia + 1 : nlev])
 
     # Set logical switches
     ll = paclc >= epsec
     llm = zaclcm < epsec
     llp = zaclcp < epsec
 
-    lltop = ll & llm  # True if cloud top detected
-    llbas = ll & llp  # True if cloud base detected
+    lltop = ll & llm
+    llbas = ll & llp
 
-    # Set ktop and kbas
-    iindex = jnp.tile(jnp.arange(klev), (kbdim, 1))
+    # Set ktop and kbas (index-marked masks)
+    iindex = jnp.tile(jnp.arange(nlev, dtype=jnp.int32), (nbdim, 1))
     ktop = jnp.where(lltop, iindex, 0)
     kbas = jnp.where(llbas, iindex, 0)
 
-    # Count the number of clouds per column
-    iclnb = jnp.sum(lltop, axis=1)
+    def process_column(jl, carry_state):
+        kcl_minustop, kcl_minusbas = carry_state
 
-    # Process each column
-    def process_column(jl, kcl_minustop, kcl_minusbas):
-        jnumb = iclnb[jl]
-        iclbounds = jnp.zeros((2, klev // 2 + 1), dtype=jnp.int32)
+        # per-level event flags for this column
+        is_top = lltop[jl, :]  # (nlev,) bool
+        is_bas = llbas[jl, :]  # (nlev,) bool
 
-        # Set the bounds in a compact array
-        iclbounds = iclbounds.at[0, :jnumb].set(jnp.where(lltop[jl, :], iindex[jl, :], 0))
-        iclbounds = iclbounds.at[1, :jnumb].set(jnp.where(llbas[jl, :], iindex[jl, :], 0))
+        # Record up to nlev pairs in fixed-size arrays; unused slots stay -1.
+        tops_out0 = -jnp.ones((nlev,), dtype=jnp.int32)
+        bas_out0 = -jnp.ones((nlev,), dtype=jnp.int32)
 
-        # Flag cloud levels except their base (or top)
-        def update_bounds(jm, kcl_minustop, kcl_minusbas):
-            jtop = iclbounds[0, jm]
-            jbas = iclbounds[1, jm]
-            kcl_minusbas = kcl_minusbas.at[jl, jtop:jbas].set(jbas)
-            kcl_minustop = kcl_minustop.at[jl, jtop + 1 : jbas + 1].set(jtop)
-            return kcl_minustop, kcl_minusbas
+        # scan state:
+        # open_top: int32, -1 means "no open cloud"
+        # pair_count: number of emitted pairs so far (int32)
+        # tops_out, bas_out: (nlev,) arrays
+        def scan_step(state, k):
+            open_top, pair_count, tops_out, bas_out = state
+            k = k.astype(jnp.int32)
+
+            top_here = is_top[k]
+            bas_here = is_bas[k]
+
+            # If a top and no cloud is open, open one at k.
+            open_top = jnp.where(top_here & (open_top < 0), k, open_top)
+
+            # If a base and a cloud is open, emit a pair (open_top, k) and close.
+            emit = bas_here & (open_top >= 0)
+
+            tops_out = jax.lax.cond(
+                emit,
+                lambda arr: arr.at[pair_count].set(open_top),
+                lambda arr: arr,
+                tops_out,
+            )
+            bas_out = jax.lax.cond(
+                emit,
+                lambda arr: arr.at[pair_count].set(k),
+                lambda arr: arr,
+                bas_out,
+            )
+
+            pair_count = pair_count + emit.astype(jnp.int32)
+            open_top = jnp.where(emit, -jnp.int32(1), open_top)
+
+            return (open_top, pair_count, tops_out, bas_out), None
+
+        init_state = (-jnp.int32(1), jnp.int32(0), tops_out0, bas_out0)
+        (open_top, npairs, tops_list, bas_list), _ = jax.lax.scan(
+            scan_step, init_state, jnp.arange(nlev)
+        )
+
+        # Apply each (top, base) pair to fill kcl_* rows using masks.
+        def apply_pair(i, state):
+            kcl_minustop, kcl_minusbas = state
+            jtop = tops_list[i]
+            jbas = bas_list[i]
+
+            valid = (i < npairs) & (jtop >= 0) & (jbas >= 0) & (jtop < jbas)
+
+            def do_update(st):
+                kcl_minustop, kcl_minusbas = st
+
+                idx = jnp.arange(nlev, dtype=jnp.int32)
+                in_minusbas = (idx >= jtop) & (idx < jbas)   # [top, base)
+                in_minustop = (idx > jtop) & (idx <= jbas)   # (top, base]
+
+                row_minusbas = kcl_minusbas[jl, :]
+                row_minustop = kcl_minustop[jl, :]
+
+                row_minusbas = jnp.where(in_minusbas, jbas, row_minusbas)
+                row_minustop = jnp.where(in_minustop, jtop, row_minustop)
+
+                kcl_minusbas = kcl_minusbas.at[jl, :].set(row_minusbas)
+                kcl_minustop = kcl_minustop.at[jl, :].set(row_minustop)
+                return kcl_minustop, kcl_minusbas
+
+            return jax.lax.cond(valid, do_update, lambda st: st, (kcl_minustop, kcl_minusbas))
 
         kcl_minustop, kcl_minusbas = jax.lax.fori_loop(
-            0, jnumb, update_bounds, (kcl_minustop, kcl_minusbas)
+            0, nlev, apply_pair, (kcl_minustop, kcl_minusbas)
         )
+
         return kcl_minustop, kcl_minusbas
 
     kcl_minustop, kcl_minusbas = jax.lax.fori_loop(
-        0, kproma, process_column, (kcl_minustop, kcl_minusbas)
+        0, nproma, process_column, (kcl_minustop, kcl_minusbas)
     )
 
     return ktop, kbas, kcl_minustop, kcl_minusbas
+
 
 def init_cloud_micro_2m(lconv):
     """
