@@ -71,7 +71,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
             atol=1e-4, rtol=0
         )
         self.assertAlmostEqual(physics_data.condensation.precls[0,0,jnp.newaxis], jnp.asarray([1.293]), delta=0.05)
-        self.assertEqual(physics_data.convection.iptop[0,0,jnp.newaxis], jnp.asarray([[1]])) # Note this is 2 in the Fortran code, but indexing from 1, so should be 1 in the python
+        self.assertEqual(physics_data.convection.iptop[0,0,jnp.newaxis], jnp.asarray([[2]]))
 
     def test_get_large_scale_condensation_tendencies_gradients_isnan_ones(self):
         """Test that we can calculate gradients of large-scale condensation without getting NaN values"""
