@@ -45,6 +45,35 @@ class ForcingData:
         )
     
     @classmethod
+    def single_column_forcing(cls, alb0=0., sice_am=0., snowc_am=0.,
+                            soilw_am=0., stl_am=273.15, sea_surface_temperature=300.,
+                            lfluxland=False):
+        """Initialize a ForcingData instance for a single column model.
+
+        Args:
+            alb0 (optional): Bare-land annual mean albedo (default 0).
+            sice_am (optional): Sea ice concentration (default 0).
+            snowc_am (optional): Snow cover (default 0).
+            soilw_am (optional): Soil moisture (default 0).
+            stl_am (optional): Temperature over land in Kelvin (default 273.15).
+            sea_surface_temperature (optional): SST in Kelvin (default 300).
+            lfluxland (optional): Land flux flag (default False).
+
+        Returns:
+            ForcingData object for a single column with shape (1, 1)
+
+        """
+        return cls(
+            alb0=jnp.array([[alb0]]),
+            sice_am=jnp.array([[sice_am]]),
+            snowc_am=jnp.array([[snowc_am]]),
+            soilw_am=jnp.array([[soilw_am]]),
+            stl_am=jnp.array([[stl_am]]),
+            sea_surface_temperature=jnp.array([[sea_surface_temperature]]),
+            lfluxland=jnp.bool_(lfluxland),
+        )
+
+    @classmethod
     def from_file(cls, filename: str, target_resolution=None):
         """Initialize forcing data from a file.
 
@@ -76,7 +105,9 @@ class ForcingData:
             ix, il, n_times = ds['stl'].shape
             if (ix, il) not in VALID_NODAL_SHAPES:
                 raise ValueError(f"Invalid nodal shape: {(ix, il)}. Must be one of: {VALID_NODAL_SHAPES}.")
-            if n_times != 365:
+            if n_times == 12:
+                ds = interpolate_to_daily(ds)
+            elif n_times!= 365:
                 raise ValueError(f"Expected 365 time steps, got {n_times}.")
             # FIXME: Consider validating lat/lon values here - would have to construct a coords object to get expected values though
         elif target_resolution not in VALID_TRUNCATIONS:
