@@ -67,7 +67,7 @@ def diagnose_convection(
 
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match icltop convention
+    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
     possible_cltop_levels = jnp.arange(2, kx-3)
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
@@ -143,7 +143,7 @@ def get_convection_tendencies(
     iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, forcing, geometry)
 
     # 3. Convection over selected grid-points
-    mask = iptop < kx
+    mask = iptop < kx # CHECK INDEXING
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
 
@@ -174,7 +174,7 @@ def get_convection_tendencies(
 
     # replace loop with masking
     loop_mask = (kx - 2 >= jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]) & \
-                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop)
+                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop) # CHECK INDEXING
     
     #start by making entrainment profile:
     _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
@@ -202,11 +202,11 @@ def get_convection_tendencies(
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[jnp.newaxis], axis=0), axis=0)
     pad_array = lambda array: jnp.pad(array, ((0, 2), (0, 0), (0, 0)), mode='constant', constant_values=0)
-    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop)
+    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop) # CHECK INDEXING
                                  for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
     
     # 3.3 Top layer (condensation and detrainment)
-    k = iptop - 1
+    k = iptop - 1 # CHECK INDEXING
 
     # Flux of convective precipitation
     qsatb = index_array(pad_array(interpolate(qsat)), k)
