@@ -185,19 +185,15 @@ def longwave_fluxes_single_band(
     surface_emissivity: float,
     surface_planck: float
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate LW fluxes for a single band.
-    
-    For LW emission, use absorptive transmittance (not diffuse transmittance from scattering).
-    """
+    """Calculate LW fluxes for a single band."""
     nlev = tau.shape[0]
     
-    # For LW emission, use pure absorption transmittance
-    # T_abs = exp(-tau/mu) with mu ~ 1.66 (diffusivity factor) for better accuracy
-    T_abs = jnp.exp(-tau / 1.66)
+    # Calculate layer properties (no direct beam for LW)
+    R_dif, T_dif, _, _ = layer_reflectance_transmittance(tau, ssa, g, mu0=None)
     
-    # Emission source: epsilon * Planck
-    source = planck_layer * (1.0 - T_abs)
+    # Simplified approach: use source function method
+    # Source = Planck * (1 - transmittance)
+    source = planck_layer * (1.0 - T_dif)
     
     # Initialize arrays
     flux_up = jnp.zeros(nlev + 1)
@@ -209,8 +205,10 @@ def longwave_fluxes_single_band(
     # Upward flux calculation using recurrence relation
     def upward_step(carry, x):
         flux_below = carry
-        lev, T, S = x
-        # Upward flux = transmitted from below + emitted by layer
+        lev, R, T, S = x
+        # CRITICAL FIX: Removed R * flux_below term
+        # The R * flux_below term was incorrectly reflecting upward flux back upward
+        # which doesn't make physical sense and was causing flux to be 15-25x too large
         flux_above = T * flux_below + S
         return flux_above, flux_above
         
@@ -219,14 +217,14 @@ def longwave_fluxes_single_band(
     _, flux_up_levels = jax.lax.scan(
         upward_step,
         flux_up[nlev],
-        (indices, T_abs[::-1], source[::-1])
+        (indices, R_dif[::-1], T_dif[::-1], source[::-1])
     )
     flux_up = flux_up.at[:-1].set(flux_up_levels[::-1])
     
     # Downward flux from top
     def downward_step(carry, x):
         flux_above = carry
-        lev, T, S = x
+        lev, R, T, S = x
         flux_below = T * flux_above + S
         return flux_below, flux_below
         
@@ -235,7 +233,7 @@ def longwave_fluxes_single_band(
     _, flux_down_levels = jax.lax.scan(
         downward_step,
         0.0,  # No downward LW at TOA
-        (indices, T_abs, source)
+        (indices, R_dif, T_dif, source)
     )
     flux_down = flux_down.at[1:].set(flux_down_levels)
     
@@ -322,17 +320,11 @@ def shortwave_fluxes_single_band(
     # Direct flux at each level
     flux_direct = toa_flux * direct_trans_full
     
-    # Conservative budget-based diffuse source (energy-safe)
-    # Direct energy removed in each layer: delta_flux = flux_direct_in * (1 - T_dir)
-    # Portion that becomes diffuse (scattered): source_total = ssa * delta_flux
-    # Split source between upward and downward directions (50/50 split for simplicity)
-    # This ensures total diffuse source cannot exceed energy removed from direct beam
-    # Fixes energy conservation bug (was TOA SW up > TOA SW down, now properly conserved)
-    flux_direct_in = flux_direct[:-1]  # Direct flux at top of each layer
-    delta_flux = flux_direct_in * (1.0 - T_dir)  # Energy removed from direct beam in layer
-    source_total = ssa * delta_flux  # Total conservative diffuse source (energy-safe)
-    source_up = 0.5 * source_total  # Half goes upward
-    source_down = 0.5 * source_total  # Half goes downward
+    # Diffuse radiation calculation
+    # Source from direct beam scattering (split into upward/downward components)
+    source_diffuse = toa_flux * R_dir * direct_trans_full[:-1]
+    source_up = 0.5 * source_diffuse
+    source_down = 0.5 * source_diffuse
     
     # Initialize diffuse fluxes
     flux_down_dif = jnp.zeros(nlev + 1)
@@ -369,7 +361,7 @@ def shortwave_fluxes_single_band(
     )
     flux_down_dif = flux_down_dif.at[1:].set(flux_down_levels)
 
-    # Update surface upward flux to include diffuse reflection
+    # CRITICAL FIX: Update surface upward flux to include diffuse reflection
     # Surface reflects both direct AND diffuse downward radiation
     flux_up_dif = flux_up_dif.at[nlev].set(
         surface_albedo * (flux_direct[nlev] + flux_down_dif[nlev])
@@ -382,9 +374,8 @@ def shortwave_fluxes_single_band(
         (R_dif[::-1], T_dif[::-1], source_up[::-1])
     )
     flux_up_dif = flux_up_dif.at[:-1].set(flux_up_levels[::-1])
-    
-    # Recompute downward diffuse with updated upward flux for consistency
-    # This ensures the coupled up/down solution is self-consistent
+
+    # Recalculate downward diffuse with updated upward flux for consistency
     _, flux_down_levels = jax.lax.scan(
         downward_diffuse_step,
         0.0,  # No diffuse at TOA
