@@ -364,16 +364,17 @@ def clouds(operand):
     cloudc = jnp.where(mask, humidity.rh[nl1] - parameters.shortwave_radiation.rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1+1, nlp+1) # Assign icltop values based on the mask
 
-    # Second for loop (three levels)
-    drh = humidity.rh[2:kx-2] - parameters.shortwave_radiation.rhcl1 # Calculate drh for the relevant range of k (2D slices of 3D array)
-    mask = (drh > cloudc) & (state.specific_humidity[2:kx-2] > parameters.shortwave_radiation.qacl)  # Create a boolean mask where the conditions are met
-    cloudc_update = jnp.where(mask, drh, cloudc)  # Update cloudc where the mask is True
-    cloudc = jnp.max(cloudc_update, axis=0)   # Only update cloudc when the condition is met; use np.max along axis 2
+    # Vectorized implementation of the second for loop
+    drh = humidity.rh - parameters.shortwave_radiation.rhcl1
+    mask = state.specific_humidity > parameters.shortwave_radiation.qacl
 
-    # Update icltop where the mask is True
-    k_indices = jnp.arange(2, kx-2)  # Generate the k indices (since range starts from 2)
-    icltop_update = jnp.where(mask, k_indices[:, jnp.newaxis, jnp.newaxis]+1, icltop)  # Use the mask to update icltop only where the cloudc was updated # CHECK INDEXING
-    icltop = jnp.where(cloudc == cloudc_update, icltop_update, icltop).max(axis=0)
+    # Set invalid entries to -1 so they are not chosen by argmax
+    max_valid_rh_layer = 2 + jnp.argmax(jnp.where(mask[2:kx-2],humidity.rh[2:kx-2],-1), axis=0)
+    max_drh = jnp.squeeze(jnp.take_along_axis(drh, max_valid_rh_layer[jnp.newaxis], axis=0), axis=0)
+    
+    valid_column = jnp.any(mask[2:kx-2], axis=0) # Ensures that max_drh is from a valid layer
+    icltop = jnp.where(valid_column & (max_drh > cloudc), max_valid_rh_layer + 1, icltop)
+    cloudc = jnp.where(valid_column & (max_drh > cloudc), max_drh, cloudc)
 
     # Third for loop (two levels)
     # Perform the calculations (Two Loops)
