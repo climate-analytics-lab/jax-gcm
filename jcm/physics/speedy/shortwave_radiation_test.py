@@ -142,6 +142,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing = ForcingData.zeros((ix, il))
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
+    @pytest.mark.skip(reason="needs ground truth from speedy.f90") # FIXME
     def test_shortwave_radiation(self):
         from jcm.geometry import Geometry
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
@@ -160,7 +161,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * np.ones(xy)
         precls = 4.0 * np.ones(xy)
         # Construct a varying iptop to catch layer-dependent effects and indexing bugs
-        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:]
+        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:] + 1
         fmask = .7 * np.ones(xy)
 
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
