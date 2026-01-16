@@ -185,8 +185,11 @@ def shortwave_rad_fluxes(operand):
         parameters.shortwave_radiation.ablwv2 * qa
     ], axis=-1)
 
-    # Cloud-free levels (stratosphere + PBL, k = 0 and kx-1)
+    # Upper stratosphere (k = 0): no water vapor
     absorptivity = absorptivity.at[0, :, :, 2:].set(0)
+
+    # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1)
+    # Leave absorptivity unchanged
     
     # Cloudy layers: free troposphere (2 <= k <= kx - 2)
     acloud = cloudc * parameters.shortwave_radiation.ablcl2
