@@ -143,7 +143,7 @@ def get_convection_tendencies(
     iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, forcing, geometry)
 
     # 3. Convection over selected grid-points
-    mask = iptop < kx # CHECK INDEXING
+    mask = ~(iptop == kx+1)
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
 
@@ -173,8 +173,8 @@ def get_convection_tendencies(
     # 3.2 Intermediate layers (entrainment)
 
     # replace loop with masking
-    loop_mask = (kx - 2 >= jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]) & \
-                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop) # CHECK INDEXING
+    _k_3d = jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]
+    loop_mask = (kx - 2 >= _k_3d) & (_k_3d >= iptop)
     
     #start by making entrainment profile:
     _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
@@ -188,7 +188,7 @@ def get_convection_tendencies(
     # Downward fluxes
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
-    # Calculate flux convergence
+    # Calculate flux convergences
     dfse = dfse.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fus_3d - _fds_3d, axis=0)))
     dfqa = dfqa.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=0)))
 
@@ -202,11 +202,11 @@ def get_convection_tendencies(
     # assuming that take_along_axis is at least as well-optimized as any workaround via masking
     index_array = lambda array, index: jnp.squeeze(jnp.take_along_axis(array, index[jnp.newaxis], axis=0), axis=0)
     pad_array = lambda array: jnp.pad(array, ((0, 2), (0, 0), (0, 0)), mode='constant', constant_values=0)
-    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop) # CHECK INDEXING
+    fmass, fus, fuq, fds, fdq = (index_array(pad_array(_flux_3d), iptop)
                                  for _flux_3d in (_fmass_3d, _fus_3d, _fuq_3d, _fds_3d, _fdq_3d))
     
     # 3.3 Top layer (condensation and detrainment)
-    k = iptop - 1 # CHECK INDEXING
+    k = iptop - 1
 
     # Flux of convective precipitation
     qsatb = index_array(pad_array(interpolate(qsat)), k)
