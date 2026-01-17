@@ -144,7 +144,7 @@ def get_surface_fluxes(
         u0,v0,ustr,vstr,shf,evap,rlus,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
 
         # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes
-        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
+        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by defining effective skin temperature
 
         # Vectorized computation using JAX arrays
         tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(geometry.coa) * rsds * (1.0 - alb_l) * psa
