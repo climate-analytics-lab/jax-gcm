@@ -142,7 +142,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing = ForcingData.zeros((ix, il))
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
-    @pytest.mark.skip(reason="needs ground truth from speedy.f90") # FIXME
+    # FIXME: currently testing against itself, needs updated values from speedy.f90
     def test_shortwave_radiation(self):
         from jcm.geometry import Geometry
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
@@ -181,8 +181,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
-
-        # FIXME: was testing against itself, values are now outdated, need to generate some from speedy.f90
         
         # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
