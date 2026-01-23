@@ -60,9 +60,13 @@ def shortwave_rad_fluxes(operand):
     tau2 = jnp.zeros((kx, ix, il, 4))
     mask = icltop < kx
     clamped_icltop = jnp.clip(icltop, 0, tau2.shape[0] - 1).astype(int) # Clamp icltop - 1 to be within the valid index range for tau2
-    # Start with tau2 and update the values where the mask is true
-    tau2 = tau2.at[clamped_icltop, :, :, 2].set(
-        jnp.where(mask, parameters.shortwave_radiation.albcl * cloudc, tau2[clamped_icltop, :, :, 2])
+    
+    # Start with tau2
+    # Create arrays of i and j indices that will broadcast correctly alongside clamped_icltop
+    i_idx, j_idx = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing='ij')
+    # Update values at cloud top
+    tau2 = tau2.at[clamped_icltop, i_idx, j_idx, 2].set(
+        mask * parameters.shortwave_radiation.albcl * cloudc
     )
     # Update the tau2 values for the second condition (kx index) across the entire array
     tau2 = tau2.at[kx - 1, :, :, 2].set(parameters.shortwave_radiation.albcls * clstr)

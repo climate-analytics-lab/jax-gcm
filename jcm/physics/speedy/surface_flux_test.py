@@ -427,8 +427,185 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag), 
+        check_vjp(f, f_vjp, args = (phi0, parameters.surface_flux.hdrag),
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag), 
+        check_jvp(f, f_jvp, args = (phi0, parameters.surface_flux.hdrag),
                                 atol=None, rtol=1, eps=0.000001)
+
+
+class TestAquaplanetSurfaceFluxes(unittest.TestCase):
+    """Tests for aquaplanet configuration (lfluxland=False, fmask=0).
+
+    These tests verify that ocean surface fluxes are correctly computed
+    when there is no land in the simulation (pure aquaplanet).
+    """
+
+    def setUp(self):
+        global ix, il, kx
+        ix, il, kx = 96, 48, 8
+
+        global ForcingData, SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData, \
+               PhysicsState, get_surface_fluxes, PhysicsTendency, parameters, Geometry, convert_to_speedy_latitudes, grav
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, SWRadiationData, LWRadiationData, PhysicsData
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+        from jcm.physics.speedy.params import Parameters
+        from jcm.geometry import Geometry
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        from jcm.constants import grav
+        parameters = Parameters.default()
+
+        from jcm.physics.speedy.surface_flux import get_surface_fluxes
+
+    def test_aquaplanet_ocean_evaporation_nonzero(self):
+        """Test that ocean evaporation is computed when lfluxland=False.
+
+        This test catches the bug where sea surface fluxes were zero in aquaplanet
+        simulations because denvvs[:,:,2], t1[:,:,1], and q1[:,:,1] were only
+        computed inside the land_fluxes conditional branch.
+        """
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+
+        # Pure ocean setup - no land
+        fmask = jnp.zeros((ix, il))  # All ocean
+        phi0 = jnp.zeros((ix, il))   # No orography
+
+        # Atmospheric state
+        psa = jnp.ones((ix, il))
+        ua = 5.0 * jnp.ones(zxy)
+        va = 2.0 * jnp.ones(zxy)
+        ta = 280.0 * jnp.ones(zxy)  # Cool atmosphere
+        qa = 5.0 * jnp.ones(zxy)    # Some humidity
+        rh = 0.7 * jnp.ones(zxy)
+        phi = 5000.0 * jnp.ones(zxy)
+
+        # Warm ocean - should drive evaporation
+        sea_surface_temperature = 300.0 * jnp.ones((ix, il))
+        rsds = 400.0 * jnp.ones((ix, il))
+        rlds = 350.0 * jnp.ones((ix, il))
+
+        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
+        hum_data = HumidityData.zeros(xy, kx, rh=rh)
+        conv_data = ConvectionData.zeros(xy, kx)
+        sw_rad = SWRadiationData.zeros(xy, kx, rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=conv_data, humidity=hum_data,
+                                          surface_flux=sflux_data, shortwave_rad=sw_rad, longwave_rad=lw_rad)
+        geometry = convert_to_speedy_latitudes(
+            Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask)
+        )
+
+        # Key: lfluxland=False for aquaplanet
+        forcing = ForcingData.zeros(xy, sea_surface_temperature=sea_surface_temperature, lfluxland=False)
+
+        tendencies, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
+        sflux_data = physics_data.surface_flux
+
+        # Verify no NaNs in outputs
+        self.assertFalse(jnp.any(jnp.isnan(sflux_data.evap)), "Evaporation contains NaNs")
+        self.assertFalse(jnp.any(jnp.isnan(sflux_data.shf)), "Sensible heat flux contains NaNs")
+        self.assertFalse(jnp.any(jnp.isnan(sflux_data.ustr)), "Wind stress contains NaNs")
+        self.assertFalse(jnp.any(jnp.isnan(tendencies.specific_humidity)), "Humidity tendency contains NaNs")
+
+        # Ocean evaporation (index 1) should be positive with warm SST and cool atmosphere
+        self.assertTrue(jnp.all(sflux_data.evap[:, :, 1] > 0),
+                        "Ocean evaporation should be positive with warm SST")
+
+        # Weighted evaporation (index 2) should equal ocean evaporation when fmask=0
+        self.assertTrue(jnp.allclose(sflux_data.evap[:, :, 2], sflux_data.evap[:, :, 1]),
+                        "Weighted evaporation should equal ocean evaporation for pure ocean")
+
+        # Humidity tendency should be positive (evaporation adds moisture)
+        self.assertTrue(jnp.all(tendencies.specific_humidity[-1] > 0),
+                        "Humidity tendency should be positive from ocean evaporation")
+
+    def test_aquaplanet_sensible_heat_flux(self):
+        """Test that ocean sensible heat flux is computed correctly in aquaplanet."""
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+
+        fmask = jnp.zeros((ix, il))
+        phi0 = jnp.zeros((ix, il))
+
+        psa = jnp.ones((ix, il))
+        ua = 5.0 * jnp.ones(zxy)
+        va = 2.0 * jnp.ones(zxy)
+        ta = 280.0 * jnp.ones(zxy)
+        qa = 5.0 * jnp.ones(zxy)
+        rh = 0.7 * jnp.ones(zxy)
+        phi = 5000.0 * jnp.ones(zxy)
+
+        # Warm ocean relative to atmosphere
+        sea_surface_temperature = 300.0 * jnp.ones((ix, il))
+        rsds = 400.0 * jnp.ones((ix, il))
+        rlds = 350.0 * jnp.ones((ix, il))
+
+        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
+        hum_data = HumidityData.zeros(xy, kx, rh=rh)
+        conv_data = ConvectionData.zeros(xy, kx)
+        sw_rad = SWRadiationData.zeros(xy, kx, rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=conv_data, humidity=hum_data,
+                                          surface_flux=sflux_data, shortwave_rad=sw_rad, longwave_rad=lw_rad)
+        geometry = convert_to_speedy_latitudes(
+            Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask)
+        )
+        forcing = ForcingData.zeros(xy, sea_surface_temperature=sea_surface_temperature, lfluxland=False)
+
+        tendencies, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, geometry)
+        sflux_data = physics_data.surface_flux
+
+        # Sensible heat flux should be positive (ocean warming atmosphere)
+        self.assertTrue(jnp.all(sflux_data.shf[:, :, 1] > 0),
+                        "Ocean sensible heat flux should be positive with warm SST")
+
+        # Temperature tendency should be positive at surface level
+        self.assertTrue(jnp.all(tendencies.temperature[-1] > 0),
+                        "Temperature tendency should be positive from warm ocean")
+
+    def test_aquaplanet_gradient_check(self):
+        """Test that gradients are valid for aquaplanet configuration."""
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+
+        fmask = jnp.zeros((ix, il))
+        phi0 = jnp.zeros((ix, il))
+        psa = jnp.ones((ix, il))
+        ua = 5.0 * jnp.ones(zxy)
+        va = 2.0 * jnp.ones(zxy)
+        ta = 290.0 * jnp.ones(zxy)
+        qa = 5.0 * jnp.ones(zxy)
+        rh = 0.7 * jnp.ones(zxy)
+        phi = 5000.0 * jnp.ones(zxy)
+        sea_surface_temperature = 295.0 * jnp.ones((ix, il))
+        rsds = 400.0 * jnp.ones((ix, il))
+        rlds = 350.0 * jnp.ones((ix, il))
+
+        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
+        hum_data = HumidityData.zeros(xy, kx, rh=rh)
+        conv_data = ConvectionData.zeros(xy, kx)
+        sw_rad = SWRadiationData.zeros(xy, kx, rsds=rsds)
+        lw_rad = LWRadiationData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=conv_data, humidity=hum_data,
+                                          surface_flux=sflux_data, shortwave_rad=sw_rad, longwave_rad=lw_rad)
+        geometry = convert_to_speedy_latitudes(
+            Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, orography=phi0/grav, fmask=fmask)
+        )
+        forcing = ForcingData.zeros(xy, sea_surface_temperature=sea_surface_temperature, lfluxland=False)
+
+        _, f_vjp = jax.vjp(get_surface_fluxes, state, physics_data, parameters, forcing, geometry)
+
+        tends = PhysicsTendency.ones(zxy)
+        datas = PhysicsData.ones(xy, kx)
+
+        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp((tends, datas))
+
+        self.assertFalse(df_ddatas.isnan().any_true(), "Gradient w.r.t. physics_data contains NaNs")
+        self.assertFalse(df_dstate.isnan().any_true(), "Gradient w.r.t. state contains NaNs")
+        self.assertFalse(df_dparams.isnan().any_true(), "Gradient w.r.t. parameters contains NaNs")
+        self.assertFalse(df_dforcing.isnan().any_true(), "Gradient w.r.t. forcing contains NaNs")
 

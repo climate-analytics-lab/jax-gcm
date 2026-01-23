@@ -88,41 +88,60 @@ def get_surface_fluxes(
 
     u0 = parameters.surface_flux.fwind0*ua[kx-1]
     v0 = parameters.surface_flux.fwind0*va[kx-1]
+
+    def compute_evap_true(operand):
+        q1, qsat0, idx = operand
+        q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[kx-1])
+        q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[kx-1])
+        qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
+        return q1, qsat0
+    
+    def compute_evap_false(operand):
+        q1, qsat0, idx = operand
+        q1 = q1.at[:, :, idx].set(qa[kx-1])
+        return q1, qsat0
+    
+    rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
+
+    astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
+
+    # 1.1 Wind components
+    rcp = 1.0/cp
+    nl1 = kx-1
+    gtemp0 = 1.0 - parameters.surface_flux.ftemp0
+
+    # substituting the for loop at line 109
+    # Temperature difference between lowest level and sfc
+    # line 112
+    dt1 = geometry.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
+    
+    # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
+    # line 115 - 116
+    t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
+    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*geometry.sigl[kx-1]))
+
+    # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
+    # line 119 - 120
+    t2 = t2.at[:, :, 1].set(ta[kx-1] + rcp*phi[kx-1])
+    t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
+
+    # lines 124 - 137
+    t1 = jnp.where((ta[kx-1] > ta[nl1-1])[:, :, jnp.newaxis],
+                parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
+                ta[kx-1][:, :, jnp.newaxis])
+    
+    t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+    # 1.3 Density * wind speed (including gustiness factor)
+    denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
+
+
     ##########################################################
     # Land surface
     ##########################################################
 
     def land_fluxes(operand):
         u0,v0,ustr,vstr,shf,evap,rlus,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
-        # 1.1 Wind components
-        rcp = 1.0/cp
-        nl1 = kx-1
-        gtemp0 = 1.0 - parameters.surface_flux.ftemp0
-
-        # substituting the for loop at line 109
-        # Temperature difference between lowest level and sfc
-        # line 112
-        dt1 = geometry.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
-        
-        # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
-        # line 115 - 116
-        t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-        t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*geometry.sigl[kx-1]))
-
-        # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
-        # line 119 - 120
-        t2 = t2.at[:, :, 1].set(ta[kx-1] + rcp*phi[kx-1])
-        t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
-
-        # lines 124 - 137
-        t1 = jnp.where((ta[kx-1] > ta[nl1-1])[:, :, jnp.newaxis],
-                    parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
-                    ta[kx-1][:, :, jnp.newaxis])
-        
-        t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
-
-        # 1.3 Density * wind speed (including gustiness factor)
-        denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
 
         # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
@@ -131,9 +150,6 @@ def get_surface_fluxes(
         tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(geometry.coa) * rsds * (1.0 - alb_l) * psa
 
         # 2.2 Stability Correlation
-        rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
-
-        astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
 
         dthl = jnp.where(
             tskin > t2[:, :, 0],
@@ -154,18 +170,7 @@ def get_surface_fluxes(
         shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
         
         # 2.5 Computing Evaporation
-        def compute_evap_true(operand):
-            q1, qsat0, idx = operand
-            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[kx-1])
-            q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[kx-1])
-            qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
-            return q1, qsat0
-        
-        def compute_evap_false(operand):
-            q1, qsat0, idx = operand
-            q1 = q1.at[:, :, idx].set(qa[kx-1])
-            return q1, qsat0
-        
+
         q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 0))
 
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
@@ -219,23 +224,6 @@ def get_surface_fluxes(
             parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, rlus, evap, shf, tskin, qsat0)
         )
 
-        dths = jnp.where(
-            forcing.sea_surface_temperature > t2[:, :, 1],
-            jnp.minimum(parameters.surface_flux.dtheta, forcing.sea_surface_temperature - t2[:, :, 1]),
-            jnp.maximum(-parameters.surface_flux.dtheta, astab * (forcing.sea_surface_temperature - t2[:, :, 1]))
-        )
-        
-        denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
-
-        q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
-
-        # 4.2 Wind Stress
-        ks = 2
-
-        cdsdv = parameters.surface_flux.cds * denvvs[:, :, ks]
-        ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
-        vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
-
         return (u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
     
     tskin = jnp.zeros_like(stl_am)
@@ -246,7 +234,22 @@ def get_surface_fluxes(
     # Sea Surface
     ##########################################################
 
+    dths = jnp.where(
+        forcing.sea_surface_temperature > t2[:, :, 1],
+        jnp.minimum(parameters.surface_flux.dtheta, forcing.sea_surface_temperature - t2[:, :, 1]),
+        jnp.maximum(-parameters.surface_flux.dtheta, astab * (forcing.sea_surface_temperature - t2[:, :, 1]))
+    )
+    
+    denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
+
+    q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
+
+    # 4.2 Wind Stress
     ks = 2
+
+    cdsdv = parameters.surface_flux.cds * denvvs[:, :, ks]
+    ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
+    vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
 
     # 4.3 Sensible heat flux
     shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
@@ -262,27 +265,16 @@ def get_surface_fluxes(
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
 
-    def weight_avg_landfluxes(operand):
+    ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
+    vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
+    shf = shf.at[:, :, 2].set(weighted_average(shf))
+    evap = evap.at[:, :, 2].set(weighted_average(evap))
+    rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
 
-        ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = operand
-        ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
-        vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
-        shf = shf.at[:, :, 2].set(weighted_average(shf))
-        evap = evap.at[:, :, 2].set(weighted_average(evap))
-        rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
+    t0 = weighted_average(t1)
 
-        t0 = weighted_average(t1)
-
-        tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
-        tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
-
-        return (ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
-    
-    t0 = jnp.zeros_like(t1[:,:,0])
-    tsfc = jnp.zeros_like(stl_am)
-    ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = jax.lax.cond(
-        lfluxland, weight_avg_landfluxes, pass_fn, operand=(ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
-    )
+    tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
+    tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
 
     surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, rlus=rlus,
                                                       hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
