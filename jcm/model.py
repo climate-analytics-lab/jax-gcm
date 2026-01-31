@@ -24,6 +24,10 @@ from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, get_coords
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial
+import logging
+
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger()
 
 _LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
@@ -392,6 +396,7 @@ class Model:
 
         """
         from jcm.physics_interface import verify_state
+        jax.debug.callback(logger.info, "Post processing: %s simulated seconds", state.sim_time)
 
         predictions = Predictions(
             dynamics=dynamics_state_to_physics_state(state, self.primitive),
@@ -496,6 +501,8 @@ class Model:
 
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
+        jax.debug.callback(logger.info, "Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s", 
+                                        forcing, save_interval, total_time, output_averages)
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
@@ -503,7 +510,7 @@ class Model:
             total_time=total_time,
             output_averages=output_averages
         )
-        
+        jax.debug.callback(logger.info, "Run completed.")
         self._final_modal_state = final_modal_state
         return predictions
 
@@ -512,7 +519,8 @@ class Model:
             forcing: ForcingData=None,
             save_interval=10.0,
             total_time=120.0,
-            output_averages=False
+            output_averages=False,
+            log_level=logging.CRITICAL
     ) -> Predictions:
         """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
@@ -527,11 +535,15 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             output_averages:
                 Whether to output time-averaged quantities (default False).
+            log_level:
+                (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
 
         """
+        logger.setLevel(log_level)
+
         if isinstance(initial_state, primitive_equations.State):
             self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
             self._final_modal_state = initial_state
