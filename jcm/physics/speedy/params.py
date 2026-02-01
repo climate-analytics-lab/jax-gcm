@@ -9,7 +9,7 @@ from jax import tree_util
 class ConvectionParameters:
     psmin: jnp.ndarray # Minimum (normalised) surface pressure for the occurrence of convection
     trcnv: jnp.ndarray # Time of relaxation (in hours) towards reference state
-    rhil: jnp.ndarray # Relative humidity threshold in intermeduate layers for secondary mass flux
+    rhil: jnp.ndarray # Relative humidity threshold in intermediate layers for secondary mass flux
     rhbl: jnp.ndarray # Relative humidity threshold in the boundary layer
     entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base

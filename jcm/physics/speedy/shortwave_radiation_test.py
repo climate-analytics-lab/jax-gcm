@@ -142,13 +142,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing = ForcingData.zeros((ix, il))
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
 
+    # FIXME: currently testing against itself, needs updated values from speedy.f90
     def test_shortwave_radiation(self):
         from jcm.geometry import Geometry
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
-        geopotential = jnp.arange(7, -1, -1, dtype = float)
+        geopotential = 20000. * jnp.arange(7, -1, -1, dtype = float)
         se = .1*geopotential
 
         xy = (ix, il)
@@ -157,10 +158,10 @@ class TestShortWaveRadiation(unittest.TestCase):
         qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
 
         psa = jnp.ones(xy)
-        precnv = -1.0 * np.ones(xy)
+        precnv = 1.0 * np.ones(xy)
         precls = 4.0 * np.ones(xy)
         # Construct a varying iptop to catch layer-dependent effects and indexing bugs
-        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:]
+        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:] + 1
         fmask = .7 * np.ones(xy)
 
         geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
@@ -177,11 +178,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         forcing = ForcingData.zeros(xy)
-        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
         physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
-
-        # FIXME: testing against itself at the moment, need to get updated values from speedy.f90
         
         # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [

@@ -1,6 +1,8 @@
 import unittest
 from jcm.date import fraction_of_year_elapsed, DateData
+from jcm.model import Model
 import jax_datetime as jdt
+import jax.numpy as jnp
 
 class TestDateUnit(unittest.TestCase):
 
@@ -38,3 +40,11 @@ class TestDateUnit(unittest.TestCase):
         # Test copy with input
         d3 = d.copy(0.25)
         self.assertAlmostEqual(d3.tyear, 0.25, places=2)
+
+    def test_overflow(self):
+        model = Model(start_date=jdt.to_datetime('1970-01-01'))
+        for i in range(6):
+            year = 10**i
+            date = model._date_from_sim_time((year+.5) * 365.2425 * 86400)
+            self.assertEqual(date.model_year, jnp.round(1970 + year))
+            self.assertTrue(jnp.isclose(date.tyear, 0.5, atol=1e-2))

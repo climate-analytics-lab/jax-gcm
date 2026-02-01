@@ -67,7 +67,7 @@ def diagnose_convection(
 
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match icltop convention
+    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
     possible_cltop_levels = jnp.arange(2, kx-3)
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
@@ -143,7 +143,7 @@ def get_convection_tendencies(
     iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, forcing, geometry)
 
     # 3. Convection over selected grid-points
-    mask = iptop < kx
+    mask = ~(iptop == kx+1)
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
 
@@ -173,8 +173,8 @@ def get_convection_tendencies(
     # 3.2 Intermediate layers (entrainment)
 
     # replace loop with masking
-    loop_mask = (kx - 2 >= jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]) & \
-                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop)
+    _k_3d = jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]
+    loop_mask = (kx - 2 >= _k_3d) & (_k_3d >= iptop)
     
     #start by making entrainment profile:
     _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
@@ -188,7 +188,7 @@ def get_convection_tendencies(
     # Downward fluxes
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
-    # Calculate flux convergence
+    # Calculate flux convergences
     dfse = dfse.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fus_3d - _fds_3d, axis=0)))
     dfqa = dfqa.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=0)))
 

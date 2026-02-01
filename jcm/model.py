@@ -157,7 +157,7 @@ def averaged_trajectory_from_step(
     def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
         stacked_empty_data = tree_map(
-            lambda x: jnp.zeros((outer_steps,) + x.shape, dtype=jnp.float32),
+            lambda x: jnp.zeros((outer_steps,) + jnp.array(x).shape, dtype=jnp.float32),
             empty_data
         )
         diagnostics_collector.data = nnx.Variable(stacked_empty_data)
@@ -351,7 +351,10 @@ class Model:
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(seconds=jnp.round(sim_time).astype(jnp.int32)),
+            model_time=self.start_date + jdt.Timedelta(
+                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
+                seconds=jnp.round(sim_time % 86400).astype(jnp.int32)
+            ),
             model_step=jnp.int32(sim_time / self.dt_si.m),
             dt_seconds=self.dt_si.m
         )
