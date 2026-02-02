@@ -200,7 +200,7 @@ class Model:
 
     def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
-                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
+                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'), log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
         
         Args:
@@ -218,8 +218,12 @@ class Model:
                 Optional tuple describing the SPMD mesh for parallelization
             start_date: 
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
+            log_level:
+                (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
         """
+        logger.setLevel(log_level)
+
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
@@ -522,8 +526,7 @@ class Model:
             forcing: ForcingData=None,
             save_interval=10.0,
             total_time=120.0,
-            output_averages=False,
-            log_level=logging.CRITICAL
+            output_averages=False
     ) -> Predictions:
         """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
@@ -538,14 +541,11 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             output_averages:
                 Whether to output time-averaged quantities (default False).
-            log_level:
-                (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
 
         """
-        logger.setLevel(log_level)
 
         if isinstance(initial_state, primitive_equations.State):
             self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
