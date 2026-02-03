@@ -220,6 +220,7 @@ class Model:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
+
         """
         # Set root logging level to be log_level so it propagates to other modules
         logging.getLogger().setLevel(log_level)
@@ -544,8 +545,8 @@ class Model:
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
-        """
 
+        """
         if isinstance(initial_state, primitive_equations.State):
             self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
             self._final_modal_state = initial_state
