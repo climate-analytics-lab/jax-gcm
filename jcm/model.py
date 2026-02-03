@@ -220,7 +220,6 @@ class Model:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
-
         """
         # Set root logging level to be log_level so it propagates to other modules
         logging.getLogger().setLevel(log_level)
