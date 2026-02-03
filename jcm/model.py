@@ -26,8 +26,8 @@ import pandas as pd
 from functools import partial
 import logging
 
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s')
-logger = logging.getLogger()
+# logging.basicConfig(format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 _LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
@@ -222,7 +222,8 @@ class Model:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
         """
-        logger.setLevel(log_level)
+        # Set root logging level to be log_level so it propagates to other modules
+        logging.getLogger().setLevel(log_level)
 
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)

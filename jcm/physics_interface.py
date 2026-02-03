@@ -17,6 +17,9 @@ from jcm.forcing import ForcingData
 from jcm.date import DateData
 from typing import Tuple, Any
 from jcm.diffusion import DiffusionFilter
+import logging
+
+logger = logging.getLogger(__name__)
 
 @tree_math.struct
 class PhysicsState:
@@ -205,6 +208,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         Physics state variables
 
     """
+    jax.debug.callback(logger.info, "Converting state variables from dynamics to physics state variables")
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
