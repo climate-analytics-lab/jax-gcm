@@ -233,6 +233,7 @@ class Model:
             coords=self.coords,
             physics_specs=self.physics_specs,
             p0=p0*units.pascal,
+            p1=.05*p0*units.pascal,
         )
         
         self.physics = physics or SpeedyPhysics()
