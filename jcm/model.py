@@ -544,7 +544,6 @@ class Model:
 
         Returns:
             A Predictions object containing the trajectory of post-processed model states.
-
         """
 
         if isinstance(initial_state, primitive_equations.State):
