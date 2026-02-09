@@ -14,7 +14,7 @@ from jcm.physics.icon.radiation.radiation_scheme import (
     radiation_scheme
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters
-from jcm.physics.icon.unit_conversions import calculate_layer_thickness, calculate_air_density
+from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
 from jcm.physics.icon.icon_physics_data import AerosolData
 import jax_datetime as jdt
 from datetime import datetime
@@ -23,23 +23,19 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
     """Create default aerosol data for testing as AerosolData object"""
     if parameters is None:
         parameters = RadiationParameters.default()
-
-    # Create simple aerosol profiles with small background loading
-    total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
-    aod_profile = jnp.ones((nlev, total_bands)) * 0.01  # Small background AOD
-    ssa_profile = jnp.ones((nlev, total_bands)) * 0.9   # Mostly scattering
-    # Set LW bands to pure absorption (SSA = 0)
-    ssa_profile = ssa_profile.at[:, int(parameters.n_sw_bands):].set(0.0)
-    asy_profile = jnp.ones((nlev, total_bands)) * 0.7   # Forward scattering
+    
+    # Create simple default aerosol profiles
+    # For tests, we don't need spectral bands - just create simple profiles
+    aod_profile = jnp.ones((nlev, ncols)) * 0.01  # Small background AOD profile
+    ssa_profile = jnp.ones((nlev, ncols)) * 0.9   # Mostly scattering
+    asy_profile = jnp.ones((nlev, ncols)) * 0.7   # Forward scattering
     
     # Column-integrated properties
-    aod_total = jnp.array([0.1])              # Total column AOD
-    aod_anthropogenic = jnp.array([0.05])     # Anthropogenic AOD
-    aod_background = jnp.array([0.05])        # Background AOD
+    aod_total = jnp.sum(aod_profile, axis=0)  # Total column AOD
+    aod_anthropogenic = jnp.ones(ncols) * 0.005  # Small anthropogenic contribution
+    aod_background = jnp.ones(ncols) * 0.005     # Small background contribution
+    cdnc_factor = jnp.ones(ncols)                # No aerosol-cloud interaction
     
-    # For Twomey effect
-    cdnc_factor = jnp.array([1.0])            # No aerosol-cloud interaction
-
     return AerosolData(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
@@ -79,10 +75,6 @@ def create_test_atmosphere(nlev=10):
     specific_humidity = 0.01 * jnp.exp(-height_levels / 8000.0)  # kg/kg
     specific_humidity = jnp.maximum(specific_humidity, 1e-6)  # Minimum humidity
 
-    # Layer thickness and air density
-    layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
-    air_density = calculate_air_density(pressure_levels, temperature)
-
     # Some clouds in middle troposphere
     cloud_water = jnp.zeros(nlev)
     cloud_ice = jnp.zeros(nlev)
@@ -100,8 +92,6 @@ def create_test_atmosphere(nlev=10):
         'specific_humidity': specific_humidity,
         'pressure_levels': pressure_levels,
         'pressure_interfaces': pressure_interfaces,
-        'layer_thickness': layer_thickness,
-        'air_density': air_density,
         'height_levels': height_levels,
         'cloud_water': cloud_water,
         'cloud_ice': cloud_ice,
@@ -114,13 +104,18 @@ def test_prepare_radiation_state():
     atm = create_test_atmosphere(nlev=5)
     cos_zenith = jnp.array(0.5)
 
+    # Calculate layer thickness and air density as required by prepare_radiation_state
+    from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+
     rad_state = prepare_radiation_state(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -165,7 +160,12 @@ def test_prepare_radiation_state():
 def test_radiation_scheme_basic():
     """Test basic radiation scheme functionality"""
     atm = create_test_atmosphere(nlev=8)
-
+    
+    # Calculate layer thickness and air density as required by radiation_scheme
+    from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     # Solar geometry for noon, summer
     date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))  # June 21, noon
     latitude = 0.0
@@ -182,8 +182,8 @@ def test_radiation_scheme_basic():
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -234,7 +234,11 @@ def test_radiation_scheme_basic():
 def test_radiation_scheme_nighttime():
     """Test radiation scheme at nighttime (no solar)"""
     atm = create_test_atmosphere(nlev=5)
-
+    
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     # Nighttime conditions
     date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 0, 0, 0))  # June 21, midnight
     latitude = 0.0
@@ -251,8 +255,8 @@ def test_radiation_scheme_nighttime():
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -286,7 +290,11 @@ def test_radiation_scheme_nighttime():
 def test_radiation_scheme_custom_parameters():
     """Test radiation scheme with custom parameters"""
     atm = create_test_atmosphere(nlev=6)
-
+    
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     date = jdt.Datetime.from_pydatetime(datetime(2025, 3, 21, 12, 0, 0))  # March 21, noon
 
     # Custom parameters with appropriate band limits
@@ -301,14 +309,14 @@ def test_radiation_scheme_custom_parameters():
     
     # Create aerosol data for custom parameters
     aerosol_data = create_default_aerosol_data(nlev=6, parameters=custom_params, ncols=1)
-
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -352,7 +360,7 @@ def test_radiation_scheme_extreme_conditions():
 
     date = jdt.Datetime.from_pydatetime(datetime(2025, 12, 21, 12, 0, 0))  # December 21, noon
 
-    # Layer thickness and air density
+    # Calculate layer thickness and air density as required by radiation_scheme
     air_density = calculate_air_density(pressure_levels, temperature)
     layer_thickness = calculate_layer_thickness(pressure_levels, temperature)
 
@@ -382,7 +390,7 @@ def test_radiation_scheme_extreme_conditions():
         surface_emissivity=jnp.array([0.95]),
         surface_temperature=jnp.array([288.0])
     )
-
+    
     # Should handle extreme conditions without NaN
     assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))
     assert not jnp.any(jnp.isnan(diagnostics.toa_lw_up))
@@ -397,22 +405,26 @@ def test_radiation_scheme_very_cloudy():
     cloud_water = jnp.ones(8) * 1e-3  # Heavy water clouds
     cloud_ice = jnp.ones(8) * 5e-4    # Heavy ice clouds
     cloud_fraction = jnp.ones(8) * 0.9  # 90% cloud cover
-
+    
     date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))  # June 21, noon
 
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     # Create default radiation parameters
     parameters = RadiationParameters.default()
-
+    
     # Create default aerosol data
     aerosol_data = create_default_aerosol_data(nlev=len(atm['temperature']), parameters=parameters, ncols=1)
-
+    
     tendencies, diagnostics = radiation_scheme(
         temperature=atm['temperature'],
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
@@ -440,49 +452,14 @@ def test_radiation_scheme_very_cloudy():
     assert sw_flux_variations > 1.0  # Some variation due to cloud scattering
 
 
-def test_radiation_column():
-    """Test single column radiation function"""
-    atm = create_test_atmosphere(nlev=6)
-
-    # Create default radiation parameters
-    parameters = RadiationParameters.default()
-
-    # Create default aerosol data
-    aerosol_data = create_default_aerosol_data(nlev=6, parameters=parameters, ncols=1)
-
-    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))  # June 21, noon
-
-    tendencies, diagnostics = radiation_scheme(
-        temperature=atm['temperature'],
-        specific_humidity=atm['specific_humidity'],
-        pressure_levels=atm['pressure_levels'],
-        pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
-        cloud_water=atm['cloud_water'],
-        cloud_ice=atm['cloud_ice'],
-        cloud_fraction=atm['cloud_fraction'],
-        date=date,
-        latitude=0.0,
-        longitude=0.0,
-        parameters=parameters,
-        aerosol_data=aerosol_data,
-        surface_albedo_nir=jnp.array([0.2]),
-        surface_albedo_vis=jnp.array([0.2]),
-        surface_emissivity=jnp.array([0.95]),
-        surface_temperature=jnp.array([288.0])
-    )
-
-    # Should produce same results as main function
-    assert tendencies.temperature_tendency.shape == (6,)
-    assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))
-    assert jnp.all(jnp.isfinite(diagnostics.toa_lw_up))
-
-
 def test_radiation_scheme_energy_conservation():
     """Test energy conservation in radiation scheme"""
     atm = create_test_atmosphere(nlev=10)
-
+    
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     # Create default radiation parameters
     parameters = RadiationParameters.default()
     date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))  # June 21, noon
@@ -495,8 +472,8 @@ def test_radiation_scheme_energy_conservation():
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -530,6 +507,10 @@ def test_radiation_scheme_realistic_values():
     """Test that radiation scheme produces realistic atmospheric values"""
     atm = create_test_atmosphere(nlev=15)
 
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+
     # Create default radiation parameters
     parameters = RadiationParameters.default()
 
@@ -543,8 +524,8 @@ def test_radiation_scheme_realistic_values():
         specific_humidity=atm['specific_humidity'],
         pressure_levels=atm['pressure_levels'],
         pressure_interfaces=atm['pressure_interfaces'],
-        layer_thickness=atm['layer_thickness'],
-        air_density=atm['air_density'],
+        layer_thickness=layer_thickness,
+        air_density=air_density,
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
@@ -600,7 +581,11 @@ def test_radiation_scheme_realistic_values():
 def test_radiation_scheme_reproducibility():
     """Test that radiation scheme produces reproducible results"""
     atm = create_test_atmosphere(nlev=7)
-
+    
+    # Calculate layer thickness and air density as required by radiation_scheme
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    
     # Create default radiation parameters
     parameters = RadiationParameters.default()
 
@@ -616,8 +601,8 @@ def test_radiation_scheme_reproducibility():
             specific_humidity=atm['specific_humidity'],
             pressure_levels=atm['pressure_levels'],
             pressure_interfaces=atm['pressure_interfaces'],
-            layer_thickness=atm['layer_thickness'],
-            air_density=atm['air_density'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
             cloud_water=atm['cloud_water'],
             cloud_ice=atm['cloud_ice'],
             cloud_fraction=atm['cloud_fraction'],
@@ -631,7 +616,7 @@ def test_radiation_scheme_reproducibility():
             surface_emissivity=jnp.array([0.95]),
             surface_temperature=jnp.array([288.0])
         )
-
+        
         if i == 0:
             tendencies_1 = tendencies
             diagnostics_1 = diagnostics

@@ -12,7 +12,7 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 from collections import abc
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.forcing import ForcingData
 from jcm.geometry import Geometry
@@ -21,6 +21,7 @@ from jcm.physics.icon.constants import physical_constants
 
 # Import physics modules (will be implemented progressively)
 from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme
+from jcm.physics.icon.radiation.radiation_scheme_rrtmgp import radiation_scheme_rrtmgp
 from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
@@ -52,7 +53,8 @@ class IconPhysics(Physics):
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
                  parameters: Optional[Parameters] = None,
-                 dt_physics: Optional[float] = None):
+                 dt_physics: Optional[float] = None,
+                 radiation_scheme_fn: Optional[Callable] = None):
         """
         Initialize the ICON physics.
 
@@ -64,6 +66,7 @@ class IconPhysics(Physics):
                 all internal physics timesteps (dt_conv, dt_rad, etc.) to match
                 the model integration timestep. This is important since we don't
                 have sub-timestepping - all physics must use the same timestep.
+            radiation_scheme_fn: If None, use icon radiation_scheme; pass radiation_scheme_rrtmgp to use RRTMGP.
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
@@ -80,7 +83,7 @@ class IconPhysics(Physics):
             apply_forcing_data,             # Time-varying boundary conditions
             get_simple_aerosol,            # Aerosol before radiation
             apply_chemistry,               # Chemistry for ozone, methane etc.
-            apply_radiation,               
+            make_apply_radiation(radiation_scheme_fn if radiation_scheme_fn is not None else radiation_scheme),
             apply_convection,              
             apply_clouds,
             apply_microphysics,
@@ -603,113 +606,119 @@ def _prepare_common_physics_state(
     return zero_tendencies, updated_physics_data
 
 # Physics term methods
-@jit
-def apply_radiation(state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    geometry: Geometry
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply radiation heating rates"""
-    
-    # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
-    nlev, ncols = state.temperature.shape
-    
-    # Get lat/lon from geometry
-    lat, lon = jax.numpy.meshgrid(
-        geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
-        geometry.lon * 180.0 / jnp.pi,  # degrees
-    )
-    # Then reshape to (ncols,) to match column format
-    latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
+def make_apply_radiation(radiation_scheme_fn):
+    """Create a radiation factory with swapable radiation schemes"""
 
-    # Get date information for solar calculations
-    date = physics_data.date.dt
-    
-    # Get cloud properties from tracers and previous physics
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    cloud_fraction = physics_data.clouds.cloud_fraction
+    @jit
+    def apply_radiation(state: PhysicsState,
+        physics_data: PhysicsData,
+        parameters: Parameters,
+        forcing: ForcingData,
+        geometry: Geometry
+    ) -> tuple[PhysicsTendency, PhysicsData]:
+        """Apply radiation heating rates"""
 
-    # Get ozone from chemistry data
-    ozone_vmr = physics_data.chemistry.ozone_vmr * 1e-6  # Convert ppmv to VMR
-    # CO2 is well-mixed, so use a scalar mean value (radiation scheme expects scalar)
-    co2_vmr = jnp.mean(physics_data.chemistry.co2_vmr) * 1e-6  # Convert ppmv to VMR, scalar
-    
-    # Reshape surface properties to (ncols,) for vmap
-    surface_temperature_col = physics_data.surface.surface_temperature.reshape(ncols)  # (ncols,)
-    surface_albedo_vis_col = physics_data.radiation.surface_albedo_vis.reshape(ncols)  # (ncols,)
-    surface_albedo_nir_col = physics_data.radiation.surface_albedo_nir.reshape(ncols)  # (ncols,)
-    surface_emissivity_col = physics_data.radiation.surface_emissivity.reshape(ncols)  # (ncols,)
+        # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
+        nlev, ncols = state.temperature.shape
 
-    # Prepare aerosol data for vmap - reshape to have column as the mapped dimension
-    aerosol_data_for_vmap = physics_data.aerosol.copy(
-        aod_profile=physics_data.aerosol.aod_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
-        ssa_profile=physics_data.aerosol.ssa_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
-        asy_profile=physics_data.aerosol.asy_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
-        cdnc_factor=physics_data.aerosol.cdnc_factor.reshape(ncols),  # (ncols,)
-        aod_total=physics_data.aerosol.aod_total.reshape(ncols),  # (ncols,)
-        aod_anthropogenic=physics_data.aerosol.aod_anthropogenic.reshape(ncols),  # (ncols,)
-        aod_background=physics_data.aerosol.aod_background.reshape(ncols),  # (ncols,)
-    )
-    
-    radiation_results = jax.vmap(
-        radiation_scheme,
-        in_axes=(1, 1, 1, 1, 1,    # temperature, specific_humidity, pressure_full, pressure_half, layer_thickness (nlev/nlev+1, ncols)
-                 1, 1, 1, 1,       # air_density, cloud_water, cloud_ice, cloud_fraction (nlev, ncols)
-                 0, 0, 0, 0,       # surface_temperature, surface_albedo_vis, surface_albedo_nir, surface_emissivity (ncols,)
-                 None, 0, 0,       # date (scalar), latitudes (ncols,), longitudes (ncols,)
-                 None, 0, 1, None),  # parameters (scalar), aerosol_data (per column), ozone_vmr (nlev, ncols), co2_vmr (scalar)
-        out_axes=(0, 0),  # Returns (RadiationTendencies, RadiationData) per column
-        axis_size=ncols
-    )(state.temperature, state.specific_humidity, physics_data.diagnostics.pressure_full, physics_data.diagnostics.pressure_half, physics_data.diagnostics.layer_thickness,
-      physics_data.diagnostics.air_density, cloud_water, cloud_ice, cloud_fraction,
-      surface_temperature_col, surface_albedo_vis_col,
-      surface_albedo_nir_col, surface_emissivity_col,
-      date, latitudes, longitudes,
-      parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr)
-    
-    # Unpack structured results directly
-    tendencies_vmapped, diagnostics_vmapped = radiation_results
-    
-    # Extract temperature tendencies and transpose to [nlev, ncols]
-    temperature_tendency = tendencies_vmapped.temperature_tendency.T
-    
-    # Create physics tendencies
-    # Note: All tendencies should be in [nlev, ncols] format to match the reshaped state
-    physics_tendencies = PhysicsTendency(
-        u_wind=jnp.zeros((nlev, ncols)),  # No wind tendencies from radiation
-        v_wind=jnp.zeros((nlev, ncols)),
-        temperature=temperature_tendency,
-        specific_humidity=jnp.zeros((nlev, ncols)),  # Match the expected shape
-        tracers={}
-    )
-    
-    # Reconstruct RadiationData from vmapped diagnostics
-    # Most fields need to be transposed from [ncols, ...] to [..., ncols]
-    rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),  # [ncols, 1] -> [ncols]
-        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
-        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
-        surface_emissivity=diagnostics_vmapped.surface_emissivity,
-        sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2),  # [ncols, nlev+1, nbands] -> [nlev+1, ncols, nbands]
-        sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2),
-        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
-        lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2),
-        lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2),
-        lw_heating_rate=tendencies_vmapped.longwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
-        surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
-        surface_lw_down=diagnostics_vmapped.surface_lw_down,
-        surface_sw_up=diagnostics_vmapped.surface_sw_up,
-        surface_lw_up=diagnostics_vmapped.surface_lw_up,
-        toa_sw_up=diagnostics_vmapped.toa_sw_up,
-        toa_lw_up=diagnostics_vmapped.toa_lw_up,
-        toa_sw_down=diagnostics_vmapped.toa_sw_down
-    )
-    
-    updated_physics_data = physics_data.copy(radiation=rad_out)
-    
-    return physics_tendencies, updated_physics_data
+        # Get lat/lon from geometry
+        lat, lon = jax.numpy.meshgrid(
+            geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
+            geometry.lon * 180.0 / jnp.pi,  # degrees
+        )
+        # Then reshape to (ncols,) to match column format
+        latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
+
+        # Get date information for solar calculations
+        date = physics_data.date.dt
+
+        # Get cloud properties from tracers and previous physics
+        cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+        cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+        cloud_fraction = physics_data.clouds.cloud_fraction
+
+        # Get ozone from chemistry data
+        ozone_vmr = physics_data.chemistry.ozone_vmr * 1e-6  # Convert ppmv to VMR
+        # CO2 is well-mixed, so use a scalar mean value (radiation scheme expects scalar)
+        co2_vmr = jnp.mean(physics_data.chemistry.co2_vmr) * 1e-6  # Convert ppmv to VMR, scalar
+
+        # Reshape surface properties to (ncols,) for vmap
+        surface_temperature_col = physics_data.surface.surface_temperature.reshape(ncols)  # (ncols,)
+        surface_albedo_vis_col = physics_data.radiation.surface_albedo_vis.reshape(ncols)  # (ncols,)
+        surface_albedo_nir_col = physics_data.radiation.surface_albedo_nir.reshape(ncols)  # (ncols,)
+        surface_emissivity_col = physics_data.radiation.surface_emissivity.reshape(ncols)  # (ncols,)
+
+        # Prepare aerosol data for vmap - reshape to have column as the mapped dimension
+        aerosol_data_for_vmap = physics_data.aerosol.copy(
+            aod_profile=physics_data.aerosol.aod_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+            ssa_profile=physics_data.aerosol.ssa_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+            asy_profile=physics_data.aerosol.asy_profile.reshape(nlev, ncols).T,  # (ncols, nlev)
+            cdnc_factor=physics_data.aerosol.cdnc_factor.reshape(ncols),  # (ncols,)
+            aod_total=physics_data.aerosol.aod_total.reshape(ncols),  # (ncols,)
+            aod_anthropogenic=physics_data.aerosol.aod_anthropogenic.reshape(ncols),  # (ncols,)
+            aod_background=physics_data.aerosol.aod_background.reshape(ncols),  # (ncols,)
+        )
+
+        radiation_results = jax.vmap(
+            radiation_scheme_fn,
+            in_axes=(
+                1, 1, 1, 1, 1,    # temperature, specific_humidity, pressure_full, pressure_half, layer_thickness (nlev/nlev+1, ncols)
+                1, 1, 1, 1,       # air_density, cloud_water, cloud_ice, cloud_fraction (nlev, ncols)
+                0, 0, 0, 0,       # surface_temperature, surface_albedo_vis, surface_albedo_nir, surface_emissivity (ncols,)
+                None, 0, 0,       # date (scalar), latitudes (ncols,), longitudes (ncols,)
+                None, 0, 1, None),  # parameters (scalar), aerosol_data (per column), ozone_vmr (nlev, ncols), co2_vmr (scalar)
+            out_axes=(0, 0),  # Returns (RadiationTendencies, RadiationData) per column
+            axis_size=ncols
+        )(state.temperature, state.specific_humidity, physics_data.diagnostics.pressure_full, physics_data.diagnostics.pressure_half, physics_data.diagnostics.layer_thickness,
+          physics_data.diagnostics.air_density, cloud_water, cloud_ice, cloud_fraction,
+          surface_temperature_col, surface_albedo_vis_col,
+          surface_albedo_nir_col, surface_emissivity_col,
+          date, latitudes, longitudes,
+          parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr)
+
+        # Unpack structured results directly
+        tendencies_vmapped, diagnostics_vmapped = radiation_results
+
+        # Extract temperature tendencies and transpose to [nlev, ncols]
+        temperature_tendency = tendencies_vmapped.temperature_tendency.T
+
+        # Create physics tendencies
+        # Note: All tendencies should be in [nlev, ncols] format to match the reshaped state
+        physics_tendencies = PhysicsTendency(
+            u_wind=jnp.zeros((nlev, ncols)),  # No wind tendencies from radiation
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=temperature_tendency,
+            specific_humidity=jnp.zeros((nlev, ncols)),  # Match the expected shape
+            tracers={}
+        )
+
+        # Reconstruct RadiationData from vmapped diagnostics
+        # Most fields need to be transposed from [ncols, ...] to [..., ncols]
+        rad_out = RadiationData(
+            cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),  # [ncols, 1] -> [ncols]
+            surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
+            surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
+            surface_emissivity=diagnostics_vmapped.surface_emissivity,
+            sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2),  # [ncols, nlev+1, nbands] -> [nlev+1, ncols, nbands]
+            sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2),
+            sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+            lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2),
+            lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2),
+            lw_heating_rate=tendencies_vmapped.longwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+            surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
+            surface_lw_down=diagnostics_vmapped.surface_lw_down,
+            surface_sw_up=diagnostics_vmapped.surface_sw_up,
+            surface_lw_up=diagnostics_vmapped.surface_lw_up,
+            toa_sw_up=diagnostics_vmapped.toa_sw_up,
+            toa_lw_up=diagnostics_vmapped.toa_lw_up,
+            toa_sw_down=diagnostics_vmapped.toa_sw_down
+        )
+
+        updated_physics_data = physics_data.copy(radiation=rad_out)
+
+        return physics_tendencies, updated_physics_data
+
+    return apply_radiation
 
 @jit
 def apply_convection(

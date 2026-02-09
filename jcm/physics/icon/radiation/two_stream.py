@@ -480,4 +480,3 @@ def flux_to_heating_rate(
     
     return heating
 
-
