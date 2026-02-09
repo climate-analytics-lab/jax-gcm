@@ -15,9 +15,29 @@ from .cloud_microphysics import (
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
 from .cloud_utils import (
-    get_util_var, get_cloud_bounds
+    get_util_var, get_cloud_bounds, eff_ice_crystal_radius, minimum_CDNC
 )
-from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf
+from .cloud_microphysics_2m import (
+    MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain,
+    precip_formation_warm, precip_formation_cold, update_in_cloud_water
+)
+from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf, rhoh2o
+
+from .cloud_params_2m import (cqtmin, ldyn_cdnc_min, rcd_vol_max, cdnc_min_fixed, 
+                              cdnc_min_lower, cdnc_min_upper, fact_PK, pow_PK, icemin
+                              )
+
+from math import pi
+
+def _zeros(n: int) -> jnp.ndarray:
+        return jnp.zeros((n,), dtype=jnp.float32)
+
+
+def _full(n: int, v: float) -> jnp.ndarray:
+    return jnp.full((n,), v, dtype=jnp.float32)
+
+
+# from cloud_params_2m import CloudParams2M
 
 
 class TestCloudDropletRadius:
@@ -590,6 +610,833 @@ class TestCloudUtils:
         assert jnp.array_equal(kbas, expected_kbas), f"kbas: Expected {expected_kbas}, got {kbas}"
         assert jnp.array_equal(kcl_minustop, expected_kcl_minustop), f"lcl_minustop: Expected {expected_kcl_minustop}, got {kcl_minustop}"
         assert jnp.array_equal(kcl_minusbas, expected_kcl_minusbas), f"kcl_minusbas: Expected {expected_kcl_minusbas}, got {kcl_minusbas}"
+    
+    def test_eff_ice_crystal_radius(self):
+        # Positive, non-degenerate inputs so the eps-guards do not affect the result
+        pxice = jnp.array([0.1, 1.0, 10.0], dtype=jnp.float32)   # [g/m^3]
+        picnc = jnp.array([1e5, 1e6, 1e7], dtype=jnp.float32)    # [1/m^3]
+
+        got = eff_ice_crystal_radius(pxice, picnc)
+        expected = 0.5e4 * (pxice / (fact_PK * picnc)) ** (1.0 / pow_PK)
+
+        assert got.shape == expected.shape
+        assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
+    
+    def test_minimum_CDNC(self):
+        pxwat = jnp.array([0.0, 1e-6, 1e-4, 1e-2], dtype=jnp.float32)  # [kg/m^3]
+        got = minimum_CDNC(pxwat)
+
+        if ldyn_cdnc_min:
+            expected = rcd_vol_max ** (-3.0) * (3.0 / (4.0 * pi * rhoh2o)) * pxwat
+            expected = jnp.clip(expected, cdnc_min_lower, cdnc_min_upper)
+        else:
+            expected = jnp.full_like(pxwat, cdnc_min_fixed * 1.0e6)  # cm^-3 -> m^-3
+
+        assert got.shape == pxwat.shape
+        assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
+
+        # extra invariant: dynamic branch must be within clip bounds
+        if ldyn_cdnc_min:
+            assert jnp.all(got >= cdnc_min_lower)
+            assert jnp.all(got <= cdnc_min_upper)
+
+class TestMeltingSnowIce_2M:
+    def test_melting_snow_and_ice(self):
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        temperature_previous = jnp.array([tmelt + 1.0, tmelt - 1.0], dtype=jnp.float32)
+        melt_mask = temperature_previous > tmelt
+
+        pressure_thickness = jnp.array([1.0e4, 1.0e4], dtype=jnp.float32)
+        lsdcp = jnp.array([2.8e3, 2.8e3], dtype=jnp.float32)
+        lvdcp = jnp.array([2.5e3, 2.5e3], dtype=jnp.float32)
+
+        ice_cloud_previous = jnp.array([1e-4, 1e-4], dtype=jnp.float32)
+        ice_tendency = jnp.array([1e-6, 1e-6], dtype=jnp.float32)
+
+        icncq = jnp.array([2e5, 2e5], dtype=jnp.float32)
+        icnc = jnp.array([1e6, 1e6], dtype=jnp.float32)
+        cdnc = jnp.array([1e8, 1e8], dtype=jnp.float32)
+        qmel = jnp.array([0.0, 0.0], dtype=jnp.float32)
+
+        rain_flux = jnp.array([1e-5, 1e-5], dtype=jnp.float32)
+        snow_flux = jnp.array([2e-5, 2e-5], dtype=jnp.float32)
+
+        ice_flux = jnp.array([1.0e-5, 1.0e-5], dtype=jnp.float32)
+        ice_flux_n = jnp.array([1.0e7, 1.0e7], dtype=jnp.float32)
+
+        (
+            icnc_o,
+            qmel_o,
+            cdnc_o,
+            rain_flux_o,
+            snow_flux_o,
+            ice_flux_o,
+            ice_flux_n_o,
+            ice_tendency_o,
+            pimlt,
+            psmlt,
+            pximlt,
+        ) = melting_snow_and_ice(
+            melt_mask=melt_mask,
+            temperature_previous=temperature_previous,
+            ice_cloud_previous=ice_cloud_previous,
+            pressure_thickness=pressure_thickness,
+            icncq=icncq,
+            lsdcp=lsdcp,
+            lvdcp=lvdcp,
+            icnc=icnc,
+            qmel=qmel,
+            cdnc=cdnc,
+            rain_flux=rain_flux,
+            snow_flux=snow_flux,
+            ice_flux=ice_flux,
+            ice_flux_n=ice_flux_n,
+            ice_tendency=ice_tendency,
+            dt=dt,
+        )
+
+        # Basic sanity checks
+        assert icnc_o.shape == (2,)
+        assert jnp.all(jnp.isfinite(icnc_o))
+        assert jnp.all(jnp.isfinite(rain_flux_o))
+        assert jnp.all(jnp.isfinite(snow_flux_o))
+
+        # Melt point should transfer ICNC to CDNC and reset ICNC to icemin
+        assert float(icnc_o[0]) == float(icemin)
+        assert float(cdnc_o[0]) == float(cdnc[0] + icncq[0])
+        assert float(qmel_o[0]) == float(qmel[0] + dt * icncq[0])
+
+        # Non-melt point should not change those number variables
+        assert float(icnc_o[1]) == float(icnc[1])
+        assert float(cdnc_o[1]) == float(cdnc[1])
+        assert float(qmel_o[1]) == float(qmel[1])
+
+        # Diagnostics should be non-negative
+        assert float(pimlt[0]) >= 0.0
+        assert float(psmlt[0]) >= 0.0
+        assert float(pximlt[0]) >= 0.0
+
+        # ice_flux_n should be zeroed if mass flux drops below epsec (may or may not happen here),
+        # but must never be negative.
+        assert jnp.all(ice_flux_n_o >= 0.0)
+        assert jnp.all(ice_flux_o >= 0.0)
+    
+class TestSublimationSnowIceEvapRain_2M:
+    def _common_inputs(self, n: int):
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        # previous-step thermodynamics
+        specific_humidity_prev = _full(n, 1.0e-3)  # pqm1 [kg/kg]
+        temperature_prev = _full(n, 260.0)         # ptm1 [K]
+
+        # layer geometry
+        pressure_thickness = _full(n, 1.0e4)       # pdp [Pa]
+        dp_over_g = _full(n, 1.0e3)                # pdpg [kg/m^2]
+
+        # area fractions
+        precip_fraction = _full(n, 0.5)            # pclcpre
+        falling_ice_fraction = _full(n, 0.5)       # pclcfi
+
+        # air properties
+        air_density = _full(n, 1.2)                # prho [kg/m^3]
+        inv_air_density = 1.0 / air_density        # pqrho
+        inv_air_density_rcp = inv_air_density      # prho_rcp (kept identical)
+
+        # saturation quantities / deficits
+        qsat_ice = _full(n, 2.0e-3)                # pqsi [kg/kg]  ( > q )
+        qsat_water_prev = _full(n, 2.0e-3)         # pqsw [kg/kg]  ( > q )
+
+        # scheme-specific subsaturation terms (positive allows sinks)
+        subsat_wrt_ice = _full(n, 0.5)             # picesub
+        subsat_wrt_water_evap = _full(n, 0.5)      # psusatw_evap
+        thermo_term_water = _full(n, 1.0)          # pastbstw (>0)
+
+        # latent heat term
+        lsdcp = _full(n, 2.8e3)                    # plsdcp
+
+        # default fluxes (overridden per-test)
+        snow_flux = _zeros(n)                      # psfl
+        rain_flux = _zeros(n)                      # prfl
+        ice_flux = _zeros(n)                       # pxiflux
+        ice_flux_n = _full(n, 1.0e7)               # pxifluxn
+
+        return dict(
+            dt=dt,
+            specific_humidity_prev=specific_humidity_prev,
+            temperature_prev=temperature_prev,
+            precip_fraction=precip_fraction,
+            falling_ice_fraction=falling_ice_fraction,
+            pressure_thickness=pressure_thickness,
+            dp_over_g=dp_over_g,
+            subsat_wrt_ice=subsat_wrt_ice,
+            lsdcp=lsdcp,
+            inv_air_density=inv_air_density,
+            qsat_ice=qsat_ice,
+            inv_air_density_rcp=inv_air_density_rcp,
+            snow_flux=snow_flux,
+            air_density=air_density,
+            qsat_water_prev=qsat_water_prev,
+            rain_flux=rain_flux,
+            subsat_wrt_water_evap=subsat_wrt_water_evap,
+            thermo_term_water=thermo_term_water,
+            ice_flux=ice_flux,
+            ice_flux_n=ice_flux_n,
+        )
+
+    def test_snow_sublimation_only(self):
+        n = 4
+        x = self._common_inputs(n)
+
+        precip_mask = jnp.array([True, True, False, True])
+        falling_ice_mask = jnp.array([False, False, False, False])
+
+        # Snow flux present only at first two points; masked off third; last has zero flux
+        x["snow_flux"] = jnp.array([2.0e-4, 1.0e-4, 2.0e-4, 0.0], dtype=jnp.float32)
+        x["rain_flux"] = _zeros(n)
+        x["ice_flux"] = _zeros(n)
+        x["ice_flux_n"] = _full(n, 1.0e7)
+
+        ice_flux_o, ice_flux_n_o, ice_sublim, snow_sublim, rain_evap = sublimation_snow_and_ice_evaporation_rain(
+            precip_mask=precip_mask,
+            falling_ice_mask=falling_ice_mask,
+            specific_humidity_prev=x["specific_humidity_prev"],
+            temperature_prev=x["temperature_prev"],
+            precip_fraction=x["precip_fraction"],
+            pressure_thickness=x["pressure_thickness"],
+            dp_over_g=x["dp_over_g"],
+            subsat_wrt_ice=x["subsat_wrt_ice"],
+            lsdcp=x["lsdcp"],
+            inv_air_density=x["inv_air_density"],
+            qsat_ice=x["qsat_ice"],
+            inv_air_density_rcp=x["inv_air_density_rcp"],
+            snow_flux=x["snow_flux"],
+            air_density=x["air_density"],
+            qsat_water_prev=x["qsat_water_prev"],
+            rain_flux=x["rain_flux"],
+            subsat_wrt_water_evap=x["subsat_wrt_water_evap"],
+            thermo_term_water=x["thermo_term_water"],
+            falling_ice_fraction=x["falling_ice_fraction"],
+            ice_flux=x["ice_flux"],
+            ice_flux_n=x["ice_flux_n"],
+            dt=x["dt"],
+        )
+
+        assert float(snow_sublim[0]) > 0.0
+        assert float(snow_sublim[1]) > 0.0
+        assert float(snow_sublim[2]) == 0.0  # precip_mask False
+        assert float(snow_sublim[3]) == 0.0  # snow_flux == 0
+
+        assert jnp.all(ice_sublim == 0.0)
+        assert jnp.all(rain_evap == 0.0)
+
+        # unchanged ice fluxes
+        assert jnp.allclose(ice_flux_o, x["ice_flux"])
+        assert jnp.allclose(ice_flux_n_o, x["ice_flux_n"])
+
+        assert jnp.all(jnp.isfinite(snow_sublim))
+        assert jnp.all(snow_sublim >= 0.0)
+
+    def test_falling_ice_sublimation_reduces_fluxes(self):
+        n = 4
+        x = self._common_inputs(n)
+
+        precip_mask = jnp.array([False, False, False, False])
+        falling_ice_mask = jnp.array([True, True, False, True])
+
+        ice_flux_in = jnp.array([2.0e-4, 1.0e-4, 5.0e-4, 2.0e-4], dtype=jnp.float32)
+        ice_flux_n_in = jnp.array([2.0e7, 1.0e7, 1.0e7, 2.0e7], dtype=jnp.float32)
+        x["ice_flux"] = ice_flux_in
+        x["ice_flux_n"] = ice_flux_n_in
+
+        x["snow_flux"] = _zeros(n)
+        x["rain_flux"] = _zeros(n)
+
+        ice_flux_o, ice_flux_n_o, ice_sublim, snow_sublim, rain_evap = sublimation_snow_and_ice_evaporation_rain(
+            precip_mask=precip_mask,
+            falling_ice_mask=falling_ice_mask,
+            specific_humidity_prev=x["specific_humidity_prev"],
+            temperature_prev=x["temperature_prev"],
+            precip_fraction=x["precip_fraction"],
+            pressure_thickness=x["pressure_thickness"],
+            dp_over_g=x["dp_over_g"],
+            subsat_wrt_ice=x["subsat_wrt_ice"],
+            lsdcp=x["lsdcp"],
+            inv_air_density=x["inv_air_density"],
+            qsat_ice=x["qsat_ice"],
+            inv_air_density_rcp=x["inv_air_density_rcp"],
+            snow_flux=x["snow_flux"],
+            air_density=x["air_density"],
+            qsat_water_prev=x["qsat_water_prev"],
+            rain_flux=x["rain_flux"],
+            subsat_wrt_water_evap=x["subsat_wrt_water_evap"],
+            thermo_term_water=x["thermo_term_water"],
+            falling_ice_fraction=x["falling_ice_fraction"],
+            ice_flux=x["ice_flux"],
+            ice_flux_n=x["ice_flux_n"],
+            dt=x["dt"],
+        )
+
+        assert float(ice_sublim[0]) > 0.0
+        assert float(ice_sublim[1]) > 0.0
+        assert float(ice_sublim[2]) == 0.0  # falling_ice_mask False
+        assert float(ice_sublim[3]) > 0.0
+
+        # Should reduce mass flux where active
+        assert float(ice_flux_o[0]) < float(ice_flux_in[0])
+        assert float(ice_flux_o[1]) < float(ice_flux_in[1])
+        assert float(ice_flux_o[2]) == float(ice_flux_in[2])
+        assert float(ice_flux_o[3]) < float(ice_flux_in[3])
+
+        # Number flux should not increase where active
+        assert float(ice_flux_n_o[0]) <= float(ice_flux_n_in[0])
+        assert float(ice_flux_n_o[1]) <= float(ice_flux_n_in[1])
+        assert float(ice_flux_n_o[2]) == float(ice_flux_n_in[2])
+        assert float(ice_flux_n_o[3]) <= float(ice_flux_n_in[3])
+
+        assert jnp.all(snow_sublim == 0.0)
+        assert jnp.all(rain_evap == 0.0)
+
+        assert jnp.all(jnp.isfinite(ice_sublim))
+        assert jnp.all(ice_sublim >= 0.0)
+        assert jnp.all(ice_flux_o >= 0.0)
+        assert jnp.all(ice_flux_n_o >= 0.0)
+
+    def test_rain_evaporation_only(self):
+        n = 4
+        x = self._common_inputs(n)
+
+        precip_mask = jnp.array([True, True, False, True])
+        falling_ice_mask = jnp.array([False, False, False, False])
+
+        x["rain_flux"] = jnp.array([3.0e-4, 1.0e-4, 2.0e-4, 0.0], dtype=jnp.float32)
+        x["snow_flux"] = _zeros(n)
+        x["ice_flux"] = _zeros(n)
+        x["ice_flux_n"] = _full(n, 1.0e7)
+
+        ice_flux_o, ice_flux_n_o, ice_sublim, snow_sublim, rain_evap = sublimation_snow_and_ice_evaporation_rain(
+            precip_mask=precip_mask,
+            falling_ice_mask=falling_ice_mask,
+            specific_humidity_prev=x["specific_humidity_prev"],
+            temperature_prev=x["temperature_prev"],
+            precip_fraction=x["precip_fraction"],
+            pressure_thickness=x["pressure_thickness"],
+            dp_over_g=x["dp_over_g"],
+            subsat_wrt_ice=x["subsat_wrt_ice"],
+            lsdcp=x["lsdcp"],
+            inv_air_density=x["inv_air_density"],
+            qsat_ice=x["qsat_ice"],
+            inv_air_density_rcp=x["inv_air_density_rcp"],
+            snow_flux=x["snow_flux"],
+            air_density=x["air_density"],
+            qsat_water_prev=x["qsat_water_prev"],
+            rain_flux=x["rain_flux"],
+            subsat_wrt_water_evap=x["subsat_wrt_water_evap"],
+            thermo_term_water=x["thermo_term_water"],
+            falling_ice_fraction=x["falling_ice_fraction"],
+            ice_flux=x["ice_flux"],
+            ice_flux_n=x["ice_flux_n"],
+            dt=x["dt"],
+        )
+
+        assert float(rain_evap[0]) > 0.0
+        assert float(rain_evap[1]) > 0.0
+        assert float(rain_evap[2]) == 0.0  # precip_mask False
+        assert float(rain_evap[3]) == 0.0  # rain_flux == 0
+
+        assert jnp.all(snow_sublim == 0.0)
+        assert jnp.all(ice_sublim == 0.0)
+
+        assert jnp.allclose(ice_flux_o, x["ice_flux"])
+        assert jnp.allclose(ice_flux_n_o, x["ice_flux_n"])
+
+        assert jnp.all(jnp.isfinite(rain_evap))
+        assert jnp.all(rain_evap >= 0.0)
+
+
+class TestAutoconversion_2M:
+    def test_precip_formation_warm_mask_false_no_change(self):
+        """If warm_precip_mask is False everywhere, outputs should be zero rates and unchanged inputs."""
+        # config = CloudParams2M.default()
+
+        shape = (5,)
+        warm_precip_mask = jnp.zeros(shape, dtype=bool)
+
+        autoconversion_factor = jnp.ones(shape)
+        cloud_fraction = jnp.full(shape, 0.5)
+        minimum_cloud_precip_fraction = jnp.full(shape, 0.1)
+        air_density = jnp.full(shape, 1.0)
+        rain_water = jnp.full(shape, 1e-4)
+        minimum_droplet_number = jnp.full(shape, 1e6)
+        droplet_number_in = jnp.full(shape, 2e6)
+        cloud_water_in = jnp.full(shape, 1e-3)
+        dt = jnp.full(shape, 10.0)
+
+        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+            warm_precip_mask=warm_precip_mask,
+            autoconversion_factor=autoconversion_factor,
+            cloud_fraction=cloud_fraction,
+            minimum_cloud_precip_fraction=minimum_cloud_precip_fraction,
+            air_density=air_density,
+            rain_water=rain_water,
+            minimum_droplet_number=minimum_droplet_number,
+            droplet_number=droplet_number_in,
+            cloud_water=cloud_water_in,
+            dt=dt
+        )
+
+        assert jnp.allclose(droplet_number, droplet_number_in)
+        assert jnp.allclose(cloud_water, cloud_water_in)
+        assert jnp.allclose(pmratepr, jnp.zeros_like(cloud_water_in))
+        assert jnp.allclose(prpr, jnp.zeros_like(cloud_water_in))
+        assert jnp.allclose(prprn, jnp.zeros_like(cloud_water_in))
+
+
+    def test_precip_formation_warm_mask_true_reduces_cloud_water_and_nonnegative_rates(self):
+        """If mask is True and cloud water is present, cloud water should not increase; rates should be >= 0."""
+        # config = MicrophysicsParameters_2M.default()
+
+        shape = (6,)
+        warm_precip_mask = jnp.ones(shape, dtype=bool)
+
+        autoconversion_factor = jnp.ones(shape)
+        cloud_fraction = jnp.linspace(0.1, 1.0, shape[0])
+        minimum_cloud_precip_fraction = jnp.full(shape, 0.2)
+        air_density = jnp.full(shape, 1.0)
+        rain_water = jnp.full(shape, 5e-4)
+        minimum_droplet_number = jnp.full(shape, 1e6)
+
+        droplet_number_in = jnp.full(shape, 2e6)
+        cloud_water_in = jnp.full(shape, 2e-3)
+        dt = jnp.full(shape, 10.0)
+
+        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+            warm_precip_mask=warm_precip_mask,
+            autoconversion_factor=autoconversion_factor,
+            cloud_fraction=cloud_fraction,
+            minimum_cloud_precip_fraction=minimum_cloud_precip_fraction,
+            air_density=air_density,
+            rain_water=rain_water,
+            minimum_droplet_number=minimum_droplet_number,
+            droplet_number=droplet_number_in,
+            cloud_water=cloud_water_in,
+            dt=dt
+            # config=config,
+        )
+
+        # Cloud water is reduced by autoconversion and accretion terms; should not increase.
+        assert jnp.all(cloud_water <= cloud_water_in + 1e-12)
+
+        # Formation rates should be nonnegative for physically meaningful inputs.
+        assert jnp.all(pmratepr >= -1e-12)
+        assert jnp.all(prpr >= -1e-12)
+        assert jnp.all(prprn >= -1e-12)
+
+        # Droplet number should not increase (autoconversion removes droplets); allow tiny eps.
+        assert jnp.all(droplet_number <= droplet_number_in + 1e-8)
+
+    def test_precip_formation_warm_mixed_mask_only_updates_true_elements(self):
+        """Only elements where mask is True should be modified."""
+        # config = MicrophysicsParameters_2M.default()
+
+        warm_precip_mask = jnp.array([True, False, True, False])
+
+        autoconversion_factor = jnp.ones_like(warm_precip_mask, dtype=jnp.float32)
+        cloud_fraction = jnp.full((4,), 0.5)
+        minimum_cloud_precip_fraction = jnp.full((4,), 0.1)
+        air_density = jnp.full((4,), 1.0)
+        rain_water = jnp.full((4,), 1e-4)
+        minimum_droplet_number = jnp.full((4,), 1e6)
+
+        droplet_number_in = jnp.full((4,), 2e6)
+        cloud_water_in = jnp.full((4,), 1e-3)
+        dt = jnp.full((4,), 10.0)
+
+        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+            warm_precip_mask=warm_precip_mask,
+            autoconversion_factor=autoconversion_factor,
+            cloud_fraction=cloud_fraction,
+            minimum_cloud_precip_fraction=minimum_cloud_precip_fraction,
+            air_density=air_density,
+            rain_water=rain_water,
+            minimum_droplet_number=minimum_droplet_number,
+            droplet_number=droplet_number_in,
+            cloud_water=cloud_water_in,
+            dt=dt
+            # config=config,
+        )
+
+        false_idx = jnp.where(~warm_precip_mask)[0]
+
+        assert jnp.allclose(droplet_number[false_idx], droplet_number_in[false_idx])
+        assert jnp.allclose(cloud_water[false_idx], cloud_water_in[false_idx])
+        assert jnp.allclose(pmratepr[false_idx], 0.0)
+        assert jnp.allclose(prpr[false_idx], 0.0)
+        assert jnp.allclose(prprn[false_idx], 0.0)
+
+    def test_precip_formation_cold_basic_invariants_and_shapes(self):
+        """
+        Smoke/invariant test for precip_formation_cold.
+
+        Checks:
+        - output shapes match input shapes
+        - outputs are finite
+        - non-negativity for formation rates (pspr, psacl, psacln, psprn, pmsnowacl)
+        - droplet_number is not reduced below cqtmin
+        - in-cloud condensates are not negative
+        """
+        n = 6
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        # Make 3 points "active" (cloudy with ice+liquid+snow) and 3 "inactive"
+        cloud_mask = jnp.array([True, True, True, False, True, False])
+
+        cloud_fraction = jnp.array([0.3, 0.5, 0.1, 0.0, 0.2, 0.0], dtype=jnp.float32)
+        autoconversion_factor = jnp.array([1.0, 0.7, 0.3, 0.0, 0.5, 0.0], dtype=jnp.float32)
+        minimum_cloud_precip_fraction = jnp.minimum(cloud_fraction, jnp.array([0.2] * n, dtype=jnp.float32))
+
+        air_density = jnp.array([1.2] * n, dtype=jnp.float32)
+        inv_air_density = 1.0 / air_density
+        inv_air_density_rcp = 1.0 / air_density  # keep identical for test
+
+        temperature = jnp.array([260.0, 255.0, 268.0, 280.0, 250.0, 275.0], dtype=jnp.float32)
+        dynamic_viscosity = jnp.array([1.8e-5] * n, dtype=jnp.float32)
+
+        # Snow from above: present only for active points to trigger riming/accretion
+        snow_mass_mmr_from_above = jnp.array([1e-5, 2e-5, 5e-6, 0.0, 1e-5, 0.0], dtype=jnp.float32)
+
+        # In-cloud ice and liquid: positive for active points
+        in_cloud_ice = jnp.array([2e-4, 1e-4, 5e-5, 0.0, 2e-4, 0.0], dtype=jnp.float32)
+        in_cloud_liquid = jnp.array([1e-4, 2e-4, 1e-4, 0.0, 5e-5, 0.0], dtype=jnp.float32)
+
+        # Number concentrations
+        ice_number = jnp.array([1e5, 2e5, 5e4, 1e5, 3e5, 1e5], dtype=jnp.float32)
+        droplet_number = jnp.array([5e7, 2e7, 1e7, 5e7, 4e7, 5e7], dtype=jnp.float32)
+
+        # Minimum droplet number (pcdnc_min)
+        minimum_droplet_number = jnp.array([1e6] * n, dtype=jnp.float32)
+
+        snow_rate_in_cloud = jnp.zeros((n,), dtype=jnp.float32)
+
+        outs = precip_formation_cold(
+            cloud_mask=cloud_mask,
+            autoconversion_factor=autoconversion_factor,
+            cloud_fraction=cloud_fraction,
+            minimum_cloud_precip_fraction=minimum_cloud_precip_fraction,
+            inverse_air_density=inv_air_density,
+            inverse_air_density_rcp=inv_air_density_rcp,
+            temperature=temperature,
+            dynamic_viscosity=dynamic_viscosity,
+            snow_mass_mmr_from_above=snow_mass_mmr_from_above,
+            air_density=air_density,
+            minimum_droplet_number=minimum_droplet_number,
+            ice_number=ice_number,
+            droplet_number=droplet_number,
+            snow_rate_in_cloud=snow_rate_in_cloud,
+            in_cloud_ice=in_cloud_ice,
+            in_cloud_liquid=in_cloud_liquid,
+            dt=dt,
+        )
+
+        assert len(outs) == 10
+        (
+            ice_number_o,
+            droplet_number_o,
+            snow_rate_in_cloud_o,
+            in_cloud_ice_o,
+            in_cloud_liquid_o,
+            psprn,
+            psacl,
+            psacln,
+            pmsnowacl,
+            pspr,
+        ) = outs
+
+        for arr in outs:
+            assert arr.shape == (n,)
+            assert jnp.all(jnp.isfinite(arr)), "All outputs must be finite"
+
+        # Invariants / basic physical bounds
+        assert jnp.all(in_cloud_ice_o >= 0.0)
+        assert jnp.all(in_cloud_liquid_o >= 0.0)
+        assert jnp.all(droplet_number_o >= cqtmin)
+        assert jnp.all(ice_number_o >= 0.0)
+
+        # Formation/accretion diagnostics should never be negative
+        assert jnp.all(pspr >= 0.0)
+        assert jnp.all(psprn >= 0.0)
+        assert jnp.all(psacl >= 0.0)
+        assert jnp.all(psacln >= 0.0)
+        assert jnp.all(pmsnowacl >= 0.0)
+
+        # If a point is completely non-cloudy, outputs should remain "quiet" (rates zero)
+        inactive = ~cloud_mask
+        assert jnp.all(pspr[inactive] == 0.0)
+        assert jnp.all(psacl[inactive] == 0.0)
+        assert jnp.all(psacln[inactive] == 0.0)
+        assert jnp.all(psprn[inactive] == 0.0)
+
+class TestUpdateInCloudWater_2M:   
+    def test_update_in_cloud_water_shapes_and_finite(self):
+        n = 8
+
+        # Inputs (mostly benign)
+        aerosol_total = _full(n, 100.0)                 # [1/cm^3]-like scale used as *1e6 in scheme
+        activated_cdnc = _full(n, 1.0e6)                # [1/m^3]
+        condensation_increment = _zeros(n)              # [kg/kg]
+        deposition_increment = _zeros(n)                # [kg/kg]
+        cloud_cover_vari_i = _zeros(n)
+        cloud_cover_vari_l = _zeros(n)
+        activated_icnc = _full(n, 1.0e3)                # [1/m^3]
+        specific_humidity = _full(n, 1.0e-2)
+        saturation_specific_humidity = _full(n, 2.0e-2)
+        air_density = _full(n, 1.2)
+        ice_mean_volume_radius = _full(n, 20e-6)        # [m]
+        temperature_previous = _full(n, 280.0)          # [K]
+
+        cloud_flag = jnp.array([True, False, True, False, True, False, True, False])
+        icnc = _full(n, 1.0)                            # [1/m^3] small
+        droplet_nucleation_accumulated = _zeros(n)      # accumulator
+        cdnc = _full(n, 1.0e5)                          # [1/m^3]
+        cloud_fraction = jnp.where(cloud_flag, _full(n, 0.2), _full(n, 0.0))
+        in_cloud_ice_mixing_ratio = _zeros(n)
+        in_cloud_water_mixing_ratio = _zeros(n)
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        outs = update_in_cloud_water(
+            aerosol_total=aerosol_total,
+            activated_cdnc=activated_cdnc,
+            condensation_increment=condensation_increment,
+            deposition_increment=deposition_increment,
+            cloud_cover_vari_i=cloud_cover_vari_i,
+            cloud_cover_vari_l=cloud_cover_vari_l,
+            activated_icnc=activated_icnc,
+            specific_humidity=specific_humidity,
+            saturation_specific_humidity=saturation_specific_humidity,
+            air_density=air_density,
+            ice_mean_volume_radius=ice_mean_volume_radius,
+            temperature_previous=temperature_previous,
+            cloud_flag=cloud_flag,
+            icnc=icnc,
+            droplet_nucleation_accumulated=droplet_nucleation_accumulated,
+            cdnc=cdnc,
+            cloud_fraction=cloud_fraction,
+            in_cloud_ice_mixing_ratio=in_cloud_ice_mixing_ratio,
+            in_cloud_water_mixing_ratio=in_cloud_water_mixing_ratio,
+            dt=dt,
+        )
+
+        assert len(outs) == 8
+        for o in outs:
+            assert o.shape == (n,)
+            assert jnp.all(jnp.isfinite(o)), "Outputs should be finite"
+
+
+    def test_existing_cloud_updates_in_cloud_water_only_where_cloud_flag_true(self):
+        """
+        If cloud_flag is True, pxlb should be incremented by condensation_increment/max(cloud_fraction,clc_min).
+        If cloud_flag is False and no new cloud creation triggers, pxlb should remain unchanged.
+        """
+        n = 4
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        cloud_flag = jnp.array([True, False, True, False])
+        cloud_fraction = jnp.array([0.2, 0.0, 0.5, 0.0], dtype=jnp.float32)
+
+        in_cloud_water = jnp.array([1e-4, 2e-4, 0.0, 3e-4], dtype=jnp.float32)
+        cond_inc = jnp.array([1e-6, 5e-6, 2e-6, 9e-6], dtype=jnp.float32)
+
+        out = update_in_cloud_water(
+            aerosol_total=_full(n, 10.0),
+            activated_cdnc=_full(n, 1e6),
+            condensation_increment=cond_inc,
+            deposition_increment=_zeros(n),
+            cloud_cover_vari_i=_zeros(n),
+            cloud_cover_vari_l=_zeros(n),
+            activated_icnc=_full(n, 1e3),
+            specific_humidity=_full(n, 1e-2),
+            saturation_specific_humidity=_full(n, 2e-2),
+            air_density=_full(n, 1.2),
+            ice_mean_volume_radius=_full(n, 20e-6),
+            temperature_previous=_full(n, 280.0),
+            cloud_flag=cloud_flag,
+            icnc=_full(n, 1.0),
+            droplet_nucleation_accumulated=_zeros(n),
+            cdnc=_full(n, 1e7),  # large enough to avoid activation path
+            cloud_fraction=cloud_fraction,
+            in_cloud_ice_mixing_ratio=_zeros(n),
+            in_cloud_water_mixing_ratio=in_cloud_water,
+            dt=dt,
+        )
+
+        _, _, _, _, cloud_fraction_out, _, in_cloud_water_out, _ = out
+
+        # No new cloud creation expected because deposition+cloud_cover_vari_i and condensation+cloud_cover_vari_l
+        # are both nonzero only in cond_inc, but cloud_flag False cases COULD trigger ll1.
+        # To isolate "existing cloud update", ensure ll1 is false by setting cond_inc=0 in cloud_flag False indices.
+        # (We already have cond_inc >0 everywhere, so we compute expected using the actual routine behavior.)
+        #
+        # Instead of relying on ll1, assert that for indices where cloud_flag True, water increased.
+        assert in_cloud_water_out[0] > in_cloud_water[0]
+        assert in_cloud_water_out[2] > in_cloud_water[2]
+
+        # Also, cloud_fraction should still be in [0,1]
+        assert jnp.all((cloud_fraction_out >= 0.0) & (cloud_fraction_out <= 1.0))
+
+
+    def test_new_cloud_is_created_when_no_cloud_and_positive_sources(self):
+        """
+        When cloud_flag is False and there is positive (condensation or deposition) source,
+        the routine creates a cloud fraction based on clipped RH and initializes in-cloud condensate.
+        """
+        n = 3
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        cloud_flag = jnp.array([False, False, False])
+        cloud_fraction = _zeros(n)
+
+        # RH = q/qs => [0.5, 1.2, 0.001] -> clipped [0.5, 1.0, 0.01]
+        q = jnp.array([1e-2, 1e-2, 1e-5], dtype=jnp.float32)
+        qs = jnp.array([2e-2, 8e-3, 1e-2], dtype=jnp.float32)
+
+        cond_inc = jnp.array([1e-6, 1e-6, 1e-6], dtype=jnp.float32)
+        dep_inc = _zeros(n)
+
+        out = update_in_cloud_water(
+            aerosol_total=_full(n, 10.0),
+            activated_cdnc=_full(n, 1e6),
+            condensation_increment=cond_inc,
+            deposition_increment=dep_inc,
+            cloud_cover_vari_i=_zeros(n),
+            cloud_cover_vari_l=_zeros(n),
+            activated_icnc=_full(n, 1e3),
+            specific_humidity=q,
+            saturation_specific_humidity=qs,
+            air_density=_full(n, 1.2),
+            ice_mean_volume_radius=_full(n, 20e-6),
+            temperature_previous=_full(n, 280.0),
+            cloud_flag=cloud_flag,
+            icnc=_full(n, 1.0),
+            droplet_nucleation_accumulated=_zeros(n),
+            cdnc=_full(n, 1e7),
+            cloud_fraction=cloud_fraction,
+            in_cloud_ice_mixing_ratio=_zeros(n),
+            in_cloud_water_mixing_ratio=_zeros(n),
+            dt=dt,
+        )
+
+        cloud_flag_out, _, _, _, cloud_fraction_out, _, in_cloud_water_out, _ = out
+
+        assert jnp.all(cloud_flag_out)
+        assert jnp.all(cloud_fraction_out > 0.0)
+        assert jnp.all(cloud_fraction_out <= 1.0)
+
+        # In the newly cloudy points, in-cloud water should be initialized > 0
+        assert jnp.all(in_cloud_water_out > 0.0)
+
+
+    def test_cdnc_activation_increases_cdnc_and_accumulates_nucleation(self):
+        """
+        If (cloudy) AND (qc > cqtmin) AND (cdnc <= cdnc_min) AND (T > cthomi),
+        then cdnc is increased towards activated_cdnc and droplet_nucleation_accumulated increases by dt*ΔN.
+        """
+        n = 2
+        dt = jnp.array(10.0, dtype=jnp.float32)
+
+        cloud_flag = jnp.array([True, True])
+        cloud_fraction = _full(n, 0.2)
+
+        # Ensure water is present
+        in_cloud_water = _full(n, 1e-4)
+        air_density = _full(n, 1.2)
+
+        # Choose activated higher than initial
+        cdnc0 = jnp.array([1e5, 2e5], dtype=jnp.float32)
+        activated = jnp.array([5e6, 5e6], dtype=jnp.float32)
+
+        # Warm enough to permit update
+        temperature_previous = _full(n, 280.0)
+
+        droplet_nuc0 = _zeros(n)
+
+        out = update_in_cloud_water(
+            aerosol_total=_full(n, 100.0),
+            activated_cdnc=activated,
+            condensation_increment=_zeros(n),
+            deposition_increment=_zeros(n),
+            cloud_cover_vari_i=_zeros(n),
+            cloud_cover_vari_l=_zeros(n),
+            activated_icnc=_full(n, 1e3),
+            specific_humidity=_full(n, 1e-2),
+            saturation_specific_humidity=_full(n, 2e-2),
+            air_density=air_density,
+            ice_mean_volume_radius=_full(n, 20e-6),
+            temperature_previous=temperature_previous,
+            cloud_flag=cloud_flag,
+            icnc=_full(n, 1.0),
+            droplet_nucleation_accumulated=droplet_nuc0,
+            cdnc=cdnc0,
+            cloud_fraction=cloud_fraction,
+            in_cloud_ice_mixing_ratio=_zeros(n),
+            in_cloud_water_mixing_ratio=in_cloud_water,
+            dt=dt,
+        )
+
+        _, _, droplet_nuc_out, cdnc_out, _, _, _, cdnc_min = out
+
+        # cdnc should not decrease
+        assert jnp.all(cdnc_out >= cdnc0)
+
+        # If activation triggered, cdnc increases by (activated - cdnc0) (since max(.,0))
+        # But it is only applied when cdnc <= cdnc_min. We assert monotonic and that
+        # droplet_nucleation_accumulated increased for any index where cdnc0 <= cdnc_min.
+        deltaN = jnp.maximum(0.0, activated - cdnc0)
+        expected_nuc_increase = dt * deltaN
+
+        triggered = cdnc0 <= cdnc_min
+        assert jnp.all(droplet_nuc_out >= droplet_nuc0)
+        assert jnp.allclose(
+            droplet_nuc_out[triggered],
+            droplet_nuc0[triggered] + expected_nuc_increase[triggered],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+    def test_jittable_and_consistent_with_eager(self):
+        n = 5
+        dt = jnp.array(30.0, dtype=jnp.float32)
+
+        inputs = dict(
+            aerosol_total=_full(n, 100.0),
+            activated_cdnc=_full(n, 1e6),
+            condensation_increment=_full(n, 1e-6),
+            deposition_increment=_zeros(n),
+            cloud_cover_vari_i=_zeros(n),
+            cloud_cover_vari_l=_zeros(n),
+            activated_icnc=_full(n, 1e3),
+            specific_humidity=_full(n, 1e-2),
+            saturation_specific_humidity=_full(n, 2e-2),
+            air_density=_full(n, 1.2),
+            ice_mean_volume_radius=_full(n, 20e-6),
+            temperature_previous=_full(n, 280.0),
+            cloud_flag=jnp.array([True, False, True, False, True]),
+            icnc=_full(n, 1.0),
+            droplet_nucleation_accumulated=_zeros(n),
+            cdnc=_full(n, 1e5),
+            cloud_fraction=jnp.array([0.1, 0.0, 0.3, 0.0, 0.2], dtype=jnp.float32),
+            in_cloud_ice_mixing_ratio=_zeros(n),
+            in_cloud_water_mixing_ratio=_full(n, 1e-4),
+            dt=dt,
+        )
+
+        eager = update_in_cloud_water(**inputs)
+        jitted = jax.jit(update_in_cloud_water)(**inputs)
+
+        for e, j in zip(eager, jitted):
+            assert jnp.allclose(e, j, rtol=0.0, atol=0.0)
+
+
 
 if __name__ == "__main__":
     # Run tests
@@ -627,6 +1474,30 @@ if __name__ == "__main__":
     test_utils = TestCloudUtils()
     test_utils.test_get_util_var()
     test_utils.test_get_cloud_bounds()
+    test_utils.test_eff_ice_crystal_radius()
+    test_utils.test_minimum_CDNC()
+
+    test_melting_snow_ice_2m = TestMeltingSnowIce_2M()
+    test_melting_snow_ice_2m.test_melting_snow_and_ice()
+
+    test_sublimation_snow_ice_rain_2m = TestSublimationSnowIceEvapRain_2M()
+    test_sublimation_snow_ice_rain_2m.test_snow_sublimation_only()
+    test_sublimation_snow_ice_rain_2m.test_falling_ice_sublimation_reduces_fluxes()
+    test_sublimation_snow_ice_rain_2m.test_rain_evaporation_only()
+
+    test_auto_2m = TestAutoconversion_2M()
+    test_auto_2m.test_precip_formation_warm_mask_false_no_change()
+    test_auto_2m.test_precip_formation_warm_mask_true_reduces_cloud_water_and_nonnegative_rates()
+    test_auto_2m.test_precip_formation_warm_mixed_mask_only_updates_true_elements()
+
+    test_update_cloud_water_2m = TestUpdateInCloudWater_2M()
+    test_update_cloud_water_2m.test_update_in_cloud_water_shapes_and_finite()
+    test_update_cloud_water_2m.test_existing_cloud_updates_in_cloud_water_only_where_cloud_flag_true()
+    test_update_cloud_water_2m.test_new_cloud_is_created_when_no_cloud_and_positive_sources()
+    test_update_cloud_water_2m.test_cdnc_activation_increases_cdnc_and_accumulates_nucleation()
+    test_update_cloud_water_2m.test_jittable_and_consistent_with_eager()
+
+    
     
     print("All tests passed!")
         

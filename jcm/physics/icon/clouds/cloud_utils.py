@@ -7,80 +7,16 @@ Date: 2025-12-15
 import jax.numpy as jnp
 import jax
 from jax import lax
+from jax import jit
 from math import pi
 
 from ..constants.physical_constants import (
     grav, rgrav, rhoh2o
 )
-from .cloud_params import (
-    cqtmin, crhoi, cn0s, crhosno
+from .cloud_params_2m import (
+    epsec, eps, fact_PK, pow_PK, ldyn_cdnc_min, cdnc_min_fixed,
+    cdnc_min_lower, cdnc_min_upper, rcd_vol_max
 )
-
-# Microphysical constants
-epsec = 1.0e-12
-xsec = 1.0 - epsec
-# cqtmin is undefined in the provided code, so it needs to be defined elsewhere
-# Assuming cqtmin = 0 for now
-#cqtmin = 0.0
-qsec = 1.0 - cqtmin
-eps = jnp.finfo(jnp.float64).eps
-cri = 10.0e-6  # [m] => 10 um
-pi = jnp.pi
-crhoi = 1.0  # Placeholder for ice crystal density, define appropriately
-mi = 4.0 / 3.0 * cri**3 * pi * crhoi
-ri_vol_mean_1 = 2.166e-9
-ri_vol_mean_2 = 4.264e-8
-alfased_1 = 63292.4
-alfased_2 = 8.78
-alfased_3 = 329.75
-betased_1 = 0.5727
-betased_2 = 0.0954
-betased_3 = 0.3091
-
-# SF #475
-cdnc_min_upper = 40.0e6
-cdnc_min_lower = 1.0e6
-rcd_vol_max = 19.0e-6
-# SF The above has been updated on 2016.04.04 (David Neubauer, pure atm run, HAM-M7, AR&G activation)
-
-icemin = 10.0
-icemax = 1.0e7
-sigmaw = 0.28
-disp = jnp.exp(0.5 * sigmaw**2)
-dw0 = 10.0e-6 * disp
-cdi = 0.6
-mw0 = 4.19e-12
-mi0 = 1.0e-12
-mi0_rcp = 1.0e12
-ka = 0.024
-kb = 1.38e-23
-alpha = 0.5
-xmw = 2.992e-26  # Mass of an H2O molecule [kg]
-fall = 3.0
-rhoice = 925.0
-conv_effr2mvr = 0.9
-clc_min = 0.01
-exm1_1 = 2.47 - 1.0
-exp_1 = -1.0 / exm1_1
-exm1_2 = 4.7 - 1.0
-exp_2 = -1.0 / exm1_2
-rhoh2o = 1.0  # Placeholder for water density, define appropriately
-pirho = pi * rhoh2o
-pirho_rcp = 1.0 / pirho
-cap = 2.0 / pi
-crhosno = 1.0  # Placeholder for snow density, define appropriately
-cn0s = 1.0  # Placeholder for some constant, define appropriately
-cons4 = 1.0 / (pi * crhosno * cn0s)**0.8125
-cons5 = 1.0 / (pi * crhosno * cn0s)**0.875
-fact_coll_eff = 0.09  # Factor for temperature-dependent collection efficiency of snow by cold hydrometeors
-fact_tke = 0.7
-
-# SF #176 Constants for ice crystal mass to effective radius relationship, from Pruppacher & Klett 1997
-# m = zfact_PK x (2r_i)**zpow_PK (m in g; r_i in cm)
-
-# Plate P1a, from table 2.2a (size range: 10-3000 micrometers)
-fact_PK = 8.253e-3  # 9.17 x 0.9, because m = rho_c x V_c, where rho_c = 0.9 g.cm^-3
-pow_PK = 2.475
 
 def get_util_var(nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1):
     """
@@ -261,6 +197,75 @@ def get_cloud_bounds(nproma, nbdim, ntdia, nlev, paclc):
 
     return ktop, kbas, kcl_minustop, kcl_minusbas
 
+def eff_ice_crystal_radius(pxice: jnp.ndarray, picnc: jnp.ndarray) -> jnp.ndarray:
+    """
+    Effective ice crystal radius following Lohmann et al. (2008, ERL), expression (1),
+    using the Pruppacher & Klett (1997) mass–size relation parameters.
+
+    Parameters
+    ----------
+    pxice : jnp.ndarray
+        In-cloud ice mass concentration [g/m^3].
+    picnc : jnp.ndarray
+        Ice crystal number concentration (ICNC) [1/m^3].
+
+    Returns
+    -------
+    prieff : jnp.ndarray
+        Effective ice crystal radius [micron].
+    """
+    # fact_PK and pow_PK are constants/params from the scheme (imported in this module or via cloud_params_2m).
+    return 0.5e4 * (pxice / jnp.maximum(fact_PK * jnp.maximum(picnc, eps), eps)) ** (1.0 / pow_PK)
+
+@jit
+def minimum_CDNC(pxwat, ldyn_cdnc_min=ldyn_cdnc_min, cdnc_min_fixed=cdnc_min_fixed):
+    """
+    Sets the minimum cloud droplet number concentration, either statically or dynamically.
+
+    Parameters:
+        pxwat (array): In-cloud water mixing ratio [kg/m^3].
+        ldyn_cdnc_min (bool): Flag to use dynamic CDNC minimum.
+        cdnc_min_fixed (float): Static minimum CDNC value in cm^-3.
+
+    Returns:
+        pcdnc_min (array): Minimum cloud droplet number concentration [m^-3].
+    """
+    if ldyn_cdnc_min:
+        # Dynamic value for minimum CDNC
+        pcdnc_min = rcd_vol_max**(-3.0) * (3.0 / (4.0 * pi * rhoh2o)) * pxwat
+        pcdnc_min = jnp.clip(pcdnc_min, cdnc_min_lower, cdnc_min_upper)
+    else:
+        # Static minimum CDNC
+        pcdnc_min = cdnc_min_fixed * 1.0e6  # Convert from cm^-3 to m^-3
+        pcdnc_min = jnp.full_like(pxwat, pcdnc_min)
+
+    return pcdnc_min
+
+def consistency_number_to_mass(
+    pthreshold: float | jnp.ndarray,
+    pmass: jnp.ndarray,
+    pnumber: jnp.ndarray,
+    ) -> jnp.ndarray:
+    """
+    Returns a "physical" number concentration/flux: whenever the corresponding mass
+    is below `pthreshold`, the number is reset to 0.
+
+    Parameters
+    ----------
+    pthreshold : float or jnp.ndarray
+        Threshold below which `pnumber` is forced to zero.
+    pmass : jnp.ndarray
+        Mass-like quantity (e.g. ice flux mass) [units arbitrary].
+    pnumber : jnp.ndarray
+        Number-like quantity associated with `pmass`.
+
+    Returns
+    -------
+    jnp.ndarray
+        `pnumber` with entries zeroed where `pmass < pthreshold`.
+    """
+    return jnp.where(pmass < pthreshold, 0.0, pnumber)
+
 
 def init_cloud_micro_2m(lconv):
     """
@@ -311,3 +316,4 @@ def init_cloud_micro_2m(lconv):
         "bc_tconv": bc_tconv,
         "bc_detr_cond": bc_detr_cond,
     }
+

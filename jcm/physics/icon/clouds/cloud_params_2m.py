@@ -1,7 +1,7 @@
 """
 Contains the tunable parameters for the cloud microphysics.
 Subroutines for intializing these values are also included.
-Based on mo_cloud_params from ECHAM6/ICON.
+Based on mo_echam_cloud_params from ECHAM6/ICON.
 """
 
 from jax import jit
@@ -118,28 +118,112 @@ class CloudParams2M(NamedTuple):
     cdnc_min_fixed: float = 10.0   # [cm^-3] fixed value when ldyn_cdnc_min is False
     nic_cirrus: int = 2            # cirrus scheme selector
 
-    # Resolution-dependent parameters (initialized later)
-    crs: float = None
-    crt: float = None
-    cvtfall: float = None
-    csecfrl: float = None
-    clwprat: float = None
-    csatsc: float = None
-    cinv: float = None
+    # Resolution-dependent parameters
+    # NOTE : The following parameters are normally initialized in the sucloud
+    # subroutine based on model resolution. Here, default values for ICON
+    # have been used as placeholders. They will be updated by calling
+    # sucloud during model initialization.
+    crs: float = 0.975
+    crt: float = 0.75
+    cvtfall: float = 2.5
+    csecfrl: float = 5e-6
+    clwprat: float = 4.0
+    csatsc: float = 0.7
+    cinv: float = 0.25
 
-    nex: float = None
-    nadd: float = None
+    nex: float = 2
+    nadd: float = 0
 
     # Variables initialized in sucloud
-    ncctop: float = None
-    nccbot: float = None
-    jbmin: float = None
-    jbmax: float = None
+    ncctop: float = 13
+    nccbot: float = 35
+    jbmin: float = 40
+    jbmax: float = 45
 
     @classmethod
     def default(cls) -> 'CloudParams2M':
         """Return default cloud parameters for 2-m scheme"""
         return cls()
+
+@jit
+def sucloud(nlev, vct, nn=None, is_icon=False):
+    """
+    Defines highest level where condensation is allowed.
+    Initializes resolution-dependent parameters.
+    # TODO: allow the CloudParams2M to be updated with resolution-dependant sucloud outputs.
+    # For now the default values for ICON have been used as placeholders (see note above in CloudParams2M).
+
+    Args:
+        nlev: Number of vertical levels
+        vct: Vertical coordinate transformation coefficients
+        nn: Truncation (optional, required if is_icon is False)
+        is_icon: Whether the model is ICON (True) or ECHAM (False)
+
+    Returns:
+        Updated cloud parameters (jbmin, jbmax, ncctop, nccbot, crs, crt, cvtfall, csecfrl,
+        clwprat, csatsc, cinv, nex, nadd)
+    """
+    global crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv, nex, nadd
+    global ncctop, nccbot, jbmin, jbmax
+
+    if is_icon:
+        # ICON-specific values
+        jbmin, jbmax, ncctop, nccbot = 40, 45, 13, 35
+        crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
+        nex, nadd = 2, 0
+    else:
+        # ECHAM-specific calculations
+        za = vct[:nlev + 1]
+        zb = vct[nlev + 1:]
+        zph = za + zb * 101320.0
+
+        zp = (zph[:-1] + zph[1:]) * 0.5
+        zh = (zph[-1] - zp) / (grav * 1.25)
+
+        # Highest inversion level (first full level below 2000 m)
+        jbmin = jnp.argmax(zh < 2000.0)
+
+        # Lowest inversion level (first full level below 500 m)
+        jbmax = jnp.argmax(zh < 500.0)
+
+        # Pressure level cptop (Pa)
+        ncctop = jnp.argmax(zp >= cptop)
+
+        # Pressure level cpbot (Pa)
+        nccbot = jnp.argmax(zp >= cpbot)
+
+        # Resolution-dependent parameters
+        if nn == 31:
+            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.95, 0.85, 3.0, 5e-7, 0.0, 0.1, 0.5
+            nex, nadd = 1, 1
+        elif nn == 63:
+            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
+            nex, nadd = 2, 0
+        elif nn == 127:
+            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
+            nex, nadd = 2, 0
+        elif nn == 255:
+            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
+            nex, nadd = 2, 0
+        else:
+            raise ValueError("Truncation not supported.")
+
+    # return {
+    #     "jbmin": jbmin,
+    #     "jbmax": jbmax,
+    #     "ncctop": ncctop,
+    #     "nccbot": nccbot,
+    #     "crs": crs,
+    #     "crt": crt,
+    #     "cvtfall": cvtfall,
+    #     "csecfrl": csecfrl,
+    #     "clwprat": clwprat,
+    #     "csatsc": csatsc,
+    #     "cinv": cinv,
+    #     "nex": nex,
+    #     "nadd": nadd,
+    # }
+    pass
 
 # Global instance of physical constants
 cloud_params = CloudParams2M.default()
@@ -228,70 +312,3 @@ pirho_rcp = cloud_params.pirho_rcp
 cap = cloud_params.cap
 cons4 = cloud_params.cons4
 cons5 = cloud_params.cons5
-
-@jit
-def sucloud(nlev, vct, nn=None, is_icon=False):
-    """
-    Defines highest level where condensation is allowed.
-    Initializes resolution-dependent parameters.
-    """
-    global crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv, nex, nadd
-    global ncctop, nccbot, jbmin, jbmax
-
-    if is_icon:
-        # ICON-specific values
-        jbmin, jbmax, ncctop, nccbot = 40, 45, 13, 35
-        crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-        nex, nadd = 2, 0
-    else:
-        # ECHAM-specific calculations
-        za = vct[:nlev + 1]
-        zb = vct[nlev + 1:]
-        zph = za + zb * 101320.0
-
-        zp = (zph[:-1] + zph[1:]) * 0.5
-        zh = (zph[-1] - zp) / (grav * 1.25)
-
-        # Highest inversion level (first full level below 2000 m)
-        jbmin = jnp.argmax(zh < 2000.0)
-
-        # Lowest inversion level (first full level below 500 m)
-        jbmax = jnp.argmax(zh < 500.0)
-
-        # Pressure level cptop (Pa)
-        ncctop = jnp.argmax(zp >= cptop)
-
-        # Pressure level cpbot (Pa)
-        nccbot = jnp.argmax(zp >= cpbot)
-
-        # Resolution-dependent parameters
-        if nn == 31:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.95, 0.85, 3.0, 5e-7, 0.0, 0.1, 0.5
-            nex, nadd = 1, 1
-        elif nn == 63:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 127:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 255:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        else:
-            raise ValueError("Truncation not supported.")
-
-    return {
-        "jbmin": jbmin,
-        "jbmax": jbmax,
-        "ncctop": ncctop,
-        "nccbot": nccbot,
-        "crs": crs,
-        "crt": crt,
-        "cvtfall": cvtfall,
-        "csecfrl": csecfrl,
-        "clwprat": clwprat,
-        "csatsc": csatsc,
-        "cinv": cinv,
-        "nex": nex,
-        "nadd": nadd,
-    }
