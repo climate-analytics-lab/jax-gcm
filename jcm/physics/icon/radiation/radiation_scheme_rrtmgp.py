@@ -299,43 +299,28 @@ def prepare_icon_data(
 
 
 def radiation_scheme_rrtmgp_fn(
-    rrtmgp_data: dict, 
+    rrtmgp_data: dict,
     toa_flux: jnp.ndarray,
     cos_zenith: jnp.ndarray
 ) -> dict:
-    """Compute heating rates using RRTMGP with dynamic solar parameters.
-    
-    Temporarily updates the atmospheric state with per-gridcell solar parameters
-    by monkey-patching the frozen dataclass. 
-    
+    """Compute heating rates using RRTMGP with per-column solar parameters.
+
+    Passes zenith and irrad into RRTMGP's compute_heating_rate so the call is
+    pure and vmap over columns can be compiled and run in parallel.
+
     Args:
         rrtmgp_data: Dictionary of RRTMGP inputs (from prepare_rrtmgp_data)
         toa_flux: Top-of-atmosphere solar flux [W/m²] (from ICON calculation)
         cos_zenith: Cosine of solar zenith angle (from ICON calculation)
-        
+
     Returns:
         Dictionary of RRTMGP outputs (heating rates and diagnostics)
     """
-    # Store original values
-    original_zenith = _GLOBAL_RRTMGP_INSTANCE.atmospheric_state.zenith
-    original_irrad = _GLOBAL_RRTMGP_INSTANCE.atmospheric_state.irrad
-    
-    # Compute dynamic solar parameters
     zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
-    
-    # Monkey-patch the atmospheric state temporarily with JAX arrays
-    # This now works because we fixed RRTMGP to handle JAX arrays
-    object.__setattr__(_GLOBAL_RRTMGP_INSTANCE.atmospheric_state, 'zenith', zenith_angle)
-    object.__setattr__(_GLOBAL_RRTMGP_INSTANCE.atmospheric_state, 'irrad', toa_flux)
-    
-    try:
-        # Use the standard RRTMGP compute_heating_rate method with updated state
-        rrtmgp_output = _GLOBAL_RRTMGP_INSTANCE.compute_heating_rate(**rrtmgp_data)
-        return rrtmgp_output
-    finally:
-        # Always restore original values
-        object.__setattr__(_GLOBAL_RRTMGP_INSTANCE.atmospheric_state, 'zenith', original_zenith)
-        object.__setattr__(_GLOBAL_RRTMGP_INSTANCE.atmospheric_state, 'irrad', original_irrad)
+    rrtmgp_output = _GLOBAL_RRTMGP_INSTANCE.compute_heating_rate(
+        zenith=zenith_angle, irrad=toa_flux, **rrtmgp_data
+    )
+    return rrtmgp_output
 
 
 def radiation_scheme_rrtmgp(
