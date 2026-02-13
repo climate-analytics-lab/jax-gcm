@@ -168,6 +168,3 @@ notebooks/model_state.nc
 
 docs/build
 docs/source/generated
-
-# Claude files
-CLAUDE.md
