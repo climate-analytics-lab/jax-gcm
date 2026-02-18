@@ -748,8 +748,8 @@ class TestSublimationSnowIceEvapRain_2M:
         qsat_water_prev = _full(n, 2.0e-3)         # pqsw [kg/kg]  ( > q )
 
         # scheme-specific subsaturation terms (positive allows sinks)
-        subsat_wrt_ice = _full(n, 0.5)             # picesub
-        subsat_wrt_water_evap = _full(n, 0.5)      # psusatw_evap
+        subsat_wrt_ice = _full(n, -1e-5)           # picesub
+        subsat_wrt_water_evap = _full(n, -1e-5)    # psusatw_evap
         thermo_term_water = _full(n, 1.0)          # pastbstw (>0)
 
         # latent heat term
@@ -795,7 +795,7 @@ class TestSublimationSnowIceEvapRain_2M:
         x["snow_flux"] = jnp.array([2.0e-4, 1.0e-4, 2.0e-4, 0.0], dtype=jnp.float32)
         x["rain_flux"] = _zeros(n)
         x["ice_flux"] = _zeros(n)
-        x["ice_flux_n"] = _full(n, 1.0e7)
+        x["ice_flux_n"] = _zeros(n)
 
         ice_flux_o, ice_flux_n_o, ice_sublim, snow_sublim, rain_evap = sublimation_snow_and_ice_evaporation_rain(
             precip_mask=precip_mask,
@@ -912,7 +912,7 @@ class TestSublimationSnowIceEvapRain_2M:
         x["rain_flux"] = jnp.array([3.0e-4, 1.0e-4, 2.0e-4, 0.0], dtype=jnp.float32)
         x["snow_flux"] = _zeros(n)
         x["ice_flux"] = _zeros(n)
-        x["ice_flux_n"] = _full(n, 1.0e7)
+        x["ice_flux_n"] = _zeros(n)
 
         ice_flux_o, ice_flux_n_o, ice_sublim, snow_sublim, rain_evap = sublimation_snow_and_ice_evaporation_rain(
             precip_mask=precip_mask,
