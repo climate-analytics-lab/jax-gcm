@@ -475,7 +475,7 @@ class Model:
         outer_steps = int(total_time / save_interval)
         times = self.start_date.delta.days \
                 + (initial_state.sim_time*units.second).to(units.day).m \
-                + save_interval * jnp.arange(outer_steps)
+                + save_interval * jnp.arange(1, outer_steps + 1)
 
         integrate = self._get_integrate_fn(
             step_fn,
