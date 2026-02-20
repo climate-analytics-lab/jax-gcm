@@ -7,7 +7,8 @@ def run_default_speedy_model(save_interval=None):
     T31, 40min timestep
     """
     from jcm.model import Model
-    from jcm.geometry import Geometry
+    from jcm.terrain import TerrainData
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
     from jcm.forcing import ForcingData
     from importlib import resources
 
@@ -15,8 +16,9 @@ def run_default_speedy_model(save_interval=None):
 
     # Load the terrain and forcing data
     
-    realistic_geometry = Geometry.from_file(forcing_dir / 'terrain.nc', target_resolution=31)
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', target_resolution=31)
+    coords = get_speedy_coords()
+    realistic_terrain = TerrainData.from_file(forcing_dir / 'terrain.nc', coords=coords)
+    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', coords=coords)
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average
@@ -29,7 +31,8 @@ def run_default_speedy_model(save_interval=None):
         output_averages = True
 
     model = Model(
-        geometry=realistic_geometry,
+        coords=coords,
+        terrain=realistic_terrain,
         time_step=time_step,
     )
 

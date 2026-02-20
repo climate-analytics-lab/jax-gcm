@@ -15,12 +15,12 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import Geometry, coords_from_geometry
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, get_coords
+from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial
@@ -62,7 +62,7 @@ class Predictions:
             A final `xarray.Dataset` ready for analysis and plotting.
 
         """
-        from dinosaur.xarray_utils import data_to_xarray
+        from jcm.utils import data_to_xarray
         
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
@@ -76,19 +76,23 @@ class Predictions:
         physics_predictions = float0s_to_nans(self.physics)
 
         nodal_shape = dynamics_predictions.u_wind.shape[1:]
-        coords = get_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
         physics_module = physics_module or SpeedyPhysics()
-        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, geometry=Geometry.from_coords(coords))
+        physics_module.cache_coords(coords)
+        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
         times = jax.device_get(self.times)
         coords = jax.device_get(coords)
 
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
                                  coords=coords, serialize_coords_to_attrs=False,
-                                 times=times - times[0])
+                                 times=times - times[0],
+                                 additional_coords={'wvi_id': jnp.array([1,2]),
+                                                    'hsg_level': jnp.arange(nodal_shape[0]+1)})
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
@@ -198,25 +202,25 @@ def averaged_trajectory_from_step(
 class Model:
     """Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet."""
 
-    def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
+    def __init__(self, coords: CoordinateSystem, time_step=30.0, terrain: TerrainData=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'), log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
-        
+
         Args:
-            time_step:
-                Model time step in minutes
-            geometry: 
-                Geometry object describing the model grid and orography of the model
             coords:
                 CoordinateSystem object describing the model coordinates
-            physics: 
+            time_step:
+                Model time step in minutes
+            terrain:
+                TerrainData object describing boundary conditions (orography, land-sea mask, etc.)
+            physics:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
             spmd_mesh:
                 Optional tuple describing the SPMD mesh for parallelization
-            start_date: 
+            start_date:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
@@ -229,13 +233,11 @@ class Model:
         self.dt_si = (time_step * units.minute).to(units.second)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
-        # Store coords separately - it's used by dynamics but not physics (and can't easily be jitted)
-        if geometry is not None: # user-specified geometry takes precedence
-            self.geometry = geometry
-            self.coords = coords_from_geometry(geometry, spmd_mesh=spmd_mesh)
-        else:
-            self.coords = coords if coords is not None else get_coords(spmd_mesh=spmd_mesh)
-            self.geometry = Geometry.from_coords(coords=self.coords)
+        # Store coords - used by dynamics and physics
+        self.coords = coords
+
+        # Store terrain (boundary conditions)
+        self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(self.coords)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
@@ -245,11 +247,12 @@ class Model:
         )
         
         self.physics = physics or SpeedyPhysics()
+        self.physics.cache_coords(self.coords)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.truncated_orography = primitive_equations.truncated_modal_orography(self.geometry.orog, self.coords, wavenumbers_to_clip=2)
+        self.truncated_orography = primitive_equations.truncated_modal_orography(self.terrain.orog, self.coords, wavenumbers_to_clip=2)
 
         self.primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
@@ -381,8 +384,8 @@ class Model:
                 time_step=self.dt_si.m,
                 physics=self.physics,
                 forcing=forcing,
+                terrain=self.terrain,
                 diffusion=self.diffusion,
-                geometry=self.geometry,
                 date=self._date_from_sim_time(state.sim_time),
                 diagnostics_collector=d
             )
@@ -415,7 +418,7 @@ class Model:
         if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.geometry, date)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.terrain, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
@@ -433,7 +436,7 @@ class Model:
             )
 
             # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
-            return integrate_fn(state, self.physics.get_empty_data(self.geometry)) if output_averages else integrate_fn(state)
+            return integrate_fn(state, self.physics.get_empty_data(self.coords)) if output_averages else integrate_fn(state)
 
         return _integrate_fn
 

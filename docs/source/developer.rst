@@ -147,11 +147,12 @@ To profile the model and identify performance bottlenecks:
 .. code-block:: python
 
    import jax.profiler
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
    # Start a trace and create a Perfetto trace file
    jax.profiler.start_trace("./tensorboard_logs", create_perfetto_trace=True)
 
-   model = Model(time_step=30.0)
+   model = Model(coords=get_speedy_coords(),time_step=30.0)
 
    # Run the model
    predictions = model.run(

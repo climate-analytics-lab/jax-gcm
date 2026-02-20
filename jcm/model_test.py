@@ -15,10 +15,14 @@ class TestModelUnit(unittest.TestCase):
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.model import Model
-        from jcm.geometry import Geometry
-        geometry = Geometry.from_spectral_truncation(spectral_truncation=31, num_levels=8)
+        from jcm.terrain import TerrainData
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+
+        coords = get_held_suarez_coords()
+        terrain = TerrainData.from_coords(coords)
         model = Model(
-            geometry=geometry,
+            coords=coords,
+            terrain=terrain,
             time_step=180,
             physics=HeldSuarezPhysics(),
         )
@@ -58,8 +62,11 @@ class TestModelUnit(unittest.TestCase):
         
     def test_speedy_model(self):
         from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
+        # Create model that goes through one timestep
         model = Model(
+            coords=get_speedy_coords(),
             time_step=720,
         )
 
@@ -105,8 +112,10 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.slow
     def test_speedy_model_averages(self):
         from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         model = Model(
+            coords=get_speedy_coords(),
             time_step=30, # to make sure this test stays valid if we ever change the default timestep
         )
         preds = model.run(save_interval=.5/24., total_time=2/24.)
@@ -114,6 +123,7 @@ class TestModelUnit(unittest.TestCase):
         true_avg_preds = jtu.tree_map(lambda a: jnp.mean(a, axis=0), preds)
 
         avg_model = Model(
+            coords=get_speedy_coords(),
             time_step=30,
         )
         avg_preds = avg_model.run(
@@ -132,9 +142,10 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_gradients_isnan(self):
         from jcm.model import Model
         from jcm.utils import ones_like
-
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
         # Create model that goes through one timestep
-        model = Model()
+        
+        model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_modal_state()
 
         def fn(state):
@@ -160,8 +171,9 @@ class TestModelUnit(unittest.TestCase):
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
         from jcm.model import Model
         from jcm.utils import ones_like
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        model = Model()
+        model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_modal_state()
 
         def fn(state):
@@ -183,17 +195,21 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
         from jcm.model import Model
-        from jcm.geometry import Geometry
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
         from jcm.forcing import ForcingData
         from jcm.utils import ones_like
 
         from importlib import resources
         data_dir = resources.files('jcm.data.bc.t30.clim')
-        geometry = Geometry.from_file(data_dir / 'terrain.nc', target_resolution=31)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', target_resolution=31)
+
+        coords = get_speedy_coords()
+        terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
         create_model = lambda params=Parameters.default(): Model(
-            geometry=geometry,
+            coords=coords,
+            terrain=terrain,
             physics=SpeedyPhysics(parameters=params),
         )
 
@@ -209,17 +225,23 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
         from jcm.model import Model
-        from jcm.geometry import Geometry
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
         from jcm.forcing import ForcingData
         from jcm.utils import ones_like_tangent
         
         from importlib import resources
         data_dir = resources.files('jcm.data.bc.t30.clim')
-        geometry = Geometry.from_file(data_dir / 'terrain.nc', target_resolution=31)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', target_resolution=31)
 
+        coords = get_speedy_coords()
+        # need coords to create terrain
+        terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+
+        # coords need to be passed to model init
         create_model = lambda params=Parameters.default(): Model(
-            geometry=geometry,
+            coords=coords,
+            terrain=terrain,
             physics=SpeedyPhysics(parameters=params),
         )
 
@@ -246,9 +268,10 @@ class TestModelUnit(unittest.TestCase):
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):
         from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         # Create model that goes through one timestep
-        model = Model()
+        model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_modal_state()
 
         def f(state_f):

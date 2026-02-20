@@ -6,14 +6,15 @@ to the specific physics being used.
 import jax
 import jax.numpy as jnp
 import tree_math
-from jcm.geometry import Geometry
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.forcing import ForcingData
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from typing import Tuple, Any
 from jcm.diffusion import DiffusionFilter
@@ -138,14 +139,17 @@ Attributes:
 
 class Physics:
     UNITS_TABLE_CSV_PATH = None
-    
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+
+    def cache_coords(self, coords: CoordinateSystem):
+        return None
+
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
             forcing: Forcing data
-            geometry: Geometry data
+            terrain: Terrain data (boundary conditions)
             date: Date data
 
         Returns:
@@ -154,16 +158,16 @@ class Physics:
 
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
-    
-    def get_empty_data(self, geometry: Geometry) -> Any:
+
+    def get_empty_data(self, coords) -> Any:
         return None
 
-    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
+    def data_struct_to_dict(self, struct: Any, nodal_shape, sep: str = ".") -> dict[str, Any]:
         """Flattens a physics data struct into a dictionary.
 
         Args:
             struct: The struct to flatten.
-            geometry: Geometry object.
+            nodal_shape: Shape of the nodal grid (kx, ix, il).
             sep: Separator to use for constructing hierarchical keys.
 
         Returns:
@@ -172,7 +176,7 @@ class Physics:
         """
         if struct is None:
             return {}
-        
+
         def _to_dict_recursive(obj, parent_key=""):
             items = {}
             for key, val in obj.__dict__.items():
@@ -184,14 +188,14 @@ class Physics:
                 else:
                     raise ValueError(f"Unsupported type for key {new_key}: {type(val)}")
             return items
-        
+
         items = _to_dict_recursive(struct)
 
         # replace multi-channel fields with a field for each channel
         _original_keys = list(items.keys())
         for k in _original_keys:
             s = items[k].shape
-            if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+            if len(s) == 5 and s[1:-1] == nodal_shape or len(s) == 4 and s[1:-1] == nodal_shape[1:]:
                 items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
                 del items[k]
 
@@ -351,7 +355,7 @@ def get_physical_tendencies(
     time_step: float,
     physics: Physics,
     forcing: ForcingData,
-    geometry: Geometry,
+    terrain: TerrainData,
     diffusion: DiffusionFilter,
     date: DateData,
     diagnostics_collector=None,
@@ -364,7 +368,7 @@ def get_physical_tendencies(
         time_step: Time step in seconds
         physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
         forcing: ForcingData object
-        geometry: Geometry object
+        terrain: TerrainData object
         date: DateData object
         diagnostics_collector: DiagnosticsCollector object
 
@@ -375,10 +379,10 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, geometry, date)
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, terrain, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
-    
+
     if diagnostics_collector is not None:
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 

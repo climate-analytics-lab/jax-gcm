@@ -4,7 +4,8 @@ import pandas as pd
 from importlib import resources
 import argparse
 from pathlib import Path
-from jcm.utils import VALID_TRUNCATIONS, get_coords
+from jcm.utils import VALID_TRUNCATIONS
+from dinosaur.coordinate_systems import HorizontalGridTypes
 
 def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     """Interpolate monthly forcing data to daily resolution using linear interpolation.
@@ -45,7 +46,7 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
     return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
-def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
+def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample a dataset to a target spectral resolution using linear interpolation.
 
     Pads the dataset at the poles (latitude) and periodically in longitude to enable
@@ -60,7 +61,6 @@ def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
         Dataset interpolated to the target resolution grid.
 
     """
-    grid = get_coords(spectral_truncation=target_resolution).horizontal
 
     # Pad latitude with extra rows at poles so data can be interpolated to higher latitudes than exist in T30 grid
     south_pole = ds.isel(lat=0).mean(dim="lon", keep_attrs=True)
@@ -88,7 +88,7 @@ def _upsample_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
 
     return ds_interp
 
-def upsample_forcings_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
+def upsample_forcings_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample forcing data to target resolution with physical constraints.
 
     Interpolates the forcing dataset to the target resolution and applies physical
@@ -103,14 +103,14 @@ def upsample_forcings_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
         Upsampled forcing dataset with physical constraints applied.
 
     """
-    ds_interp = _upsample_ds(ds, target_resolution)
+    ds_interp = _upsample_ds(ds, grid)
     for v in ds_interp.data_vars:
         ds_interp[v] = ds_interp[v].clip(min=0.)
     for v in ['icec', 'soilw_am', 'alb']:
         ds_interp[v] = ds_interp[v].clip(max=1.)
     return ds_interp
 
-def upsample_terrain_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
+def upsample_terrain_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample terrain data to target resolution with physical constraints.
 
     Interpolates the terrain dataset to the target resolution and clips the land-sea
@@ -125,13 +125,13 @@ def upsample_terrain_ds(ds: xr.Dataset, target_resolution: int) -> xr.Dataset:
         Upsampled terrain dataset with land-sea mask clipped to [0, 1].
 
     """
-    ds_interp = _upsample_ds(ds, target_resolution)
+    ds_interp = _upsample_ds(ds, grid)
     ds_interp['lsm'] = ds_interp['lsm'].clip(0.0, 1.0)
     # not clamping orog to avoid erasing real areas below sea level, but this might allow bad extrapolated values at the extreme latitudes
     return ds_interp
 
-def interpolate(target_resolution, output_dir=None):
-    f"""Interpolate T30 forcing and terrain data to target resolution and save to output directory.
+def interpolate(grid, output_dir=None):
+    f"""Interpolate T30 forcing and terrain data to target resolution (defined by grid) and save to output directory.
 
     Reads the original T30 resolution forcing and terrain data from package resources,
     interpolates them to the target spectral resolution, and writes the output files.
@@ -144,6 +144,7 @@ def interpolate(target_resolution, output_dir=None):
 
     Args:
         target_resolution: Target spectral truncation number. Must be one of: {VALID_TRUNCATIONS}.
+        grid: Dinosaur HorizontalGridTypes instance for the target resolution.
         output_dir: Directory to write output files. If None, uses current working directory.
 
     """
@@ -151,6 +152,9 @@ def interpolate(target_resolution, output_dir=None):
     bc_dir = resources.files('jcm.data.bc')
     forcing_original_file = bc_dir / "t30/clim/forcing.nc"
     terrain_original_file = bc_dir / "t30/clim/terrain.nc"
+
+    # the spectral resolution is total wavenumbers - 2
+    target_resolution = grid.total_wavenumbers - 2  
 
     # Write output files to current working directory (or specified output_dir)
     if output_dir is None:
@@ -178,7 +182,7 @@ def interpolate(target_resolution, output_dir=None):
 
         print(f"Interpolating {forcing_daily_file} to T{target_resolution} resolution...")
         with xr.open_dataset(forcing_daily_file) as ds_forcing:
-            ds_forcing_interp = upsample_forcings_ds(ds_forcing, target_resolution)
+            ds_forcing_interp = upsample_forcings_ds(ds_forcing, grid)
             ds_forcing_interp.to_netcdf(forcing_upscaled_file)
         print(f"Generated {forcing_upscaled_file}")
 
@@ -188,11 +192,13 @@ def interpolate(target_resolution, output_dir=None):
     else:
         print(f"Interpolating {terrain_original_file} to T{target_resolution} resolution...")
         with xr.open_dataset(terrain_original_file) as ds_terrain:
-            ds_terrain_interp = upsample_terrain_ds(ds_terrain, target_resolution)
+            ds_terrain_interp = upsample_terrain_ds(ds_terrain, grid)
             ds_terrain_interp.to_netcdf(terrain_upscaled_file)
         print(f"Generated {terrain_upscaled_file}")
 
 def main(argv=None) -> int:
+    from jcm.utils import get_coords
+    from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
     """CLI entrypoint. Parse argv and call `interpolate`.
 
     Args:
@@ -216,8 +222,11 @@ def main(argv=None) -> int:
     # let argparse handle argument errors (it raises SystemExit on bad args)
     args = parser.parse_args(argv) # uses sys.argv[1:] if argv is None
 
+    # it doesn't matter what the vertical coordinate system is, so we are just using a fixed one here, interpolation is horizontal
+    coords = get_coords(SIGMA_LAYER_BOUNDARIES[7],spectral_truncation=args.target_resolution)
+
     try:
-        interpolate(args.target_resolution)
+        interpolate(coords.horizontal)
         return 0
     except Exception:
         import traceback

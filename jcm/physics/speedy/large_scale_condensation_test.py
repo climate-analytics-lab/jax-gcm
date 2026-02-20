@@ -11,15 +11,18 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 1, 1, 8
 
-        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, geometry, ForcingData, get_large_scale_condensation_tendencies
+        global ConvectionData, HumidityData, PhysicsData, PhysicsState, PhysicsTendency, parameters, speedy_coords, terrain, ForcingData, get_large_scale_condensation_tendencies
         from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.params import Parameters
-        from jcm.geometry import Geometry
-        parameters = Parameters.default()
-        geometry = Geometry.single_column_geometry(num_levels=8)
+        from jcm.terrain import TerrainData
         from jcm.forcing import ForcingData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
         from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
+
+        speedy_coords = SpeedyCoords.single_column_coords(num_levels=kx)
+        parameters = Parameters.default()
+        terrain = TerrainData.single_column()
 
     def test_get_large_scale_condensation_tendencies(self):
         xy = (ix,il)
@@ -32,10 +35,10 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = state = PhysicsState.zeros(zxy, specific_humidity=qa, normalized_surface_pressure=psa)
-        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
+        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection, speedy_coords=speedy_coords)
         forcing = ForcingData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, forcing, geometry)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, forcing, terrain)
         # Check that itop, precls, dtlsc, and dqlsc are not null.
         self.assertIsNotNone(physics_data.convection.iptop)
         self.assertIsNotNone(physics_data.condensation.precls)
@@ -55,10 +58,10 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat)
         state = PhysicsState.zeros(zxy, specific_humidity=qa,normalized_surface_pressure=psa)
-        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
+        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection, speedy_coords=speedy_coords)
         forcing = ForcingData.ones(xy)
 
-        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, forcing, geometry)
+        physics_tendencies, physics_data = get_large_scale_condensation_tendencies(state, physics_data, parameters, forcing, terrain)
         
         np.testing.assert_allclose(
             physics_tendencies.temperature[:,0,0],
@@ -77,16 +80,16 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         """Test that we can calculate gradients of large-scale condensation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
-        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        physics_data = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)  # Create PhysicsData object (parameter)
         state = PhysicsState.ones(zxy)
         forcing = ForcingData.ones(xy)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, forcing, geometry)
+        _, f_vjp = jax.vjp(get_large_scale_condensation_tendencies, state, physics_data, parameters, forcing, terrain)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx)
+        datas = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)
         input = (tends, datas)
-        df_dstates, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
+        df_dstates, df_ddatas, df_dparams, df_dforcing, df_dterrain = f_vjp(input)
 
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstates.isnan().any_true())
@@ -107,7 +110,7 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, iptop=itop)
         humidity = HumidityData.zeros(xy, kx, qsat=qsat[:, jnp.newaxis, jnp.newaxis])
         state = PhysicsState.zeros(zxy, specific_humidity=qa[:, jnp.newaxis, jnp.newaxis],normalized_surface_pressure=psa)
-        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection)
+        physics_data = PhysicsData.zeros(xy, kx, humidity=humidity, convection=convection, speedy_coords=speedy_coords)
         forcing = ForcingData.ones(xy)
 
         # Set float inputs
@@ -115,14 +118,14 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_large_scale_condensation_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
         
@@ -130,9 +133,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.001)
 
 
