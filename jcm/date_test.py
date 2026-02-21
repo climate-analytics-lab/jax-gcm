@@ -3,6 +3,7 @@ from jcm.date import fraction_of_year_elapsed, DateData
 from jcm.model import Model
 import jax_datetime as jdt
 import jax.numpy as jnp
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 class TestDateUnit(unittest.TestCase):
 
@@ -42,7 +43,7 @@ class TestDateUnit(unittest.TestCase):
         self.assertAlmostEqual(d3.tyear, 0.25, places=2)
 
     def test_overflow(self):
-        model = Model(start_date=jdt.to_datetime('1970-01-01'))
+        model = Model(coords=get_speedy_coords(), start_date=jdt.to_datetime('1970-01-01'))
         for i in range(6):
             year = 10**i
             date = model._date_from_sim_time((year+.5) * 365.2425 * 86400)
