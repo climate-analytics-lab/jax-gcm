@@ -16,9 +16,9 @@ jcm/                          # Main package
 ├── model.py                  # Core Model class - main entry point
 ├── main.py                   # CLI entry point (Hydra config)
 ├── constants.py              # Global physical constants
-├── utils.py                  # Utilities and lookup tables
-├── geometry.py               # Grid geometry and terrain
-├── forcing.py                # Boundary conditions and I/O
+├── utils.py                  # Utilities, lookup tables, and coordinate creation
+├── terrain.py                # Terrain boundary conditions (orography, land-sea mask)
+├── forcing.py                # Forcing boundary conditions and I/O
 ├── date.py                   # Date handling
 ├── physics_interface.py      # Physics-dynamics coupling
 ├── diffusion.py              # Diffusion filter
@@ -26,6 +26,7 @@ jcm/                          # Main package
 ├── physics/
 │   ├── speedy/               # SPEEDY physics parameterizations
 │   │   ├── speedy_physics.py # Main SPEEDY orchestrator
+│   │   ├── speedy_coords.py  # SPEEDY coordinate caching (vertical/horizontal)
 │   │   ├── params.py         # Tunable parameter structs
 │   │   ├── convection.py     # Convection scheme
 │   │   ├── humidity.py       # Moisture processes
@@ -36,6 +37,8 @@ jcm/                          # Main package
 │   │   ├── vertical_diffusion.py
 │   │   └── *_test.py         # Co-located unit tests
 │   └── held_suarez/          # Simplified Held-Suarez physics
+│       ├── held_suarez_physics.py
+│       └── utils.py          # Coordinate helpers for Held-Suarez
 ├── data/
 │   ├── bc/                   # Boundary condition data (T30 climatology)
 │   └── test/                 # Test reference data
@@ -153,3 +156,37 @@ Auto-generated physics variable translation docs come from `jcm/physics/speedy/u
 - Configuration is managed via **Hydra** (see `jcm/config/`)
 - Supports multiple resolutions: T21 to T425 spectral truncations
 - SPMD sharding support for multi-device execution
+
+### Coordinate and terrain system
+
+The grid/geometry system is split into three layers with clear separation of concerns:
+
+1. **CoordinateSystem** (from `dinosaur`) — horizontal and vertical discretization, created via `utils.get_coords(sigma_boundaries, ...)`. This is physics-agnostic.
+
+2. **TerrainData** (`terrain.py`) — runtime boundary conditions (orography, land-sea mask). Immutable and physics-agnostic. Has factory classmethods: `from_coords()`, `from_file()`, `aquaplanet()`, `single_column()`.
+
+3. **SpeedyCoords** (`physics/speedy/speedy_coords.py`) — SPEEDY-specific precomputed coordinate transforms (sigma layers, trig functions). Cached on the physics object at init time via `cache_coords()`.
+
+**Model initialization pattern:**
+```python
+from jcm.model import Model
+from jcm.terrain import TerrainData
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+
+# 1. Create coordinate system (includes sigma boundaries)
+coords = get_speedy_coords(layers=8, spectral_truncation=31)
+
+# 2. Create terrain boundary conditions
+terrain = TerrainData.from_coords(coords)  # or .aquaplanet()
+
+# 3. Create model (physics caches coords internally)
+model = Model(coords=coords, terrain=terrain, physics=SpeedyPhysics())
+```
+
+**Key design principles:**
+- **Static config** (coordinates, physics transforms) is set once at init and cached
+- **Dynamic config** (terrain, forcing) can vary per simulation
+- Physics classes implement `cache_coords(coords)` to precompute coordinate-dependent data
+- Data structs use `@classmethod` factories (`.from_coords()`, `.from_file()`, `.aquaplanet()`) for clear construction intent
+- `TerrainData` replaced the old monolithic `Geometry` class — terrain is now separate from coordinate configuration
