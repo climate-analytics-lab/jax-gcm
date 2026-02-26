@@ -18,7 +18,8 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
 from jcm.physics.icon.icon_physics import IconPhysics
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.date import DateData
@@ -39,15 +40,16 @@ class EmergentPropertiesValidator:
         
         self.config = {**default_config, **(grid_config or {})}
         
-        # Create geometry
-        self.geometry = Geometry.from_grid_shape(
-            nlon=self.config['nlon'],
-            nlat=self.config['nlat'], 
-            nlev=self.config['nlev']
-        )
-        
+        # Create coords and terrain
+        # TODO: Update this to use proper sigma boundaries for the configured number of levels
+        sigma_boundaries = np.linspace(0, 1, self.config['nlev'] + 1)
+        nodal_shape = (self.config['nlon'], self.config['nlat'])
+        self.coords = get_coords(sigma_boundaries, nodal_shape=nodal_shape)
+        self.terrain = TerrainData.aquaplanet(self.coords)
+
         # Initialize physics
         self.physics = IconPhysics()
+        self.physics.cache_coords(self.coords)
         
         # Create latitude/longitude arrays
         self.lat = jnp.linspace(-90, 90, self.config['nlat'])

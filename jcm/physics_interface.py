@@ -6,22 +6,24 @@ to the specific physics being used.
 import jax
 import jax.numpy as jnp
 import tree_math
-from jcm.geometry import Geometry
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import (
-    compute_diagnostic_state_sigma, compute_diagnostic_state_hybrid,
-    State, PrimitiveEquations,
-    get_geopotential_on_sigma, get_geopotential_diff_hybrid, get_geopotential_diff_sigma
+    compute_diagnostic_state, State, PrimitiveEquations,
+    get_geopotential_on_sigma, get_geopotential_diff_hybrid,
 )
+from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
-from dinosaur.hybrid_coordinates import HybridCoordinates
 from jax import tree_util
 from jcm.forcing import ForcingData
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from typing import Tuple, Any, Dict
 from jcm.diffusion import DiffusionFilter
+import logging
+
+logger = logging.getLogger(__name__)
 
 @tree_math.struct
 class PhysicsState:
@@ -34,18 +36,6 @@ class PhysicsState:
     tracers: Dict[str, jnp.ndarray]  # Additional tracers beyond specific_humidity
 
     def __init__(self, u_wind, v_wind, temperature, specific_humidity, geopotential, normalized_surface_pressure, tracers=None):
-        """
-        Initialize the PhysicsState with the given variables.
-
-        Args:
-            u_wind: U wind component
-            v_wind: V wind component
-            temperature: Temperature field
-            specific_humidity: Specific humidity field
-            geopotential: Geopotential field
-            surface_pressure: Surface pressure field (normalized by p0)
-            tracers: Additional tracers as a dictionary
-        """
         self.u_wind = u_wind
         self.v_wind = v_wind
         self.temperature = temperature
@@ -176,14 +166,17 @@ Attributes:
 
 class Physics:
     UNITS_TABLE_CSV_PATH = None
-    
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, geometry: Geometry, date: DateData) -> Tuple[PhysicsTendency, Any]:
+
+    def cache_coords(self, coords: CoordinateSystem):
+        return None
+
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
             forcing: Forcing data
-            geometry: Geometry data
+            terrain: Terrain data (boundary conditions)
             date: Date data
 
         Returns:
@@ -192,16 +185,16 @@ class Physics:
 
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
-    
-    def get_empty_data(self, geometry: Geometry) -> Any:
+
+    def get_empty_data(self, coords) -> Any:
         return None
 
-    def data_struct_to_dict(self, struct: Any, geometry: Geometry, sep: str = ".") -> dict[str, Any]:
+    def data_struct_to_dict(self, struct: Any, nodal_shape, sep: str = ".") -> dict[str, Any]:
         """Flattens a physics data struct into a dictionary.
 
         Args:
             struct: The struct to flatten.
-            geometry: Geometry object.
+            nodal_shape: Shape of the nodal grid (kx, ix, il).
             sep: Separator to use for constructing hierarchical keys.
 
         Returns:
@@ -210,7 +203,7 @@ class Physics:
         """
         if struct is None:
             return {}
-        
+
         def _to_dict_recursive(obj, parent_key=""):
             items = {}
             for key, val in obj.__dict__.items():
@@ -222,14 +215,14 @@ class Physics:
                 else:
                     raise ValueError(f"Unsupported type for key {new_key}: {type(val)}")
             return items
-        
+
         items = _to_dict_recursive(struct)
 
         # replace multi-channel fields with a field for each channel
         _original_keys = list(items.keys())
         for k in _original_keys:
             s = items[k].shape
-            if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+            if len(s) == 5 and s[1:-1] == nodal_shape or len(s) == 4 and s[1:-1] == nodal_shape[1:]:
                 items.update({f"{k}{sep}{i}": items[k][..., i] for i in range(s[-1])})
                 del items[k]
 
@@ -246,11 +239,12 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         Physics state variables
 
     """
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    jax.debug.callback(logger.debug, "Converting state variables from dynamics to physics state variables")
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
     # Z, X, Y
-    compute_diagnostic_state = compute_diagnostic_state_hybrid if isinstance(dynamics.coords.vertical, HybridCoordinates) else compute_diagnostic_state_sigma
     nodal_state = compute_diagnostic_state(state, dynamics.coords)
     t = nodal_state.temperature_variation
     q = nodal_state.tracers['specific_humidity']
@@ -260,13 +254,12 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
 
     if isinstance(dynamics.coords.vertical, HybridCoordinates):
         # For hybrid coordinates, compute geopotential difference then add orography
-        # Note: get_geopotential_diff_hybrid expects temperature VARIATION, not full temperature
         spectral_temperature_variation = dynamics.coords.horizontal.to_modal(nodal_state.temperature_variation)
         phi_spectral_diff = get_geopotential_diff_hybrid(
             temperature=spectral_temperature_variation,
             coordinates=dynamics.coords.vertical,
             ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
-            p_surface=dynamics.p_s_ref,  # Use same reference pressure as dynamics core
+            p_surface=dynamics.p_s_ref,
             method='dense',
             sharding=None
         )
@@ -274,17 +267,17 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     else:
         # For sigma coordinates, use the full geopotential calculation in nodal space
-        # Need to add reference temperature to get full temperature
         full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
         phi = get_geopotential_on_sigma(
             temperature=full_temperature,
-            specific_humidity=None,  # For now, compute dry geopotential (TODO: include moisture)
+            specific_humidity=None,
             nodal_orography=nodal_orography,
             sigma=dynamics.coords.vertical,
             gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
             ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
             sharding=None
         )
+
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
 
@@ -295,7 +288,6 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     all_tracers = {}
     for tracer_name, tracer_value in nodal_state.tracers.items():
         if tracer_name != 'specific_humidity':
-            # Dimensionalize other tracers (assuming they have same units as specific_humidity for now)
             all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(tracer_value, units.gram / units.kilogram).m
 
     return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp, axis=-3), all_tracers)
@@ -331,8 +323,7 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     # Convert all tracers to modal
     tracers_modal = {'specific_humidity': q_modal}
     for tracer_name, tracer_value in physics_state.tracers.items():
-        # Nondimensionalize and convert to modal
-        tracer_nd = dynamics.physics_specs.nondimensionalize(tracer_value * units.gram / units.kilogram / units.second)
+        tracer_nd = dynamics.physics_specs.nondimensionalize(tracer_value * units.gram / units.kilogram)
         tracers_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_nd)
 
     return State(
@@ -370,7 +361,6 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     # Convert all tracer tendencies to modal
     tracers_tend_modal = {'specific_humidity': q_tend_modal}
     for tracer_name, tracer_tend in physics_tendency.tracers.items():
-        # Nondimensionalize and convert to modal
         tracer_tend_nd = dynamics.physics_specs.nondimensionalize(tracer_tend * units.gram / units.kilogram / units.second)
         tracers_tend_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_tend_nd)
 
@@ -430,7 +420,7 @@ def get_physical_tendencies(
     time_step: float,
     physics: Physics,
     forcing: ForcingData,
-    geometry: Geometry,
+    terrain: TerrainData,
     diffusion: DiffusionFilter,
     date: DateData,
     diagnostics_collector=None,
@@ -443,7 +433,7 @@ def get_physical_tendencies(
         time_step: Time step in seconds
         physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
         forcing: ForcingData object
-        geometry: Geometry object
+        terrain: TerrainData object
         date: DateData object
         diagnostics_collector: DiagnosticsCollector object
 
@@ -454,10 +444,10 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, geometry, date)
+    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, terrain, date)
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
-    
+
     if diagnostics_collector is not None:
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 

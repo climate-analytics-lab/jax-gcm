@@ -44,7 +44,7 @@ The :py:class:`jcm.physics_interface.Physics` abstract base class defines a clea
            state: PhysicsState,
            physics_data: PhysicsData,
            forcing: ForcingData,
-           geometry: Geometry,
+           terrain: TerrainData,
        ) -> tuple[PhysicsTendency, PhysicsData]:
            """Compute physics tendencies for the current state.
 
@@ -52,7 +52,7 @@ The :py:class:`jcm.physics_interface.Physics` abstract base class defines a clea
                state: Current atmospheric state (temperature, winds, etc.)
                physics_data: Diagnostic data from previous timesteps
                forcing: Boundary conditions (SST, orography, etc.)
-               geometry: Grid and coordinate information
+               terrain: Orography/terrain information
 
            Returns:
                tendencies: Changes to apply to the state
@@ -124,23 +124,25 @@ The model is designed to be composable at multiple levels:
 .. code-block:: python
 
    # Use SPEEDY physics
-   model = Model(physics=SpeedyPhysics())
+   model = Model(coords=get_speedy_coords(),physics=SpeedyPhysics())
 
-   # Use custom physics (future)
-   model = Model(physics=CustomPhysics())
+   # Use custom physics (future), this could use any existing or custom coords that are compatible with the physics implementation
+   model = Model(coords,physics=CustomPhysics())
 
    # Combine multiple physics packages (future)
-   model = Model(physics=HybridPhysics([speedy_radiation, ml_convection]))
+   model = Model(coords,physics=HybridPhysics([speedy_radiation, ml_convection]))
 
 **Configurations**: Model components can be configured independently:
 
 .. code-block:: python
 
-   geometry = Geometry.from_grid_shape(nodal_shape=(256, 128), num_levels=8)
+   coords = get_speedy_coords(nodal_shape=(256, 128), layers=8, spectral_truncation=85)
+   terrain = TerrainData.from_coords(coords)
    physics = SpeedyPhysics(parameters=custom_params)
    
    model = Model(
-       geometry=geometry,
+       coords,
+       terrain=terrain,
        physics=physics,
    )
 
@@ -155,7 +157,7 @@ A core design goal is full differentiability through the model. This enables:
 
    def loss(params):
        physics = SpeedyPhysics(parameters=params)
-       model = Model(physics=physics)
+       model = Model(coords=get_speedy_coords(),physics=physics)
        predictions = model.run(...)
        return compute_loss(predictions, observations)
 
@@ -168,7 +170,7 @@ A core design goal is full differentiability through the model. This enables:
 .. code-block:: python
 
    def run_model(initial_state):
-       model = Model()
+       model = Model(coords=get_speedy_coords())
        return model.run(initial_state=initial_state, ...)
 
    # Gradients with respect to initial conditions
@@ -224,7 +226,7 @@ The default configuration provides a working model out of the box:
 .. code-block:: python
 
    # Just works - sensible defaults for everything
-   model = Model()
+   model = Model(coords=get_speedy_coords())
    predictions = model.run()
 
 For Experts

@@ -14,14 +14,20 @@ class TestSolar(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
 
-        global solar, geometry
+        global solar, terrain, speedy_coords
         from jcm.physics.speedy.shortwave_radiation import solar
-        from jcm.geometry import Geometry
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+
         from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
+        terrain, speedy_coords = convert_to_speedy_latitudes(terrain, speedy_coords)
 
     def test_solar(self):
-        self.assertTrue(np.allclose(solar(0.2, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(0.2, speedy_coords=speedy_coords), np.array([
             59.64891891,  82.51370562, 109.0996075 , 135.94454033,
             162.48195582, 188.46471746, 213.72891835, 238.14170523,
             261.58627434, 283.95547202, 305.15011948, 325.07762082,
@@ -34,7 +40,7 @@ class TestSolar(unittest.TestCase):
             282.48360014, 260.01911561, 236.4767785 , 211.95903738,
             186.57407167, 160.43718712, 133.67240691, 106.41888862,
             78.84586166,  51.20481384,  24.06562443,   0.89269878]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.4, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(0.4, speedy_coords=speedy_coords), np.array([
             0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00,
             0.00000000e+00, 1.17528392e-01, 1.13271540e+01, 2.91320240e+01,
             5.00775958e+01, 7.28770444e+01, 9.68131455e+01, 1.21415906e+02,
@@ -47,7 +53,7 @@ class TestSolar(unittest.TestCase):
             4.69489091e+02, 4.65618250e+02, 4.60867185e+02, 4.55625373e+02,
             4.50536488e+02, 4.46820735e+02, 4.47873663e+02, 4.58140604e+02,
             4.66603495e+02, 4.73109251e+02, 4.77630650e+02, 4.80148724e+02]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.6, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(0.6, speedy_coords=speedy_coords), np.array([
             0., 0., 0., 0., 2.42301138, 17.44981519, 37.44706963, 59.86771264,
             83.6333103, 108.1344301, 132.97031768, 157.84825598, 182.53801702,
             206.84837586, 230.61437093, 253.6899679, 275.94351445, 297.25534724,
@@ -57,7 +63,7 @@ class TestSolar(unittest.TestCase):
             446.92519666, 442.51191674, 436.56582757, 429.17485652, 420.45766136,
             410.57670499, 399.7619425, 388.35679371, 376.91876172, 366.48029222,
             359.54828853, 363.72218759, 368.79349031, 372.31796687, 374.28083132]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(0.8, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(0.8, speedy_coords=speedy_coords), np.array([
             2.40672590e+02, 2.39410416e+02, 2.37278513e+02, 2.48984331e+02,
             2.66799442e+02, 2.86134104e+02, 3.05646230e+02, 3.24707974e+02,
             3.42958056e+02, 3.60158149e+02, 3.76136095e+02, 3.90759256e+02,
@@ -70,7 +76,7 @@ class TestSolar(unittest.TestCase):
             2.16288991e+02, 1.91274040e+02, 1.65679673e+02, 1.39678886e+02,
             1.13480705e+02, 8.73568473e+01, 6.16981674e+01, 3.71583316e+01,
             1.51012308e+01, 1.34429313e-01, 0.00000000e+00, 0.00000000e+00]), atol=1e-4))
-        self.assertTrue(np.allclose(solar(1.0, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(1.0, speedy_coords=speedy_coords), np.array([
             553.93421795, 551.02918596, 545.81297397, 538.30746507, 528.54406252,
             516.56378888, 506.85181087, 506.40750073, 508.57359122, 511.41450948,
             514.02258691, 515.87725366, 516.65036719, 516.12420873, 514.15095359,
@@ -82,7 +88,7 @@ class TestSolar(unittest.TestCase):
             20.24490036, 4.43498764, 0., 0., 0., 0., 0., 0.]), atol=1e-4))
 
         # other csol values
-        self.assertTrue(np.allclose(solar(0.6, 1300, geometry=geometry), np.array([
+        self.assertTrue(np.allclose(solar(0.6, speedy_coords, 1300), np.array([
             0.,          0.,           0.,           0.,
             2.30256929,  16.58242672,  35.58566559,  56.89183219,
             79.47609897, 102.75932685, 126.36068201, 150.00199764,
@@ -99,9 +105,9 @@ class TestSolar(unittest.TestCase):
     def test_solar_gradients_isnan(self):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
         from jcm.physics.speedy.physical_constants import solc
-        primals, f_vjp = jax.vjp(solar, 0.2, 4.*solc, geometry)
+        primals, f_vjp = jax.vjp(solar, 0.2, speedy_coords, 4.*solc)
         input = jnp.ones_like(primals)
-        df_dtyear, df_dcsol, df_dgeo = f_vjp(input)
+        df_dtyear, df_dcoords, df_dcsol = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
         
@@ -110,16 +116,16 @@ class TestSolar(unittest.TestCase):
         tyear = 0.2
         csol = 4.*solc
 
-        def f(tyear, csol):
-            return solar(tyear, csol, geometry)
+        def f(tyear, speedy_coords, csol):
+            return solar(tyear, speedy_coords, csol)
 
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (tyear, csol), 
+        check_vjp(f, f_vjp, args = (tyear, speedy_coords, csol), 
                                 atol=None, rtol=1, eps=0.0001)
-        check_jvp(f, f_jvp, args = (tyear, csol), 
+        check_jvp(f, f_jvp, args = (tyear, speedy_coords, csol), 
                                 atol=None, rtol=1, eps=0.000001)
         
 class TestShortWaveRadiation(unittest.TestCase):
@@ -129,23 +135,28 @@ class TestShortWaveRadiation(unittest.TestCase):
         ix, il, kx = 96, 48, 8
 
         global ForcingData, SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData, \
-               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, forcing, geometry
+               PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, forcing, terrain, speedy_coords, \
+               convert_to_speedy_latitudes, TerrainData
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.shortwave_radiation import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
         from jcm.physics.speedy.physical_constants import epssw, solc
         from jcm.physics.speedy.params import Parameters
-        from jcm.geometry import Geometry
-        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
         parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
         forcing = ForcingData.zeros((ix, il))
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
+        
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        terrain, speedy_coords = convert_to_speedy_latitudes(terrain, speedy_coords)
 
     # FIXME: currently testing against itself, needs updated values from speedy.f90
     def test_shortwave_radiation(self):
-        from jcm.geometry import Geometry
-        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -164,7 +175,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:] + 1
         fmask = .7 * np.ones(xy)
 
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
+        terrain_new = terrain.copy(fmask=fmask)
+        terrain_new, speedy_c = convert_to_speedy_latitudes(terrain_new, speedy_coords)
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -175,12 +187,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_c)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         forcing = ForcingData.zeros(xy)
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
-        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
-        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain_new)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain_new)
+        _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, terrain_new)
         
         # surface downward shortwave radiation at all latitudes
         self.assertTrue(np.allclose(physics_data.shortwave_rad.rsds[0, :], [
@@ -246,11 +258,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
         forcing = ForcingData.zeros(xy)
 
-        new_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        new_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
         
         self.assertEqual(new_data.shortwave_rad.fsol.shape, (ix, il))
         self.assertEqual(new_data.shortwave_rad.ozupp.shape, (ix, il))
@@ -264,13 +276,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
        
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
-        topsr = solar(date_data.tyear, geometry=geometry)
+        topsr = solar(date_data.tyear, speedy_coords=speedy_coords)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
@@ -279,11 +291,11 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
         fs0 = 6.0
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
@@ -295,12 +307,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-04-01 12:00:00'))
 
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
         # Expected form for ozone based on the provided formula
-        flat2 = 1.5 * geometry.sia**2 - 0.5
+        flat2 = 1.5 * physics_data.speedy_coords.sia**2 - 0.5
         expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
@@ -309,9 +321,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, geometry)
+        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
         
         # Ensure outputs are consistent and within expected ranges
         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
@@ -347,12 +359,12 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, forcing, geometry)
-        datas = PhysicsData.ones(xy,kx)
+        _, f_vjp = jax.vjp(get_zonal_average_fields, state, physics_data, forcing, terrain)
+        datas = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)
         df_dstates, df_ddatas, _, _ = f_vjp(datas)
 
         self.assertFalse(df_ddatas.isnan().any_true())
@@ -362,15 +374,15 @@ class TestShortWaveRadiation(unittest.TestCase):
         """Test that we can calculate gradients of shortwave radiation without getting NaN values"""
         xy = (ix, il)
         zxy = (kx, ix, il)
-        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        physics_data = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         forcing = ForcingData.ones(xy)
         physics_data.shortwave_rad.compute_shortwave = True
 
         # Calculate gradient
-        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, forcing, geometry)
+        _, f_vjp = jax.vjp(get_shortwave_rad_fluxes, state, physics_data, parameters, forcing, terrain)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx)
+        datas = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)
         input = (tends, datas)
         df_dstates, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
 
@@ -380,8 +392,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
 
     def test_clouds_gradients_isnan_with_realistic_values_grad(self):
-        from jcm.geometry import Geometry
-        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
 
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
@@ -398,9 +408,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         precnv = -1.0 * jnp.ones(xy)
         precls = 4.0 * jnp.ones(xy)
         iptop = 8 * jnp.ones(xy, dtype=int)
-        fmask = .7 * jnp.ones(xy)
-
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx, fmask=fmask))
 
         surface_flux = SurfaceFluxData.zeros(xy)
         humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
@@ -411,13 +418,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         forcing = ForcingData.zeros(xy)
         # Calculate gradient
-        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, forcing, geometry)
+        primals, f_vjp = jax.vjp(get_clouds, state, physics_data, parameters, forcing, terrain)
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy,kx)
+        datas = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)
         input = (tends, datas)
         df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
         
@@ -453,19 +460,19 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data.tyear = 0.6
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        _, physics_data = get_clouds(state, physics_data, parameters, forcing, geometry)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, forcing_f,geometry_f):
+        def f(physics_data_f, state_f, forcing_f,terrain_f):
             data_out = get_zonal_average_fields(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(data_out)
         
@@ -473,9 +480,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.0001)
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
@@ -483,7 +490,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         """Test whether gradients are close for shortwave radiation"""
         xy = (ix, il)
         zxy = (kx, ix, il)
-        physics_data = PhysicsData.ones(xy,kx)  # Create PhysicsData object (parameter)
+        physics_data = PhysicsData.ones(xy,kx,speedy_coords=speedy_coords)  # Create PhysicsData object (parameter)
         state =PhysicsState.ones(zxy)
         forcing = ForcingData.ones(xy)
         physics_data.shortwave_rad.compute_shortwave = True
@@ -493,14 +500,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_shortwave_rad_fluxes(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(data_out)
         
@@ -508,9 +515,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.0001)
 
     @pytest.mark.skip(reason="finite differencing produces nans")
@@ -552,14 +559,14 @@ class TestShortWaveRadiation(unittest.TestCase):
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(data_out)
         
@@ -567,7 +574,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.000001)

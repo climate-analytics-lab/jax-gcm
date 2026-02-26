@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import jit
 
 # importing custom functions from library
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
@@ -18,7 +18,7 @@ def get_surface_fluxes(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Parameters
     ----------
@@ -37,7 +37,7 @@ def get_surface_fluxes(
     phi : 3D array
         - Geopotential, state.geopotential
     phi0 : 2D array
-        - Surface geopotential, geometry.orog * grav
+        - Surface geopotential, terrain.orog * grav
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
     sea_surface_temperature : 2D array
@@ -49,7 +49,7 @@ def get_surface_fluxes(
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
     stl_am = forcing.stl_am
-    lfluxland = forcing.lfluxland
+    lfluxland = terrain.lfluxland
     kx, ix, il = state.temperature.shape
 
     psa = state.normalized_surface_pressure
@@ -58,13 +58,13 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = geometry.fmask
+    fmask = terrain.fmask
 
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = geometry.orog * grav # surface geopotential
+    phi0 = terrain.orog * grav # surface geopotential
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
@@ -113,12 +113,12 @@ def get_surface_fluxes(
     # substituting the for loop at line 109
     # Temperature difference between lowest level and sfc
     # line 112
-    dt1 = geometry.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
+    dt1 = physics_data.speedy_coords.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
     
     # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
     # line 115 - 116
     t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*geometry.sigl[kx-1]))
+    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*physics_data.speedy_coords.sigl[kx-1]))
 
     # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
     # line 119 - 120
@@ -147,7 +147,7 @@ def get_surface_fluxes(
         # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by defining effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(geometry.coa) * rsds * (1.0 - alb_l) * psa
+        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(physics_data.speedy_coords.coa) * rsds * (1.0 - alb_l) * psa
 
         # 2.2 Stability Correlation
 
@@ -160,7 +160,7 @@ def get_surface_fluxes(
         denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
 
         # 2.3 Computing Wind Stress
-        forog = get_orog_land_sfc_drag(geometry.phis0, parameters.surface_flux.hdrag)
+        forog = get_orog_land_sfc_drag(terrain.phis0, parameters.surface_flux.hdrag)
         cdldv = parameters.surface_flux.cdl * denvvs[:, :, 0] * forog
         ustr = ustr.at[:, :, 0].set(-cdldv * ua[kx-1])
         vstr = vstr.at[:, :, 0].set(-cdldv * va[kx-1])
@@ -282,10 +282,10 @@ def get_surface_fluxes(
 
     # Compute tendencies due to surface fluxes (physics.f90:197-205)
     rps = 1.0 / state.normalized_surface_pressure
-    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*geometry.grdsig[-1])
-    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*geometry.grdsig[-1])
-    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*geometry.grdscp[-1])
-    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*geometry.grdsig[-1])
+    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
+    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
+    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*physics_data.speedy_coords.grdscp[-1])
+    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
     physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
 
     return physics_tendencies, physics_data

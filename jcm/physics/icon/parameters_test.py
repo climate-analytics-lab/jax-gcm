@@ -92,16 +92,21 @@ def test_physics_terms_use_parameters():
     
     # The physics should be able to compute tendencies
     # (This is a basic smoke test)
-    import jcm.geometry as geo
-    geometry = geo.Geometry.from_grid_shape((nlat, nlon), num_levels=nlev)
+    import numpy as np
+    from jcm.utils import get_coords
+    from jcm.terrain import TerrainData
+    sigma_boundaries = np.linspace(0, 1, nlev + 1)
+    coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
+    terrain = TerrainData.aquaplanet(coords)
+    physics.cache_coords(coords)
     forcing = ForcingData.zeros((nlat, nlon),
                                     sea_surface_temperature=jnp.ones((nlat, nlon)) * 288.0,
                                     sice_am=jnp.zeros((nlat, nlon, 365)))
-    
+
     tendencies, physics_data = physics.compute_tendencies(
-        state, 
+        state,
         forcing=forcing,
-        geometry=geometry,
+        terrain=terrain,
         date=DateData.set_date(jdt.Datetime.from_pydatetime(datetime(2020, 6, 21)))
     )
     

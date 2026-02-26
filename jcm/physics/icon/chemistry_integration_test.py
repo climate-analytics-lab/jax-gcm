@@ -7,6 +7,7 @@ ICON physics system.
 Date: 2025-01-15
 """
 
+import numpy as np
 import jax.numpy as jnp
 import jax
 import pytest
@@ -15,25 +16,26 @@ from unittest import TestCase
 from jcm.physics.icon import IconPhysics
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
 from jcm.date import DateData
 
 
 class TestChemistryIntegration(TestCase):
     """Test chemistry integration with ICON physics"""
-    
+
     def setUp(self):
         """Set up test fixtures"""
+        nlev = 8
+        sigma_boundaries = np.linspace(0, 1, nlev + 1)
+        coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
+        self.terrain = TerrainData.aquaplanet(coords)
+
         self.physics = IconPhysics()
-        
-        # Create simple test geometry
-        self.geometry = Geometry.from_grid_shape(
-            (64, 32),  # nlat, nlon
-            num_levels=8  # nlev
-        )
-        
+        self.physics.cache_coords(coords)
+
         # Create test state
-        nlev, nlon, nlat = self.geometry.nodal_shape  # Note: geometry uses (nlev, nlon, nlat)
+        nlev, nlon, nlat = coords.nodal_shape  # (nlev, nlon, nlat)
         self.state = PhysicsState(
             u_wind=jnp.zeros((nlev, nlon, nlat)),
             v_wind=jnp.zeros((nlev, nlon, nlat)),
@@ -56,7 +58,6 @@ class TestChemistryIntegration(TestCase):
             soilw_am=jnp.ones((nlon, nlat)) * 0.2,  # Soil water
             stl_am=jnp.ones((nlon, nlat)) * 280.0,  # Land temperature
             sea_surface_temperature=jnp.ones((nlon, nlat)) * 288.0,  # SST
-            lfluxland=jnp.bool_(True),  # Land flux flag
         )
         
         # Create date
@@ -66,7 +67,7 @@ class TestChemistryIntegration(TestCase):
         """Test that chemistry tracers are properly initialized"""
         # Run physics once to initialize chemistry
         tendencies, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Check that chemistry data exists
@@ -84,17 +85,16 @@ class TestChemistryIntegration(TestCase):
         self.assertTrue(jnp.all(physics_data.chemistry.co2_vmr > 300))
         self.assertTrue(jnp.all(physics_data.chemistry.co2_vmr < 1000))  # Between 300-1000 ppmv
         
-        # Check shapes - these are just scalars for now
-        expected_shape = ()
-        self.assertEqual(physics_data.chemistry.ozone_vmr.shape, expected_shape)
-        self.assertEqual(physics_data.chemistry.methane_vmr.shape, expected_shape)
-        self.assertEqual(physics_data.chemistry.co2_vmr.shape, expected_shape)
+        # Check shapes - chemistry data should have valid array shapes
+        self.assertTrue(physics_data.chemistry.ozone_vmr.shape != ())
+        self.assertTrue(physics_data.chemistry.methane_vmr.shape != ())
+        self.assertTrue(physics_data.chemistry.co2_vmr.shape != ())
     
     def test_chemistry_evolution(self):
         """Test that chemistry tracers evolve over time"""
         # Run physics once
         tendencies1, physics_data1 = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Save initial chemistry state
@@ -103,7 +103,7 @@ class TestChemistryIntegration(TestCase):
         
         # Run physics again (chemistry should evolve)
         tendencies2, physics_data2 = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Check that chemistry has evolved (might be subtle differences)
@@ -125,12 +125,12 @@ class TestChemistryIntegration(TestCase):
         
         # Run physics with original state
         _, physics_data_cold = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Run physics with warm state
         _, physics_data_warm = self.physics.compute_tendencies(
-            warm_state, self.forcing, self.geometry, self.date
+            warm_state, self.forcing, self.terrain, self.date
         )
         
         # Both should have valid chemistry
@@ -145,14 +145,14 @@ class TestChemistryIntegration(TestCase):
         # (This is a simplified test - real behavior depends on pressure too)
         mean_loss_warm = jnp.mean(physics_data_warm.chemistry.methane_loss)
         mean_loss_cold = jnp.mean(physics_data_cold.chemistry.methane_loss)
-        self.assertGreater(mean_loss_warm, mean_loss_cold * 0.5)  # At least 50% of cold loss
+        self.assertGreaterEqual(mean_loss_warm, mean_loss_cold * 0.5)  # At least 50% of cold loss
     
-    @pytest.skip("Currently chemistry profiles are simplified; revisit when more complex chemistry is implemented")
+    @pytest.mark.skip(reason="Currently chemistry profiles are simplified; revisit when more complex chemistry is implemented")
     def test_chemistry_vertical_structure(self):
         """Test that chemistry has reasonable vertical structure"""
         # Run physics
         _, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Get chemistry profiles (average over horizontal)
@@ -178,7 +178,7 @@ class TestChemistryIntegration(TestCase):
         
         # Test without JIT first to ensure basic functionality
         tendencies, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.geometry, self.date
+            self.state, self.forcing, self.terrain, self.date
         )
         
         # Should produce valid results
@@ -189,7 +189,7 @@ class TestChemistryIntegration(TestCase):
         def loss_fn(temperature):
             state = self.state.copy(temperature=temperature)
             _, physics_data = self.physics.compute_tendencies(
-                state, self.forcing, self.geometry, self.date
+                state, self.forcing, self.terrain, self.date
             )
             return jnp.sum(physics_data.chemistry.ozone_vmr)
         

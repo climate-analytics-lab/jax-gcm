@@ -15,15 +15,19 @@ from dinosaur.time_integration import ExplicitODE
 from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
-from jcm.geometry import Geometry, coords_from_geometry
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, get_coords
+from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
 from functools import partial
+import logging
+
+# logging.basicConfig(format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 _LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
@@ -45,7 +49,7 @@ class Predictions:
     physics: Any
     times: Any
 
-    def to_xarray(self, physics_module: Physics=None, coords=None):
+    def to_xarray(self, physics_module: Physics=None):
         """Convert the full prediction trajectory to a final xarray.Dataset.
         This function unpacks the nested dictionary structure from the simulation
         output, formats the data, and converts the time coordinate to a
@@ -53,13 +57,12 @@ class Predictions:
 
         Args:
             physics_module (optional): instance of the Physics module used to generate the predictions, used to parse physics fields (default SpeedyPhysics).
-            hybrid_vertical (bool, optional): whether to use hybrid vertical coordinates (default False).
+
         Returns:
-            A final `xarray.Dataset` ready for analysis and plotting.   
+            A final `xarray.Dataset` ready for analysis and plotting.
 
         """
-        from dinosaur.xarray_utils import data_to_xarray
-        from jcm.physics.icon.icon_physics import IconPhysics
+        from jcm.utils import data_to_xarray
         
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
@@ -73,20 +76,23 @@ class Predictions:
         physics_predictions = float0s_to_nans(self.physics)
 
         nodal_shape = dynamics_predictions.u_wind.shape[1:]
-        coords = coords or get_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
 
         # prepare physics predictions for xarray conversion
         # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
         physics_module = physics_module or SpeedyPhysics()
-        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, 
-                                                                geometry=Geometry.from_coords(coords,hybrid_vertical=isinstance(physics_module, IconPhysics)))
+        physics_module.cache_coords(coords)
+        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
         times = jax.device_get(self.times)
         coords = jax.device_get(coords)
 
         pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
                                  coords=coords, serialize_coords_to_attrs=False,
-                                 times=times - times[0])
+                                 times=times - times[0],
+                                 additional_coords={'wvi_id': jnp.array([1,2]),
+                                                    'hsg_level': jnp.arange(nodal_shape[0]+1)})
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
@@ -196,47 +202,42 @@ def averaged_trajectory_from_step(
 class Model:
     """Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet."""
 
-    def __init__(self, time_step=30.0, geometry: Geometry=None, coords: CoordinateSystem=None,
+    def __init__(self, coords: CoordinateSystem, time_step=30.0, terrain: TerrainData=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
-                 use_hybrid_coords=None,
-                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01')) -> None:
+                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'), log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
-        
+
         Args:
-            time_step:
-                Model time step in minutes
-            geometry: 
-                Geometry object describing the model grid and orography of the model
             coords:
                 CoordinateSystem object describing the model coordinates
-            physics: 
+            time_step:
+                Model time step in minutes
+            terrain:
+                TerrainData object describing boundary conditions (orography, land-sea mask, etc.)
+            physics:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
             spmd_mesh:
                 Optional tuple describing the SPMD mesh for parallelization
-            use_hybrid_coords:
-                Whether to use hybrid vertical coordinates (default None, auto-detected based on physics type)
-            start_date: 
+            start_date:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
+            log_level:
+                (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
         """
+        # Set root logging level to be log_level so it propagates to other modules
+        logging.getLogger().setLevel(log_level)
+
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)
         self.dt = self.physics_specs.nondimensionalize(self.dt_si)
 
-        # Auto-detect coordinate system based on physics type
-        if use_hybrid_coords is None:
-            from jcm.physics.icon import IconPhysics
-            use_hybrid_coords = isinstance(physics, IconPhysics)
-        
-        # Store coords separately - it's used by dynamics but not physics (and can't easily be jitted)
-        if geometry is not None: # user-specified geometry takes precedence
-            self.geometry = geometry
-            self.coords = coords_from_geometry(geometry, spmd_mesh=spmd_mesh, hybrid_vertical=use_hybrid_coords)
-        else:
-            self.coords = coords if coords is not None else get_coords(spmd_mesh=spmd_mesh, hybrid_vertical=use_hybrid_coords)
-            self.geometry = Geometry.from_coords(coords=self.coords, hybrid_vertical=use_hybrid_coords)
+        # Store coords - used by dynamics and physics
+        self.coords = coords
+
+        # Store terrain (boundary conditions)
+        self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(self.coords)
 
         # Get the reference temperature and orography. This also returns the initial state function (if wanted to start from rest)
         self.default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
@@ -246,30 +247,25 @@ class Model:
         )
         
         self.physics = physics or SpeedyPhysics()
+        self.physics.cache_coords(self.coords)
 
         # Ensure IconPhysics uses the correct timestep for all parameterizations
         from jcm.physics.icon import IconPhysics
         if isinstance(self.physics, IconPhysics):
-            # Update physics parameters to use model timestep
             self.physics.parameters = self.physics.parameters.with_timestep(self.dt_si.m)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape
-        self.truncated_orography = primitive_equations.truncated_modal_orography(self.geometry.orog, self.coords, wavenumbers_to_clip=2)
+        self.truncated_orography = primitive_equations.truncated_modal_orography(self.terrain.orog, self.coords, wavenumbers_to_clip=2)
 
-        if use_hybrid_coords:
-            _primitive_equations = dinosaur.primitive_equations.PrimitiveEquationsHybrid
-        else:
-            _primitive_equations = dinosaur.primitive_equations.PrimitiveEquations
-
-        self.primitive = _primitive_equations(
+        self.primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
             orography=self.truncated_orography,
             coords=self.coords,
             physics_specs=self.physics_specs,
         )
-
+        
         def conserve_global_mean_surface_pressure(u, u_next):
             return u_next.replace(
                 # prevent global mean (0th spectral component) surface pressure drift by setting it to its value before timestep
@@ -356,10 +352,8 @@ class Model:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
             # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
-            # For hybrid coordinates, use p_s_ref instead of p0 for consistency
-            ref_pressure = self.primitive.p_s_ref if hasattr(self.primitive, 'p_s_ref') else p0
             state.log_surface_pressure = self.coords.horizontal.to_modal(
-                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(self.physics_specs.nondimensionalize(ref_pressure * units.pascal)) # Makes this robust to different physics_specs, which will change default_state_fn behavior
+                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(self.physics_specs.nondimensionalize(p0 * units.pascal)) # Makes this robust to different physics_specs, which will change default_state_fn behavior
             )
 
             # need to add specific humidity as a tracer
@@ -370,7 +364,10 @@ class Model:
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(seconds=jnp.round(sim_time).astype(jnp.int32)),
+            model_time=self.start_date + jdt.Timedelta(
+                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
+                seconds=jnp.round(sim_time % 86400).astype(jnp.int32)
+            ),
             model_step=jnp.int32(sim_time / self.dt_si.m),
             dt_seconds=self.dt_si.m
         )
@@ -392,8 +389,8 @@ class Model:
                 time_step=self.dt_si.m,
                 physics=self.physics,
                 forcing=forcing,
+                terrain=self.terrain,
                 diffusion=self.diffusion,
-                geometry=self.geometry,
                 date=self._date_from_sim_time(state.sim_time),
                 diagnostics_collector=d
             )
@@ -404,18 +401,18 @@ class Model:
 
     def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
         """Post-process a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
-
+        
         Args:
-            state:
+            state: 
                 A `primitive_equations.State` object from the simulation.
-
+        
         Returns:
             A dictionary containing the `PhysicsState` ('dynamics') and the
             diagnostic physics variables (data structure determined by model.physics).
 
         """
         from jcm.physics_interface import verify_state
-        from jcm.physics.icon import IconPhysics
+        jax.debug.callback(logger.info, "Post processing: %s simulated seconds", state.sim_time)
 
         predictions = Predictions(
             dynamics=dynamics_state_to_physics_state(state, self.primitive),
@@ -426,12 +423,7 @@ class Model:
         if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.geometry, date)
-
-            # Reshape ICON physics data from column format to 3D nodal format
-            if isinstance(self.physics, IconPhysics):
-                physics_data = self.physics.reshape_physics_data_to_3d(physics_data, self.geometry)
-
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.terrain, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
@@ -449,7 +441,7 @@ class Model:
             )
 
             # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
-            return integrate_fn(state, self.physics.get_empty_data(self.geometry)) if output_averages else integrate_fn(state)
+            return integrate_fn(state, self.physics.get_empty_data(self.coords)) if output_averages else integrate_fn(state)
 
         return _integrate_fn
 
@@ -498,21 +490,8 @@ class Model:
             post_process_fn=lambda state: self._post_process(state, forcing, output_averages),
             output_averages=output_averages
         )
-
+        
         final_modal_state, predictions = integrate(initial_state)
-
-        # Reshape physics data when using IconPhysics with output_averages
-        # (non-averaged case is handled in _post_process)
-        if output_averages:
-            from jcm.physics.icon import IconPhysics
-            if isinstance(self.physics, IconPhysics) and predictions.physics is not None:
-                # Reshape each timestep's physics data
-                reshaped_physics = tree_map(
-                    lambda x: self.physics.reshape_physics_data_to_3d(x, self.geometry) if hasattr(x, '__dict__') else x,
-                    predictions.physics
-                )
-                predictions = predictions.replace(physics=reshaped_physics)
-
         return final_modal_state, predictions.replace(times=times)
 
     def resume(self,
@@ -538,6 +517,8 @@ class Model:
 
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
+        jax.debug.callback(logger.info, "Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s", 
+                                        forcing, save_interval, total_time, output_averages)
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
@@ -545,7 +526,7 @@ class Model:
             total_time=total_time,
             output_averages=output_averages
         )
-        
+        jax.debug.callback(logger.info, "Run completed.")
         self._final_modal_state = final_modal_state
         return predictions
 

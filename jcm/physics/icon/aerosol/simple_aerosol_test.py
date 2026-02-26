@@ -24,7 +24,6 @@ from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.icon_physics import PhysicsTendency
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
 from jcm.date import DateData
 import tree_math
 

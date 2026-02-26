@@ -3,7 +3,7 @@ Parametrization of large-scale condensation.
 """
 from jax import jit
 import jax.numpy as jnp
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
@@ -16,7 +16,7 @@ def get_large_scale_condensation_tendencies(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Compute large-scale condensation and associated tendencies of temperature and moisture
 
@@ -55,7 +55,7 @@ def get_large_scale_condensation_tendencies(
     # instability
     
     # Compute sig2, rhref, and dqmax arrays
-    sig2 = geometry.fsg**2.0
+    sig2 = physics_data.speedy_coords.fsg**2.0
     
     rhref = parameters.condensation.rhlsc + parameters.condensation.drhlsc * (sig2 - 1.0)
     # Apply rhblsc threshold only at bottom level (k=kx), not all levels
@@ -80,7 +80,7 @@ def get_large_scale_condensation_tendencies(
     iptop = jnp.minimum(first_cond_level, conv.iptop)
 
     # Large-scale precipitation
-    pfact = geometry.dhs * prg
+    pfact = physics_data.speedy_coords.dhs * prg
     precls = 0. - jnp.sum(pfact[1:, jnp.newaxis, jnp.newaxis] * dqlsc[1:], axis=0)
     precls *= state.normalized_surface_pressure
 

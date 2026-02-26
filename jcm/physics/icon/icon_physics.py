@@ -11,13 +11,31 @@ Date: 2025-01-09
 import jax
 from jax import jit
 import jax.numpy as jnp
+import tree_math
 from collections import abc
 from typing import Tuple, Optional
+from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
+
+
+@tree_math.struct
+class _IconGeometry:
+    """Lightweight geometry adapter for ICON physics term functions.
+
+    Constructed from CoordinateSystem + TerrainData in compute_tendencies
+    and passed to the ICON physics term functions, providing the same
+    interface as the old Geometry class.
+    """
+    nodal_shape: tuple
+    fsg: jnp.ndarray  # sigma coordinates at level centers
+    hsg: jnp.ndarray  # sigma coordinates at half levels (boundaries)
+    lat: jnp.ndarray  # latitude in radians
+    lon: jnp.ndarray  # longitude in radians
+    fmask: jnp.ndarray  # fractional land-sea mask
 
 # Import physics modules (will be implemented progressively)
 from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme
@@ -74,6 +92,10 @@ class IconPhysics(Physics):
             params = params.with_timestep(dt_physics)
         self.parameters = params
         
+        # Cached coordinate data (populated by cache_coords)
+        self._coords = None
+        self._nodal_shape = None
+
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
@@ -89,11 +111,27 @@ class IconPhysics(Physics):
             apply_gravity_waves
         ]
     
+    def cache_coords(self, coords: CoordinateSystem):
+        """Cache coordinate system data needed by ICON physics."""
+        self._coords = coords
+        self._nodal_shape = coords.nodal_shape
+
+    def _build_geometry(self, terrain: TerrainData) -> _IconGeometry:
+        """Construct an _IconGeometry adapter from cached coords + terrain."""
+        return _IconGeometry(
+            nodal_shape=self._nodal_shape,
+            fsg=jnp.asarray(self._coords.vertical.centers),
+            hsg=jnp.asarray(self._coords.vertical.boundaries),
+            lat=jnp.asarray(self._coords.horizontal.latitudes),
+            lon=jnp.asarray(self._coords.horizontal.longitudes),
+            fmask=terrain.fmask,
+        )
+
     def compute_tendencies(
         self,
         state: PhysicsState,
         forcing: ForcingData,
-        geometry: Geometry,
+        terrain: TerrainData,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
         """
@@ -101,15 +139,17 @@ class IconPhysics(Physics):
 
         Args:
             state: Current state variables
-            parameters: Parameters object
-            boundaries: Boundary data
-            geometry: Geometry data
+            forcing: Forcing data
+            terrain: Terrain data (boundary conditions)
             date: Date data
 
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
         """
+        # Build geometry adapter from terrain + cached coords
+        geometry = self._build_geometry(terrain)
+
         physics_data = PhysicsData.zeros(
             (geometry.nodal_shape[1]*geometry.nodal_shape[2], ),
             geometry.nodal_shape[0],
@@ -249,37 +289,45 @@ class IconPhysics(Physics):
             tracers=reshaped_tracers
         )
     
-    def data_struct_to_dict(self, struct, geometry, sep="."):
+    def data_struct_to_dict(self, struct, nodal_shape=None, sep="."):
         """
         Convert physics data struct to dictionary, reshaping column data to 3D.
-        
+
         This overrides the base class method to handle ICON physics data which
         contains fields in column format that need reshaping for xarray output.
         """
         if struct is None:
             return {}
-        
+
+        nodal_shape = nodal_shape or self._nodal_shape
+
+        # Use a simple namespace to pass nodal_shape to helper methods
+        class _ShapeInfo:
+            pass
+        shape_info = _ShapeInfo()
+        shape_info.nodal_shape = nodal_shape
+
         # Get the base struct conversion or handle manually if needed
-        result = self._get_base_struct_dict(struct, geometry, sep)
-        
+        result = self._get_base_struct_dict(struct, shape_info, sep)
+
         # Reshape all arrays to add time dimension and convert column format to spatial grid
-        result = self._reshape_arrays_for_xarray(result, geometry)
-        
+        result = self._reshape_arrays_for_xarray(result, shape_info)
+
         # Handle multi-channel arrays and filter problematic fields
-        result = self._process_multi_channel_arrays(result, geometry)
-        
+        result = self._process_multi_channel_arrays(result, shape_info)
+
         # Filter out non-array and scalar fields
         return self._filter_xarray_compatible_fields(result)
     
-    def _get_base_struct_dict(self, struct, geometry, sep):
+    def _get_base_struct_dict(self, struct, shape_info, sep):
         """Get the base dictionary conversion, handling AttributeError gracefully."""
         try:
-            return super().data_struct_to_dict(struct, geometry, sep)
+            return super().data_struct_to_dict(struct, nodal_shape=shape_info.nodal_shape, sep=sep)
         except AttributeError:
             # Handle case where some fields are not arrays
-            return self._manual_struct_to_dict(struct, geometry, sep)
+            return self._manual_struct_to_dict(struct, shape_info, sep)
     
-    def _manual_struct_to_dict(self, struct, geometry, sep):
+    def _manual_struct_to_dict(self, struct, shape_info, sep):
         """Manual conversion when base class fails."""
         def _to_dict_recursive(obj, parent_key=""):
             items = {}
@@ -290,26 +338,27 @@ class IconPhysics(Physics):
                 else:
                     items[new_key] = val
             return items
-        
+
         result = _to_dict_recursive(struct)
-        
+        nodal_shape = shape_info.nodal_shape
+
         # Process array fields for multi-channel splitting (from base class)
         _original_keys = list(result.keys())
         for k in _original_keys:
             val = result[k]
             if hasattr(val, 'shape'):
                 s = val.shape
-                if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+                if len(s) == 5 and s[1:-1] == nodal_shape or len(s) == 4 and s[1:-1] == nodal_shape[1:]:
                     result.update({f"{k}.{i}": result[k][..., i] for i in range(s[-1])})
                     del result[k]
-        
+
         return result
     
-    def _reshape_arrays_for_xarray(self, result, geometry):
+    def _reshape_arrays_for_xarray(self, result, shape_info):
         """Reshape arrays to add time dimension and handle column format."""
         import numpy as np
-        
-        nlev, nlon, nlat = geometry.nodal_shape
+
+        nlev, nlon, nlat = shape_info.nodal_shape
         ncols = nlon * nlat
         
         for key, value in list(result.items()):
@@ -401,9 +450,9 @@ class IconPhysics(Physics):
         
         return None
     
-    def _process_multi_channel_arrays(self, result, geometry):
+    def _process_multi_channel_arrays(self, result, shape_info):
         """Handle multi-channel arrays and filter problematic fields."""
-        nlev, nlon, nlat = geometry.nodal_shape
+        nlev, nlon, nlat = shape_info.nodal_shape
                 
         _original_keys = list(result.keys())
         for k in _original_keys:
@@ -449,7 +498,7 @@ class IconPhysics(Physics):
         
         return filtered_result
 
-    def reshape_physics_data_to_3d(self, physics_data: PhysicsData, geometry: Geometry) -> PhysicsData:
+    def reshape_physics_data_to_3d(self, physics_data: PhysicsData, nodal_shape=None) -> PhysicsData:
         """
         Reshape PhysicsData from column format to 3D nodal format for output.
 
@@ -458,12 +507,13 @@ class IconPhysics(Physics):
 
         Args:
             physics_data: PhysicsData in column format (ncols,) or (nlev, ncols)
-            geometry: Geometry object containing nodal_shape information
+            nodal_shape: Tuple (nlev, nlon, nlat). If None, uses cached nodal_shape.
 
         Returns:
             PhysicsData with arrays reshaped to 3D nodal format
         """
-        nlev, nlon, nlat = geometry.nodal_shape
+        nodal_shape = nodal_shape or self._nodal_shape
+        nlev, nlon, nlat = nodal_shape
         ncols = nlon * nlat
 
         def reshape_array(arr):
@@ -498,7 +548,7 @@ def _prepare_common_physics_state(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Prepare common physics variables that are used by multiple physics modules.
@@ -608,7 +658,7 @@ def apply_radiation(state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply radiation heating rates"""
     
@@ -717,7 +767,7 @@ def apply_convection(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
     
@@ -767,7 +817,7 @@ def apply_clouds(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply shallow cloud scheme """
     
@@ -823,7 +873,7 @@ def apply_microphysics(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply cloud microphysics scheme"""
     
@@ -881,7 +931,7 @@ def apply_vertical_diffusion(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply vertical diffusion and boundary layer physics"""
     from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
@@ -1029,7 +1079,7 @@ def apply_surface(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply surface physics and calculate surface fluxes"""
     from jcm.physics.icon.surface.surface_types import AtmosphericForcing
@@ -1166,7 +1216,7 @@ def apply_gravity_waves(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply gravity wave drag"""
     nlev, ncols = state.temperature.shape
@@ -1212,7 +1262,7 @@ def apply_chemistry(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply chemistry tendencies
     

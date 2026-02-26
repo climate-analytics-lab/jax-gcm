@@ -1,5 +1,4 @@
-from jcm.geometry import Geometry
-from jcm.physics.icon.icon_physics import PhysicsData, Parameters
+from jcm.physics.icon.icon_physics import PhysicsData, Parameters, _IconGeometry
 from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 import jax.numpy as jnp
@@ -11,7 +10,7 @@ def apply_forcing_data(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Compute time-varying boundary conditions for ICON physics
@@ -21,7 +20,7 @@ def apply_forcing_data(
     
     Args:
         boundaries: Current boundary conditions
-        geometry: Geometry object containing latitude information
+        geometry: _IconGeometry object containing latitude information
         day_of_year: Day of year (1-365)
         time_of_day: Time of day (hours, 0-24)
         year: Year (for solar variability)

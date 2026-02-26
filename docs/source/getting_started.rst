@@ -41,16 +41,18 @@ An aquaplanet simulation is the simplest configuration - a water-covered planet 
 .. code-block:: python
 
    from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
    # Create a model with default aquaplanet configuration
    model = Model(
-       time_step=30.0,  # minutes
+      coords=get_speedy_coords(),  # T31 spectral resolution with 8 vertical levels
+      time_step=30.0  # minutes
    )
 
    # Run a 120-day simulation
    predictions = model.run(
-       save_interval=10.0,  # save every 10 days
-       total_time=120.0     # total simulation time in days
+      save_interval=10.0,  # save every 10 days
+      total_time=120.0     # total simulation time in days
    )
 
    # Convert output to xarray Dataset for analysis
@@ -67,30 +69,33 @@ For a more realistic simulation with orography and time-varying boundary conditi
 .. code-block:: python
 
    from jcm.model import Model
-   from jcm.geometry import Geometry
+   from jcm.terrain import TerrainData
    from jcm.forcing import ForcingData
    from importlib import resources
+
+   coords = get_speedy_coords()  # T31 spectral resolution with 8 vertical levels
 
    # Load realistic orography and land-sea mask, interpolated to T31 grid
    data_dir = resources.files("jcm.data.bc.t30.clim")
    terrain_file = data_dir / "terrain.nc"
-   geometry = Geometry.from_file(terrain_file, target_resolution=31)
+   terrain = TerrainData.from_file(terrain_file, coords=coords)
 
    # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid
    forcing_file = data_dir / "forcing.nc"
-   forcing = ForcingData.from_file(forcing_file, target_resolution=31)
+   forcing = ForcingData.from_file(forcing_file, coords=coords)
 
    # Create model with realistic configuration
    model = Model(
-       time_step=30.0,
-       geometry=geometry,
+      coords,
+      time_step=30.0,
+      terrain=terrain
    )
 
    # Run simulation
    predictions = model.run(
-       forcing=forcing,
-       save_interval=5.0,   # save every 5 days
-       total_time=30.0      # 30-day simulation
+      forcing=forcing,
+      save_interval=5.0,   # save every 5 days
+      total_time=30.0      # 30-day simulation
    )
 
    # Convert to xarray and save
@@ -106,14 +111,17 @@ You can customize various aspects of the model:
 
 .. code-block:: python
 
-   from jcm.geometry import Geometry
+   from jcm.terrain import TerrainData
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
    # Higher resolution: T85 (256x128 grid)
-   geometry = Geometry.from_spectral_truncation(spectral_truncation=85)
+   coords = get_speedy_coords(spectral_truncation=85)
+   terrain = TerrainData.aquaplanet(coords=coords)
 
    model = Model(
-       time_step=20.0,  # smaller timestep for stability
-       geometry=geometry
+      coords=coords,
+      time_step=20.0,  # smaller timestep for stability
+      terrain=terrain
    )
 
 **Physics**: Use different physics packages or configurations
@@ -122,6 +130,7 @@ You can customize various aspects of the model:
 
    from jcm.physics.speedy.speedy_physics import SpeedyPhysics
    from jcm.physics.speedy.params import Parameters
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
    # Customize physics parameters
    params = Parameters.default()
@@ -130,8 +139,9 @@ You can customize various aspects of the model:
    physics = SpeedyPhysics(parameters=params)
 
    model = Model(
-       time_step=30.0,
-       physics=physics
+      coords=get_speedy_coords(),
+      time_step=30.0,
+      physics=physics
    )
 
 **Initial Conditions**: Start from a specific state
@@ -175,6 +185,7 @@ To enable multi-device parallelization, simply pass an ``spmd_mesh`` when creati
 
    import jax
    from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
    # Check available devices
    print(f"Available devices: {jax.devices()}")
@@ -186,7 +197,7 @@ To enable multi-device parallelization, simply pass an ``spmd_mesh`` when creati
    #   - Don't split latitude (1)
    #   - Don't split vertical (1)
    # Otherwise, create and run model as usual
-   model = Model(spmd_mesh=(4, 1, 1))
+   model = Model(coords=get_speedy_coords(), spmd_mesh=(4, 1, 1))
    predictions = model.run(save_interval=5.0, total_time=30.0)
 
 Mesh Configuration Guidelines

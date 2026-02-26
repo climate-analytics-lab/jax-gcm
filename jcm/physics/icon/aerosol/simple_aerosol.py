@@ -6,7 +6,7 @@ from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.icon_physics import PhysicsTendency
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.physics.icon.icon_physics import _IconGeometry
 from .aerosol_params import AerosolParameters
 
 
@@ -15,7 +15,7 @@ def get_simple_aerosol(
     physics_data: PhysicsData,
     parameters: AerosolParameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> Tuple[PhysicsTendency, PhysicsData]:
     """
     Apply MACv2-SP (Simple Plumes) aerosol scheme

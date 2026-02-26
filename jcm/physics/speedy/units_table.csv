@@ -65,7 +65,7 @@ condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensatio
 surface_flux.rlus.2,W/m²,slru,Upward flux of long-wave radiation at the surface
 land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model
 mod_radcon.tau2.0,1,tau2,Transmissivity of atmospheric layers
-condensation.precls,kg/m²/s,precls,Precipitation due to large-scale condensation
+condensation.precls,g/m²/s,precls,Precipitation due to large-scale condensation
 mod_radcon.tau2.2,1,tau2,Transmissivity of atmospheric layers
 surface_flux.u0,m/s,u0,Near-surface u-wind
 surface_flux.rlus.0,W/m²,slru,Upward flux of long-wave radiation at the surface

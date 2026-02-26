@@ -7,15 +7,17 @@ running the full radiation and aerosol schemes that have JAX compatibility issue
 Date: 2025-01-11
 """
 
+import numpy as np
 import jax.numpy as jnp
 import pytest
-from jcm.physics.icon.icon_physics import IconPhysics, _prepare_common_physics_state
+from jcm.physics.icon.icon_physics import IconPhysics, _prepare_common_physics_state, _IconGeometry
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.date import DateData
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
 from typing import Tuple
 
 
@@ -24,7 +26,7 @@ def apply_simple_test_physics(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    geometry: _IconGeometry
 ) -> Tuple[PhysicsTendency, PhysicsData]:
     """Simple test physics that just returns small tendencies"""
     nlev, ncols = state.temperature.shape
@@ -56,7 +58,7 @@ def test_prepare_common_physics_state():
     # Setup
     nlev, nlat, nlon = 8, 64, 32
     ncols = nlat * nlon
-    
+
     # Create state
     tracers = {
         'qc': jnp.zeros((nlev, ncols)),
@@ -71,14 +73,23 @@ def test_prepare_common_physics_state():
         normalized_surface_pressure=jnp.ones(ncols),
         tracers=tracers
     )
-    
+
     # Create other inputs
     date = DateData.zeros()
     physics_data = PhysicsData.zeros((nlat, nlon), nlev, date=date)
     parameters = Parameters.default()
     forcing = ForcingData.zeros((nlat, nlon))
-    geometry = Geometry.from_grid_shape((nlat, nlon), num_levels=nlev)
-    
+    sigma_boundaries = np.linspace(0, 1, nlev + 1)
+    coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
+    geometry = _IconGeometry(
+        nodal_shape=coords.nodal_shape,
+        fsg=jnp.asarray(coords.vertical.centers),
+        hsg=jnp.asarray(coords.vertical.boundaries),
+        lat=jnp.asarray(coords.horizontal.latitudes),
+        lon=jnp.asarray(coords.horizontal.longitudes),
+        fmask=jnp.zeros((nlat, nlon)),
+    )
+
     # Run preparation
     tendencies, updated_physics_data = _prepare_common_physics_state(
         state, physics_data, parameters, forcing, geometry
@@ -97,7 +108,7 @@ def test_simple_physics_integration():
     # Setup
     nlev, nlat, nlon = 8, 64, 32
     ncols = nlat * nlon
-    
+
     # Create test physics with only simple terms
     class SimpleIconPhysics(IconPhysics):
         def __init__(self):
@@ -107,9 +118,14 @@ def test_simple_physics_integration():
                 _prepare_common_physics_state,
                 apply_simple_test_physics
             ]
-    
+
+    sigma_boundaries = np.linspace(0, 1, nlev + 1)
+    coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
+    terrain = TerrainData.aquaplanet(coords)
+
     physics = SimpleIconPhysics()
-    
+    physics.cache_coords(coords)
+
     # Create state with reshape to 3D
     shape_3d = (nlev, nlat, nlon)
     tracers = {
@@ -125,15 +141,14 @@ def test_simple_physics_integration():
         normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers=tracers
     )
-    
+
     # Create other inputs
     date = DateData.zeros()
     forcing = ForcingData.zeros((nlat, nlon))
-    geometry = Geometry.from_grid_shape((nlat, nlon), num_levels=nlev)
-    
+
     # Run physics
     tendencies, physics_data = physics.compute_tendencies(
-        state, forcing, geometry, date
+        state, forcing, terrain, date
     )
     
     # Check outputs
@@ -152,10 +167,15 @@ def test_physics_vectorization():
     """Test that physics properly vectorizes over columns"""
     # Setup
     nlev, nlat, nlon = 8, 64, 32
-    
+
+    sigma_boundaries = np.linspace(0, 1, nlev + 1)
+    coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
+    terrain = TerrainData.aquaplanet(coords)
+
     physics = IconPhysics()
+    physics.cache_coords(coords)
     physics.terms = [_prepare_common_physics_state, apply_simple_test_physics]
-    
+
     # Create state - make temperature vary by column
     shape_3d = (nlev, nlat, nlon)
     temp_base = 280.0
@@ -163,7 +183,7 @@ def test_physics_vectorization():
     # Add variation by latitude
     for i in range(nlat):
         temperature = temperature.at[:, i, :].set(temp_base + i * 2.0)
-    
+
     tracers = {'qc': jnp.zeros(shape_3d)}
     state = PhysicsState(
         temperature=temperature,
@@ -174,15 +194,14 @@ def test_physics_vectorization():
         normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers=tracers
     )
-    
+
     # Create other inputs
     date = DateData.zeros()
     forcing = ForcingData.zeros((nlat, nlon))
-    geometry = Geometry.from_grid_shape((nlat, nlon), num_levels=nlev)
-    
+
     # Run physics
     tendencies, physics_data = physics.compute_tendencies(
-        state, forcing, geometry, date
+        state, forcing, terrain, date
     )
     
     # Check that all columns got processed

@@ -6,7 +6,7 @@ saturation specific humidity.
 import jax
 from jax import jit
 import jax.numpy as jnp
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -18,7 +18,7 @@ def spec_hum_to_rel_hum(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Convert specific humidity to relative humidity, and also return saturation
     specific humidity.
@@ -39,7 +39,7 @@ def spec_hum_to_rel_hum(
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
-    qsat = map_qsat(state.temperature, psa, geometry.fsg)
+    qsat = map_qsat(state.temperature, psa, physics_data.speedy_coords.fsg)
     rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 

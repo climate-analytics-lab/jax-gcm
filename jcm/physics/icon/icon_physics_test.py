@@ -26,18 +26,20 @@ class TestIconPhysicsIntegration(unittest.TestCase):
         - Convection causing temperature blowup (to 1300 K in 4-6 hours)
         - Vertical diffusion producing T=0K
         """
+        import numpy as np
         from jcm.utils import get_coords
-        from jcm.geometry import Geometry
+        from jcm.terrain import TerrainData
 
         # Create model with ICON physics using sigma coordinates
-        coords = get_coords(hybrid_vertical=False, layers=40, spectral_truncation=31)
-        geometry = Geometry.from_coords(coords)
+        sigma_boundaries = np.linspace(0, 1, 41)  # 40 layers
+        coords = get_coords(sigma_boundaries, spectral_truncation=31)
+        terrain = TerrainData.aquaplanet(coords)
 
         model = Model(
-            geometry=geometry,
+            coords=coords,
             time_step=30,  # 30 minutes - reasonable for atmospheric physics
+            terrain=terrain,
             physics=IconPhysics(),
-            use_hybrid_coords=False
         )
         
         # Run the model for 6 hours (with radiation/convection bugs should crash)

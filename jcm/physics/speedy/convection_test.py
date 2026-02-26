@@ -10,17 +10,21 @@ class TestConvectionUnit(unittest.TestCase):
         global ix, il, kx
         ix, il, kx = 96, 48, 8
         
-        global ConvectionData, HumidityData, ForcingData, PhysicsData, PhysicsState, parameters, forcing, geometry, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
+        global ConvectionData, HumidityData, ForcingData, PhysicsData, PhysicsState, parameters, forcing, terrain, speedy_coords, diagnose_convection, get_convection_tendencies, PhysicsTendency, get_qsat, rgas, cp, fsg, grdscp, grdsig
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.params import Parameters
-        from jcm.geometry import Geometry
-        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        fsg = speedy_coords.fsg
+        grdscp = speedy_coords.grdscp
+        grdsig = speedy_coords.grdsig
         parameters = Parameters.default()
         forcing = ForcingData.zeros((ix, il))
-        geometry = convert_to_speedy_latitudes(Geometry.from_grid_shape(nodal_shape=(ix, il), num_levels=kx))
-        fsg = geometry.fsg
-        grdscp = geometry.grdscp
-        grdsig = geometry.grdsig
+
         from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.speedy.convection import diagnose_convection, get_convection_tendencies
@@ -35,7 +39,9 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
         
-        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, forcing, geometry)
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+
+        iptop, qdif = diagnose_convection(ps, se, qa, qsat, parameters, physics_data, forcing, terrain)
 
         from importlib import resources
         test_data_dir = resources.files('jcm.data.test')
@@ -57,7 +63,8 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat, (1, ix, il))
         
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast, qsat_broadcast, parameters, forcing, geometry)
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast, qsat_broadcast, parameters, physics_data, forcing, terrain)
         
         self.assertTrue(jnp.allclose(itop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(qdif, jnp.zeros((ix, il))))
@@ -66,19 +73,19 @@ class TestConvectionUnit(unittest.TestCase):
         xy = (ix, il)
         zxy = (kx, ix, il)
         
-        physics_data = PhysicsData.ones(xy, kx)
+        physics_data = PhysicsData.ones(xy, kx, speedy_coords=speedy_coords)
         
         state = PhysicsState.ones(zxy)
 
         forcing = ForcingData.ones(xy)
         
-        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, forcing, geometry)
+        primals, f_vjp = jax.vjp(get_convection_tendencies, state, physics_data, parameters, forcing, terrain)
         
         tends = PhysicsTendency.ones(zxy)
-        datas = PhysicsData.ones(xy, kx)
+        datas = PhysicsData.ones(xy, kx, speedy_coords=speedy_coords)
         input = (tends, datas)
         
-        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dgeometry = f_vjp(input)
+        df_dstate, df_ddatas, df_dparams, df_dforcing, df_dterrain = f_vjp(input)
         
         self.assertFalse(df_ddatas.isnan().any_true())
         self.assertFalse(df_dstate.isnan().any_true())
@@ -98,7 +105,9 @@ class TestConvectionUnit(unittest.TestCase):
         qa_broadcast = jnp.tile(qa[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
         qsat_broadcast = jnp.tile(qsat[:, jnp.newaxis, jnp.newaxis], (1, ix, il))
 
-        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters, forcing, geometry)
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+
+        itop, qdif = diagnose_convection(psa, se_broadcast, qa_broadcast * 1000., qsat_broadcast * 1000., parameters,physics_data, forcing, terrain)
 
         test_itop = 5
         test_qdif = 1.1395
@@ -115,10 +124,10 @@ class TestConvectionUnit(unittest.TestCase):
 
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
-        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, speedy_coords=speedy_coords)
         forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, terrain)
 
         from importlib import resources
         test_data_dir = resources.files('jcm.data.test')
@@ -156,11 +165,11 @@ class TestConvectionUnit(unittest.TestCase):
         
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast)
         state = PhysicsState.zeros((kx, ix, il), temperature=temp, geopotential=phi, specific_humidity=qa_broadcast, normalized_surface_pressure=psa)
-        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, speedy_coords=speedy_coords)
 
         forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, terrain)
 
         self.assertTrue(jnp.allclose(physics_data.convection.iptop, jnp.ones((ix, il))*9))
         self.assertTrue(jnp.allclose(physics_data.convection.cbmf, jnp.zeros((ix, il))))
@@ -188,11 +197,11 @@ class TestConvectionUnit(unittest.TestCase):
 
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat_broadcast*1000.)
         state = PhysicsState.zeros(zxy, temperature=temp, geopotential=phi, specific_humidity=qa_broadcast*1000.,normalized_surface_pressure=psa)
-        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, speedy_coords=speedy_coords)
 
         forcing = ForcingData.zeros((ix,il))
 
-        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, geometry)
+        physics_tendencies, physics_data = get_convection_tendencies(state, physics_data, parameters, forcing, terrain)
 
         test_cbmf = jnp.array(0.019614903)
         test_precnv = jnp.array(0.21752352)
@@ -228,26 +237,29 @@ class TestConvectionUnit(unittest.TestCase):
         qa = jnp.sin(2*jnp.arange(ix)[jnp.newaxis, :, jnp.newaxis]/ix)**2 * qsat * 3.5
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         se = cp * ta + phi
-        
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+
         # Set float inputs
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
+        physics_data_floats = convert_to_float(physics_data)
 
-        def f(ps, se, qa, qsat, parameters_f, forcing_f,geometry_f):
+        def f(ps, se, qa, qsat, parameters_f, physics_data_f, forcing_f,terrain_f):
             iptop, qdif = diagnose_convection(ps, se, qa, qsat, 
-                                       parameters=convert_back(parameters_f, parameters), 
+                                       parameters=convert_back(parameters_f, parameters),
+                                       physics_data=convert_back(physics_data_f, physics_data), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(iptop), convert_to_float(qdif)
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
 
 
@@ -260,7 +272,7 @@ class TestConvectionUnit(unittest.TestCase):
         phi = rgas * ta * jnp.log(fsg[:, jnp.newaxis, jnp.newaxis])
         humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
         state = PhysicsState.zeros((kx, ix, il), temperature=ta, geopotential=phi,specific_humidity=qa, normalized_surface_pressure=ps)
-        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity)
+        physics_data = PhysicsData.zeros((ix, il), kx, humidity=humidity, speedy_coords=speedy_coords)
         forcing = ForcingData.zeros((ix,il))
 
         # Set float inputs
@@ -268,14 +280,14 @@ class TestConvectionUnit(unittest.TestCase):
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        geometry_floats = convert_to_float(geometry)
+        terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,geometry_f):
+        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       geometry=convert_back(geometry_f, geometry)
+                                       terrain=convert_back(terrain_f, terrain)
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
         
@@ -283,9 +295,9 @@ class TestConvectionUnit(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, geometry_floats), 
+        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.001)
 
 

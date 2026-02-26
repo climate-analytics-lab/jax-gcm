@@ -16,7 +16,8 @@ from pathlib import Path
 
 from jcm.model import Model
 from jcm.physics.icon import IconPhysics
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
 from jcm.date import DateData
 
 

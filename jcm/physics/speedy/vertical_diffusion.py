@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import cp, alhc
@@ -13,7 +13,7 @@ def get_vertical_diffusion_tend(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Get vertical diffusion tendencies.
     
@@ -43,8 +43,8 @@ def get_vertical_diffusion_tend(
     qtenvd = jnp.zeros((kx,ix,il))
 
     nl1 = kx - 1
-    cshc = geometry.dhs[kx - 1] / 3600.0
-    cvdi = (geometry.hsg[nl1] - geometry.hsg[1]) / ((nl1 - 1) * 3600.0)
+    cshc = physics_data.speedy_coords.dhs[kx - 1] / 3600.0
+    cvdi = (physics_data.speedy_coords.hsg[nl1] - physics_data.speedy_coords.hsg[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / parameters.vertical_diffusion.trshc
     fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
@@ -52,13 +52,13 @@ def get_vertical_diffusion_tend(
     fvdiq = cvdi / parameters.vertical_diffusion.trvdi
     fvdise = cvdi / (parameters.vertical_diffusion.trvds * cp)
 
-    rsig = 1.0 / geometry.dhs
-    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - geometry.hsg[1:-1]))
+    rsig = 1.0 / physics_data.speedy_coords.dhs
+    rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - physics_data.speedy_coords.hsg[1:-1]))
     rsig1 = rsig1.at[-1].set(0.0)
     
     # Step 2: Shallow convection
-    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[kx - 1] - geometry.fsg[nl1 - 1])
-    fvdiq2 = fvdiq * geometry.hsg[nl1]
+    drh0 = parameters.vertical_diffusion.rhgrad * (physics_data.speedy_coords.fsg[kx - 1] - physics_data.speedy_coords.fsg[nl1 - 1])
+    fvdiq2 = fvdiq * physics_data.speedy_coords.hsg[nl1]
 
     # Calculate dmse and drh arrays
     dmse = se[kx - 1] - se[nl1 - 1] + alhc * (qa[kx - 1] - qsat[nl1 -1])
@@ -98,11 +98,11 @@ def get_vertical_diffusion_tend(
     
     # Step 3: Vertical diffusion of moisture above the PBL
     k_range = jnp.arange(2, kx - 2)
-    condition = geometry.hsg[k_range + 1] > 0.5
+    condition = physics_data.speedy_coords.hsg[k_range + 1] > 0.5
 
     # Vectorized calculation of drh0 and fvdiq2 for all selected k values
-    drh0 = parameters.vertical_diffusion.rhgrad * (geometry.fsg[k_range + 1] - geometry.fsg[k_range])  # Shape: (len(k_range),)
-    fvdiq2 = fvdiq * geometry.hsg[k_range + 1]  # Shape: (len(k_range),)
+    drh0 = parameters.vertical_diffusion.rhgrad * (physics_data.speedy_coords.fsg[k_range + 1] - physics_data.speedy_coords.fsg[k_range])  # Shape: (len(k_range),)
+    fvdiq2 = fvdiq * physics_data.speedy_coords.hsg[k_range + 1]  # Shape: (len(k_range),)
 
     # Calculate drh for all selected k values across the entire ix and il dimensions
     drh = rh[k_range + 1] - rh[k_range]  # Shape: (ix, il, len(k_range))

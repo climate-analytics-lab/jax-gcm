@@ -171,6 +171,3 @@ startup.sh
 
 docs/build
 docs/source/generated
-
-# Claude files
-CLAUDE.md
