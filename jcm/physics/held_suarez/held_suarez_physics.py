@@ -2,19 +2,16 @@ import jax.numpy as jnp
 from typing import Tuple
 from dinosaur.scales import units
 from dinosaur import coordinate_systems
-from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
-from jcm.model import get_coords, PHYSICS_SPECS
+from jcm.model import PHYSICS_SPECS
 from jcm.date import DateData
 
 Quantity = units.Quantity
 
 class HeldSuarezPhysics(Physics):
-    write_output: bool
-
     def __init__(self,
-        coords: coordinate_systems.CoordinateSystem = get_coords(),
         sigma_b: Quantity = 0.7,
         kf: Quantity = 1 / (1 * units.day),
         ka: Quantity = 1 / (40 * units.day),
@@ -27,7 +24,6 @@ class HeldSuarezPhysics(Physics):
         """Initialize Held-Suarez.
 
         Args:
-            coords: horizontal and vertical discretization
             sigma_b: sigma level of effective planetary boundary layer.
             kf: coefficient of friction for Rayleigh drag.
             ka: coefficient of thermal relaxation in upper atmosphere.
@@ -36,9 +32,8 @@ class HeldSuarezPhysics(Physics):
             maxT: upper temperature bound of radiative equilibrium.
             dTy: horizontal temperature variation of radiative equilibrium.
             dThz: vertical temperature variation of radiative equilibrium.
+
         """
-        self.write_output = False
-        self.coords = coords
         self.sigma_b = sigma_b
         self.kf = PHYSICS_SPECS.nondimensionalize(kf)
         self.ka = PHYSICS_SPECS.nondimensionalize(ka)
@@ -47,9 +42,13 @@ class HeldSuarezPhysics(Physics):
         self.maxT = PHYSICS_SPECS.nondimensionalize(maxT)
         self.dTy = PHYSICS_SPECS.nondimensionalize(dTy)
         self.dThz = PHYSICS_SPECS.nondimensionalize(dThz)
-        # Coordinates
+        
+    def cache_coords(self, coords: coordinate_systems.CoordinateSystem):
+        """Cache model coordinate system for Held-Suarez physics"""
+        self.coords = coords
         self.sigma = self.coords.vertical.centers
         self.lat = self.coords.horizontal.latitudes
+        return
 
     def equilibrium_temperature(self, normalized_surface_pressure):
         p_over_p0 = (
@@ -77,22 +76,22 @@ class HeldSuarezPhysics(Physics):
     def compute_tendencies(
         self,
         state: PhysicsState,
-        boundaries: BoundaryData,
-        geometry: Geometry,
+        forcing: ForcingData,
+        terrain: TerrainData,
         date: DateData,
     ) -> Tuple[PhysicsTendency, None]:
-        """
-        Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
+        """Compute the physical tendencies given the current state and data structs. Tendencies are computed as a Held-Suarez forcing.
 
         Args:
             state: Current state variables
-            boundaries: Boundary data (unused)
-            geometry: Geometry data (unused)
+            forcing: Forcing data (unused)
+            terrain: Terrain data (unused)
             date: Date data (unused)
 
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (unused)
+
         """
         Teq = self.equilibrium_temperature(state.normalized_surface_pressure)
         d_temperature = -self.kt() * (state.temperature - Teq)

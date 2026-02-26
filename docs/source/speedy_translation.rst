@@ -58,7 +58,7 @@ Condensation
      - ``dtlsc``
      - Temperature tendency due to large-scale condensation
    * - ``precls``
-     - kg/m²/s
+     - g/m²/s
      - ``precls``
      - Precipitation due to large-scale condensation
 
@@ -86,6 +86,10 @@ Convection
      - g/m²/s
      - ``precnv``
      - Convective precipitation [g/(m^2 s)]
+   * - ``qdif``
+     - g/kg
+     - ``qdif``
+     - Excess humidity in convective gridboxes
    * - ``se``
      - J/kg
      - ``se``
@@ -314,7 +318,7 @@ Surface_flux
      - Speedy Equivalent
      - Description
    * - ``evap``
-     - kg/m²/s
+     - g/m²/s
      - ``evap``
      - Evaporation
    * - ``hfluxn``

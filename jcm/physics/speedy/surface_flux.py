@@ -3,8 +3,8 @@ import jax.numpy as jnp
 from jax import jit
 
 # importing custom functions from library
-from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -17,11 +17,10 @@ def get_surface_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
-    geometry: Geometry
+    forcing: ForcingData,
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Parameters
+    """Parameters
     ----------
     psa : 2D array
         - Normalised surface pressure, state.normalized_surface_pressure
@@ -38,20 +37,19 @@ def get_surface_fluxes(
     phi : 3D array
         - Geopotential, state.geopotential
     phi0 : 2D array
-        - Surface geopotential, boundaries.orog * grav
+        - Surface geopotential, terrain.orog * grav
     fmask : 2D array
         - Fractional land-sea mask, physics_data.surface_flux.fmask
-    tsea : 2D array
-        - Sea-surface temperature, boundaries.tsea
+    sea_surface_temperature : 2D array
+        - Sea-surface temperature, forcing.sea_surface_temperature
     rsds : 2D array
         - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
     rlds : 2D array
         - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
     lfluxland : boolean, physics_data.surface_flux.lfluxland"
     """
-    day = physics_data.date.model_day()
-    stl_am = physics_data.land_model.stl_am
-    soilw_am = boundaries.soilw_am[:,:,day]
+    stl_am = forcing.stl_am
+    lfluxland = terrain.lfluxland
     kx, ix, il = state.temperature.shape
 
     psa = state.normalized_surface_pressure
@@ -60,15 +58,13 @@ def get_surface_fluxes(
     ta = state.temperature
     qa = state.specific_humidity
     phi = state.geopotential
-    fmask = boundaries.fmask
+    fmask = terrain.fmask
 
-    lfluxland = boundaries.lfluxland
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = boundaries.orog * grav # surface geopotential
-    tsea = boundaries.tsea[:,:,day]
+    phi0 = terrain.orog * grav # surface geopotential
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
@@ -92,52 +88,68 @@ def get_surface_fluxes(
 
     u0 = parameters.surface_flux.fwind0*ua[kx-1]
     v0 = parameters.surface_flux.fwind0*va[kx-1]
+
+    def compute_evap_true(operand):
+        q1, qsat0, idx = operand
+        q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[kx-1])
+        q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[kx-1])
+        qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
+        return q1, qsat0
+    
+    def compute_evap_false(operand):
+        q1, qsat0, idx = operand
+        q1 = q1.at[:, :, idx].set(qa[kx-1])
+        return q1, qsat0
+    
+    rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
+
+    astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
+
+    # 1.1 Wind components
+    rcp = 1.0/cp
+    nl1 = kx-1
+    gtemp0 = 1.0 - parameters.surface_flux.ftemp0
+
+    # substituting the for loop at line 109
+    # Temperature difference between lowest level and sfc
+    # line 112
+    dt1 = physics_data.speedy_coords.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
+    
+    # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
+    # line 115 - 116
+    t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
+    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*physics_data.speedy_coords.sigl[kx-1]))
+
+    # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
+    # line 119 - 120
+    t2 = t2.at[:, :, 1].set(ta[kx-1] + rcp*phi[kx-1])
+    t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
+
+    # lines 124 - 137
+    t1 = jnp.where((ta[kx-1] > ta[nl1-1])[:, :, jnp.newaxis],
+                parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
+                ta[kx-1][:, :, jnp.newaxis])
+    
+    t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
+
+    # 1.3 Density * wind speed (including gustiness factor)
+    denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
+
+
     ##########################################################
     # Land surface
     ##########################################################
 
     def land_fluxes(operand):
         u0,v0,ustr,vstr,shf,evap,rlus,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
-        # 1.1 Wind components
-        rcp = 1.0/cp
-        nl1 = kx-1
-        gtemp0 = 1.0 - parameters.surface_flux.ftemp0
-
-        # substituting the for loop at line 109
-        # Temperature difference between lowest level and sfc
-        # line 112
-        dt1 = geometry.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
-        
-        # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
-        # line 115 - 116
-        t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-        t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*geometry.sigl[kx-1]))
-
-        # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
-        # line 119 - 120
-        t2 = t2.at[:, :, 1].set(ta[kx-1] + rcp*phi[kx-1])
-        t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
-
-        # lines 124 - 137
-        t1 = jnp.where((ta[kx-1] > ta[nl1-1])[:, :, jnp.newaxis],
-                    parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
-                    ta[kx-1][:, :, jnp.newaxis])
-        
-        t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
-
-        # 1.3 Density * wind speed (including gustiness factor)
-        denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
 
         # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes
-        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by definig effective skin temperature
+        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by defining effective skin temperature
 
         # Vectorized computation using JAX arrays
-        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(geometry.coa) * rsds * (1.0 - alb_l) * psa
+        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(physics_data.speedy_coords.coa) * rsds * (1.0 - alb_l) * psa
 
         # 2.2 Stability Correlation
-        rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
-
-        astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
 
         dthl = jnp.where(
             tskin > t2[:, :, 0],
@@ -148,7 +160,7 @@ def get_surface_fluxes(
         denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
 
         # 2.3 Computing Wind Stress
-        forog = get_orog_land_sfc_drag(boundaries.phis0, parameters.surface_flux.hdrag)
+        forog = get_orog_land_sfc_drag(terrain.phis0, parameters.surface_flux.hdrag)
         cdldv = parameters.surface_flux.cdl * denvvs[:, :, 0] * forog
         ustr = ustr.at[:, :, 0].set(-cdldv * ua[kx-1])
         vstr = vstr.at[:, :, 0].set(-cdldv * va[kx-1])
@@ -158,24 +170,13 @@ def get_surface_fluxes(
         shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
         
         # 2.5 Computing Evaporation
-        def compute_evap_true(operand):
-            q1, qsat0, idx = operand
-            q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[kx-1])
-            q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[kx-1])
-            qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
-            return q1, qsat0
-        
-        def compute_evap_false(operand):
-            q1, qsat0, idx = operand
-            q1 = q1.at[:, :, idx].set(qa[kx-1])
-            return q1, qsat0
-        
+
         q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 0))
 
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
         evap = evap.at[:, :, 0].set(parameters.surface_flux.chl * denvvs[:, :, 1] *\
-                    jnp.maximum(0.0, soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
+                    jnp.maximum(0.0, forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
 
         # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
         # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
@@ -202,7 +203,7 @@ def get_surface_fluxes(
             qsat0 = qsat0.at[:, :, 1].set(
                     jnp.where(
                         evap[:, :, 0] > 0.0,
-                        soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
+                        forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
                         0.0
                     )
                 )
@@ -223,23 +224,6 @@ def get_surface_fluxes(
             parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, rlus, evap, shf, tskin, qsat0)
         )
 
-        dths = jnp.where(
-            tsea > t2[:, :, 1],
-            jnp.minimum(parameters.surface_flux.dtheta, tsea - t2[:, :, 1]),
-            jnp.maximum(-parameters.surface_flux.dtheta, astab * (tsea - t2[:, :, 1]))
-        )
-        
-        denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
-
-        q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
-
-        # 4.2 Wind Stress
-        ks = 2
-
-        cdsdv = parameters.surface_flux.cds * denvvs[:, :, ks]
-        ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
-        vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
-
         return (u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
     
     tskin = jnp.zeros_like(stl_am)
@@ -250,43 +234,47 @@ def get_surface_fluxes(
     # Sea Surface
     ##########################################################
 
+    dths = jnp.where(
+        forcing.sea_surface_temperature > t2[:, :, 1],
+        jnp.minimum(parameters.surface_flux.dtheta, forcing.sea_surface_temperature - t2[:, :, 1]),
+        jnp.maximum(-parameters.surface_flux.dtheta, astab * (forcing.sea_surface_temperature - t2[:, :, 1]))
+    )
+    
+    denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
+
+    q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
+
+    # 4.2 Wind Stress
     ks = 2
 
+    cdsdv = parameters.surface_flux.cds * denvvs[:, :, ks]
+    ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
+    vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
+
     # 4.3 Sensible heat flux
-    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (tsea - t1[:, :, 1]))
+    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
 
     # 4.4 Evaporation
-    qsat0 = qsat0.at[:, :, 1].set(get_qsat(tsea, psa, 1.0))
+    qsat0 = qsat0.at[:, :, 1].set(get_qsat(forcing.sea_surface_temperature, psa, 1.0))
     evap = evap.at[:, :, 1].set(parameters.surface_flux.chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
     
     # 4.5 Lw emission and net heat fluxes
-    rlus = rlus.at[:, :, 1].set(esbc * (tsea ** 4.0))
+    rlus = rlus.at[:, :, 1].set(esbc * (forcing.sea_surface_temperature ** 4.0))
     hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
 
-    def weight_avg_landfluxes(operand):
+    ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
+    vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
+    shf = shf.at[:, :, 2].set(weighted_average(shf))
+    evap = evap.at[:, :, 2].set(weighted_average(evap))
+    rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
 
-        ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = operand
-        ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
-        vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
-        shf = shf.at[:, :, 2].set(weighted_average(shf))
-        evap = evap.at[:, :, 2].set(weighted_average(evap))
-        rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
+    t0 = weighted_average(t1)
 
-        t0 = weighted_average(t1)
-
-        tsfc  = tsea + fmask * (stl_am - tsea)
-        tskin = tsea + fmask * (tskin  - tsea)
-
-        return (ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
-    
-    t0 = jnp.zeros_like(t1[:,:,0])
-    tsfc = jnp.zeros_like(stl_am)
-    ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin = jax.lax.cond(
-        lfluxland, weight_avg_landfluxes, pass_fn, operand=(ustr, vstr, shf, evap, rlus, t1, t0, tsfc, tskin)
-    )
+    tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
+    tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
 
     surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, rlus=rlus,
                                                       hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
@@ -294,23 +282,21 @@ def get_surface_fluxes(
 
     # Compute tendencies due to surface fluxes (physics.f90:197-205)
     rps = 1.0 / state.normalized_surface_pressure
-    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*geometry.grdsig[-1])
-    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*geometry.grdsig[-1])
-    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*geometry.grdscp[-1])
-    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*geometry.grdsig[-1])
+    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
+    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
+    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*physics_data.speedy_coords.grdscp[-1])
+    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
     physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
 
     return physics_tendencies, physics_data
 
 @jit
 def get_orog_land_sfc_drag(phis0, hdrag):
-    """
-    Parameters
+    """Parameters
     ----------
     phi0 : Array
         - Array used for calculating the forog
     """
-
     rhdrag = 1/(grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))

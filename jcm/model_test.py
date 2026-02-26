@@ -1,6 +1,10 @@
 import unittest
+import jax
 import jax.tree_util as jtu
+import jax.numpy as jnp
 import pytest
+from jax.test_util import check_vjp, check_jvp
+import functools
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -11,9 +15,14 @@ class TestModelUnit(unittest.TestCase):
     def test_held_suarez_model(self):
         from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
         from jcm.model import Model
-        layers = 8
+        from jcm.terrain import TerrainData
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+
+        coords = get_held_suarez_coords()
+        terrain = TerrainData.from_coords(coords)
         model = Model(
-            layers=layers,
+            coords=coords,
+            terrain=terrain,
             time_step=180,
             physics=HeldSuarezPhysics(),
         )
@@ -53,9 +62,11 @@ class TestModelUnit(unittest.TestCase):
         
     def test_speedy_model(self):
         from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        # optionally add a boundary conditions file
+        # Create model that goes through one timestep
         model = Model(
+            coords=get_speedy_coords(),
             time_step=720,
         )
 
@@ -65,7 +76,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=total_time,
         )
         final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
-        
+
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
 
@@ -97,16 +108,44 @@ class TestModelUnit(unittest.TestCase):
         self.assertTupleEqual(dynamics_predictions.specific_humidity.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.geopotential.shape, nodal_tzxy)
         self.assertTupleEqual(dynamics_predictions.normalized_surface_pressure.shape, (nodal_tzxy[0],) + nodal_tzxy[2:])
-    
+
+    @pytest.mark.slow
+    def test_speedy_model_averages(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        model = Model(
+            coords=get_speedy_coords(),
+            time_step=30, # to make sure this test stays valid if we ever change the default timestep
+        )
+        preds = model.run(save_interval=.5/24., total_time=2/24.)
+
+        true_avg_preds = jtu.tree_map(lambda a: jnp.mean(a, axis=0), preds)
+
+        avg_model = Model(
+            coords=get_speedy_coords(),
+            time_step=30,
+        )
+        avg_preds = avg_model.run(
+            save_interval=2/24.,
+            total_time=2/24.,
+            output_averages=True,
+        )
+
+        jtu.tree_map(
+            lambda a1, a2: self.assertTrue(jnp.allclose(a1, a2, atol=1e-4)),
+            true_avg_preds,
+            avg_preds
+        )
+
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
-        import jax
-        import jax.numpy as jnp
         from jcm.model import Model
         from jcm.utils import ones_like
-
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
         # Create model that goes through one timestep
-        model = Model()
+        
+        model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_modal_state()
 
         def fn(state):
@@ -130,12 +169,11 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
-        import jax
-        import jax.numpy as jnp
         from jcm.model import Model
         from jcm.utils import ones_like
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        model = Model()
+        model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_modal_state()
 
         def fn(state):
@@ -156,30 +194,26 @@ class TestModelUnit(unittest.TestCase):
 
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
-        import jax
-        from jcm.model import Model, get_coords
-        from jcm.boundaries import boundaries_from_file
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.forcing import ForcingData
         from jcm.utils import ones_like
 
-        from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
-        
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
-        
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+
+        coords = get_speedy_coords()
+        terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            coords=coords,
+            terrain=terrain,
             physics=SpeedyPhysics(parameters=params),
         )
-        
-        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+
+        fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)
 
         # Calculate gradients using VJP
         params = Parameters.default()
@@ -190,48 +224,35 @@ class TestModelUnit(unittest.TestCase):
     
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
-        import jax
-        import jax.numpy as jnp
-        import numpy as np
-        from jcm.model import Model, get_coords
-        from jcm.boundaries import boundaries_from_file
-
-        def make_ones_parameters_object(params):
-            def make_tangent(x):
-                if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
-                    return np.ones((), dtype=jax.dtypes.float0)
-                elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
-                    return np.ones((), dtype=jax.dtypes.float0)
-                else:
-                    return jnp.ones_like(x)
-            return jtu.tree_map(lambda x: make_tangent(x), params)
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.forcing import ForcingData
+        from jcm.utils import ones_like_tangent
         
-        from pathlib import Path
-        boundaries_dir = Path(__file__).resolve().parent / 'data/bc/t30/clim'
-        
-        if not (boundaries_dir / 'boundaries_daily.nc').exists():
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, str(boundaries_dir / 'interpolate.py')], check=True)
+        from importlib import resources
+        data_dir = resources.files('jcm.data.bc.t30.clim')
 
-        boundaries = boundaries_from_file(
-            boundaries_dir / 'boundaries_daily.nc',
-            get_coords().horizontal
-        )
+        coords = get_speedy_coords()
+        # need coords to create terrain
+        terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
+        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
+        # coords need to be passed to model init
         create_model = lambda params=Parameters.default(): Model(
-            orography=boundaries.orog,
+            coords=coords,
+            terrain=terrain,
             physics=SpeedyPhysics(parameters=params),
         )
 
-        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24.)
+        model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)
 
         # Calculate gradients using JVP
         params = Parameters.default()
-        tangent = make_ones_parameters_object(params)
-        y, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
+        tangent = ones_like_tangent(params)
+        _, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
         state = jvp_sum.dynamics
-        physics_data = jvp_sum.physics
+        # physics_data = jvp_sum.physics
 
         # Check dynamics state
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
@@ -243,5 +264,54 @@ class TestModelUnit(unittest.TestCase):
         # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
         # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+
+    @pytest.mark.skip(reason="finite differencing produces nans")
+    def test_speedy_model_state_gradient_check(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        # Create model that goes through one timestep
+        model = Model(coords=get_speedy_coords())
+        state = model._prepare_initial_modal_state()
+
+        def f(state_f):
+            _ = model.run(total_time=0) # to set up model fields
+            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
+            return model._final_modal_state, predictions
+        
+        # Calculate gradient
+        f_jvp = functools.partial(jax.jvp, f)
+        f_vjp = functools.partial(jax.vjp, f) 
+
+        check_vjp(f, f_vjp, args = (state,), 
+                                atol=None, rtol=1, eps=0.00001)
+        check_jvp(f, f_jvp, args = (state,), 
+                                atol=None, rtol=1, eps=0.001)    
+    
+    @pytest.mark.slow
+    def test_speedy_model_default_statistics(self):
+        from jcm.data.test.t30.generate_default_stats import run_default_speedy_model, default_stat_vars
+        import xarray as xr
+        from importlib import resources
+
+        # load test file for comparison
+        stats_file = resources.files('jcm.data.test.t30') / 'default_statistics.nc'
+        default_stats = xr.open_dataset(stats_file)
+
+        model, predictions = run_default_speedy_model(save_interval=30.)
+        pred_ds = predictions.to_xarray()
+        pred_ds_monthly = pred_ds.isel(time=-1).mean(dim={'lon', 'lat'}) # global monthly mean, take the last month
+
+        # tolerance in # of standard deviations
+        tol = 3
+
+        # check whether zonal averages over the last month are within 2 std deviations of the expected values
+        for var in default_stat_vars:
+            lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
+            upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
+            assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
+
+
+
 
 

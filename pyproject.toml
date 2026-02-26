@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=40.4", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jcm"
+dynamic = ["version", "dependencies"]
+description = "JAX-based General Circulation Model"
+authors = [
+    {email = "dwatsonparris@ucsd.edu"}
+]
+license = {text = "Apache"}
+requires-python = ">=3.11"
+keywords = ["climate", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Topic :: Scientific/Engineering",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.setuptools]
+packages = ["jcm"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools_scm]
+fallback_version = "999"
+
+[tool.pytest.ini_options]
+python_files = "*_test.py"
+markers = [
+    "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+extend-select = ["D"]
+
+[tool.ruff.lint]
+ignore = [
+    "D100", # missing public module docstrings
+    "D101", # missing public class docstrings
+    "D102", # missing public method docstrings
+    "D103", # missing public function docstrings
+    "D104", # missing public package docstrings
+    "D205", # missing blank lines between summary line and description
+    "D400", # first lines missing period
+    "D415", # docstrings missing closing punctuation
+    "D417", # missing argument descriptions
+    "E731"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["F821"]

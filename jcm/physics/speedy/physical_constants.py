@@ -1,7 +1,7 @@
-"""
-Date: 1/25/2024
+"""Date: 1/25/2024
 For storing and initializing physical constants.
 """
+import jax.numpy as jnp
 import jcm.constants as c
 
 # Physical constants for dynamics
@@ -33,7 +33,18 @@ thds   = 12.0      # Max damping time (in hours) for extra diffusion
 tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
                                              # in the stratosphere
 
+# Land model parameters moved here since they are only used in boundaries preprocessing
+sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
+swcap = 0.30 # Soil wetness at field capacity (volume fraction)
+swwil = 0.17 # Soil wetness at wilting point  (volume fraction)
+
 # to prevent blowup of gradients
 epsilon = 1e-9
 
 nstrad = 3 # number of timesteps between shortwave evaluations
+
+SIGMA_LAYER_BOUNDARIES = {
+    # 5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]), # FIXME: not supported at the moment
+    7: jnp.array([0.0, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+    8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+}

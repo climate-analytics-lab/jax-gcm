@@ -1,5 +1,4 @@
-"""
-Date: 1/25/2024.
+"""Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 """
 import tree_math
@@ -10,7 +9,7 @@ from jax import tree_util
 class ConvectionParameters:
     psmin: jnp.ndarray # Minimum (normalised) surface pressure for the occurrence of convection
     trcnv: jnp.ndarray # Time of relaxation (in hours) towards reference state
-    rhil: jnp.ndarray # Relative humidity threshold in intermeduate layers for secondary mass flux
+    rhil: jnp.ndarray # Relative humidity threshold in intermediate layers for secondary mass flux
     rhbl: jnp.ndarray # Relative humidity threshold in the boundary layer
     entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
@@ -31,13 +30,13 @@ class ConvectionParameters:
 
 @tree_math.struct
 class ForcingParameters:
-    increase_co2: jnp.bool # Minimum (normalised) surface pressure for the occurrence of convection
-    co2_year_ref: jnp.int32 # Time of relaxation (in hours) towards reference state
+    increase_co2: jnp.bool # Whether to increase CO2 concentration over time
+    co2_year_ref: jnp.int32 # Reference year for CO2 concentration
 
     @classmethod
     def default(cls):
         return cls(
-            increase_co2 = True,
+            increase_co2 = False,
             co2_year_ref = 1950,
         )
 
@@ -232,37 +231,6 @@ class VerticalDiffusionParameters:
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
-class LandModelParameters:
-    sd2sc: jnp.ndarray # Snow depth (mm water) corresponding to snow cover = 1
-    # Soil moisture parameters
-    swcap: jnp.ndarray # Soil wetness at field capacity (volume fraction)
-    swwil: jnp.ndarray # Soil wetness at wilting point  (volume fraction)
-    # Model parameters (default values)
-    depth_soil: jnp.ndarray # Soil layer depth (m)
-    depth_lice: jnp.ndarray # Land-ice depth (m)
-    tdland: jnp.ndarray # Dissipation time (days) for land-surface temp. anomalies
-    flandmin: jnp.ndarray # Minimum fraction of land for the definition of anomalies
-    hcapl: jnp.ndarray # Heat capacities per m^2 (depth*heat_cap/m^3)
-    hcapli: jnp.ndarray
-
-    @classmethod
-    def default(cls):
-        return cls(
-            sd2sc = jnp.array(60.0),
-            swcap = jnp.array(0.30),
-            swwil = jnp.array(0.17),
-            depth_soil = jnp.array(1.0),
-            depth_lice = jnp.array(5.0),
-            tdland = jnp.array(40.0),
-            flandmin = jnp.array(1.0/3.0),
-            hcapl = jnp.array(1.0*2.50e+6),
-            hcapli = jnp.array(5.0*1.93e+6)
-        )
-
-    def isnan(self):
-        return tree_util.tree_map(jnp.isnan, self)
-
-@tree_math.struct
 class Parameters:
     convection: ConvectionParameters
     condensation: CondensationParameters
@@ -270,7 +238,6 @@ class Parameters:
     mod_radcon: ModRadConParameters
     surface_flux: SurfaceFluxParameters
     vertical_diffusion: VerticalDiffusionParameters
-    land_model: LandModelParameters
     forcing: ForcingParameters
 
     @classmethod
@@ -282,7 +249,6 @@ class Parameters:
             mod_radcon = ModRadConParameters.default(),
             surface_flux = SurfaceFluxParameters.default(),
             vertical_diffusion = VerticalDiffusionParameters.default(),
-            land_model = LandModelParameters.default(),
             forcing = ForcingParameters.default()
         )
 
@@ -294,9 +260,35 @@ class Parameters:
             mod_radcon = self.mod_radcon.isnan(),
             surface_flux = self.surface_flux.isnan(),
             vertical_diffusion = self.vertical_diffusion.isnan(),
-            land_model = self.land_model.isnan(),
             forcing = self.forcing.isnan()
         )
 
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(lambda x: jnp.any(x), self))
+
+    @classmethod
+    def float_zeros(cls):
+        """Return a Parameters instance with all fields replaced by float zeros.
+        This is useful for creating parameter co-tangents.
+        """
+        import jax
+
+        def _float_zeros(x):
+            if jnp.issubdtype(jnp.result_type(x), jnp.bool_):
+                return jnp.zeros((), dtype=jax.dtypes.float0)
+            elif jnp.issubdtype(jnp.result_type(x), jnp.integer):
+                return jnp.zeros((), dtype=jax.dtypes.float0)
+            else:
+                return jnp.zeros_like(x)
+        return tree_util.tree_map(lambda x: _float_zeros(x), cls.default())
+
+    def __str__(self):
+        """Return a human-readable string representation of the Parameters instance."""
+        from pprint import pformat
+
+        def to_readable_format(x):
+            if isinstance(x, jnp.ndarray):
+                return x.tolist()
+            return x
+
+        return pformat(tree_util.tree_map(to_readable_format, self))

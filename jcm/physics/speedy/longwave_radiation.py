@@ -1,8 +1,8 @@
 import jax
 from jax import jit
 import jax.numpy as jnp
-from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import sbc
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -15,11 +15,10 @@ def get_downward_longwave_rad_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
-    geometry: Geometry
+    forcing: ForcingData,
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Calculate the downward longwave radiation fluxes
+    """Calculate the downward longwave radiation fluxes
     
     Args:
         ta: Absolute temperature - state.temperature
@@ -30,6 +29,7 @@ def get_downward_longwave_rad_fluxes(
     Returns:
         rlds: Downward flux of long-wave radiation at the surface
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
+
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
@@ -41,12 +41,12 @@ def get_downward_longwave_rad_fluxes(
 
     # 1. Blackbody emission from atmospheric levels.
     # The linearized gradient of the blakbody emission is computed
-    # from temperatures at layer boundaries, which are interpolated
+    # from temperatures at layer forcing, which are interpolated
     # assuming a linear dependence of T on log_sigma.
     # Above the first (top) level, the atmosphere is assumed isothermal.
     
     # Temperature at level boundaries
-    st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+geometry.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
+    st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+physics_data.speedy_coords.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
     
     # Mean temperature in stratospheric layers
     st4a = st4a.at[0,:,:,1].set(0.75 * ta[0] + 0.25 * st4a[0,:,:,0])
@@ -121,11 +121,10 @@ def get_upward_longwave_rad_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
-    geometry: Geometry
+    forcing: ForcingData,
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Calculate the upward longwave radiation fluxes
+    """Calculate the upward longwave radiation fluxes
     
     Args:
         ta: Absolute temperature
@@ -140,6 +139,7 @@ def get_upward_longwave_rad_fluxes(
         ftop: Outgoing flux of long-wave radiation at the top of the atmosphere
         dfabs: Flux of long-wave radiation absorbed in each atmospheric layer
         st4a: Blackbody emission from full and half atmospheric levels - mod_radcon.st4a
+
     """
     kx, ix, il = state.temperature.shape
     ta = state.temperature
@@ -180,8 +180,8 @@ def get_upward_longwave_rad_fluxes(
     flux = flux.at[:,:,:2].set((tau2[0] * flux + emis_brad[0])[:,:,:2])
     dfabs = dfabs.at[0].add(jnp.sum((_flux_3d[0] - flux)[:,:,:2], axis=-1))
 
-    corlw1 = geometry.dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
-    corlw2 = geometry.dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
+    corlw1 = physics_data.speedy_coords.dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
+    corlw2 = physics_data.speedy_coords.dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
     dfabs = dfabs.at[0].add(-corlw1)
     dfabs = dfabs.at[1].add(-corlw2)
     ftop = corlw1 + corlw2
@@ -196,15 +196,14 @@ def get_upward_longwave_rad_fluxes(
     )
     
     # Compute temperature tendency due to absorbed lw flux: logic from physics.f90:182-184
-    ttend_lwr = dfabs * geometry.grdscp[:, jnp.newaxis, jnp.newaxis] / state.normalized_surface_pressure
+    ttend_lwr = dfabs * physics_data.speedy_coords.grdscp[:, jnp.newaxis, jnp.newaxis] / state.normalized_surface_pressure
     physics_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape,temperature=ttend_lwr)
     
     return physics_tendencies, physics_data
 
 @jit
 def radset(temp, epslw):
-    """
-    Compute energy fractions in longwave bands as a function of temperature
+    """Compute energy fractions in longwave bands as a function of temperature
 
     Args:
         temp: Absolute temperature
@@ -212,15 +211,20 @@ def radset(temp, epslw):
 
     Returns:
         fband: Energy fraction emitted in each LW band
+
     """
     jtemp = jnp.clip(temp, 200, 320) # To retain backwards compatibility with F90 code
-    
-    fband = jnp.stack((
-        jnp.zeros_like(jtemp),
+
+    fband_123 = jnp.stack((
         0.148 - 3.0e-6 * (jtemp - 247) ** 2,
         0.356 - 5.2e-6 * (jtemp - 282) ** 2,
         0.314 + 1.0e-5 * (jtemp - 315) ** 2,
     ), axis=-1)
-    fband = fband.at[..., 0].set(1. - fband.sum(axis=-1))
+    fband_0 = 1. - fband_123.sum(axis=-1)
+
+    fband = jnp.concatenate([
+        fband_0[..., jnp.newaxis],
+        fband_123
+    ], axis=-1)
     
     return (1. - epslw) * fband

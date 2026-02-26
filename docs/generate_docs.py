@@ -4,9 +4,7 @@ import sys
 from collections import defaultdict
 
 def parse_csv_to_rst_tables(csv_file):
-    """
-    Parse CSV file and create RST tables grouped by module (first word before .)
-    """
+    """Parse CSV file and create RST tables grouped by module (first word before .)"""
     modules = defaultdict(dict)
     
     try:
@@ -49,7 +47,7 @@ def parse_csv_to_rst_tables(csv_file):
     return rst_content
 
 def generate_sphinx_rst(modules):
-    rst_content = f"""Speedy Variable Translation
+    rst_content = """Speedy Variable Translation
 ===========================
 
 """
@@ -95,9 +93,7 @@ def create_sphinx_rst_table(module_name, data):
     return rst_table
 
 def update_sphinx_doc(csv_file, output_file):
-    """
-    Update the Sphinx documentation file
-    """
+    """Update the Sphinx documentation file"""
     # Generate RST content
     rst_content = parse_csv_to_rst_tables(csv_file)
     
@@ -109,13 +105,11 @@ def update_sphinx_doc(csv_file, output_file):
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(rst_content)
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 def main():
-    """
-    Main function for workflow execution
-    """
+    """Execute workflow to update Sphinx documentation from CSV"""
     output_file = 'docs/source/speedy_translation.rst'
     
     csv_path = 'jcm/physics/speedy/units_table.csv'
@@ -126,6 +120,7 @@ def main():
         with open(csv_path, 'r') as f:
             reader = csv.DictReader(f)
             total_vars = sum(1 for row in reader if row.get('Variable', '').strip())
+            print(f"Updated documentation for {total_vars} variables.")
     else:
         sys.exit(1)
 

@@ -1,5 +1,4 @@
-"""
-Date: 2/11/2024
+"""Date: 2/11/2024
 For converting between specific and relative humidity, and computing the 
 saturation specific humidity.
 """
@@ -7,8 +6,8 @@ saturation specific humidity.
 import jax
 from jax import jit
 import jax.numpy as jnp
-from jcm.geometry import Geometry
-from jcm.boundaries import BoundaryData
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -18,11 +17,10 @@ def spec_hum_to_rel_hum(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData,
-    geometry: Geometry
+    forcing: ForcingData,
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Converts specific humidity to relative humidity, and also returns saturation 
+    """Convert specific humidity to relative humidity, and also return saturation
     specific humidity.
 
     Args:
@@ -34,14 +32,14 @@ def spec_hum_to_rel_hum(
     Returns:
         rh: Relative humidity
         qsat: Saturation specific humidity
-    """
 
+    """
     # compute thermodynamic variables: logic from physics.f90:110-114
     psa = state.normalized_surface_pressure
     
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
-    qsat = map_qsat(state.temperature, psa, geometry.fsg)
+    qsat = map_qsat(state.temperature, psa, physics_data.speedy_coords.fsg)
     rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
@@ -52,8 +50,7 @@ def spec_hum_to_rel_hum(
 
 @jit
 def rel_hum_to_spec_hum(ta, ps, sig, rh):
-    """
-    Converts relative humidity to specific humidity, and also returns saturation 
+    """Convert relative humidity to specific humidity, and also return saturation
     specific humidity.
 
     Args:
@@ -65,6 +62,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
     Returns:
         qa: Specific humidity
         qsat: Saturation specific humidity
+
     """
     qsat = get_qsat(ta, ps, sig)
     qa = rh * qsat
@@ -72,8 +70,7 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
 
 @jit
 def get_qsat(ta, ps, sig):
-    """
-    Computes saturation specific humidity.
+    """Compute saturation specific humidity.
     
     Args:
         ta: Absolute temperature [K]
@@ -82,8 +79,8 @@ def get_qsat(ta, ps, sig):
     
     Returns:
         qsat: Saturation specific humidity (g/kg)
+
     """
-    
     e0 = 6.108e-3
     c1 = 17.269
     c2 = 21.875

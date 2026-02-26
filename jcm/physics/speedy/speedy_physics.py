@@ -2,19 +2,23 @@ import jax
 import jax.numpy as jnp
 from collections import abc
 from typing import Callable, Tuple
+from pathlib import Path
+from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.boundaries import BoundaryData
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
-from jcm.geometry import Geometry
+from jcm.physics.speedy.speedy_coords import SpeedyCoords
+from jcm.terrain import TerrainData
 from jcm.date import DateData
+from jcm.utils import tree_index_3d
 
 def set_physics_flags(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
-    boundaries: BoundaryData=None,
-    geometry: Geometry=None
+    forcing: ForcingData=None,
+    terrain: TerrainData=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     from jcm.physics.speedy.physical_constants import nstrad
     '''
@@ -31,24 +35,28 @@ def set_physics_flags(
     return physics_tendencies, physics_data
 
 class SpeedyPhysics(Physics):
+    """A set of intermediate complexity atmospheric physics parameterizations from the SPEEDY model.
+
+    Forcing data should be either simple climatological fields (assuming a 365 day year), or constant.
+    Many of the parameterizations assume 8 model levels and a specific vertical coordinate system.
+    """
+
     parameters: Parameters
-    write_output: bool
+    coords: CoordinateSystem
     terms: abc.Sequence[Callable[[PhysicsState], PhysicsTendency]]
-    
+    UNITS_TABLE_CSV_PATH = Path(__file__).parent / "units_table.csv"
+
     def __init__(self,
-                 write_output: bool=True,
                  parameters: Parameters=Parameters.default(),
                  checkpoint_terms=True
     ) -> None:
-        """
-        Initialize the SpeedyPhysics class with the specified parameters.
-        
+        """Initialize the SpeedyPhysics class with the specified parameters.
+
         Args:
-            write_output (bool): Flag to indicate whether physics output should be written to predictions.
             parameters (Parameters): Parameters for the physics model.
             checkpoint_terms (bool): Flag to indicate if terms should be checkpointed.
+
         """
-        self.write_output = write_output
         self.parameters = parameters
 
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
@@ -59,7 +67,7 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.surface_flux import get_surface_fluxes
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
         from jcm.physics.speedy.forcing import set_forcing
-        from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
+        # from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
 
         physics_terms = [
             set_physics_flags,
@@ -82,38 +90,60 @@ class SpeedyPhysics(Physics):
 
         self.terms = physics_terms if not checkpoint_terms else [jax.checkpoint(term, static_argnums=static_argnums.get(term, ()) + (4,)) for term in physics_terms]
     
+    def cache_coords(self, coords: CoordinateSystem):
+        """Store model coordinate system for SpeedyCoords calculation in compute_tendencies"""
+        self.model_coords = coords
+        self.cached_coords = SpeedyCoords.from_coordinate_system(coords)
+        return 
+    
     def compute_tendencies(
         self,
         state: PhysicsState,
-        boundaries: BoundaryData,
-        geometry: Geometry,
+        forcing: ForcingData,
+        terrain: TerrainData,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
-        """
-        Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
+        """Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
 
         Args:
             state: Current state variables
-            parameters: Parameters object
-            boundaries: Boundary data
-            geometry: Geometry data
+            forcing: Forcing data
+            terrain: Terrain data
             date: Date data
 
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
+
         """
+        # Initialize physics data with speedy_coords cached
         data = PhysicsData.zeros(
-            geometry.nodal_shape[1:],
-            geometry.nodal_shape[0],
-            date=date
+            self.model_coords.horizontal.nodal_shape,
+            self.model_coords.nodal_shape[0],
+            date=date,
+            speedy_coords=self.cached_coords
         )
+
         # the 'physics_terms' return an instance of tendencies and data, data gets overwritten at each step
         # and implicitly passed to the next physics_term. tendencies are summed
         physics_tendency = PhysicsTendency.zeros(shape=state.u_wind.shape)
-        
+
+        # Slice out the relevant day of the year for time-varying forcings
+        model_day_of_year = date.model_day()
+        forcing_2d = tree_index_3d(forcing, model_day_of_year)
+
         for term in self.terms:
-            tend, data = term(state, data, self.parameters, boundaries, geometry)
+            tend, data = term(state, data, self.parameters, forcing_2d, terrain)
             physics_tendency += tend
-        
+
         return physics_tendency, data
+
+    def get_empty_data(self, coords: CoordinateSystem) -> PhysicsData:
+        from jax.tree_util import tree_map
+        # PhysicsData.zeros creates an 'initial' physics data,
+        # but we need a completely zeroed one (including fields like model_year) for accumulating averages
+        # Compute speedy_coords for the empty data (it's a constant cache, not zeroed)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        empty_data = PhysicsData.zeros(coords.horizontal.nodal_shape, coords.nodal_shape[0], speedy_coords=speedy_coords)
+        # Zero out everything except speedy_coords (which should remain constant)
+        return tree_map(lambda x: 0*x, empty_data).copy(speedy_coords=speedy_coords)
