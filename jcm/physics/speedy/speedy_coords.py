@@ -5,7 +5,7 @@ from jcm.constants import p0, grav, cp
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
 from jcm.utils import get_coords
 
-def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=(96,48), spmd_mesh=None) -> CoordinateSystem:
+def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     """Create a CoordinateSystem with SPEEDY's standard sigma layers.
 
     This is a convenience wrapper around jcm.utils.get_coords() that uses
