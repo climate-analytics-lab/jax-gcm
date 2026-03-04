@@ -135,8 +135,8 @@ class SWRadiationData:
         )
     
     def isnan(self):
-        self.icltop = jnp.zeros_like(self.icltop, dtype=jnp.float32)
-        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=jnp.float32)
+        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
+        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
         return tree_util.tree_map(jnp.isnan, self)
     
 @tree_math.struct
@@ -159,7 +159,7 @@ class ModRadConData:
 
     """
 
-    ablco2: jnp.float32 
+    ablco2: float 
     alb_l: jnp.ndarray  
     alb_s: jnp.ndarray  
     albsfc: jnp.ndarray 
@@ -301,7 +301,7 @@ class ConvectionData:
     # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
     # or intended to be used.
     def isnan(self):
-        self.iptop = jnp.zeros_like(self.iptop, dtype=jnp.float32)
+        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct

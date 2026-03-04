@@ -125,7 +125,7 @@ def tree_index_3d(tree, key):
     return tree_map(lambda arr: _index_if_3d(jnp.array(arr), key), tree)
 
 def _check_type_ones_like_tangent(x):
-        if jnp.result_type(x) == jnp.float32:
+        if jnp.result_type(x) == jnp.result_type(float):
             return jnp.ones_like(x)
         # in case of a bool or int, return a float0 denoting the lack of tangent space
         # jax requires that we use numpy to construct the float0 scalar
@@ -136,7 +136,7 @@ def ones_like_tangent(pytree):
     return tree_map(_check_type_ones_like_tangent, pytree)
 
 def _check_type_zeros_like_tangent(x):
-        if jnp.result_type(x) == jnp.float32:
+        if jnp.result_type(x) == jnp.result_type(float):
             return jnp.zeros_like(x)
         return np.zeros((), dtype=jax.dtypes.float0)
 
@@ -144,14 +144,14 @@ def zeros_like_tangent(pytree):
     return tree_map(_check_type_zeros_like_tangent, pytree)
 
 def _check_type_convert_to_float(x):
-    return jnp.asarray(x, dtype=jnp.float32)
+    return jnp.asarray(x, dtype=float)
 
 def convert_to_float(x): 
     return tree_map(_check_type_convert_to_float, x)
 
 # Revert object with type float back to true type
 def _check_type_convert_back(x, x0):
-    return x if jnp.result_type(x0) == jnp.float32 else x0
+    return x if jnp.result_type(x0) == jnp.result_type(float) else x0
 
 def convert_back(x, x0):
     return tree_map(_check_type_convert_back, x, x0)

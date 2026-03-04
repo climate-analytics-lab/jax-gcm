@@ -67,7 +67,7 @@ class Predictions:
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
         # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives
-        float0s_to_nans = lambda pytree: tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, pytree)
+        float0s_to_nans = lambda pytree: tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=float) if x.dtype == jax.dtypes.float0 else x, pytree)
 
         # extract dynamics predictions (PhysicsState format)
         # and physics predictions from postprocessed output
@@ -161,7 +161,7 @@ def averaged_trajectory_from_step(
     def integrate(x_initial, empty_data):
         diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
         stacked_empty_data = tree_map(
-            lambda x: jnp.zeros((outer_steps,) + jnp.array(x).shape, dtype=jnp.array(0.0).dtype),
+            lambda x: jnp.zeros((outer_steps,) + jnp.array(x).shape, dtype=float),
             empty_data
         )
         diagnostics_collector.data = nnx.Variable(stacked_empty_data)
