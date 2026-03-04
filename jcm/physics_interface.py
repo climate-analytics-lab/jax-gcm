@@ -212,7 +212,7 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         Physics state variables
 
     """
-    jax.debug.callback(logger.debug, "Converting state variables from dynamics to physics state variables")
+    jax.debug.callback(lambda: logger.debug("Converting state variables from dynamics to physics state variables"))
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 

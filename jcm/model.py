@@ -407,7 +407,7 @@ class Model:
 
         """
         from jcm.physics_interface import verify_state
-        jax.debug.callback(logger.info, "Post processing: %s simulated seconds", state.sim_time)
+        jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
         predictions = Predictions(
             dynamics=dynamics_state_to_physics_state(state, self.primitive),
@@ -512,8 +512,10 @@ class Model:
 
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
-        jax.debug.callback(logger.info, "Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s", 
-                                        forcing, save_interval, total_time, output_averages)
+        jax.debug.callback(
+            lambda: logger.info("Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s",
+                                forcing, save_interval, total_time, output_averages)
+        )
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
@@ -521,7 +523,7 @@ class Model:
             total_time=total_time,
             output_averages=output_averages
         )
-        jax.debug.callback(logger.info, "Run completed.")
+        jax.debug.callback(lambda: logger.info("Run completed."))
         self._final_modal_state = final_modal_state
         return predictions
 
