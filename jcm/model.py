@@ -513,8 +513,8 @@ class Model:
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         jax.debug.callback(
-            lambda: logger.info("Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s",
-                                forcing, save_interval, total_time, output_averages)
+            lambda: logger.info("Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
+                                save_interval, total_time, output_averages)
         )
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
