@@ -61,7 +61,7 @@ def compute_speedy_vertical_coords(kx: int):
         # Note that for phys.par. half-lev(k) is between full-lev k and k+1
         # Fhalf(k) = Ffull(k) + WVI(K,2) * (Ffull(k+1) - Ffull(k))
         # Fsurf = Ffull(kx) + WVI(kx,2) * (Ffull(kx) - Ffull(kx-1))
-        wvi = jnp.zeros((kx, 2))
+        wvi = jnp.zeros((kx, 2), dtype=sigl.dtype)
         wvi = wvi.at[:-1, 0].set(1. / jnp.diff(sigl))
         wvi = wvi.at[:-1, 1].set((jnp.log(hsg[1:-1]) - sigl[:-1]) * wvi[:-1, 0])
         wvi = wvi.at[-1, 1].set((jnp.log(0.99) - sigl[-1]) * wvi[-2, 0])
