@@ -55,7 +55,7 @@ def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_
         
     elif fmask is None:
         # If orography provided but fmask not, default fmask to any orography > 0
-        fmask = (orography > 0.0).astype(jnp.float32)
+        fmask = (orography > 0.0).astype(float)
 
     elif orography is None:
         # If fmask provided but orography not, default orography to zeros (flat)
