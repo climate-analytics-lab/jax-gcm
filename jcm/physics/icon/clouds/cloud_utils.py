@@ -15,7 +15,7 @@ from ..constants.physical_constants import (
 )
 from .cloud_params_2m import (
     epsec, eps, fact_PK, pow_PK, ldyn_cdnc_min, cdnc_min_fixed,
-    cdnc_min_lower, cdnc_min_upper, rcd_vol_max
+    cdnc_min_lower, cdnc_min_upper, rcd_vol_max, cqtmin
 )
 
 def get_util_var(nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1):
@@ -241,6 +241,103 @@ def minimum_CDNC(pxwat, ldyn_cdnc_min=ldyn_cdnc_min, cdnc_min_fixed=cdnc_min_fix
 
     return pcdnc_min
 
+def gridbox_frac_falling_hydrometeor(
+    precip_flux_from_above: jnp.ndarray,
+    precip_frac_from_above: jnp.ndarray,
+    precip_flux_from_level: jnp.ndarray,
+    precip_frac_from_level: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Computes the grid box fraction covered by falling hydrometeor (e.g., rain+snow, sedimenting ice).
+
+    Parameters
+    ----------
+    precip_flux_from_above : jnp.ndarray
+        Flux of falling hydrometeor from above.
+    precip_frac_from_above : jnp.ndarray
+        Fraction of gridbox covered by falling hydrometeor from above.
+    precip_flux_from_level : jnp.ndarray
+        Flux of falling hydrometeor from the current level.
+    precip_frac_from_level : jnp.ndarray
+        Fraction of gridbox covered by falling hydrometeor from the current level.
+    min_precip_flux : float
+        Minimum threshold for total flux.
+
+    Returns
+    -------
+    jnp.ndarray
+        Total fraction of gridbox covered by falling hydrometeor.
+    """
+    # Determine where flux from above is greater than flux from the current level
+    ll1 = precip_flux_from_above > precip_flux_from_level
+
+    # Update fraction from above based on condition
+    updated_precip_frac_from_above = jnp.where(
+        ll1, precip_frac_from_above, precip_frac_from_level
+    )
+
+    # Compute total flux
+    total_precip_flux = precip_flux_from_above + precip_flux_from_level
+
+    # Determine where total flux is greater than the minimum threshold
+    ll1 = total_precip_flux > cqtmin
+
+    # Compute weighted average fraction
+    weighted_precip_frac = (
+        (precip_frac_from_level * precip_flux_from_level + updated_precip_frac_from_above * precip_flux_from_above)
+        / jnp.maximum(total_precip_flux, cqtmin)
+    )
+    weighted_precip_frac = jnp.clip(weighted_precip_frac, 0.0, 1.0)
+
+    # Compute total fraction
+    total_precip_frac = jnp.where(ll1, weighted_precip_frac, 0.0)
+
+    return total_precip_frac
+
+def threshold_vert_vel(
+    sat_vap_pres_water: jnp.ndarray,  # pesw [Pa]
+    sat_vap_pres_ice: jnp.ndarray,    # pesi [Pa]
+    icnc: jnp.ndarray,                # picnc [1/m^3]
+    ice_radius: jnp.ndarray,          # price [m] volume-mean ice crystal radius
+    eta: jnp.ndarray,                 # peta [-]
+) -> jnp.ndarray:
+    """
+    Threshold vertical velocity for the Wegener-Bergeron-Findeisen (WBF) criterion.
+
+    JAX port of Fortran function `threshold_vert_vel_1d` (mo_cloud_microphysics_2m).
+
+    The WBF process (ice growth at the expense of supercooled liquid) is active when
+    the actual updraft velocity is below this threshold. The threshold is proportional
+    to the supersaturation of water vapour over ice, the ice crystal number concentration,
+    the crystal size, and a diffusivity-related factor `eta`.
+
+    Parameters
+    ----------
+    sat_vap_pres_water : array
+        Saturation vapour pressure w.r.t. liquid water `pesw` [Pa].
+    sat_vap_pres_ice : array
+        Saturation vapour pressure w.r.t. ice `pesi` [Pa].
+    icnc : array
+        Ice crystal number concentration `picnc` [1/m^3].
+    ice_radius : array
+        Volume-mean ice crystal radius `price` [m].
+    eta : array
+        Diffusivity-related variable for the WBF criterion `peta` [-].
+
+    Returns
+    -------
+    pvervmax : array
+        Threshold vertical velocity [m/s] (same units as `pvervx` in the calling routine,
+        which is compared after scaling by 0.01 from cm/s).
+    """
+    return (
+        (sat_vap_pres_water - sat_vap_pres_ice)
+        / jnp.maximum(sat_vap_pres_ice, eps)
+        * icnc
+        * ice_radius
+        * eta
+    )
+
 def consistency_number_to_mass(
     pthreshold: float | jnp.ndarray,
     pmass: jnp.ndarray,
@@ -265,7 +362,6 @@ def consistency_number_to_mass(
         `pnumber` with entries zeroed where `pmass < pthreshold`.
     """
     return jnp.where(pmass < pthreshold, 0.0, pnumber)
-
 
 def init_cloud_micro_2m(lconv):
     """

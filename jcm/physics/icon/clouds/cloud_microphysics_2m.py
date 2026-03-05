@@ -49,7 +49,7 @@ import tree_math
 from math import pi
 
 from ..constants.physical_constants import (
-    cpd, grav, rgrav, rd, alv, als, rv, vtmpc1, vtmpc2, rhoh2o, ak, tmelt, p0s1_bg 
+    cpd, grav, rgrav, rd, alv, als, rv, vtmpc1, vtmpc2, rhoh2o, ak, tmelt, p0s1_bg, alhs, alhc, t0 
 )
 
 from .cloud_params_2m import (
@@ -70,7 +70,7 @@ from .cloud_params_2m import (
 )
 
 from .cloud_utils import (get_util_var, get_cloud_bounds, eff_ice_crystal_radius, minimum_CDNC,
-                          consistency_number_to_mass
+                          consistency_number_to_mass, gridbox_frac_falling_hydrometeor, threshold_vert_vel
 )
 
 # @tree_math.struct
@@ -583,7 +583,580 @@ def sublimation_snow_and_ice_evaporation_rain(
 
     return ice_flux, ice_flux_n, ice_sublim, snow_sublim, rain_evap
 
+def sedimentation_ice(
+    cloud_fraction: jnp.ndarray,          # paclc [0..1]
+    air_density_correction: jnp.ndarray,  # paaa  (air-density correction for fall speed)
+    pressure_thickness: jnp.ndarray,      # pdp [Pa]
+    air_density: jnp.ndarray,             # prho [kg/m^3]
+    inv_air_density_rcp: jnp.ndarray,     # prho_rcp [m^3/kg] (1/rho) in ICON naming
+    ice_mmr_gridmean: jnp.ndarray,        # pxip1 (INOUT) grid-mean ice mass mixing ratio [kg/kg]
+    icnc_in_cloud: jnp.ndarray,           # picnc (INOUT) in-cloud ice crystal number conc. [1/m^3]
+    ice_flux: jnp.ndarray,                # pxiflux (INOUT) ice-crystal mass flux into layer from above [kg/m^2/s]
+    ice_flux_n: jnp.ndarray,              # pxifluxn (INOUT) ice-crystal number flux into layer from above [1/m^2/s]
+    falling_ice_fraction: jnp.ndarray,    # pclcfi (INOUT) fraction of grid box covered by sedimenting/falling ice [0..1]
+    dt: jnp.ndarray,                      # ztmst [s]
+) -> tuple[
+    jnp.ndarray,  # ice_mmr_gridmean (updated) [kg/kg]
+    jnp.ndarray,  # icnc_in_cloud (updated) [1/m^3]
+    jnp.ndarray,  # ice_flux (updated) [kg/m^2/s]
+    jnp.ndarray,  # ice_flux_n (updated) [1/m^2/s]
+    jnp.ndarray,  # falling_ice_fraction (updated) [0..1]
+    jnp.ndarray,  # ice_sedimentation_rate_in_cloud (pmrateps) [kg/kg]
+]:
+    """
+    Sedimentation of cloud ice (mass + number) and update of falling-ice fluxes (Lin et al. (1983)).
 
+    This is a JAX port of the Fortran subroutine `sedimentation_ice` from ICON/ECHAM
+    (mo_cloud_microphysics_2m). It performs a single sedimentation step for **cloud ice**
+    and updates the **falling ice fluxes** (mass and number) entering/leaving the layer.
+
+    Conventions / important details
+    -------------------------------
+    - `ice_mmr_gridmean` is treated as a **grid-mean** cloud-ice mass mixing ratio [kg/kg] (Fortran `pxip1`).
+    - `icnc_in_cloud` is treated as **in-cloud** ice crystal number concentration [1/m^3] (Fortran `picnc`).
+      The routine converts it to **grid-mean** via: `zicnc_gridmean = icnc_in_cloud * cloud_fraction`
+      for the sedimentation update, then converts back to in-cloud where `cloud_fraction > clc_min`.
+    - `ice_flux` and `ice_flux_n` are **falling** ice fluxes coming from above (Fortran `pxiflux`, `pxifluxn`).
+      They are updated by adding the flux contribution from sedimentation out of this level.
+    - The fall speed depends on an effective mean mass-per-crystal proxy and is limited to [0.001, 2.0] m/s.
+    - `falling_ice_fraction` is updated with `gridbox_frac_falling_hydrometeor(...)`, consistent with other
+      precip/falling-hydrometeor routines in this module.
+    - Finally, `ice_flux_n` is passed through `consistency_number_to_mass(...)` to enforce that number flux
+      cannot remain nonzero when mass flux is essentially zero (ICON/ECHAM consistency safeguard).
+
+    Parameters
+    ----------
+    cloud_fraction : array
+        Cloud cover `paclc` [0..1].
+    air_density_correction : array
+        Density correction factor `paaa` used in the ice crystal fall velocity (dimensionless).
+    pressure_thickness : array
+        Layer pressure thickness `pdp` [Pa].
+    air_density : array
+        Air density `prho` [kg/m^3].
+    inv_air_density_rcp : array
+        Inverse air density `prho_rcp` [m^3/kg] (ICON naming; effectively 1/rho).
+    ice_mmr_gridmean : array
+        Grid-mean ice mass mixing ratio `pxip1` [kg/kg] (INOUT).
+    icnc_in_cloud : array
+        In-cloud ice crystal number concentration `picnc` [1/m^3] (INOUT).
+    ice_flux : array
+        Falling-ice *mass* flux entering from above `pxiflux` [kg/m^2/s] (INOUT).
+    ice_flux_n : array
+        Falling-ice *number* flux entering from above `pxifluxn` [1/m^2/s] (INOUT).
+    falling_ice_fraction : array
+        Gridbox fraction covered by sedimenting ice `pclcfi` [0..1] (INOUT).
+    dt : array or scalar
+        Microphysics time step `ztmst` [s].
+
+    Returns
+    -------
+    ice_mmr_gridmean : array
+        Updated grid-mean ice mass mixing ratio [kg/kg].
+    icnc_in_cloud : array
+        Updated in-cloud ice crystal number concentration [1/m^3].
+    ice_flux : array
+        Updated falling-ice mass flux [kg/m^2/s].
+    ice_flux_n : array
+        Updated falling-ice number flux [1/m^2/s].
+    falling_ice_fraction : array
+        Updated falling-ice fractional coverage [0..1].
+    ice_sedimentation_rate_in_cloud : array
+        Diagnostic in-cloud sedimented ice amount (`pmrateps`) [kg/kg].
+        This is `zxi_delta / max(cloud_fraction, clc_min)` where clouds exist, otherwise the grid-mean `zxi_delta`.
+        In ICON/ECHAM it is used for in-cloud scavenging diagnostics.
+
+    """
+
+    # Fortran uses ztmst and zcons2 ( = ztmst * rgrav ) from common timestep constants.
+    ztmst, _, _, zcons2, _ = microphysics_dt_constants(dt)
+
+    # --- Keep a copy of grid-mean ice before sedimentation
+    zxi_bf_sed = ice_mmr_gridmean
+
+    # --- Convert ICNC to grid-mean and enforce minimum
+    zicnc_gridmean = icnc_in_cloud * cloud_fraction
+    zicnc_gridmean = jnp.maximum(zicnc_gridmean, icemin)
+    zicnc_gridmean_bf_sed = zicnc_gridmean
+
+    # --- Mean mass per crystal proxy
+    zmmean = air_density * ice_mmr_gridmean / jnp.maximum(zicnc_gridmean, eps)
+    zmmean = jnp.maximum(zmmean, mi)
+
+    # --- Regime selection for sedimentation parameters
+    ll_small = zmmean < ri_vol_mean_1
+    ll_mid = jnp.logical_and(~ll_small, zmmean < ri_vol_mean_2)
+
+    zalfased = jnp.where(ll_small, alfased_1, alfased_2)
+    zalfased = jnp.where(ll_mid, alfased_3, zalfased)
+
+    zbetased = jnp.where(ll_small, betased_1, betased_2)
+    zbetased = jnp.where(ll_mid, betased_3, zbetased)
+
+    # --- Fall speed (mass and number use same here), limited as in Fortran
+    zxifallmc = fall * zalfased * (zmmean ** zbetased) * air_density_correction
+    zxifallmc = jnp.clip(zxifallmc, 0.001, 2.0)
+    zxifallnc = zxifallmc
+
+    # --- Exponential coefficients
+    zal1 = ztmst * grav * zxifallmc * air_density / jnp.maximum(pressure_thickness, eps)
+    zal3 = grav * ztmst * zxifallnc * air_density / jnp.maximum(pressure_thickness, eps)
+
+    # --- Incoming-flux "equilibria" (MERGE to 0 if fall speed is too small)
+    ll_mass = zxifallmc > eps
+    zal2_raw = ice_flux * inv_air_density_rcp / jnp.maximum(zxifallmc, eps)
+    zal2 = jnp.where(ll_mass, zal2_raw, 0.0)
+
+    ll_num = zxifallnc > eps
+    zal4_raw = ice_flux_n / jnp.maximum(zxifallnc, eps)
+    zal4 = jnp.where(ll_num, zal4_raw, 0.0)
+
+    # --- Update grid-mean ice mmr and grid-mean ICNC via relaxation form
+    exp1 = jnp.exp(-zal1)
+    exp3 = jnp.exp(-zal3)
+
+    ice_mmr_gridmean = ice_mmr_gridmean * exp1 + zal2 * (1.0 - exp1)
+    zicnc_gridmean = zicnc_gridmean * exp3 + zal4 * (1.0 - exp3)
+
+    # --- Convert back to in-cloud ICNC where cloud fraction is meaningful
+    has_cloud = cloud_fraction > clc_min
+    icnc_in_cloud_candidate = zicnc_gridmean / jnp.maximum(cloud_fraction, clc_min)
+    icnc_in_cloud = jnp.where(has_cloud, icnc_in_cloud_candidate, zicnc_gridmean)
+
+    # --- Sedimented grid-mean amount
+    # zxi_delta can be negative if the incoming flux equilibrium (zal2) exceeds
+    # the initial ice content — the layer gains more mass from above than it loses.
+    # In that case zxiflx_from_level would be negative (net absorption), which would
+    # *reduce* the outgoing flux below the incoming flux. This is physically valid
+    # (the layer is a net sink), but the outgoing flux itself cannot go below zero.
+    zxi_delta = zxi_bf_sed - ice_mmr_gridmean
+
+    # --- Flux contribution from this level (can be negative = net absorption from above)
+    zxiflx_from_level = zcons2 * zxi_delta * pressure_thickness
+
+    # --- In-cloud sedimentation diagnostic (pmrateps in Fortran)
+    # Only meaningful as a positive rate; clamp to zero for the absorption case.
+    pmrateps_in_cloud = zxi_delta / jnp.maximum(cloud_fraction, clc_min)
+    ice_sedimentation_rate_in_cloud = jnp.where(has_cloud, pmrateps_in_cloud, zxi_delta)
+    ice_sedimentation_rate_in_cloud = jnp.maximum(ice_sedimentation_rate_in_cloud, 0.0)
+
+    # --- Update fraction covered by falling ice
+    # Only update if there is a positive flux contribution from this level.
+    falling_ice_fraction = gridbox_frac_falling_hydrometeor(
+        precip_flux_from_above=ice_flux,
+        precip_frac_from_above=falling_ice_fraction,
+        precip_flux_from_level=jnp.maximum(zxiflx_from_level, 0.0),  # only positive contribution
+        precip_frac_from_level=cloud_fraction,
+    )
+
+    # --- Update mass flux
+    # The outgoing flux = incoming + sedimented_out - absorbed_from_above.
+    # Cannot go below zero: if zxiflx_from_level < 0 (net absorption), limit removal
+    # to what is available in the incoming flux.
+    ice_flux = jnp.maximum(ice_flux + zxiflx_from_level, 0.0)
+
+    # --- Update number flux
+    # Same logic: delta_n can be negative (layer absorbs crystals from above).
+    # Outgoing number flux cannot go below zero.
+    delta_n = zcons2 * (zicnc_gridmean_bf_sed - zicnc_gridmean) * pressure_thickness * inv_air_density_rcp
+    ice_flux_n = jnp.maximum(ice_flux_n + delta_n, 0.0)
+
+    # --- Enforce mass/number consistency
+    ice_flux_n = consistency_number_to_mass(pthreshold=epsec, pmass=ice_flux, pnumber=ice_flux_n)
+
+    return (
+        ice_mmr_gridmean,
+        icnc_in_cloud,
+        ice_flux,
+        ice_flux_n,
+        falling_ice_fraction,
+        ice_sedimentation_rate_in_cloud,
+    )
+# ...existing code...
+
+def mixed_phase_deposition_and_corrections(
+    pressure: jnp.ndarray,               # papp1 [Pa] pressure at full levels (t-1)
+    icnc: jnp.ndarray,                   # picnc [1/m^3] ice crystal number concentration
+    specific_humidity_prev: jnp.ndarray, # pqm1 [kg/kg] specific humidity (t-1)
+    cloud_fraction: jnp.ndarray,         # paclc [0..1] cloud cover
+    sat_vap_pres_ice: jnp.ndarray,       # pesi [Pa] saturation vapour pressure w.r.t. ice
+    sat_vap_pres_water: jnp.ndarray,     # pesw [Pa] saturation vapour pressure w.r.t. water
+    bergeron_variable: jnp.ndarray,      # peta [-] variable for Bergeron-Findeisen process
+    tompkins_genti: jnp.ndarray,         # pgenti [kg/kg] Tompkins cloud cover scheme variable
+    lsdcp: jnp.ndarray,                  # plsdcp [K] Ls / cpd
+    lvdcp: jnp.ndarray,                  # plvdcp [K] Lv / cpd
+    specific_humidity: jnp.ndarray,      # pqp1 [kg/kg] specific humidity (t)
+    qsat_prev: jnp.ndarray,              # pqsm1 [kg/kg] saturation specific humidity (t-1)
+    air_density: jnp.ndarray,            # prho [kg/m^3]
+    temperature: jnp.ndarray,            # ptp1 [K] temperature (t)
+    ice_evaporation: jnp.ndarray,        # pxievap [kg/kg] evaporation of cloud ice
+    ice_mmr_gridmean: jnp.ndarray,       # pxip1 [kg/kg] ice mass mixing ratio (grid-mean, t)
+    ice_detrainment_tendency: jnp.ndarray, # pxite [kg/kg/s] cloud ice tendency from detrainment
+    updraft_velocity: jnp.ndarray,       # pvervx [cm/s] updraft velocity
+    condensation_rate: jnp.ndarray,      # pcnd [kg/kg] (INOUT) condensation rate
+    deposition_rate: jnp.ndarray,        # pdep [kg/kg] (INOUT) deposition rate
+    dt: jnp.ndarray,                     # ztmst [s]
+    ll_het: bool = True,                 # heterogeneous nucleation flag (module-level in Fortran)
+) -> tuple[
+    jnp.ndarray,  # condensation_rate (updated pcnd) [kg/kg]
+    jnp.ndarray,  # deposition_rate (updated pdep) [kg/kg]
+    jnp.ndarray,  # temperature_tmp (ptp1tmp) [K]
+    jnp.ndarray,  # specific_humidity_tmp (pqp1tmp) [kg/kg]
+    jnp.ndarray,  # qsat_tmp (pqsp1tmp) [kg/kg]
+]:
+    """
+    Mixed-phase deposition and condensation corrections for the ICON/ECHAM 2-moment scheme.
+
+    JAX port of Fortran subroutine `mixed_phase_deposition_and_corrections`
+    (mo_cloud_microphysics_2m).
+
+    Overview
+    --------
+    This routine determines whether a grid box is in the ice or liquid phase,
+    computes updated saturation specific humidities at the new temperature,
+    and applies condensation/deposition increments accounting for:
+      - Bergeron-Findeisen process (ice growth at expense of liquid),
+      - Homogeneous vs heterogeneous cirrus nucleation (via nic_cirrus / ll_het),
+      - Phase-consistent thermodynamic corrections to temperature and humidity.
+
+    It does NOT perform sedimentation or precipitation — those are handled in
+    `sedimentation_ice` and `precip_formation_cold/warm`.
+
+    Steps
+    -----
+    1. Compute first-guess updated temperature (`temperature_tmp`) and specific
+       humidity (`specific_humidity_tmp`) from existing condensation/deposition rates.
+    2. Update ice mass mixing ratio (`zxip1`) including detrainment, evaporation,
+       Tompkins source (`pgenti`), and deposition.
+    3. Compute effective ice crystal radius from `zxip1` and `icnc` (via
+       `eff_ice_crystal_radius`), then convert to volume-mean radius using the
+       Schumann et al. (2011) parameterisation.
+    4. Compute Bergeron-Findeisen threshold vertical velocity (`zvervmax`) from
+       saturation vapour pressures, ICNC, ice radius, and `peta`.
+    5. Determine phase mask `lo2`:
+       - True  (ice)    if T < cthomi, OR if T < tmelt AND updraft < threshold
+       - False (liquid) otherwise
+    6. Look up saturation vapour pressures at the new temperature using the
+       ECHAM lookup-table approach (here replaced by analytic Teten's formula
+       consistent with the rest of the JAX scheme).
+    7. Compute saturation specific humidities and thermodynamic correction factor
+       `zqcon = 1 / (1 + Lc * dqs/dT)`.
+    8. Apply deposition increment to `deposition_rate` (ice cases) and condensation
+       increment to `condensation_rate` (liquid cases), using phase-dependent
+       supersaturation thresholds and the `nic_cirrus` / `ll_het` flags.
+    9. Apply final corrections: if the updated humidity falls below `zrhtest`
+       (a RH-limited threshold based on t-1 humidity), reduce the
+       condensation/deposition so as not to over-dry the grid box.
+    10. Recompute `temperature_tmp` and `specific_humidity_tmp` from the corrected rates.
+
+    Parameters
+    ----------
+    pressure : array
+        Full-level pressure at (t-1), `papp1` [Pa].
+    icnc : array
+        In-cloud ice crystal number concentration `picnc` [1/m^3].
+    specific_humidity_prev : array
+        Specific humidity at (t-1) `pqm1` [kg/kg].
+    cloud_fraction : array
+        Cloud cover `paclc` [0..1].
+    sat_vap_pres_ice : array
+        Saturation vapour pressure w.r.t. ice `pesi` [Pa].
+    sat_vap_pres_water : array
+        Saturation vapour pressure w.r.t. water `pesw` [Pa].
+    bergeron_variable : array
+        Variable for the Bergeron-Findeisen threshold velocity `peta` [-].
+    tompkins_genti : array
+        Ice source term from the Tompkins cloud cover scheme `pgenti` [kg/kg].
+    lsdcp : array
+        Latent heat of sublimation / cpd `plsdcp` [K].
+    lvdcp : array
+        Latent heat of vaporisation / cpd `plvdcp` [K].
+    specific_humidity : array
+        Specific humidity at (t) `pqp1` [kg/kg].
+    qsat_prev : array
+        Saturation specific humidity at (t-1) `pqsm1` [kg/kg].
+    air_density : array
+        Air density `prho` [kg/m^3].
+    temperature : array
+        Temperature at (t) `ptp1` [K].
+    ice_evaporation : array
+        Evaporation of cloud ice `pxievap` [kg/kg].
+    ice_mmr_gridmean : array
+        Grid-mean cloud ice mass mixing ratio at (t) `pxip1` [kg/kg].
+    ice_detrainment_tendency : array
+        Cloud ice tendency from convective detrainment `pxite` [kg/kg/s].
+    updraft_velocity : array
+        Updraft velocity `pvervx` [cm/s].
+    condensation_rate : array
+        Condensation rate `pcnd` [kg/kg] (INOUT).
+    deposition_rate : array
+        Deposition rate `pdep` [kg/kg] (INOUT).
+    dt : array or scalar
+        Microphysics timestep `ztmst` [s].
+    ll_het : bool
+        Module-level flag for heterogeneous nucleation path (default False).
+
+    Returns
+    -------
+    condensation_rate : array
+        Updated condensation rate `pcnd` [kg/kg].
+    deposition_rate : array
+        Updated deposition rate `pdep` [kg/kg].
+    temperature_tmp : array
+        Updated temperature `ptp1tmp` [K].
+    specific_humidity_tmp : array
+        Updated specific humidity `pqp1tmp` [kg/kg].
+    qsat_tmp : array
+        Updated saturation specific humidity `pqsp1tmp` [kg/kg].
+
+    Notes
+    -----
+    The Fortran lookup table calls (`set_lookup_index`, `tlucua`, `tlucuaw`,
+    `tlucub`, `sat_spec_hum`) are replaced here by inline Teten's formula
+    computations consistent with the rest of the JAX scheme.
+    The `effective_2_volmean_radius_param_Schuman_2011` and
+    `threshold_vert_vel` helpers must be available in this module or imported.
+    """
+
+    ztmst = dt
+
+    # -------------------------------------------------------------------------
+    # 1. First-guess updated temperature and specific humidity
+    # -------------------------------------------------------------------------
+    temperature_tmp = temperature + lvdcp * condensation_rate + lsdcp * deposition_rate
+    specific_humidity_tmp = specific_humidity - condensation_rate - deposition_rate
+
+    # -------------------------------------------------------------------------
+    # 2. Updated ice mass mixing ratio (grid-mean)
+    #    zxip1 = pxip1 + dt*pxite - pxievap + pgenti + pdep
+    # -------------------------------------------------------------------------
+    zxip1 = ice_mmr_gridmean + ztmst * ice_detrainment_tendency - ice_evaporation + tompkins_genti + deposition_rate
+    zxip1 = jnp.maximum(zxip1, 0.0)
+
+    # -------------------------------------------------------------------------
+    # 3. Effective ice crystal radius → volume-mean radius (Schumann 2011)
+    #    Convert: grid-mean kg/kg → in-cloud g/m^3
+    # -------------------------------------------------------------------------
+    ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, clc_min)
+    zrieff = eff_ice_crystal_radius(ice_gm3, icnc)           # [µm]
+    zrieff = jnp.clip(zrieff, ceffmin, ceffmax)
+
+    # Schumann et al. (2011) parameterisation: r_vol from r_eff
+    # zrih = -2261 + sqrt(5113188 + 2809*zrieff^3); zrice = 1e-6 * zrih^(1/3)
+    zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
+    zrice = 1.0e-6 * jnp.maximum(zrih, 0.0) ** (1.0 / 3.0)
+
+    # -------------------------------------------------------------------------
+    # 4. Bergeron-Findeisen threshold vertical velocity
+    # -------------------------------------------------------------------------
+    zvervmax = threshold_vert_vel(
+        sat_vap_pres_water=sat_vap_pres_water,
+        sat_vap_pres_ice=sat_vap_pres_ice,
+        icnc=icnc,
+        ice_radius=zrice,
+        eta=bergeron_variable,
+    )
+
+    # -------------------------------------------------------------------------
+    # 5. Phase mask lo2:  True = ice cloud,  False = liquid cloud
+    #    lo2 = (T_tmp < cthomi) OR (T_tmp < tmelt AND 0.01*pvervx < zvervmax)
+    # -------------------------------------------------------------------------
+    lo2 = jnp.logical_or(
+        temperature_tmp < cthomi,
+        jnp.logical_and(
+            temperature_tmp < tmelt,
+            0.01 * updraft_velocity < zvervmax,
+        ),
+    )
+
+    # -------------------------------------------------------------------------
+    # 6. Saturation vapour pressures and specific humidities at temperature_tmp
+    #    using Teten's formula (replaces Fortran lookup tables).
+    #
+    #    Over ice  (lo2=True):  e_s = e_s_ice(T_tmp)
+    #    Over water(lo2=False): e_s = e_s_water(T_tmp)
+    #
+    #    sat_spec_hum: q_s = eps * e_s / (p - (1-eps)*e_s)
+    #                      ≈ e_s / (p/(eps) - e_s)    [standard approximation]
+    #    where eps = Rd/Rv, vtmpc1 = Rv/Rd - 1
+    # -------------------------------------------------------------------------
+
+    # Re-evaluate at temperature_tmp (this replaces fortran lookup tables)
+    ztmp_ice = (alhs/rv)*(1.0/t0 - 1.0/temperature_tmp)
+    ztmp_water = (alhc/rv)*(1.0/t0 - 1.0/temperature_tmp)
+    zes_ice_new = 611 * jnp.exp(ztmp_ice)
+    zes_water_new = 611 * jnp.exp(ztmp_water)
+
+    # Select phase-appropriate saturation vapour pressure
+    zes = jnp.where(lo2, zes_ice_new, zes_water_new)
+    zesw = zes_water_new
+
+    # Saturation specific humidity (standard formula)
+    # q_s = zes / (p - (1 - Rd/Rv)*zes)  — same form as ECHAM sat_spec_hum
+    def _qsat(e, p):
+        e_clipped = jnp.minimum(e, 0.4 * p)   # safety clip (Fortran: zes < 0.4)
+        return e_clipped / (p - (1.0 - 1.0 / (1.0 + vtmpc1)) * e_clipped)
+
+    qsat_tmp = _qsat(zes, pressure)          # pqsp1tmp: phase-appropriate
+    qsat_tmp_water = _qsat(zesw, pressure)   # zqsp1tmpw: always over water
+
+    # zcor: correction factor d(q_s)/d(e_s) * p / (p - e_s)^2  (used in zlcdqsdt)
+    # In ECHAM: zcor = 1 / (1 - vtmpc1 * q_s)
+    zcor = 1.0 / jnp.maximum(1.0 - vtmpc1 * qsat_tmp, eps)
+    zcorw = 1.0 / jnp.maximum(1.0 - vtmpc1 * qsat_tmp_water, eps)
+
+    # -------------------------------------------------------------------------
+    # 7. Saturation specific humidity at (t+1) for zdqsdt
+    #    In Fortran: zqst1 uses tlucuap1 (lookup at it+1), approximated here
+    #    by evaluating at (T_tmp + 1 K) and taking finite difference.
+    # -------------------------------------------------------------------------
+    ztmp_ice_p1 = jnp.minimum(ak * (temperature_tmp + 1.0 - tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
+    ztmp_water_p1 = jnp.minimum(ak * (temperature_tmp + 1.0 - tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
+
+    zes_p1 = jnp.where(lo2, p0s1_bg * jnp.exp(ztmp_ice_p1), p0s1_bg * jnp.exp(ztmp_water_p1))
+    zqst1 = zes_p1 / pressure
+    zqst1 = jnp.minimum(zqst1, 0.5)
+    zqst1 = zqst1 / (1.0 - vtmpc1 * zqst1)
+
+    # zdqsdt = 1000*(q_s(T+1) - q_s(T))  [units: per 1000 K — as in Fortran]
+    zdqsdt = 1000.0 * (zqst1 - qsat_tmp)
+
+    # -------------------------------------------------------------------------
+    # 8. Thermodynamic correction factor zqcon
+    #    Fortran: zlcdqsdt = MERGE(lc*zdqsdt, q_s*zcor*zlucub, ll1)
+    #    where ll1 = (zes < 0.4) and zlucub ~ d(ln zes)/dT from the table.
+    #    In the analytic port: use lc*zdqsdt for both branches (ll1 captures
+    #    a numerical regime of the lookup table; for the analytic formula the
+    #    two expressions converge).
+    # -------------------------------------------------------------------------
+    ll1 = zes < 0.4 * pressure   # equivalent to Fortran ll1 (zes < 0.4 in sat_spec_hum units)
+
+    zlc = jnp.where(lo2, lsdcp, lvdcp)
+
+    # zlucub equivalent: (Lc/Rv) / T^2  (Clausius-Clapeyron derivative of ln e_s)
+    zlucub = jnp.where(
+        lo2,
+        als / (rv * jnp.maximum(temperature_tmp**2, eps)),  # ice
+        alv / (rv * jnp.maximum(temperature_tmp**2, eps)),  # water
+    )
+
+    ztmp1_zlcd = zlc * zdqsdt
+    ztmp2_zlcd = qsat_tmp * zcor * zlucub
+    zlcdqsdt = jnp.where(ll1, ztmp1_zlcd, ztmp2_zlcd)
+
+    zqcon = 1.0 / (1.0 + zlcdqsdt)
+
+    # -------------------------------------------------------------------------
+    # 9. Supersaturation thresholds
+    # -------------------------------------------------------------------------
+    zoversat = 0.01 * qsat_tmp           # 1% supersaturation over ice/water
+    zoversatw = 0.01 * qsat_tmp_water    # 1% supersaturation over water
+
+    # zrhtest: RH-limited threshold humidity for final correction
+    zrhtest = jnp.minimum(specific_humidity_prev / jnp.maximum(qsat_prev, eps), 1.0) * qsat_tmp
+
+    # Heterogeneous onset humidity (only relevant in ice phase)
+    zqsp1tmphet_candidate = jnp.minimum(qsat_tmp_water + zoversatw, qsat_tmp * 1.3)
+    zqsp1tmphet = jnp.where(lo2, zqsp1tmphet_candidate, 0.0)
+
+    # -------------------------------------------------------------------------
+    # 10. Supersaturation increments
+    # -------------------------------------------------------------------------
+    ztmp1 = (specific_humidity_tmp - qsat_tmp - zoversat) * zqcon          # w.r.t. ice/water
+    ztmp2 = (specific_humidity_tmp - qsat_tmp_water - zoversatw) * zqcon   # w.r.t. water
+    ztmp3 = (specific_humidity_tmp - zqsp1tmphet) * zqcon                  # w.r.t. heterogeneous onset
+
+    # -------------------------------------------------------------------------
+    # 11. Supersaturation condition flags
+    # -------------------------------------------------------------------------
+    ll1_circ = jnp.array(nic_cirrus == 1)  # constant (not per-point)
+
+    ll2 = specific_humidity_tmp > (qsat_tmp + zoversat)
+    ll3 = specific_humidity_tmp > (qsat_tmp_water + zoversatw)
+    ll4 = specific_humidity_tmp > zqsp1tmphet
+    ll5 = temperature_tmp >= cthomi  # True = mixed-phase (not homogeneous)
+
+    # -------------------------------------------------------------------------
+    # 12. Deposition increment (ice cloud cases, lo2=True)
+    #     Three mutually exclusive branches:
+    #       A: nic_cirrus==1 (or nic_cirrus!=1 but T>=cthomi):  use ztmp1 if ll2
+    #       B: nic_cirrus!=1, T<cthomi, not heterogeneous:       use ztmp2 if ll3
+    #       C: nic_cirrus!=1, T<cthomi, heterogeneous (ll_het):  use ztmp3 if ll4
+    # -------------------------------------------------------------------------
+    dep_increment = jnp.zeros_like(deposition_rate)
+
+    # Branch A
+    ll6_A = jnp.logical_and(
+        lo2,
+        jnp.logical_or(
+            jnp.logical_and(ll1_circ, ll2),
+            jnp.logical_and(~ll1_circ, jnp.logical_and(ll2, ll5)),
+        ),
+    )
+    dep_increment = jnp.where(ll6_A, ztmp1, dep_increment)
+
+    # Branch B: nic_cirrus!=1, T<cthomi (!ll5), not ll_het
+    ll6_B = jnp.logical_and(
+        lo2,
+        jnp.logical_and(
+            ~ll1_circ,
+            jnp.logical_and(ll3, jnp.logical_and(~ll5, jnp.array(not ll_het))),
+        ),
+    )
+    dep_increment = jnp.where(ll6_B, ztmp2, dep_increment)
+
+    # Branch C: nic_cirrus!=1, T<cthomi (!ll5), ll_het
+    ll6_C = jnp.logical_and(
+        lo2,
+        jnp.logical_and(
+            ~ll1_circ,
+            jnp.logical_and(ll4, jnp.logical_and(~ll5, jnp.array(ll_het))),
+        ),
+    )
+    dep_increment = jnp.where(ll6_C, ztmp3, dep_increment)
+
+    deposition_rate = deposition_rate + dep_increment
+
+    # -------------------------------------------------------------------------
+    # 13. Condensation increment (liquid cloud cases, lo2=False)
+    # -------------------------------------------------------------------------
+    ll6_liq = jnp.logical_and(~lo2, ll2)
+    cnd_increment = jnp.where(ll6_liq, ztmp1, 0.0)
+    condensation_rate = condensation_rate + cnd_increment
+
+    # -------------------------------------------------------------------------
+    # 14. Final corrections
+    #     If the updated q < zrhtest AND q_s(new) <= q_s(t-1),
+    #     cap deposition/condensation at (pqp1 - zrhtest) to avoid over-drying.
+    # -------------------------------------------------------------------------
+    ztmp5 = jnp.maximum(specific_humidity - zrhtest, 0.0)
+
+    ll1_dep = deposition_rate > 0.0
+    ll2_cnd = condensation_rate > 0.0
+    ll3_rh  = specific_humidity_tmp < zrhtest
+    ll4_qs  = qsat_tmp <= qsat_prev
+
+    # Correction for deposition (ice phase)
+    ll5_dep = jnp.logical_and(lo2, jnp.logical_and(ll1_dep, jnp.logical_and(ll3_rh, ll4_qs)))
+    deposition_rate = jnp.where(ll5_dep, ztmp5, deposition_rate)
+
+    # Correction for condensation (liquid phase)
+    ll5_cnd = jnp.logical_and(~lo2, jnp.logical_and(ll2_cnd, jnp.logical_and(ll3_rh, ll4_qs)))
+    condensation_rate = jnp.where(ll5_cnd, ztmp5, condensation_rate)
+
+    # -------------------------------------------------------------------------
+    # 15. Final updated temperature and specific humidity
+    # -------------------------------------------------------------------------
+    temperature_tmp = temperature + lvdcp * condensation_rate + lsdcp * deposition_rate
+    specific_humidity_tmp = specific_humidity - condensation_rate - deposition_rate
+
+    return (
+        condensation_rate,
+        deposition_rate,
+        temperature_tmp,
+        specific_humidity_tmp,
+        qsat_tmp,
+    )
 
 def precip_formation_warm(
     warm_precip_mask: jnp.ndarray,

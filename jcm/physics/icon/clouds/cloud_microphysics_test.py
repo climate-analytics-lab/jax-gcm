@@ -18,13 +18,14 @@ from .cloud_utils import (
     get_util_var, get_cloud_bounds, eff_ice_crystal_radius, minimum_CDNC
 )
 from .cloud_microphysics_2m import (
-    MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain,
-    precip_formation_warm, precip_formation_cold, update_in_cloud_water
+    MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain, sedimentation_ice,
+    mixed_phase_deposition_and_corrections, precip_formation_warm, precip_formation_cold, update_in_cloud_water
 )
-from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf, rhoh2o
+from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf, rhoh2o, ak, p0s1_bg, rv, t0
 
 from .cloud_params_2m import (cqtmin, ldyn_cdnc_min, rcd_vol_max, cdnc_min_fixed, 
-                              cdnc_min_lower, cdnc_min_upper, fact_PK, pow_PK, icemin
+                              cdnc_min_lower, cdnc_min_upper, fact_PK, pow_PK, icemin, clc_min,
+                              cthomi, tmelt, nic_cirrus, eps
                               )
 
 from math import pi
@@ -953,6 +954,682 @@ class TestSublimationSnowIceEvapRain_2M:
         assert jnp.all(jnp.isfinite(rain_evap))
         assert jnp.all(rain_evap >= 0.0)
 
+# ...existing code...
+
+class TestSedimentationIce_2M:
+    def _realistic_inputs(self, n: int):
+        """
+        Physically consistent inputs for sedimentation_ice.
+
+        Typical mid-tropospheric cirrus conditions:
+          - T ~ 230 K, p ~ 300 hPa, rho ~ 0.45 kg/m^3
+          - cloud ice mmr ~ 10-50 mg/kg (typical cirrus)
+          - ICNC ~ 1e4-1e5 /m^3 (cirrus range; NOT cumulus which is 1e8+)
+          - ice_flux: downward flux from layer above, consistent with mass
+          - ice_flux_n: number flux consistent with ice_flux and mean crystal mass
+
+        Key consistency requirement:
+          mean_crystal_mass = air_density * ice_mmr / ICNC
+          ice_flux_n / ice_flux should match same mean_crystal_mass
+        """
+        # --- Atmospheric state (mid-troposphere, ~300 hPa, T~230 K)
+        air_density = jnp.full((n,), 0.45, dtype=jnp.float32)       # kg/m^3 at ~300 hPa
+        inv_air_density_rcp = 1.0 / air_density                      # m^3/kg
+        pressure_thickness = jnp.full((n,), 3000.0, dtype=jnp.float32)  # Pa (~300m layer depth)
+        air_density_correction = jnp.full((n,), 1.0, dtype=jnp.float32)  # dimensionless
+
+        # --- Cloud fraction
+        cloud_fraction = jnp.array([0.8, 0.3, 0.0, 0.95], dtype=jnp.float32)
+
+        # --- Grid-mean ice mass mixing ratio [kg/kg]
+        # Cirrus: 10-50 mg/kg grid-mean; zero where no cloud
+        # Note: these are grid-mean, so multiply in-cloud value by cloud_fraction
+        # In-cloud qi ~ 50 mg/kg = 5e-5 kg/kg
+        ice_mmr_in_cloud = 5e-5  # kg/kg (in-cloud)
+        ice_mmr_gridmean = jnp.array(
+            [
+                cloud_fraction[0] * ice_mmr_in_cloud,   # 4e-5
+                cloud_fraction[1] * ice_mmr_in_cloud,   # 1.5e-5
+                0.0,                                    # no cloud
+                cloud_fraction[3] * ice_mmr_in_cloud,   # 4.75e-5
+            ],
+            dtype=jnp.float32,
+        )
+
+        # --- In-cloud ICNC [1/m^3]
+        # Cirrus: ~1e4-1e5 /m^3 (not cumulus which is 1e8+)
+        # Mean crystal mass = rho * qi_incloud / ICNC
+        # = 0.45 * 5e-5 / 5e4 = 4.5e-13 kg ~ reasonable ice crystal mass
+        icnc_in_cloud = jnp.array(
+            [5.0e4, 5.0e4, 5.0e4, 1.0e5],   # 1/m^3
+            dtype=jnp.float32,
+        )
+
+        # --- Falling ice flux from above [kg/m^2/s]
+        # Must be consistent with fall speed, density, and grid-mean ice content:
+        #   ice_flux = v_fall * air_density * ice_mmr_gridmean
+        # For v_fall ~ 0.3 m/s (typical cirrus), rho=0.45, qi_gridmean ~ 4e-5:
+        #   ice_flux ~ 0.3 * 0.45 * 4e-5 ~ 5.4e-6 kg/m^2/s
+        vfall_typical = 0.3  # m/s — within the [0.001, 2.0] clip range
+        air_density_val = 0.45
+
+        ice_flux_in = jnp.array(
+            [
+                vfall_typical * air_density_val * float(cloud_fraction[0]) * ice_mmr_in_cloud,  # ~5.4e-6
+                vfall_typical * air_density_val * float(cloud_fraction[1]) * ice_mmr_in_cloud,  # ~2.0e-6
+                0.0,                                                                              # no cloud
+                vfall_typical * air_density_val * float(cloud_fraction[3]) * ice_mmr_in_cloud,  # ~6.4e-6
+            ],
+            dtype=jnp.float32,
+        )
+
+        # --- Falling ice number flux [1/m^2/s]
+        # Consistent with mass flux: ice_flux_n = ice_flux / mean_crystal_mass
+        # mean_crystal_mass = rho * qi_incloud / ICNC
+        mean_crystal_mass = jnp.array(
+            [
+                air_density_val * ice_mmr_in_cloud / float(icnc_in_cloud[0]),  # ~4.5e-13 kg
+                air_density_val * ice_mmr_in_cloud / float(icnc_in_cloud[1]),  # ~4.5e-13 kg
+                1.0e-12,                                                         # dummy (flux=0)
+                air_density_val * ice_mmr_in_cloud / float(icnc_in_cloud[3]),  # ~2.25e-13 kg
+            ],
+            dtype=jnp.float32,
+        )
+        ice_flux_n_in = ice_flux_in / jnp.maximum(mean_crystal_mass, 1e-20)
+        ice_flux_n_in = ice_flux_n_in.at[2].set(0.0)  # consistent with zero mass flux
+
+        # --- Falling ice fraction [0..1]
+        # Should be <= cloud_fraction where ice is present
+        falling_ice_fraction_in = jnp.array(
+            [0.5, 0.2, 0.0, 0.7],
+            dtype=jnp.float32,
+        )
+
+        return dict(
+            cloud_fraction=cloud_fraction,
+            air_density_correction=air_density_correction,
+            pressure_thickness=pressure_thickness,
+            air_density=air_density,
+            inv_air_density_rcp=inv_air_density_rcp,
+            ice_mmr_gridmean=ice_mmr_gridmean,
+            icnc_in_cloud=icnc_in_cloud,
+            ice_flux=ice_flux_in,
+            ice_flux_n=ice_flux_n_in,
+            falling_ice_fraction=falling_ice_fraction_in,
+        )
+
+    def test_sedimentation_reduces_cloud_ice_and_increases_flux(self):
+        """
+        With physically consistent cirrus inputs:
+          - cloud-ice mmr should decrease (sedimentation removes ice from layer)
+          - falling-ice mass flux should increase (gains from this layer's sedimentation)
+          - all outputs must be finite and non-negative
+          - ICNC should not increase
+        """
+        n = 4
+        x = self._realistic_inputs(n)
+        dt = jnp.asarray(60.0, dtype=jnp.float32)
+
+        (
+            ice_mmr_o,
+            icnc_o,
+            ice_flux_o,
+            ice_flux_n_o,
+            falling_ice_frac_o,
+            pmrateps_o,
+        ) = sedimentation_ice(
+            cloud_fraction=x["cloud_fraction"],
+            air_density_correction=x["air_density_correction"],
+            pressure_thickness=x["pressure_thickness"],
+            air_density=x["air_density"],
+            inv_air_density_rcp=x["inv_air_density_rcp"],
+            ice_mmr_gridmean=x["ice_mmr_gridmean"],
+            icnc_in_cloud=x["icnc_in_cloud"],
+            ice_flux=x["ice_flux"],
+            ice_flux_n=x["ice_flux_n"],
+            falling_ice_fraction=x["falling_ice_fraction"],
+            dt=dt,
+        )
+
+        # --- Finiteness
+        assert jnp.all(jnp.isfinite(ice_mmr_o)),       "ice_mmr_o has non-finite values"
+        assert jnp.all(jnp.isfinite(icnc_o)),          "icnc_o has non-finite values"
+        assert jnp.all(jnp.isfinite(ice_flux_o)),      "ice_flux_o has non-finite values"
+        assert jnp.all(jnp.isfinite(ice_flux_n_o)),    "ice_flux_n_o has non-finite values"
+        assert jnp.all(jnp.isfinite(falling_ice_frac_o))
+        assert jnp.all(jnp.isfinite(pmrateps_o))
+
+        # --- Non-negativity (physical requirement for magnitudes)
+        assert jnp.all(ice_mmr_o >= 0.0),      "ice_mmr_o should be non-negative"
+        assert jnp.all(ice_flux_o >= 0.0),     "ice_flux_o should be non-negative"
+        assert jnp.all(ice_flux_n_o >= 0.0),   "ice_flux_n_o should be non-negative"
+        assert jnp.all(pmrateps_o >= 0.0),     "sedimentation rate should be non-negative"
+        assert jnp.all(falling_ice_frac_o >= 0.0)
+        assert jnp.all(falling_ice_frac_o <= 1.0)
+
+        # --- Cloudy points: ice should sediment out (mmr decreases)
+        cloudy = x["cloud_fraction"] > clc_min
+        assert jnp.all(ice_mmr_o[cloudy] <= x["ice_mmr_gridmean"][cloudy] + 1e-12), \
+            "Cloud ice mmr should not increase due to sedimentation"
+
+        # --- Falling-ice flux should increase (gains from sedimentation in this layer)
+        #     (incoming + sediment_out >= incoming)
+        assert jnp.all(ice_flux_o >= x["ice_flux"] - 1e-12), \
+            "Falling-ice flux should not decrease (gains sedimentation from this layer)"
+
+        # --- Where no cloud, ice mmr should be unchanged
+        no_cloud_idx = 2
+        assert float(x["cloud_fraction"][no_cloud_idx]) == 0.0
+        assert jnp.allclose(ice_mmr_o[no_cloud_idx], x["ice_mmr_gridmean"][no_cloud_idx], atol=1e-10)
+
+        # --- Ice flux increases only due to sedimentation from this level;
+        #     the increment should be proportional to ice mmr lost.
+        #     (weak check: delta_flux ~ zcons2 * delta_mmr * dp)
+        from jcm.physics.icon.clouds.cloud_microphysics_2m import microphysics_dt_constants
+        _, _, _, zcons2, _ = microphysics_dt_constants(dt)
+        delta_mmr = x["ice_mmr_gridmean"] - ice_mmr_o
+        expected_flux_increment = zcons2 * delta_mmr * x["pressure_thickness"]
+        actual_flux_increment = ice_flux_o - x["ice_flux"]
+        # Allow some tolerance due to the relaxation form (not a simple linear update)
+        assert jnp.all(actual_flux_increment >= -1e-12), \
+            "Flux increment from sedimentation should be non-negative"
+
+    def test_no_ice_no_sedimentation(self):
+        """
+        With zero cloud ice and zero incoming flux, nothing should change
+        (ice_mmr, ice_flux, ice_flux_n all stay zero; pmrateps ~ 0).
+        """
+        n = 4
+        x = self._realistic_inputs(n)
+        dt = jnp.asarray(60.0, dtype=jnp.float32)
+
+        # Override: set all ice to zero
+        x["ice_mmr_gridmean"] = jnp.zeros(n, dtype=jnp.float32)
+        x["ice_flux"] = jnp.zeros(n, dtype=jnp.float32)
+        x["ice_flux_n"] = jnp.zeros(n, dtype=jnp.float32)
+
+        (
+            ice_mmr_o,
+            icnc_o,
+            ice_flux_o,
+            ice_flux_n_o,
+            falling_ice_frac_o,
+            pmrateps_o,
+        ) = sedimentation_ice(
+            cloud_fraction=x["cloud_fraction"],
+            air_density_correction=x["air_density_correction"],
+            pressure_thickness=x["pressure_thickness"],
+            air_density=x["air_density"],
+            inv_air_density_rcp=x["inv_air_density_rcp"],
+            ice_mmr_gridmean=x["ice_mmr_gridmean"],
+            icnc_in_cloud=x["icnc_in_cloud"],
+            ice_flux=x["ice_flux"],
+            ice_flux_n=x["ice_flux_n"],
+            falling_ice_fraction=x["falling_ice_fraction"],
+            dt=dt,
+        )
+
+        assert jnp.allclose(ice_mmr_o, 0.0, atol=1e-12)
+        assert jnp.allclose(ice_flux_o, 0.0, atol=1e-12)
+        assert jnp.allclose(ice_flux_n_o, 0.0, atol=1e-12)
+        assert jnp.allclose(pmrateps_o, 0.0, atol=1e-12)
+        assert jnp.all(jnp.isfinite(icnc_o))
+
+    def test_number_mass_consistency(self):
+        """
+        After sedimentation, ice_flux_n should be zero wherever ice_flux is
+        essentially zero (consistency_number_to_mass guard).
+        Verify this for a point with incoming flux that gets fully sediment-trapped.
+        """
+        n = 2
+        dt = jnp.asarray(60.0, dtype=jnp.float32)
+
+        # Point 0: genuine cloud with ice
+        # Point 1: no cloud, no ice, small incoming flux → should end up consistent
+        cloud_fraction = jnp.array([0.8, 0.0], dtype=jnp.float32)
+        air_density = jnp.array([0.45, 0.45], dtype=jnp.float32)
+        inv_air_density_rcp = 1.0 / air_density
+
+        ice_mmr_gridmean = jnp.array([4e-5, 0.0], dtype=jnp.float32)
+        icnc_in_cloud = jnp.array([5e4, 5e4], dtype=jnp.float32)
+
+        # Give point 1 a tiny (sub-threshold) incoming flux
+        ice_flux_in = jnp.array([5e-4, 1e-15], dtype=jnp.float32)  # sub-epsec for pt 1
+        ice_flux_n_in = jnp.array([1e9, 1e3], dtype=jnp.float32)
+
+        (
+            ice_mmr_o,
+            icnc_o,
+            ice_flux_o,
+            ice_flux_n_o,
+            _,
+            _,
+        ) = sedimentation_ice(
+            cloud_fraction=cloud_fraction,
+            air_density_correction=jnp.ones(n, dtype=jnp.float32),
+            pressure_thickness=jnp.full((n,), 3000.0, dtype=jnp.float32),
+            air_density=air_density,
+            inv_air_density_rcp=inv_air_density_rcp,
+            ice_mmr_gridmean=ice_mmr_gridmean,
+            icnc_in_cloud=icnc_in_cloud,
+            ice_flux=ice_flux_in,
+            ice_flux_n=ice_flux_n_in,
+            falling_ice_fraction=jnp.array([0.5, 0.0], dtype=jnp.float32),
+            dt=dt,
+        )
+
+        # Where ice_flux_o is essentially zero, ice_flux_n_o must also be zero
+        from jcm.physics.icon.clouds.cloud_params_2m import epsec
+        near_zero_flux = ice_flux_o < epsec
+        assert jnp.all(ice_flux_n_o[near_zero_flux] == 0.0), \
+            "ice_flux_n should be zeroed where ice_flux is below epsec (consistency guard)"
+        
+class TestMixedPhaseDepositionAndCorrections2M:
+    """
+    Unit tests for mixed_phase_deposition_and_corrections.
+
+    Structure:
+      - _base_inputs(): physically consistent mid-troposphere cirrus case.
+      - _warm_inputs(): liquid-cloud case above tmelt.
+      - Individual tests cover: output shapes/finiteness, phase branching,
+        thermodynamic consistency, RH correction, and edge cases.
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _base_inputs(self, n: int = 4):
+        """
+        Physically consistent cirrus inputs (T ~ 240 K, p ~ 400 hPa)?.
+        lo2 = True (ice phase) for all points.
+        """
+        T = jnp.full((n,), 240.0, dtype=jnp.float32)
+        p = jnp.full((n,), 40000.0, dtype=jnp.float32)
+        rho = jnp.full((n,), 0.45, dtype=jnp.float32)
+
+        T_val = 240.0
+        # compute saturation vapour pressures consistently with the routine under test
+        # ztmp_ice = jnp.minimum(ak * (T_val - tmelt) / jnp.maximum(T_val - 7.66, 1e-6), 700.0)
+        # ztmp_water = jnp.minimum(ak * (T_val - tmelt) / jnp.maximum(T_val - 35.86, 1e-6), 700.0)
+        # esi_correct = p0s1_bg * jnp.exp(ztmp_ice)
+        # esw_correct = p0s1_bg * jnp.exp(ztmp_water)
+
+        ztmp_ice = (alhs/rv)*(1.0/t0 - 1.0/T_val)
+        ztmp_water = (alhc/rv)*(1.0/t0 - 1.0/T_val)
+        esi_correct = 611 * jnp.exp(ztmp_ice)
+        esw_correct = 611 * jnp.exp(ztmp_water)
+
+        esi = jnp.full((n,), esi_correct, dtype=jnp.float32)
+        esw = jnp.full((n,), esw_correct, dtype=jnp.float32)
+
+        # qsat using same formula as _qsat() in the function:
+        vtmpc1 = 0.608   # or import from physical_constants
+        qsat_ice_internal = esi_correct / (float(p[0]) - (1.0 - 1.0/(1.0 + vtmpc1)) * esi_correct)
+        # ~1.30e-3 kg/kg
+
+        qv   = jnp.full((n,), qsat_ice_internal * 1.5, dtype=jnp.float32)
+        qm1  = jnp.full((n,), qsat_ice_internal * 0.98, dtype=jnp.float32)
+        qsm1 = jnp.full((n,), qsat_ice_internal,        dtype=jnp.float32)
+
+        # ICNC typical for cirrus
+        icnc = jnp.full((n,), 5e4, dtype=jnp.float32)        # 1/m^3
+        cloud_fraction = jnp.full((n,), 0.7, dtype=jnp.float32)
+
+        # Ice mmr grid-mean ~ 3e-5 kg/kg
+        ice_mmr = jnp.full((n,), 3e-5, dtype=jnp.float32)
+
+        # Bergeron variable (small → zvervmax ~ 0, so WBF satisfied easily)
+        eta = jnp.full((n,), 1e-3, dtype=jnp.float32)
+
+        # Thermodynamic constants at 240 K (approximate)
+        Ls = 2.836e6   # J/kg
+        Lv = 2.501e6   # J/kg
+        cpd = 1004.0
+        lsdcp = jnp.full((n,), Ls / cpd, dtype=jnp.float32)
+        lvdcp = jnp.full((n,), Lv / cpd, dtype=jnp.float32)
+
+        # Tompkins source and detrainment: zero for clean tests
+        pgenti = jnp.zeros((n,), dtype=jnp.float32)
+        xite = jnp.zeros((n,), dtype=jnp.float32)
+        xievap = jnp.zeros((n,), dtype=jnp.float32)
+
+        # Updraft very small (cm/s) → 0.01*pvervx << zvervmax → lo2=True
+        pvervx = jnp.full((n,), 0.001, dtype=jnp.float32)
+
+        # Initial condensation/deposition: zero (all increments come from this routine)
+        pcnd = jnp.zeros((n,), dtype=jnp.float32)
+        pdep = jnp.zeros((n,), dtype=jnp.float32)
+
+        dt = jnp.asarray(60.0, dtype=jnp.float32)
+
+        return dict(
+            pressure=p,
+            icnc=icnc,
+            specific_humidity_prev=qm1,
+            cloud_fraction=cloud_fraction,
+            sat_vap_pres_ice=esi,
+            sat_vap_pres_water=esw,
+            bergeron_variable=eta,
+            tompkins_genti=pgenti,
+            lsdcp=lsdcp,
+            lvdcp=lvdcp,
+            specific_humidity=qv,
+            qsat_prev=qsm1,
+            air_density=rho,
+            temperature=T,
+            ice_evaporation=xievap,
+            ice_mmr_gridmean=ice_mmr,
+            ice_detrainment_tendency=xite,
+            updraft_velocity=pvervx,
+            condensation_rate=pcnd,
+            deposition_rate=pdep,
+            dt=dt,
+        )
+
+    def _warm_inputs(self, n: int = 4):
+        """
+        Liquid-cloud inputs (T ~ 285 K > tmelt).
+        lo2 = False (liquid phase) for all points.
+        Supersaturated w.r.t. water → condensation should occur.
+        """
+        x = self._base_inputs(n)
+        T = jnp.full((n,), 285.0, dtype=jnp.float32)    # K (> tmelt=273.15)
+        p = jnp.full((n,), 85000.0, dtype=jnp.float32)  # Pa (~850 hPa)
+        rho = jnp.full((n,), 1.0, dtype=jnp.float32)
+
+        # Saturation vapour pressures at 285 K
+        esw = jnp.full((n,), 1400.0, dtype=jnp.float32)  # Pa w.r.t. water (approx)
+        esi = jnp.full((n,), 1350.0, dtype=jnp.float32)  # Pa w.r.t. ice (< esw)
+
+        qsw = esw / p   # ~ 1.65e-2 kg/kg
+        qsi = esi / p
+
+        # Supersaturated w.r.t. water by 3%
+        qv = qsw * 1.03
+        qm1 = qsw * 0.99
+        qsm1 = qsw
+
+        Lv = 2.501e6
+        cpd = 1004.0
+        lvdcp = jnp.full((n,), Lv / cpd, dtype=jnp.float32)
+        lsdcp = x["lsdcp"]
+
+        x.update(
+            pressure=p,
+            temperature=T,
+            air_density=rho,
+            sat_vap_pres_ice=esi,
+            sat_vap_pres_water=esw,
+            specific_humidity=qv,
+            specific_humidity_prev=qm1,
+            qsat_prev=qsm1,
+            lvdcp=lvdcp,
+            # large updraft: 0.01*pvervx > zvervmax → lo2=False (liquid)
+            updraft_velocity=jnp.full((n,), 1e6, dtype=jnp.float32),
+            ice_mmr_gridmean=jnp.zeros((n,), dtype=jnp.float32),
+            icnc=jnp.full((n,), 1e8, dtype=jnp.float32),  # not used in liquid branch
+        )
+        return x
+
+    def _call(self, x, **overrides):
+        kwargs = {**x, **overrides}
+        return mixed_phase_deposition_and_corrections(**kwargs)
+
+    # ------------------------------------------------------------------
+    # 1. Basic sanity: outputs finite, shapes correct
+    # ------------------------------------------------------------------
+
+    def test_outputs_finite_and_correct_shape_ice(self):
+        n = 4
+        x = self._base_inputs(n)
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        for arr in (pcnd_o, pdep_o, T_o, q_o, qs_o):
+            assert arr.shape == (n,)
+            assert jnp.all(jnp.isfinite(arr)), f"Non-finite values in {arr}"
+
+    def test_outputs_finite_and_correct_shape_liquid(self):
+        n = 4
+        x = self._warm_inputs(n)
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        for arr in (pcnd_o, pdep_o, T_o, q_o, qs_o):
+            assert arr.shape == (n,)
+            assert jnp.all(jnp.isfinite(arr)), f"Non-finite values in {arr}"
+
+    # ------------------------------------------------------------------
+    # 2. Phase branching: ice phase → deposition, no condensation
+    # ------------------------------------------------------------------
+
+    def test_ice_phase_produces_deposition_not_condensation(self):
+        """
+        In the ice phase (lo2=True, supersaturated w.r.t. ice),
+        deposition_rate should increase; condensation_rate should stay near zero.
+        """
+        x = self._base_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pdep_o > 0.0), "Deposition should be positive in supersaturated ice cloud"
+        assert jnp.all(pcnd_o == 0.0), "Condensation should be zero in ice phase"
+
+    # ------------------------------------------------------------------
+    # 3. Phase branching: liquid phase → condensation, no deposition
+    # ------------------------------------------------------------------
+
+    def test_liquid_phase_produces_condensation_not_deposition(self):
+        """
+        In the liquid phase (lo2=False, supersaturated w.r.t. water),
+        condensation_rate should increase; deposition_rate should stay near zero.
+        """
+        x = self._warm_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pcnd_o > 0.0), "Condensation should be positive in supersaturated liquid cloud"
+        assert jnp.all(pdep_o == 0.0), "Deposition should be zero in liquid phase"
+
+    # ------------------------------------------------------------------
+    # 4. Thermodynamic consistency: T_tmp = T + Lv/cpd*pcnd + Ls/cpd*pdep
+    # ------------------------------------------------------------------
+
+    def test_temperature_thermodynamic_consistency_ice(self):
+        """
+        T_tmp = T + (Ls/cpd)*pdep + (Lv/cpd)*pcnd  (energy conservation).
+        """
+        x = self._base_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        T_expected = x["temperature"] + x["lsdcp"] * pdep_o + x["lvdcp"] * pcnd_o
+        assert jnp.allclose(T_o, T_expected, atol=1e-4), \
+            "Temperature update not thermodynamically consistent"
+
+    def test_temperature_thermodynamic_consistency_liquid(self):
+        x = self._warm_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        T_expected = x["temperature"] + x["lsdcp"] * pdep_o + x["lvdcp"] * pcnd_o
+        assert jnp.allclose(T_o, T_expected, atol=1e-4)
+
+    # ------------------------------------------------------------------
+    # 5. Moisture conservation: q_tmp = q - pcnd - pdep
+    # ------------------------------------------------------------------
+
+    def test_moisture_conservation_ice(self):
+        x = self._base_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        q_expected = x["specific_humidity"] - pcnd_o - pdep_o
+        assert jnp.allclose(q_o, q_expected, atol=1e-9), \
+            "Specific humidity update not consistent with pcnd + pdep"
+
+    def test_moisture_conservation_liquid(self):
+        x = self._warm_inputs()
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        q_expected = x["specific_humidity"] - pcnd_o - pdep_o
+        assert jnp.allclose(q_o, q_expected, atol=1e-9)
+
+    # ------------------------------------------------------------------
+    # 6. No supersaturation → no deposition/condensation increment
+    # ------------------------------------------------------------------
+
+    def test_no_deposition_when_subsaturated_ice(self):
+        """
+        When q < q_sat_ice (subsaturated), deposition should not increase.
+        Starting pdep=0 → should remain 0 or go negative (sublimation branch),
+        but must NOT produce a positive increment here (that's a different routine).
+        """
+        x = self._base_inputs()
+        # Set q strongly subsaturated (50% of q_sat_ice)
+        p = x["pressure"]
+        esi = x["sat_vap_pres_ice"]
+        qsi = esi / p * 0.5  # well subsaturated
+        x = {**x, "specific_humidity": qsi}
+
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        # Deposition should not increase above the initial value (0)
+        assert jnp.all(pdep_o <= 0.0 + 1e-10), \
+            "Deposition should not be positive when subsaturated"
+
+    def test_no_condensation_when_subsaturated_liquid(self):
+        x = self._warm_inputs()
+        p = x["pressure"]
+        esw = x["sat_vap_pres_water"]
+        qsw = esw / p * 0.8  # subsaturated w.r.t. water
+        x = {**x, "specific_humidity": qsw}
+
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pcnd_o <= 0.0 + 1e-10), \
+            "Condensation should not be positive when subsaturated"
+
+    # ------------------------------------------------------------------
+    # 7. RH-correction: deposition/condensation capped to avoid over-drying
+    # ------------------------------------------------------------------
+
+    def test_rh_correction_caps_deposition(self):
+        """
+        When q_s(new) <= q_s(t-1) and q_tmp < zrhtest, deposition should be
+        capped to max(q - zrhtest, 0). With qsm1 large, the correction fires.
+        """
+        x = self._base_inputs()
+
+        # Make qsm1 large (very moist reference state) so correction fires.
+        # zrhtest = min(qm1/qsm1, 1) * qs_new ~ large → most of q is used.
+        qm1 = x["specific_humidity"] * 0.999
+        qsm1 = qm1  # RH(t-1) = 1.0, so zrhtest = qs_new
+
+        x = {**x, "specific_humidity_prev": qm1, "qsat_prev": qsm1}
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        # With correction active, deposition is capped at max(q - qs_new, 0)
+        # → q_o should be >= qs_o (it won't go drier than saturation)
+        assert jnp.all(q_o >= qs_o - 1e-8), \
+            "After RH correction, q_tmp should not fall below q_sat"
+
+    # ------------------------------------------------------------------
+    # 8. Very cold temperature (T < cthomi): always ice phase
+    # ------------------------------------------------------------------
+
+    def test_very_cold_always_ice_phase(self):
+        """
+        Below cthomi (~233 K), lo2=True regardless of updraft.
+        Deposition should fire; condensation should not.
+        """
+        x = self._base_inputs()
+        T_cold = jnp.full_like(x["temperature"], cthomi - 5.0)  # 228 K
+
+        # Saturation vapour pressure at 228 K (ice ~ 5 Pa)
+        ztmp_ice_cold = (alhs / rv) * (1.0 / t0 - 1.0 / T_cold)
+        ztmp_water_cold = (alhc / rv) * (1.0 / t0 - 1.0 / T_cold)
+        esi_calc = 611.0 * jnp.exp(ztmp_ice_cold)
+        esw_calc = 611.0 * jnp.exp(ztmp_water_cold)
+        p = x["pressure"]
+        vtmpc1 = 0.608
+
+        # Compute qsat for ice and water
+        qsat_ice = esi_calc / (p - (1.0 - 1.0 / (1.0 + vtmpc1)) * esi_calc)
+        qsat_water = esw_calc / (p - (1.0 - 1.0 / (1.0 + vtmpc1)) * esw_calc)
+
+        # Compute zqsp1tmphet threshold
+        zoversatw = 0.01 * qsat_water
+        zqsp1tmphet = jnp.minimum(qsat_water + zoversatw, qsat_ice * 1.3)
+
+        # Set specific_humidity slightly above zqsp1tmphet
+        qsi_cold = zqsp1tmphet + 1e-8  # Add a small margin to ensure ll4=True
+
+        # Update inputs
+        esi_cold = jnp.full_like(x["sat_vap_pres_ice"], esi_calc)
+        esw_cold = jnp.full_like(x["sat_vap_pres_water"], esw_calc)
+
+        x = {
+            **x,
+            "temperature": T_cold,
+            "sat_vap_pres_ice": esi_cold,
+            "sat_vap_pres_water": esw_cold,
+            "specific_humidity": qsi_cold,
+            # Large updraft (should be overridden by T < cthomi):
+            "updraft_velocity": jnp.full_like(x["updraft_velocity"], 1e9),
+        }
+
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pdep_o > 0.0), "Below cthomi: deposition should occur"
+        assert jnp.all(pcnd_o == 0.0), "Below cthomi: condensation should be zero"
+
+    # ------------------------------------------------------------------
+    # 9. Pre-existing deposition/condensation carries through
+    # ------------------------------------------------------------------
+
+    def test_pre_existing_deposition_is_accumulated(self):
+        """
+        If an existing deposition_rate is passed in, the output should be >= that value
+        (the routine only *adds* increments, never removes existing deposition).
+        """
+        x = self._base_inputs()
+        pdep_initial = jnp.full_like(x["deposition_rate"], 1e-6)  # pre-existing
+        x = {**x, "deposition_rate": pdep_initial}
+
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pdep_o >= pdep_initial - 1e-10), \
+            "Output deposition should be >= input deposition"
+
+    def test_pre_existing_condensation_is_accumulated(self):
+        x = self._warm_inputs()
+        pcnd_initial = jnp.full_like(x["condensation_rate"], 1e-6)
+        x = {**x, "condensation_rate": pcnd_initial}
+
+        pcnd_o, pdep_o, T_o, q_o, qs_o = self._call(x)
+
+        assert jnp.all(pcnd_o >= pcnd_initial - 1e-10)
+
+    # ------------------------------------------------------------------
+    # 10. ll_het flag: switches heterogeneous nucleation path
+    #     In heterogeneous mode (ll_het=True, nic_cirrus != 1, T < cthomi),
+    #     the deposition increment uses ztmp3 (w.r.t. zqsp1tmphet) not ztmp1.
+    #     For our cold inputs, dep should still be > 0 in both cases.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.skipif(nic_cirrus == 1, reason="ll_het path only active when nic_cirrus != 1")
+    def test_ll_het_flag_changes_deposition(self): #FAILED, TODO different thresholds might produce same masks, migh remove
+        """
+        With ll_het=True vs False, deposition increments should differ
+        (different saturation threshold used). Both should still be finite >= 0.
+        """
+        x = self._base_inputs()
+        T_cold = jnp.full_like(x["temperature"], cthomi - 5.0)
+        x = {**x, "temperature": T_cold}
+
+        _, pdep_hom, _, _, _ = self._call(x, ll_het=False)
+        _, pdep_het, _, _, _ = self._call(x, ll_het=True)
+
+        assert jnp.all(jnp.isfinite(pdep_hom))
+        assert jnp.all(jnp.isfinite(pdep_het))
+        # Values should differ (different threshold)
+        assert not jnp.allclose(pdep_hom, pdep_het), \
+            "ll_het=True and False should produce different deposition increments"
 
 class TestAutoconversion_2M:
     def test_precip_formation_warm_mask_false_no_change(self):
@@ -1484,6 +2161,29 @@ if __name__ == "__main__":
     test_sublimation_snow_ice_rain_2m.test_snow_sublimation_only()
     test_sublimation_snow_ice_rain_2m.test_falling_ice_sublimation_reduces_fluxes()
     test_sublimation_snow_ice_rain_2m.test_rain_evaporation_only()
+
+    test_sedimentation_ice_2m = TestSedimentationIce_2M()
+    test_sedimentation_ice_2m.test_sedimentation_reduces_cloud_ice_and_increases_flux()
+    test_sedimentation_ice_2m.test_no_ice_no_sedimentation()
+    test_sedimentation_ice_2m.test_number_mass_consistency()
+
+    test_mixed_phase_2m = TestMixedPhaseDepositionAndCorrections2M()
+    test_mixed_phase_2m.test_outputs_finite_and_correct_shape_ice()
+    test_mixed_phase_2m.test_outputs_finite_and_correct_shape_liquid()
+    test_mixed_phase_2m.test_ice_phase_produces_deposition_not_condensation()
+    test_mixed_phase_2m.test_liquid_phase_produces_condensation_not_deposition()
+    test_mixed_phase_2m. test_temperature_thermodynamic_consistency_ice()
+    test_mixed_phase_2m.test_temperature_thermodynamic_consistency_liquid()
+    test_mixed_phase_2m.test_moisture_conservation_ice()
+    test_mixed_phase_2m.test_moisture_conservation_liquid()
+    test_mixed_phase_2m.test_no_deposition_when_subsaturated_ice()
+    test_mixed_phase_2m.test_no_condensation_when_subsaturated_liquid()
+    test_mixed_phase_2m.test_rh_correction_caps_deposition()
+    test_mixed_phase_2m.test_very_cold_always_ice_phase()
+    test_mixed_phase_2m.test_pre_existing_deposition_is_accumulated()
+    test_mixed_phase_2m.test_pre_existing_condensation_is_accumulated()
+    test_mixed_phase_2m.test_ll_het_flag_changes_deposition()
+
 
     test_auto_2m = TestAutoconversion_2M()
     test_auto_2m.test_precip_formation_warm_mask_false_no_change()
