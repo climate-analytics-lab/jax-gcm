@@ -131,26 +131,26 @@ def calculate_layer_thickness(
     return dz
 
 
-def prepare_physics_state_2d(state, geometry):
+def prepare_physics_state_2d(state, icon_coords):
     """
     Prepare physics state with proper unit conversions for 2D (vectorized) format.
-    
+
     This is used within IconPhysics after state has been reshaped to [nlev, ncols].
-    
+
     Args:
         state: PhysicsState in 2D format [nlev, ncols]
-        geometry: Geometry object
-        
+        icon_coords: IconCoords object with cached coordinate data
+
     Returns:
         Tuple of converted quantities needed by physics schemes
     """
     nlev, ncols = state.temperature.shape
-    
+
     # Convert surface pressure to Pascal
     surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
-    
+
     # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, geometry.fsg)
+    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, icon_coords.fsg)
     
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)
@@ -170,26 +170,26 @@ def prepare_physics_state_2d(state, geometry):
     }
 
 
-def prepare_physics_state_3d(state, geometry):
+def prepare_physics_state_3d(state, icon_coords):
     """
     Prepare physics state with proper unit conversions for 3D format.
-    
+
     This could be used for diagnostics or debugging with full 3D arrays.
-    
+
     Args:
         state: PhysicsState in 3D format [nlev, nlat, nlon]
-        geometry: Geometry object
-        
+        icon_coords: IconCoords object with cached coordinate data
+
     Returns:
         Tuple of converted quantities needed by physics schemes
     """
     nlev, nlat, nlon = state.temperature.shape
-    
+
     # Convert surface pressure to Pascal
     surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
-    
+
     # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, geometry.fsg)
+    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, icon_coords.fsg)
     
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)

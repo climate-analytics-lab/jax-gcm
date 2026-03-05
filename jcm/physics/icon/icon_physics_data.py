@@ -10,6 +10,7 @@ Date: 2025-01-11
 import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
+from jcm.physics.icon.icon_coords import IconCoords
 from jax import tree_util
 from typing import Optional
 
@@ -435,8 +436,9 @@ class ChemistryData:
 @tree_math.struct
 class PhysicsData:
     """Main physics data container for ICON physics"""
-    
+
     date: DateData
+    icon_coords: IconCoords
     diagnostics: DiagnosticData
     radiation: RadiationData
     convection: ConvectionData
@@ -445,11 +447,12 @@ class PhysicsData:
     surface: SurfaceData
     aerosol: AerosolData
     chemistry: ChemistryData
-    
+
     @classmethod
-    def zeros(cls, nodal_shape, nlev, date=None):
+    def zeros(cls, nodal_shape, nlev, icon_coords=None, date=None):
         return cls(
             date=date if date is not None else DateData.zeros(),
+            icon_coords=icon_coords,
             diagnostics=DiagnosticData.zeros(nodal_shape, nlev),
             radiation=RadiationData.zeros(nodal_shape, nlev),
             convection=ConvectionData.zeros(nodal_shape, nlev),
@@ -459,10 +462,11 @@ class PhysicsData:
             aerosol=AerosolData.zeros(nodal_shape, nlev),
             chemistry=ChemistryData.zeros(nodal_shape, nlev),
         )
-    
+
     def copy(self, **kwargs):
         new_data = {
             'date': self.date,
+            'icon_coords': self.icon_coords,
             'diagnostics': self.diagnostics,
             'radiation': self.radiation,
             'convection': self.convection,

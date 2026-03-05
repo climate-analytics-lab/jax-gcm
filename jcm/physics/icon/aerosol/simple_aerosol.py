@@ -3,10 +3,9 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import betainc
 from jcm.physics.icon.icon_physics_data import PhysicsData
-from jcm.physics.icon.icon_physics import PhysicsTendency
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
-from jcm.physics.icon.icon_physics import _IconGeometry
+from jcm.terrain import TerrainData
 from .aerosol_params import AerosolParameters
 
 
@@ -15,7 +14,7 @@ def get_simple_aerosol(
     physics_data: PhysicsData,
     parameters: AerosolParameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> Tuple[PhysicsTendency, PhysicsData]:
     """
     Apply MACv2-SP (Simple Plumes) aerosol scheme
@@ -35,11 +34,11 @@ def get_simple_aerosol(
     nlev, ncols = state.temperature.shape
     aerosol_params = parameters.aerosol
     
-    # Get grid coordinates from geometry
-    nlon = geometry.nodal_shape[1]
+    # Get grid coordinates from cached coordinates
+    nlon = physics_data.icon_coords.nodal_shape[1]
     lat, lon = jax.numpy.meshgrid(
-        geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
-        geometry.lon * 180.0 / jnp.pi,  # degrees
+        physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
+        physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
     )
     # Then reshape to (ncols,) to match column format
     lats = lat.reshape(ncols)

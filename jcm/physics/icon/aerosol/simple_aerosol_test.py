@@ -21,8 +21,7 @@ from jcm.physics.icon.aerosol.simple_aerosol import (
 )
 from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
 from jcm.physics.icon.icon_physics_data import PhysicsData
-from jcm.physics.icon.icon_physics import PhysicsTendency
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.date import DateData
 import tree_math

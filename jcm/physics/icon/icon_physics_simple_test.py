@@ -10,8 +10,9 @@ Date: 2025-01-11
 import numpy as np
 import jax.numpy as jnp
 import pytest
-from jcm.physics.icon.icon_physics import IconPhysics, _prepare_common_physics_state, _IconGeometry
+from jcm.physics.icon.icon_physics import IconPhysics, _prepare_common_physics_state
 from jcm.physics.icon.icon_physics_data import PhysicsData
+from jcm.physics.icon.icon_coords import IconCoords
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.date import DateData
@@ -26,7 +27,7 @@ def apply_simple_test_physics(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> Tuple[PhysicsTendency, PhysicsData]:
     """Simple test physics that just returns small tendencies"""
     nlev, ncols = state.temperature.shape
@@ -76,23 +77,17 @@ def test_prepare_common_physics_state():
 
     # Create other inputs
     date = DateData.zeros()
-    physics_data = PhysicsData.zeros((nlat, nlon), nlev, date=date)
-    parameters = Parameters.default()
-    forcing = ForcingData.zeros((nlat, nlon))
     sigma_boundaries = np.linspace(0, 1, nlev + 1)
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
-    geometry = _IconGeometry(
-        nodal_shape=coords.nodal_shape,
-        fsg=jnp.asarray(coords.vertical.centers),
-        hsg=jnp.asarray(coords.vertical.boundaries),
-        lat=jnp.asarray(coords.horizontal.latitudes),
-        lon=jnp.asarray(coords.horizontal.longitudes),
-        fmask=jnp.zeros((nlat, nlon)),
-    )
+    icon_coords = IconCoords.from_coordinate_system(coords)
+    terrain = TerrainData.aquaplanet(coords)
+    physics_data = PhysicsData.zeros((nlat, nlon), nlev, icon_coords=icon_coords, date=date)
+    parameters = Parameters.default()
+    forcing = ForcingData.zeros((nlat, nlon))
 
     # Run preparation
     tendencies, updated_physics_data = _prepare_common_physics_state(
-        state, physics_data, parameters, forcing, geometry
+        state, physics_data, parameters, forcing, terrain
     )
     
     # Check outputs

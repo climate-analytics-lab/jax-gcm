@@ -20,22 +20,7 @@ from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
-
-
-@tree_math.struct
-class _IconGeometry:
-    """Lightweight geometry adapter for ICON physics term functions.
-
-    Constructed from CoordinateSystem + TerrainData in compute_tendencies
-    and passed to the ICON physics term functions, providing the same
-    interface as the old Geometry class.
-    """
-    nodal_shape: tuple
-    fsg: jnp.ndarray  # sigma coordinates at level centers
-    hsg: jnp.ndarray  # sigma coordinates at half levels (boundaries)
-    lat: jnp.ndarray  # latitude in radians
-    lon: jnp.ndarray  # longitude in radians
-    fmask: jnp.ndarray  # fractional land-sea mask
+from jcm.physics.icon.icon_coords import IconCoords
 
 # Import physics modules (will be implemented progressively)
 from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme
@@ -93,8 +78,7 @@ class IconPhysics(Physics):
         self.parameters = params
         
         # Cached coordinate data (populated by cache_coords)
-        self._coords = None
-        self._nodal_shape = None
+        self._icon_coords = None
 
         # Build list of physics terms
         self.terms = [
@@ -113,19 +97,7 @@ class IconPhysics(Physics):
     
     def cache_coords(self, coords: CoordinateSystem):
         """Cache coordinate system data needed by ICON physics."""
-        self._coords = coords
-        self._nodal_shape = coords.nodal_shape
-
-    def _build_geometry(self, terrain: TerrainData) -> _IconGeometry:
-        """Construct an _IconGeometry adapter from cached coords + terrain."""
-        return _IconGeometry(
-            nodal_shape=self._nodal_shape,
-            fsg=jnp.asarray(self._coords.vertical.centers),
-            hsg=jnp.asarray(self._coords.vertical.boundaries),
-            lat=jnp.asarray(self._coords.horizontal.latitudes),
-            lon=jnp.asarray(self._coords.horizontal.longitudes),
-            fmask=terrain.fmask,
-        )
+        self._icon_coords = IconCoords.from_coordinate_system(coords)
 
     def compute_tendencies(
         self,
@@ -147,12 +119,12 @@ class IconPhysics(Physics):
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
         """
-        # Build geometry adapter from terrain + cached coords
-        geometry = self._build_geometry(terrain)
+        nodal_shape = self._icon_coords.nodal_shape
 
         physics_data = PhysicsData.zeros(
-            (geometry.nodal_shape[1]*geometry.nodal_shape[2], ),
-            geometry.nodal_shape[0],
+            (nodal_shape[1]*nodal_shape[2], ),
+            nodal_shape[0],
+            icon_coords=self._icon_coords,
             date=date
         )
 
@@ -178,7 +150,7 @@ class IconPhysics(Physics):
             
             # Apply term to vectorized state (returns column format)
             term_tendency, physics_data = term(
-                vectorized_state, physics_data, self.parameters, forcing, geometry
+                vectorized_state, physics_data, self.parameters, forcing, terrain
             )
             
             # OPTIMIZATION: Direct accumulation in column format (no reshape)
@@ -299,7 +271,7 @@ class IconPhysics(Physics):
         if struct is None:
             return {}
 
-        nodal_shape = nodal_shape or self._nodal_shape
+        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
 
         # Use a simple namespace to pass nodal_shape to helper methods
         class _ShapeInfo:
@@ -512,7 +484,7 @@ class IconPhysics(Physics):
         Returns:
             PhysicsData with arrays reshaped to 3D nodal format
         """
-        nodal_shape = nodal_shape or self._nodal_shape
+        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
         nlev, nlon, nlat = nodal_shape
         ncols = nlon * nlat
 
@@ -548,7 +520,7 @@ def _prepare_common_physics_state(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """
     Prepare common physics variables that are used by multiple physics modules.
@@ -568,11 +540,11 @@ def _prepare_common_physics_state(
     
     # Calculate pressure levels from surface pressure and sigma coordinates
     surface_pressure = state.normalized_surface_pressure * p0  # Convert to Pa
-    sigma_levels = geometry.fsg  # sigma coordinates at level centers
+    sigma_levels = physics_data.icon_coords.fsg  # sigma coordinates at level centers
     pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
-    
+
     # Calculate pressure at interfaces (half levels)
-    sigma_half = geometry.hsg
+    sigma_half = physics_data.icon_coords.hsg
     pressure_half = sigma_half[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
     
     # Convert geopotential to height
@@ -658,17 +630,17 @@ def apply_radiation(state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply radiation heating rates"""
     
     # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
     nlev, ncols = state.temperature.shape
     
-    # Get lat/lon from geometry
+    # Get lat/lon from cached coordinates
     lat, lon = jax.numpy.meshgrid(
-        geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
-        geometry.lon * 180.0 / jnp.pi,  # degrees
+        physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
+        physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
     )
     # Then reshape to (ncols,) to match column format
     latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
@@ -767,7 +739,7 @@ def apply_convection(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
     
@@ -817,7 +789,7 @@ def apply_clouds(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply shallow cloud scheme """
     
@@ -873,7 +845,7 @@ def apply_microphysics(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply cloud microphysics scheme"""
     
@@ -931,7 +903,7 @@ def apply_vertical_diffusion(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply vertical diffusion and boundary layer physics"""
     from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
@@ -1079,7 +1051,7 @@ def apply_surface(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply surface physics and calculate surface fluxes"""
     from jcm.physics.icon.surface.surface_types import AtmosphericForcing
@@ -1096,7 +1068,7 @@ def apply_surface(
     # In reality, this should come from the model's surface state
     nsfc_type = 3  # Fixed value: water, ice, land
     surface_fractions = jnp.zeros((ncols, nsfc_type))
-    land_fraction = geometry.fmask.reshape((ncols,))
+    land_fraction = terrain.fmask.reshape((ncols,))
     surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
     surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME: verify/improve this setup
 
@@ -1216,7 +1188,7 @@ def apply_gravity_waves(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply gravity wave drag"""
     nlev, ncols = state.temperature.shape
@@ -1262,7 +1234,7 @@ def apply_chemistry(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: _IconGeometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply chemistry tendencies
     
