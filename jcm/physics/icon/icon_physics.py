@@ -1013,6 +1013,14 @@ def apply_vertical_diffusion(
     pbl_height = vdiff_diagnostics.boundary_layer_height  # Shape [ncols]
     u_star = vdiff_diagnostics.friction_velocity  # Shape [ncols]
     b_flux = vdiff_diagnostics.surface_heat_flux  # Shape [ncols] (using heat flux as buoyancy proxy)
+
+    # Extract surface exchange coefficients (per surface type)
+    surface_exchange_heat = vdiff_diagnostics.surface_exchange_heat  # (ncols, nsfc_type)
+    surface_exchange_moisture = vdiff_diagnostics.surface_exchange_moisture  # (ncols, nsfc_type)
+    # Momentum: use lowest-level profile coefficient, broadcast across surface types
+    surface_exchange_momentum = jnp.repeat(
+        vdiff_diagnostics.exchange_coeff_momentum[:, -1:], nsfc_type, axis=1
+    )  # (ncols, nsfc_type)
     
     # Update TKE
     new_tke = tke + dt * tke_tend
@@ -1034,11 +1042,13 @@ def apply_vertical_diffusion(
     # Only update fields that actually exist in VerticalDiffusionData
     vdiff_data = physics_data.vertical_diffusion.copy(
         tke=new_tke,
-        km=km,  # Use correct field name
-        kh=kh,  # Use correct field name
+        km=km,
+        kh=kh,
+        surface_exchange_heat=surface_exchange_heat,
+        surface_exchange_moisture=surface_exchange_moisture,
+        surface_exchange_momentum=surface_exchange_momentum,
         pbl_height=pbl_height,
         surface_friction_velocity=u_star,
-        # Note: thv_variance and surface_buoyancy_flux don't exist in VerticalDiffusionData
     )
     
     updated_physics_data = physics_data.copy(vertical_diffusion=vdiff_data)
@@ -1092,13 +1102,12 @@ def apply_surface(
     ref_height = physics_data.diagnostics.height_full[-1, :] - physics_data.diagnostics.height_full[-1, :].min()
     ref_height = jnp.maximum(ref_height, 10.0)  # At least 10m
     
-    # Create atmospheric forcing for all columns
-    # Initialize exchange coefficients with dummy values for now
+    # Get exchange coefficients from vertical diffusion diagnostics
     nsfc_type = 3
-    dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient FIXME: replace with real values
-    
-    # Surface properties are now extracted earlier in the function
-    
+    exchange_coeff_heat = physics_data.vertical_diffusion.surface_exchange_heat.reshape(ncols, nsfc_type)
+    exchange_coeff_moisture = physics_data.vertical_diffusion.surface_exchange_moisture.reshape(ncols, nsfc_type)
+    exchange_coeff_momentum = physics_data.vertical_diffusion.surface_exchange_momentum.reshape(ncols, nsfc_type)
+
     atm_forcing = AtmosphericForcing(
         temperature=atm_temp,
         humidity=atm_qv,
@@ -1109,9 +1118,9 @@ def apply_surface(
         lw_downward=physics_data.radiation.surface_lw_down,
         rain_rate=jnp.zeros(ncols),  # No rain for now
         snow_rate=jnp.zeros(ncols),  # No snow for now
-        exchange_coeff_heat=dummy_exchange,
-        exchange_coeff_moisture=dummy_exchange,
-        exchange_coeff_momentum=dummy_exchange
+        exchange_coeff_heat=exchange_coeff_heat,
+        exchange_coeff_moisture=exchange_coeff_moisture,
+        exchange_coeff_momentum=exchange_coeff_momentum
     )
     
     # Apply surface physics to all columns
