@@ -1158,6 +1158,109 @@ def mixed_phase_deposition_and_corrections(
         qsat_tmp,
     )
 
+import jax.numpy as jnp
+
+def freezing_below_238K(
+    freezing_condition: jnp.ndarray,    # ld_frz_below_238K
+    cloud_cover: jnp.ndarray,           # paclc
+    min_cdnc: jnp.ndarray,              # pcdnc_min
+    ice_crystal_number: jnp.ndarray,    # picnc
+    droplet_freezing_rate: jnp.ndarray, # pqfre
+    droplet_number: jnp.ndarray,        # pcdnc
+    freezing_rate: jnp.ndarray,         # pfrl
+    cloud_ice: jnp.ndarray,             # pxib
+    cloud_liquid: jnp.ndarray,          # pxlb
+    timestep: float,                    # zdt
+    min_liquid_threshold: float         # cqtmin
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Freezing process below 238K for cloud microphysics.
+
+    Overview
+    --------
+    This routine simulates the freezing of cloud droplets into ice crystals
+    below 238K. It updates the ice crystal number concentration (ICNC), cloud
+    droplet freezing rate, cloud droplet number concentration (CDNC), freezing
+    rate, cloud ice, and cloud liquid water mixing ratios.
+
+    The freezing process is triggered by a boolean mask (`freezing_condition`)
+    that identifies grid points where freezing occurs. The routine:
+      1. Updates the freezing rate by adding contributions from cloud liquid water.
+      2. Transfers cloud liquid water to cloud ice where freezing occurs.
+      3. Reduces the cloud liquid water mixing ratio to zero in freezing regions.
+      4. Updates the cloud droplet freezing rate and ice crystal number concentration
+         based on the available cloud droplet number concentration.
+      5. Ensures the cloud droplet number concentration does not fall below a
+         minimum threshold (`min_cdnc`).
+
+    Parameters
+    ----------
+    freezing_condition : jnp.ndarray
+        Boolean mask indicating where freezing below 238K occurs `ld_frz_below_238K`.
+    cloud_cover : jnp.ndarray
+        Cloud cover fraction `paclc` [0..1] .
+    min_cdnc : jnp.ndarray
+        Minimum cloud droplet number concentration from max radius `pcdnc_min` [1/m^3] .
+    ice_crystal_number : jnp.ndarray
+        Ice crystal number concentration (ICNC) `picnc` [1/m^3] (INOUT).
+    droplet_freezing_rate : jnp.ndarray
+        Cloud droplet freezing rate `pqfre` [m^-3 s^-1]  (INOUT).
+    droplet_number : jnp.ndarray
+        Cloud droplet number concentration (CDNC) `pcdnc` [1/m^3] (INOUT).
+    freezing_rate : jnp.ndarray
+        Freezing rate `pfrl` [kg/kg] (INOUT).
+    cloud_ice : jnp.ndarray
+        Cloud ice mixing ratio in the cloudy part of the grid box `pxib` [kg/kg] (INOUT).
+    cloud_liquid : jnp.ndarray
+        Cloud liquid water mixing ratio in the cloudy part of the grid box `pxlb` [kg/kg] (INOUT).
+    timestep : float
+        Time step `zdt` [s] .
+    min_liquid_threshold : float
+        Minimum threshold for cloud liquid water `cqtmin` [kg/kg].
+    Returns
+    -------
+    Updated values of ice_crystal_number, droplet_freezing_rate, droplet_number,
+    freezing_rate, cloud_ice, and cloud_liquid.
+    """
+
+    # -------------------------------------------------------------------------
+    # 1. Update freezing rate by adding contributions from cloud liquid water
+    # -------------------------------------------------------------------------
+    temp_freezing_rate = freezing_rate + cloud_liquid * cloud_cover
+    freezing_rate = jnp.where(freezing_condition, temp_freezing_rate, freezing_rate)
+
+    # -------------------------------------------------------------------------
+    # 2. Transfer cloud liquid water to cloud ice where freezing occurs
+    # -------------------------------------------------------------------------
+    temp_cloud_ice = cloud_ice + cloud_liquid
+    cloud_ice = jnp.where(freezing_condition, temp_cloud_ice, cloud_ice)
+
+    # -------------------------------------------------------------------------
+    # 3. Reduce cloud liquid water to zero in freezing regions
+    # -------------------------------------------------------------------------
+    cloud_liquid = jnp.where(freezing_condition, 0.0, cloud_liquid)
+
+    # -------------------------------------------------------------------------
+    # 4. Update droplet freezing rate and ice crystal number concentration
+    # -------------------------------------------------------------------------
+    # Excess droplet number above the minimum threshold
+    excess_droplets = jnp.maximum(droplet_number - min_cdnc, 0.0)
+
+    # Update droplet freezing rate
+    updated_freezing_rate = droplet_freezing_rate - timestep * excess_droplets
+    droplet_freezing_rate = jnp.where(freezing_condition, updated_freezing_rate, droplet_freezing_rate)
+
+    # Update ice crystal number concentration
+    updated_ice_crystal_number = ice_crystal_number + excess_droplets
+    ice_crystal_number = jnp.where(freezing_condition, updated_ice_crystal_number, ice_crystal_number)
+
+    # -------------------------------------------------------------------------
+    # 5. Ensure cloud droplet number concentration does not fall below minimum
+    # -------------------------------------------------------------------------
+    droplet_number = jnp.where(freezing_condition, min_liquid_threshold, droplet_number)
+
+    return ice_crystal_number, droplet_freezing_rate, droplet_number, freezing_rate, cloud_ice, cloud_liquid
+
 def precip_formation_warm(
     warm_precip_mask: jnp.ndarray,
     autoconversion_factor: jnp.ndarray,
