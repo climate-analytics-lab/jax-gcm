@@ -1055,13 +1055,18 @@ def apply_surface(
     # Reshape boundary fields to column format
     surface_temp = physics_data.surface.surface_temperature.reshape(ncols)
 
-    # Initialize surface state (simplified)
-    # In reality, this should come from the model's surface state
-    nsfc_type = 3  # Fixed value: water, ice, land
+    # Surface tile fractions: water (0), sea ice (1), land (2).
+    # Sea ice fraction is taken from prescribed boundary conditions and
+    # constrained to the non-land area so that fractions sum to exactly 1.
+    nsfc_type = 3
     surface_fractions = jnp.zeros((ncols, nsfc_type))
     land_fraction = terrain.fmask.reshape((ncols,))
-    surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
-    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME: verify/improve this setup
+    raw_ice = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
+    sea_ice_fraction = jnp.clip(raw_ice.reshape((ncols,)), 0.0, 1.0 - land_fraction)
+    water_fraction = 1.0 - land_fraction - sea_ice_fraction
+    surface_fractions = surface_fractions.at[:, 0].set(water_fraction)
+    surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
+    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
