@@ -1,5 +1,4 @@
-"""
-Unit tests for simple_aerosol module
+"""Unit tests for simple_aerosol module
 
 Tests the MACv2-SP (Simple Plumes) aerosol scheme implementation
 with proper JAX compatibility and vectorization.
@@ -8,9 +7,7 @@ with proper JAX compatibility and vectorization.
 import jax.numpy as jnp
 import jax
 import pytest
-from jax import random
 from jcm.physics.icon.aerosol.simple_aerosol import (
-    get_simple_aerosol,
     get_plume_spatial_distribution,
     get_anthropogenic_aod,
     get_background_aod,
@@ -20,11 +17,6 @@ from jcm.physics.icon.aerosol.simple_aerosol import (
     get_CDNC,
 )
 from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
-from jcm.physics.icon.icon_physics_data import PhysicsData
-from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.forcing import ForcingData
-from jcm.date import DateData
-import tree_math
 
 
 class TestAerosolParameters:

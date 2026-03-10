@@ -1,5 +1,4 @@
-"""
-Unit tests for two-stream radiative transfer solver
+"""Unit tests for two-stream radiative transfer solver
 
 Tests the two-stream approximation implementation including
 coefficients, layer properties, flux calculations, and heating rates.
@@ -8,7 +7,6 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.radiation.two_stream import (
     two_stream_coefficients,
     layer_reflectance_transmittance,
@@ -334,8 +332,7 @@ def test_extreme_optical_depths():
 
 
 def test_longwave_realistic_olr():
-    """
-    BUG TEST: Ensure longwave radiation produces realistic OLR.
+    """BUG TEST: Ensure longwave radiation produces realistic OLR.
 
     Bug found: OLR is 0.17 W/m² instead of expected ~240 W/m²
     """
@@ -412,8 +409,7 @@ def test_longwave_realistic_olr():
 
 
 def test_shortwave_toa_net_flux():
-    """
-    BUG TEST: Ensure shortwave doesn't have 100% reflection at TOA.
+    """BUG TEST: Ensure shortwave doesn't have 100% reflection at TOA.
 
     Bug found: SW up at TOA = 1306.59 W/m², SW down = 1306.60 W/m²
     (99.99% reflection, essentially nothing entering atmosphere!)
@@ -480,9 +476,9 @@ def test_shortwave_toa_net_flux():
     # Note: For optically thick atmospheres (τ>10), transmission can be <1%
     # This test mainly checks that surface flux is non-zero and properly reflects surface albedo
     surface_down = jnp.sum(flux_down_sw[-1, :n_sw_bands])
-    surface_up = jnp.sum(flux_up_sw[-1, :n_sw_bands])
+    jnp.sum(flux_up_sw[-1, :n_sw_bands])
 
-    assert surface_down > 0.0, f"Surface SW down is zero - radiation not reaching surface!"
+    assert surface_down > 0.0, "Surface SW down is zero - radiation not reaching surface!"
 
     # Check that surface albedo is being applied correctly (per band)
     for band in range(n_sw_bands):

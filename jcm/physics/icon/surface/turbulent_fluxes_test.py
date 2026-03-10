@@ -1,20 +1,16 @@
-"""
-Unit tests for turbulent flux calculations.
-"""
+"""Unit tests for turbulent flux calculations."""
 
 import pytest
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.physics.icon.surface.turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
     compute_exchange_coefficients, compute_surface_humidity,
-    compute_turbulent_fluxes, compute_surface_resistances,
-    compute_surface_diagnostics
+    compute_turbulent_fluxes
 )
 from jcm.physics.icon.surface.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
-    SurfaceFluxes, SurfaceResistances
+    SurfaceFluxes
 )
 
 

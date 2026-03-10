@@ -1,5 +1,4 @@
-"""
-Main radiation scheme interface for ICON physics
+"""Main radiation scheme interface for ICON physics
 
 This module provides the main entry point for radiation calculations,
 coordinating shortwave and longwave radiation computations.
@@ -7,10 +6,8 @@ coordinating shortwave and longwave radiation computations.
 Date: 2025-01-10
 """
 
-import jax
 import jax.numpy as jnp
-from typing import Tuple, Optional, NamedTuple
-from functools import partial
+from typing import Tuple, Optional
 
 from .radiation_types import (
     RadiationParameters, 
@@ -28,12 +25,6 @@ from .cloud_optics import cloud_optics
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 
-from ..unit_conversions import (
-    convert_surface_pressure,
-    calculate_pressure_levels,
-    geopotential_to_height
-)
-from ..constants import physical_constants
 
 
 def combine_optical_properties(
@@ -43,8 +34,7 @@ def combine_optical_properties(
     aerosol_ssa: Optional[jnp.ndarray] = None,
     aerosol_asymmetry: Optional[jnp.ndarray] = None
 ) -> OpticalProperties:
-    """
-    Combine gas, cloud, and aerosol optical properties.
+    """Combine gas, cloud, and aerosol optical properties.
     
     Args:
         gas_optical_depth: Gas optical depth [nlev, nbands]
@@ -55,6 +45,7 @@ def combine_optical_properties(
         
     Returns:
         Combined optical properties
+
     """
     # Start with gas + cloud
     total_tau = gas_optical_depth + cloud_optics.optical_depth
@@ -124,8 +115,7 @@ def prepare_radiation_state(
     aerosol_ssa: Optional[jnp.ndarray] = None,
     aerosol_asymmetry: Optional[jnp.ndarray] = None
 ) -> RadiationState:
-    """
-    Prepare radiation state from physics state variables.
+    """Prepare radiation state from physics state variables.
 
     Args:
         temperature: Temperature (K) [nlev]
@@ -145,8 +135,9 @@ def prepare_radiation_state(
 
     Returns:
         RadiationState ready for radiation calculations
+
     """
-    nlev = temperature.shape[0]
+    temperature.shape[0]
 
     # Convert specific humidity to volume mixing ratio
     # q/(1-q) * Md/Mv where Md/Mv = 29/18 = 1.608
@@ -210,8 +201,7 @@ def radiation_scheme(
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: float = 400e-6
 ) -> Tuple[RadiationTendencies, RadiationData]:
-    """
-    Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
+    """Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
 
     Args:
         temperature: Temperature (K) [nlev]
@@ -237,6 +227,7 @@ def radiation_scheme(
 
     Returns:
         Tuple of (radiation tendencies, radiation diagnostics)
+
     """
     nlev = temperature.shape[0]
     

@@ -14,8 +14,7 @@ def apply_forcing_data(
     forcing: ForcingData,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute time-varying boundary conditions for ICON physics
+    """Compute time-varying boundary conditions for ICON physics
     
     This function updates the boundary conditions with time-varying values
     for solar forcing, greenhouse gases, and surface properties.
@@ -29,8 +28,8 @@ def apply_forcing_data(
         
     Returns:
         Updated boundary conditions
+
     """
-    
     # Get expected output shape from physics_data (column format)
     ncols = physics_data.surface.surface_temperature.shape[0]
 
@@ -72,7 +71,7 @@ def apply_forcing_data(
     # Sea ice fraction (from existing data)
     #TODO: use these somewhere
     sea_ice_fraction = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
-    sea_ice_thickness = jnp.where(sea_ice_fraction > 0.1, 1.0, 0.0)  # 1m where ice exists
+    jnp.where(sea_ice_fraction > 0.1, 1.0, 0.0)  # 1m where ice exists
 
     tendencies = PhysicsTendency.zeros(state.temperature.shape)
 

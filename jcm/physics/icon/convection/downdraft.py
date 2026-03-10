@@ -1,5 +1,4 @@
-"""
-Downdraft calculations for Tiedtke-Nordeng convection scheme
+"""Downdraft calculations for Tiedtke-Nordeng convection scheme
 
 This module implements the downdraft calculations including:
 - Level of free sinking (LFS) determination
@@ -19,16 +18,16 @@ from typing import NamedTuple, Tuple
 from functools import partial
 
 from ..constants.physical_constants import (
-    grav, rd, rv, cp, eps, tmelt, alhc, alhs
+    cp, alhc
 )
 from .tiedtke_nordeng import (
     ConvectionParameters, saturation_mixing_ratio
 )
-from .updraft import saturation_adjustment
 
 
 class DowndraftState(NamedTuple):
     """State variables for downdraft calculation"""
+
     td: jnp.ndarray      # Downdraft temperature (K)
     qd: jnp.ndarray      # Downdraft specific humidity (kg/kg)
     mfd: jnp.ndarray     # Downdraft mass flux (kg/m²/s) - negative values
@@ -41,8 +40,7 @@ def wetbulb_temperature(
     humidity: jnp.ndarray,
     pressure: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate wet-bulb temperature and humidity
+    """Calculate wet-bulb temperature and humidity
     
     Simplified version - full implementation would iterate
     
@@ -53,6 +51,7 @@ def wetbulb_temperature(
         
     Returns:
         Tuple of (wetbulb_temp, wetbulb_humidity)
+
     """
     # Get saturation values
     qs = saturation_mixing_ratio(pressure, temperature)
@@ -86,8 +85,7 @@ def find_lfs(
     ktop: int,
     config: ConvectionParameters
 ) -> Tuple[int, bool]:
-    """
-    Find level of free sinking for downdraft initiation
+    """Find level of free sinking for downdraft initiation
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -103,6 +101,7 @@ def find_lfs(
         
     Returns:
         Tuple of (lfs_level, found_lfs)
+
     """
     nlev = len(temperature)
     
@@ -173,8 +172,7 @@ def downdraft_step(
     carry: DowndraftState,
     level_inputs: Tuple
 ) -> Tuple[DowndraftState, DowndraftState]:
-    """
-    Single step of downdraft calculation for use with lax.scan
+    """Single step of downdraft calculation for use with lax.scan
     
     Args:
         carry: Current downdraft state
@@ -182,6 +180,7 @@ def downdraft_step(
         
     Returns:
         Tuple of (updated_carry, output_state)
+
     """
     k, env_temp, env_q, pressure, dz, rho, precip, entrscv, cmfcmin, cevapcu = level_inputs
     
@@ -272,8 +271,7 @@ def calculate_downdraft(
     ktop: int,
     config: ConvectionParameters
 ) -> DowndraftState:
-    """
-    Calculate full downdraft profile
+    """Calculate full downdraft profile
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -289,6 +287,7 @@ def calculate_downdraft(
         
     Returns:
         DowndraftState with computed profiles
+
     """
     nlev = len(temperature)
     

@@ -1,5 +1,4 @@
-"""
-Flux calculations and tendency updates for Tiedtke-Nordeng convection
+"""Flux calculations and tendency updates for Tiedtke-Nordeng convection
 
 This module implements:
 - Final mass flux adjustments
@@ -13,12 +12,11 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
-import jax
 from jax import lax
 from typing import Tuple
 
 from ..constants.physical_constants import (
-    grav, cp, alhc, alhs, tmelt
+    grav, cp, alhc, tmelt
 )
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
@@ -31,8 +29,7 @@ def calculate_precipitation_rate(
     dt: float,
     config: ConvectionParameters
 ) -> jnp.ndarray:
-    """
-    Calculate surface precipitation rate from convection
+    """Calculate surface precipitation rate from convection
     
     Args:
         updraft_state: Updraft calculation results
@@ -42,6 +39,7 @@ def calculate_precipitation_rate(
         
     Returns:
         Surface precipitation rate (kg/m²/s)
+
     """
     # Integrate liquid water flux through cloud
     nlev = len(updraft_state.mfu)
@@ -73,8 +71,7 @@ def calculate_cloud_water_ice(
     updraft_mf: jnp.ndarray,
     downdraft_mf: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Partition cloud condensate into liquid and ice
+    """Partition cloud condensate into liquid and ice
     
     Args:
         temperature: Temperature profile (K)
@@ -84,6 +81,7 @@ def calculate_cloud_water_ice(
         
     Returns:
         Tuple of (cloud_water, cloud_ice) in kg/kg
+
     """
     # Temperature thresholds for ice formation
     t_ice = tmelt - 40.0  # All ice below this
@@ -124,8 +122,7 @@ def calculate_tendencies(
     dt: float,
     config: ConvectionParameters
 ) -> ConvectionTendencies:
-    """
-    Calculate final tendencies from convective fluxes
+    """Calculate final tendencies from convective fluxes
 
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -144,6 +141,7 @@ def calculate_tendencies(
 
     Returns:
         ConvectionTendencies with all tendency terms
+
     """
     nlev = len(temperature)
 
@@ -316,8 +314,7 @@ def mass_flux_closure(
     ktype: int,
     config: ConvectionParameters
 ) -> jnp.ndarray:
-    """
-    Determine cloud base mass flux using appropriate closure
+    """Determine cloud base mass flux using appropriate closure
     
     Args:
         cape: Convective available potential energy (J/kg)
@@ -328,6 +325,7 @@ def mass_flux_closure(
         
     Returns:
         Cloud base mass flux (kg/m²/s)
+
     """
     # Deep convection: CAPE closure
     def deep_closure():

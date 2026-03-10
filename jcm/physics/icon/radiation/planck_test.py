@@ -1,5 +1,4 @@
-"""
-Unit tests for Planck function calculations
+"""Unit tests for Planck function calculations
 
 Tests blackbody radiation calculations including spectral Planck functions,
 band integration, and temperature derivatives.
@@ -8,7 +7,6 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.radiation.planck import (
     planck_bands_lw,
     planck_function_wavenumber,
@@ -84,7 +82,6 @@ def test_planck_bands():
     
     # Define typical longwave bands
     band_limits = ((10, 350), (350, 500), (500, 2500))  # cm⁻¹
-    n_bands = 3
     
     planck_integrated = planck_bands_lw(temperatures, band_limits)
     

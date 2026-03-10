@@ -1,5 +1,4 @@
-"""
-Updraft calculations for Tiedtke-Nordeng convection scheme
+"""Updraft calculations for Tiedtke-Nordeng convection scheme
 
 This module implements the updraft calculations including:
 - Cloud base determination
@@ -13,21 +12,20 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
-import jax
 from jax import lax
 from typing import NamedTuple, Tuple
-from functools import partial
 
 from ..constants.physical_constants import (
-    grav, rd, rv, cp, eps, tmelt, alhc, alhs
+    grav, cp, alhc
 )
 from .tiedtke_nordeng import (
-    ConvectionParameters, saturation_mixing_ratio, saturation_vapor_pressure
+    ConvectionParameters, saturation_mixing_ratio
 )
 
 
 class UpdatedraftState(NamedTuple):
     """State variables for updraft calculation"""
+
     tu: jnp.ndarray      # Updraft temperature (K)
     qu: jnp.ndarray      # Updraft specific humidity (kg/kg)
     lu: jnp.ndarray      # Updraft liquid water (kg/kg)
@@ -53,8 +51,7 @@ def calculate_entrainment_detrainment(
     pressure: jnp.ndarray,
     config: ConvectionParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate enhanced entrainment and detrainment rates
+    """Calculate enhanced entrainment and detrainment rates
     
     Args:
         k: Current level index
@@ -74,6 +71,7 @@ def calculate_entrainment_detrainment(
         
     Returns:
         Tuple of (entrainment_rate, detrainment_rate) in 1/m
+
     """
     # Base entrainment rate based on convection type
     entr_base = lax.select(
@@ -150,8 +148,7 @@ def saturation_adjustment(
     total_water: jnp.ndarray,
     pressure: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Adjust temperature and moisture for saturation
+    """Adjust temperature and moisture for saturation
     
     Args:
         temperature: Temperature (K)
@@ -160,6 +157,7 @@ def saturation_adjustment(
         
     Returns:
         Tuple of (adjusted_temp, vapor, liquid)
+
     """
     # Calculate saturation mixing ratio
     qs = saturation_mixing_ratio(pressure, temperature)
@@ -199,8 +197,7 @@ def updraft_step(
     carry: UpdatedraftState,
     level_inputs: Tuple
 ) -> Tuple[UpdatedraftState, UpdatedraftState]:
-    """
-    Single step of updraft calculation for use with lax.scan
+    """Single step of updraft calculation for use with lax.scan
     
     Args:
         carry: Current updraft state
@@ -208,6 +205,7 @@ def updraft_step(
         
     Returns:
         Tuple of (updated_carry, output_state)
+
     """
     k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, config = level_inputs
     
@@ -283,8 +281,7 @@ def calculate_updraft(
     mass_flux_base: float,
     config: ConvectionParameters
 ) -> UpdatedraftState:
-    """
-    Calculate full updraft profile
+    """Calculate full updraft profile
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -300,6 +297,7 @@ def calculate_updraft(
         
     Returns:
         UpdatedraftState with computed profiles
+
     """
     nlev = len(temperature)
     
@@ -318,7 +316,7 @@ def calculate_updraft(
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
     
     # Calculate initial buoyancy at cloud base
-    virtual_temp_base = temperature[kbase] * (1.0 + 0.608 * humidity[kbase])
+    temperature[kbase] * (1.0 + 0.608 * humidity[kbase])
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
     
     initial_state = UpdatedraftState(

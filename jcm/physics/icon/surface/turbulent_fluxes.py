@@ -1,5 +1,4 @@
-"""
-Turbulent flux calculations for surface-atmosphere exchange.
+"""Turbulent flux calculations for surface-atmosphere exchange.
 
 This module implements bulk aerodynamic formulations for computing
 surface fluxes of momentum, heat, and moisture following ICON's approach.
@@ -28,8 +27,7 @@ def compute_bulk_richardson_number(
     wind_speed: jnp.ndarray,
     reference_height: float = 10.0
 ) -> jnp.ndarray:
-    """
-    Compute bulk Richardson number for surface layer stability.
+    """Compute bulk Richardson number for surface layer stability.
     
     Args:
         temperature_air: Air temperature [K] (ncol,)
@@ -41,6 +39,7 @@ def compute_bulk_richardson_number(
         
     Returns:
         Bulk Richardson number [-] (ncol, nsfc_type)
+
     """
     # Virtual potential temperatures
     theta_v_air = temperature_air * (1.0 + 0.608 * humidity_air)
@@ -68,8 +67,7 @@ def compute_stability_functions(
     stable_limit: float = 0.2,
     unstable_coeff: float = 16.0
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Compute stability functions following Businger-Dyer relationships.
+    """Compute stability functions following Businger-Dyer relationships.
     
     Args:
         richardson_number: Bulk Richardson number [-] (ncol, nsfc_type)
@@ -78,6 +76,7 @@ def compute_stability_functions(
         
     Returns:
         Tuple of (heat_stability_function, momentum_stability_function)
+
     """
     # Stable conditions (Ri > 0)
     stable_mask = richardson_number >= 0.0
@@ -86,7 +85,6 @@ def compute_stability_functions(
     phi_m_stable = phi_h_stable
     
     # Unstable conditions (Ri < 0)
-    unstable_mask = richardson_number < 0.0
     # Limit strongly unstable conditions to prevent NaN
     ri_unstable = jnp.maximum(richardson_number, -0.5)  # Limit to -0.5
     x_arg = jnp.maximum(1.0 - unstable_coeff * jnp.abs(ri_unstable), 0.1)  # Prevent negative
@@ -112,8 +110,7 @@ def compute_exchange_coefficients(
     von_karman: float,
     reference_height: float = 10.0,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute bulk exchange coefficients for momentum, heat, and moisture.
+    """Compute bulk exchange coefficients for momentum, heat, and moisture.
     
     Args:
         wind_speed: Wind speed [m/s] (ncol,)
@@ -126,6 +123,7 @@ def compute_exchange_coefficients(
         
     Returns:
         Tuple of (momentum_coeff, heat_coeff, moisture_coeff) [m/s]
+
     """    
     # Ensure minimum wind speed
     wind_speed_safe = jnp.maximum(wind_speed, min_wind_speed)
@@ -154,8 +152,7 @@ def compute_surface_humidity(
     pressure: jnp.ndarray,
     surface_type_indices: jnp.ndarray = None
 ) -> jnp.ndarray:
-    """
-    Compute saturation humidity at the surface.
+    """Compute saturation humidity at the surface.
     
     Args:
         temperature_surface: Surface temperature [K] (ncol, nsfc_type)
@@ -164,6 +161,7 @@ def compute_surface_humidity(
         
     Returns:
         Surface saturation humidity [kg/kg] (ncol, nsfc_type)
+
     """
     # Saturation vapor pressure (simplified Clausius-Clapeyron)
     # e_sat = e0 * exp(L/Rv * (1/T0 - 1/T))
@@ -193,8 +191,7 @@ def compute_turbulent_fluxes(
     exchange_coeffs_moisture: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceFluxes:
-    """
-    Compute turbulent surface fluxes using bulk aerodynamic formulas.
+    """Compute turbulent surface fluxes using bulk aerodynamic formulas.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -206,6 +203,7 @@ def compute_turbulent_fluxes(
         
     Returns:
         Surface fluxes
+
     """
     ncol = atmospheric_state.temperature.shape[0]
     nsfc_type = surface_state.temperature.shape[1]
@@ -302,8 +300,7 @@ def compute_surface_resistances(
     richardson_number: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceResistances:
-    """
-    Compute surface resistances for heat, moisture, and momentum transfer.
+    """Compute surface resistances for heat, moisture, and momentum transfer.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -313,6 +310,7 @@ def compute_surface_resistances(
         
     Returns:
         Surface resistances
+
     """
     ncol, nsfc_type = surface_state.temperature.shape
     
@@ -365,8 +363,7 @@ def compute_surface_diagnostics(
     resistances: SurfaceResistances,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceDiagnostics:
-    """
-    Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
+    """Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -377,6 +374,7 @@ def compute_surface_diagnostics(
         
     Returns:
         Surface diagnostics
+
     """
     ncol, nsfc_type = surface_state.temperature.shape
     

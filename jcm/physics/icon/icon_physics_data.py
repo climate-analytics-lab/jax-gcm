@@ -1,5 +1,4 @@
-"""
-Physics data structures for ICON atmospheric physics
+"""Physics data structures for ICON atmospheric physics
 
 This module defines the data structures that hold state and diagnostics
 for ICON physics parameterizations, following the SpeedyPhysics pattern.
@@ -11,8 +10,6 @@ import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
 from jcm.physics.icon.icon_coords import IconCoords
-from jax import tree_util
-from typing import Optional
 
 
 @tree_math.struct

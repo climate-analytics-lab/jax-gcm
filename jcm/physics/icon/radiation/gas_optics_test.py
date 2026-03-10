@@ -1,5 +1,4 @@
-"""
-Unit tests for gas optics calculations
+"""Unit tests for gas optics calculations
 
 Tests gas absorption coefficients and optical depths for atmospheric gases
 including H2O, CO2, and O3 in both longwave and shortwave bands.
@@ -8,7 +7,6 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.radiation.gas_optics import (
     water_vapor_continuum,
     co2_absorption,

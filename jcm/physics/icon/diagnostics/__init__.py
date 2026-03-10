@@ -1,5 +1,4 @@
-"""
-Physics diagnostics and utilities for ICON physics
+"""Physics diagnostics and utilities for ICON physics
 
 This module contains diagnostic calculations and utility functions
 used throughout the ICON physics parameterizations.

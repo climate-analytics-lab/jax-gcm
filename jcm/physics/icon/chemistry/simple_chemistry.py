@@ -1,5 +1,4 @@
-"""
-Simple chemistry schemes for ICON physics
+"""Simple chemistry schemes for ICON physics
 
 This module implements basic chemistry parameterizations including
 fixed ozone distribution and basic methane oxidation.
@@ -8,11 +7,10 @@ Date: 2025-01-15
 """
 
 import jax.numpy as jnp
-import jax
 from typing import NamedTuple, Tuple
 import tree_math
 
-from ..constants.physical_constants import grav, rd, cp
+from ..constants.physical_constants import grav, rd
 
 
 @tree_math.struct
@@ -78,8 +76,7 @@ def compute_height_from_pressure(
     surface_pressure: jnp.ndarray,
     temperature: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute approximate height from pressure using hydrostatic equation
+    """Compute approximate height from pressure using hydrostatic equation
     
     Args:
         pressure: Pressure at each level (Pa) [nlev, ncols]
@@ -88,6 +85,7 @@ def compute_height_from_pressure(
         
     Returns:
         Height (m) [nlev, ncols]
+
     """
     # Mean temperature for each layer
     temp_mean = jnp.mean(temperature, axis=0, keepdims=True)
@@ -107,8 +105,7 @@ def fixed_ozone_distribution(
     temperature: jnp.ndarray,
     config: ChemistryParameters
 ) -> jnp.ndarray:
-    """
-    Calculate fixed ozone distribution based on pressure/height
+    """Calculate fixed ozone distribution based on pressure/height
     
     Uses a simple analytical profile with maximum in the stratosphere
     and exponential decay above and below.
@@ -121,6 +118,7 @@ def fixed_ozone_distribution(
         
     Returns:
         Ozone volume mixing ratio (ppbv) [nlev, ncols]
+
     """
     # Calculate approximate height
     height = compute_height_from_pressure(pressure, surface_pressure, temperature)
@@ -151,8 +149,7 @@ def simple_methane_chemistry(
     dt: float,
     config: ChemistryParameters
 ) -> jnp.ndarray:
-    """
-    Simple methane chemistry with exponential decay
+    """Compute methane chemistry with exponential decay
     
     Args:
         pressure: Pressure (Pa) [nlev, ncols]
@@ -163,6 +160,7 @@ def simple_methane_chemistry(
         
     Returns:
         Methane loss rate (ppbv/s) [nlev, ncols]
+
     """
     # Temperature-dependent loss rate
     # Increases with temperature (simplified OH chemistry)
@@ -190,8 +188,7 @@ def simple_chemistry(
     dt: float,
     config: ChemistryParameters = None
 ) -> Tuple[ChemistryTendencies, ChemistryState]:
-    """
-    Simple chemistry scheme with fixed ozone and methane decay
+    """Compute chemistry with fixed ozone and methane decay
     
     Args:
         pressure: Pressure (Pa) [nlev, ncols]
@@ -204,6 +201,7 @@ def simple_chemistry(
         
     Returns:
         Tuple of (tendencies, state)
+
     """
     if config is None:
         config = ChemistryParameters.default()
@@ -256,8 +254,7 @@ def initialize_chemistry_tracers(
     temperature: jnp.ndarray,
     config: ChemistryParameters = None
 ) -> ChemistryState:
-    """
-    Initialize chemistry tracers with reasonable distributions
+    """Initialize chemistry tracers with reasonable distributions
     
     Args:
         pressure: Pressure (Pa) [nlev, ncols]
@@ -267,6 +264,7 @@ def initialize_chemistry_tracers(
         
     Returns:
         Initial chemistry state
+
     """
     if config is None:
         config = ChemistryParameters.default()

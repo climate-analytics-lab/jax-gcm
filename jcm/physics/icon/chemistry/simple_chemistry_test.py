@@ -1,12 +1,10 @@
-"""
-Tests for simple chemistry schemes
+"""Tests for simple chemistry schemes
 
 Date: 2025-01-15
 """
 
 import jax.numpy as jnp
 import jax
-import pytest
 from unittest import TestCase
 
 from .simple_chemistry import (
@@ -225,4 +223,5 @@ class TestJAXCompatibility(TestCase):
 
 
 if __name__ == "__main__":
+    import unittest
     unittest.main()

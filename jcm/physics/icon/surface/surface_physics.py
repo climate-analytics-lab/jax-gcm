@@ -1,5 +1,4 @@
-"""
-Main surface physics interface for ICON surface scheme.
+"""Main surface physics interface for ICON surface scheme.
 
 This module provides the main interface for surface physics calculations,
 coordinating different surface types (ocean, sea ice, land) and computing
@@ -8,17 +7,16 @@ grid-box mean fluxes.
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple, Optional
+from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing, 
-    SurfaceFluxes, SurfaceTendencies, SurfaceResistances, SurfaceDiagnostics
+    SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics
 )
 from .turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
-    compute_exchange_coefficients, compute_turbulent_fluxes,
-    compute_surface_resistances, compute_surface_diagnostics
+    compute_exchange_coefficients, compute_surface_resistances, compute_surface_diagnostics
 )
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
@@ -36,8 +34,7 @@ def initialize_surface_state(
     soil_temp: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceState:
-    """
-    Initialize surface state from basic inputs.
+    """Initialize surface state from basic inputs.
     
     Args:
         ncol: Number of columns
@@ -49,6 +46,7 @@ def initialize_surface_state(
         
     Returns:
         Initialized surface state
+
     """
     # Use fixed value for nsfc_type since it needs to be concrete for array creation
     nsfc_type = 3  # Always 3: water, ice, land
@@ -137,8 +135,7 @@ def surface_physics_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
-    """
-    Complete surface physics step for all surface types.
+    """Complete surface physics step for all surface types.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -148,6 +145,7 @@ def surface_physics_step(
         
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
+
     """
     ncol, nsfc_type = surface_state.temperature.shape
     
@@ -254,8 +252,7 @@ def combine_surface_fluxes(
     flux_list: list,
     fractions: jnp.ndarray
 ) -> SurfaceFluxes:
-    """
-    Combine fluxes from different surface types into grid-box means.
+    """Combine fluxes from different surface types into grid-box means.
     
     Args:
         flux_list: List of SurfaceFluxes for each surface type
@@ -263,6 +260,7 @@ def combine_surface_fluxes(
         
     Returns:
         Combined surface fluxes
+
     """
     ncol, nsfc_type = fractions.shape
     
@@ -307,8 +305,7 @@ def combine_surface_tendencies(
     tendency_list: list,
     fractions: jnp.ndarray
 ) -> SurfaceTendencies:
-    """
-    Combine tendencies from different surface types.
+    """Combine tendencies from different surface types.
     
     Args:
         tendency_list: List of SurfaceTendencies for each surface type
@@ -316,6 +313,7 @@ def combine_surface_tendencies(
         
     Returns:
         Combined surface tendencies
+
     """
     ncol, nsfc_type = fractions.shape
     
@@ -352,8 +350,7 @@ def update_surface_state(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> SurfaceState:
-    """
-    Update surface state using computed tendencies.
+    """Update surface state using computed tendencies.
     
     Args:
         surface_state: Current surface state
@@ -363,6 +360,7 @@ def update_surface_state(
         
     Returns:
         Updated surface state
+
     """
     # Update temperatures
     new_surface_temp = surface_state.temperature + tendencies.surface_temp_tendency * dt

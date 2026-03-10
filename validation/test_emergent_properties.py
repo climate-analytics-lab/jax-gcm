@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""
-Test emergent atmospheric properties in JAX-GCM ICON physics.
+"""Test emergent atmospheric properties in JAX-GCM ICON physics.
 
 This script tests key emergent properties like ITCZ formation, Hadley cell circulation,
 and global energy balance to validate the physics implementation.
 """
 
 import jax.numpy as jnp
-import jax
 import numpy as np
-import xarray as xr
 import matplotlib.pyplot as plt
 from typing import Dict, Tuple, Any
 import sys
@@ -29,7 +26,6 @@ class EmergentPropertiesValidator:
     
     def __init__(self, grid_config: Dict[str, Any] = None):
         """Initialize validator with grid configuration"""
-        
         # Default grid configuration
         default_config = {
             'nlat': 64,
@@ -59,7 +55,6 @@ class EmergentPropertiesValidator:
         
     def create_aquaplanet_state(self, sst: float = 300.0) -> PhysicsData:
         """Create initial aquaplanet state"""
-        
         ncol = self.config['nlat'] * self.config['nlon']
         nlev = self.config['nlev']
         
@@ -156,7 +151,6 @@ class EmergentPropertiesValidator:
     
     def run_physics_timestep(self, state: PhysicsData, date: DateData) -> Tuple[PhysicsData, Dict]:
         """Run single physics timestep"""
-        
         # Compute physics tendencies
         tendencies, diagnostics = self.physics.compute_tendencies(
             state, self.geometry, date
@@ -177,7 +171,6 @@ class EmergentPropertiesValidator:
     
     def run_short_integration(self, days: int = 5) -> Dict[str, jnp.ndarray]:
         """Run short integration to test basic physics"""
-        
         print(f"Running {days}-day integration...")
         
         # Initialize state
@@ -227,7 +220,6 @@ class EmergentPropertiesValidator:
     
     def test_temperature_distribution(self, history: Dict) -> Dict[str, Any]:
         """Test temperature distribution and gradients"""
-        
         print("Testing temperature distribution...")
         
         # Get final temperature
@@ -264,14 +256,13 @@ class EmergentPropertiesValidator:
         }
         
         print(f"  Temperature contrast: {temp_contrast:.1f} K")
-        print(f"  Expected range: 30-80 K")
+        print("  Expected range: 30-80 K")
         print(f"  Test passed: {results['test_passed']}")
         
         return results
     
     def test_energy_balance(self, history: Dict) -> Dict[str, Any]:
         """Test basic energy balance"""
-        
         print("Testing energy balance...")
         
         # Simple energy balance check
@@ -314,7 +305,6 @@ class EmergentPropertiesValidator:
     
     def test_physics_stability(self, history: Dict) -> Dict[str, Any]:
         """Test physics stability and reasonable values"""
-        
         print("Testing physics stability...")
         
         # Check for NaN or infinite values
@@ -347,7 +337,6 @@ class EmergentPropertiesValidator:
     
     def generate_validation_plots(self, history: Dict, results: Dict):
         """Generate validation plots"""
-        
         print("Generating validation plots...")
         
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -399,7 +388,6 @@ class EmergentPropertiesValidator:
     
     def run_comprehensive_validation(self, days: int = 5) -> Dict[str, Any]:
         """Run comprehensive validation test suite"""
-        
         print("=" * 60)
         print("JAX-GCM ICON Physics Emergent Properties Validation")
         print("=" * 60)
@@ -444,7 +432,6 @@ class EmergentPropertiesValidator:
 
 def main():
     """Run emergent properties validation"""
-    
     # Create validator
     validator = EmergentPropertiesValidator()
     

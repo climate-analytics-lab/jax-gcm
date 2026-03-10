@@ -1,5 +1,4 @@
-"""
-Simple unit tests for ICON physics that avoid complex schemes
+"""Simple unit tests for ICON physics that avoid complex schemes
 
 This provides basic tests for the ICON physics infrastructure without
 running the full radiation and aerosol schemes that have JAX compatibility issues.
@@ -9,7 +8,6 @@ Date: 2025-01-11
 
 import numpy as np
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.icon_physics import IconPhysics, _prepare_common_physics_state
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.icon_coords import IconCoords
@@ -29,7 +27,7 @@ def apply_simple_test_physics(
     forcing: ForcingData,
     terrain: TerrainData
 ) -> Tuple[PhysicsTendency, PhysicsData]:
-    """Simple test physics that just returns small tendencies"""
+    """Return small tendencies for testing."""
     nlev, ncols = state.temperature.shape
     
     # Create simple tendencies
@@ -102,7 +100,7 @@ def test_simple_physics_integration():
     """Test simple physics integration without complex schemes"""
     # Setup
     nlev, nlat, nlon = 8, 64, 32
-    ncols = nlat * nlon
+    nlat * nlon
 
     # Create test physics with only simple terms
     class SimpleIconPhysics(IconPhysics):

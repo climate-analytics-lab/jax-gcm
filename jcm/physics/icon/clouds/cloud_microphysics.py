@@ -1,5 +1,4 @@
-"""
-Cloud microphysics scheme for ICON physics
+"""Cloud microphysics scheme for ICON physics
 
 This module implements comprehensive cloud microphysics including:
 - Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)
@@ -19,13 +18,11 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import jax
-from jax import lax
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 from ..constants.physical_constants import (
-    tmelt, alhf, alhc, alhs, rd, rv, cp, grav, rhow, eps
+    tmelt, alhf, alhc, alhs, cp, rhow
 )
 
 
@@ -143,8 +140,7 @@ def cloud_droplet_radius(
     droplet_number: jnp.ndarray,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """
-    Calculate effective cloud droplet radius
+    """Calculate effective cloud droplet radius
     
     Args:
         cloud_water: Cloud liquid water content (kg/kg)
@@ -154,6 +150,7 @@ def cloud_droplet_radius(
         
     Returns:
         Effective radius (m)
+
     """
     # Convert mixing ratio to mass concentration
     cloud_water_density = cloud_water * air_density  # kg/m³
@@ -181,8 +178,7 @@ def autoconversion_kk2000(
     dt: float,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """
-    Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)
+    """Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)
     
     This parameterization is more sophisticated than simple threshold-based
     schemes and depends on both cloud water content and droplet concentration.
@@ -197,6 +193,7 @@ def autoconversion_kk2000(
         
     Returns:
         Autoconversion rate (kg/kg/s)
+
     """
     # In-cloud values
     qc_in_cloud = jnp.where(
@@ -235,8 +232,7 @@ def accretion_rain_cloud(
     air_density: jnp.ndarray,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """
-    Accretion of cloud droplets by rain
+    """Accretion of cloud droplets by rain
     
     Args:
         cloud_water: Cloud water mixing ratio (kg/kg)
@@ -247,6 +243,7 @@ def accretion_rain_cloud(
         
     Returns:
         Accretion rate (kg/kg/s)
+
     """
     # In-cloud values
     qc_in_cloud = jnp.where(
@@ -272,8 +269,7 @@ def ice_autoconversion(
     dt: float,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """
-    Autoconversion of cloud ice to snow through aggregation
+    """Autoconversion of cloud ice to snow through aggregation
     
     Args:
         cloud_ice: Cloud ice mixing ratio (kg/kg)
@@ -284,6 +280,7 @@ def ice_autoconversion(
         
     Returns:
         Ice autoconversion rate (kg/kg/s)
+
     """
     # Temperature-dependent aggregation efficiency
     # Maximum near -15°C (258K)
@@ -325,8 +322,7 @@ def snow_accretion(
     is_liquid: bool,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """
-    Accretion of cloud water/ice by falling snow
+    """Accretion of cloud water/ice by falling snow
     
     Args:
         target: Target species mixing ratio (cloud water or ice) (kg/kg)
@@ -338,6 +334,7 @@ def snow_accretion(
         
     Returns:
         Accretion rate (kg/kg/s)
+
     """
     # Collection efficiency
     efficiency = config.ccollec if is_liquid else config.ccollei
@@ -365,8 +362,7 @@ def melting_freezing(
     dt: float,
     config: MicrophysicsParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate melting of snow and freezing of rain
+    """Calculate melting of snow and freezing of rain
     
     Args:
         temperature: Temperature (K)
@@ -377,6 +373,7 @@ def melting_freezing(
         
     Returns:
         Tuple of (melting_rate, freezing_rate) in kg/kg/s
+
     """
     # Temperature departure from freezing
     dt_freeze = tmelt - temperature
@@ -412,8 +409,7 @@ def evaporation_sublimation(
     air_density: jnp.ndarray,
     config: MicrophysicsParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate evaporation of rain and sublimation of snow
+    """Calculate evaporation of rain and sublimation of snow
     
     Args:
         temperature: Temperature (K)
@@ -426,6 +422,7 @@ def evaporation_sublimation(
         
     Returns:
         Tuple of (rain_evap_rate, snow_sublim_rate) in kg/kg/s
+
     """
     from .shallow_clouds import saturation_specific_humidity
     
@@ -461,8 +458,7 @@ def sedimentation_flux(
     terminal_velocity: jnp.ndarray,
     dt: float
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate sedimentation flux and tendency for a hydrometeor
+    """Calculate sedimentation flux and tendency for a hydrometeor
     
     Uses upwind differencing with flux limiter to maintain stability.
     JAX-compatible implementation without loops.
@@ -476,8 +472,9 @@ def sedimentation_flux(
         
     Returns:
         Tuple of (flux [nlev+1], tendency [nlev])
+
     """
-    nlev = hydrometeor.shape[0]
+    hydrometeor.shape[0]
     
     # Mass content (kg/m³)
     mass_content = hydrometeor * air_density
@@ -518,8 +515,7 @@ def cloud_microphysics(
     rain_water: Optional[jnp.ndarray] = None,
     snow: Optional[jnp.ndarray] = None
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
-    """
-    Main cloud microphysics scheme
+    """Run cloud microphysics scheme
     
     Computes tendencies from all microphysical processes including:
     - Autoconversion and accretion
@@ -544,6 +540,7 @@ def cloud_microphysics(
         
     Returns:
         Tuple of (tendencies, state)
+
     """
     if config is None:
         config = MicrophysicsParameters.default()

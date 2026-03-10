@@ -1,5 +1,4 @@
-"""
-Tracer transport for Tiedtke-Nordeng convection scheme
+"""Tracer transport for Tiedtke-Nordeng convection scheme
 
 This module handles the convective transport of cloud water, cloud ice,
 and additional tracers (chemical species, aerosols, etc.)
@@ -9,8 +8,6 @@ Date: 2025-01-09
 
 import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
-from functools import partial
-from jax import lax
 
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
@@ -19,6 +16,7 @@ from ..constants.physical_constants import tmelt
 
 class TracerIndices(NamedTuple):
     """Indices for different tracer types"""
+
     iqv: int = 0    # Water vapor (specific humidity)
     iqc: int = 1    # Cloud liquid water
     iqi: int = 2    # Cloud ice
@@ -27,6 +25,7 @@ class TracerIndices(NamedTuple):
 
 class TracerTransport(NamedTuple):
     """Tracer transport state and tendencies"""
+
     # Tracer concentrations in updraft/downdraft
     tracer_u: jnp.ndarray   # [nlev, ntrac] - updraft tracer concentrations
     tracer_d: jnp.ndarray   # [nlev, ntrac] - downdraft tracer concentrations
@@ -47,8 +46,7 @@ def partition_cloud_detrainment(
     temperature: jnp.ndarray,
     detrain_total: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Partition detrained condensate into liquid and ice
+    """Partition detrained condensate into liquid and ice
     
     Args:
         temperature: Temperature at each level (K)
@@ -56,6 +54,7 @@ def partition_cloud_detrainment(
         
     Returns:
         Tuple of (detrain_liquid, detrain_ice)
+
     """
     # Temperature thresholds
     t_ice = tmelt - 35.0   # All ice below this
@@ -81,8 +80,7 @@ def transport_tracers(
     dt: float,
     indices: Optional[TracerIndices] = None
 ) -> TracerTransport:
-    """
-    Calculate tracer transport by convection
+    """Calculate tracer transport by convection
     
     Args:
         tracers: Environmental tracer concentrations [nlev, ntrac]
@@ -96,6 +94,7 @@ def transport_tracers(
         
     Returns:
         TracerTransport with all transport terms
+
     """
     if indices is None:
         indices = TracerIndices()
@@ -158,8 +157,7 @@ def transport_tracers(
 
 
 def initialize_tracers(nlev: int, include_chemistry: bool = False) -> Tuple[jnp.ndarray, TracerIndices]:
-    """
-    Initialize tracer array with appropriate species
+    """Initialize tracer array with appropriate species
     
     Args:
         nlev: Number of vertical levels
@@ -167,6 +165,7 @@ def initialize_tracers(nlev: int, include_chemistry: bool = False) -> Tuple[jnp.
         
     Returns:
         Tuple of (tracer_array, indices)
+
     """
     # Basic tracers: qv, qc, qi
     basic_tracers = 3

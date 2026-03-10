@@ -1,5 +1,4 @@
-"""
-Tiedtke-Nordeng Mass-Flux Convection Scheme
+"""Tiedtke-Nordeng Mass-Flux Convection Scheme
 
 This module implements the Tiedtke-Nordeng convection parameterization
 in JAX, based on the ICON atmospheric model implementation.
@@ -19,6 +18,7 @@ References:
   model in the tropics. ECMWF Tech. Memo. 206.
 
 Date: 2025-01-09
+
 """
 
 import jax.numpy as jnp
@@ -28,7 +28,7 @@ from typing import NamedTuple, Tuple
 import tree_math
 
 from ..constants.physical_constants import (
-    grav, rd, rv, cp, eps, tmelt, alhc, alhs
+    grav, rd, cp, eps, tmelt, alhc
 )
 
 # Import updraft, downdraft and flux modules after they're defined
@@ -143,14 +143,14 @@ class ConvectionTendencies(NamedTuple):
 
 
 def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate saturation vapor pressure using Tetens formula
+    """Calculate saturation vapor pressure using Tetens formula
     
     Args:
         temperature: Temperature (K)
         
     Returns:
         Saturation vapor pressure (Pa)
+
     """
     # Tetens formula coefficients
     a = 17.27
@@ -172,8 +172,7 @@ def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
 
 def saturation_mixing_ratio(pressure: jnp.ndarray, 
                           temperature: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate saturation mixing ratio
+    """Calculate saturation mixing ratio
     
     Args:
         pressure: Pressure (Pa)
@@ -181,6 +180,7 @@ def saturation_mixing_ratio(pressure: jnp.ndarray,
         
     Returns:
         Saturation mixing ratio (kg/kg)
+
     """
     es = saturation_vapor_pressure(temperature)
     qs = eps * es / (pressure - es * (1.0 - eps))
@@ -190,8 +190,7 @@ def saturation_mixing_ratio(pressure: jnp.ndarray,
 def moist_static_energy(temperature: jnp.ndarray,
                        height: jnp.ndarray, 
                        mixing_ratio: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate moist static energy
+    """Calculate moist static energy
     
     Args:
         temperature: Temperature (K)
@@ -200,6 +199,7 @@ def moist_static_energy(temperature: jnp.ndarray,
         
     Returns:
         Moist static energy (J/kg)
+
     """
     return cp * temperature + grav * height + alhc * mixing_ratio
 
@@ -210,8 +210,7 @@ def initialize_convection(temperature: jnp.ndarray,
                          u_wind: jnp.ndarray,
                          v_wind: jnp.ndarray,
                          config: ConvectionParameters) -> ConvectionState:
-    """
-    Initialize convection state variables
+    """Initialize convection state variables
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -223,6 +222,7 @@ def initialize_convection(temperature: jnp.ndarray,
         
     Returns:
         Initial convection state
+
     """
     nlev = temperature.shape[0]
     
@@ -264,8 +264,7 @@ def find_cloud_base(temperature: jnp.ndarray,
                    humidity: jnp.ndarray, 
                    pressure: jnp.ndarray,
                    config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Find lifting condensation level (cloud base)
+    """Find lifting condensation level (cloud base)
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -275,6 +274,7 @@ def find_cloud_base(temperature: jnp.ndarray,
         
     Returns:
         Tuple of (cloud_base_level, cloud_base_exists)
+
     """
     nlev = len(temperature)
     
@@ -320,8 +320,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
                       layer_thickness: jnp.ndarray,
                       cloud_base: int,
                       config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate CAPE and CIN for convective instability
+    """Calculate CAPE and CIN for convective instability
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -333,6 +332,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
         
     Returns:
         Tuple of (CAPE, CIN) in J/kg
+
     """
     nlev = len(temperature)
     
@@ -400,8 +400,7 @@ def tiedtke_nordeng_convection(
     dt: float,
     config: ConvectionParameters = None
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
-    """
-    Main Tiedtke-Nordeng convection scheme with fixed qc/qi transport
+    """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
     
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -418,6 +417,7 @@ def tiedtke_nordeng_convection(
         
     Returns:
         Tuple of (tendencies, final_state) with fixed qc/qi transport
+
     """
     if config is None:
         config = ConvectionParameters.default()

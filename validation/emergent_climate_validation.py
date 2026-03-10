@@ -1,29 +1,23 @@
-"""
-Emergent Climate Properties Validation Framework
+"""Emergent Climate Properties Validation Framework
 
 This module validates key emergent atmospheric properties against known values
 from literature and observations. Tests fundamental climate features that emerge
 from the physics parameterizations.
 """
 
-import jax
 import jax.numpy as jnp
 import xarray as xr
-import numpy as np
 from typing import Dict, Any, Tuple, Optional
 from dataclasses import dataclass
-from pathlib import Path
 
 from jcm.model import Model
 from jcm.physics.icon import IconPhysics
-from jcm.terrain import TerrainData
-from jcm.utils import get_coords
-from jcm.date import DateData
 
 
 @dataclass
 class ValidationResult:
     """Container for validation test results"""
+
     test_name: str
     measured_value: float
     expected_range: Tuple[float, float]
@@ -120,7 +114,7 @@ class EmergentClimateValidator:
         final_state, predictions = model.unroll(initial_state)
         
         # Convert predictions to xarray
-        ds = model.predictions_to_xarray(predictions)
+        model.predictions_to_xarray(predictions)
         
         # Process the data for validation
         print("Processing model output...")
@@ -191,7 +185,7 @@ class EmergentClimateValidator:
         # Add attributes
         state_history.attrs['model'] = 'JAX-GCM'
         state_history.attrs['physics'] = 'ICON'
-        state_history.attrs['resolution'] = f'T{horizontal_resolution}L{self.model_config["vertical_levels"]}'
+        state_history.attrs['resolution'] = f'{self.model_config["grid_resolution"]}L{self.model_config["vertical_levels"]}'
         state_history.attrs['coordinate_system'] = 'hybrid_sigma_pressure' if model.geometry.is_hybrid else 'sigma'
         state_history.attrs['total_time_days'] = duration_days
         state_history.attrs['outer_steps'] = model.outer_steps
@@ -529,7 +523,7 @@ class EmergentClimateValidator:
 
 
 def main():
-    """Main validation runner"""
+    """Run validation suite."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Run emergent climate validation')

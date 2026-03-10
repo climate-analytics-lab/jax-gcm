@@ -1,5 +1,4 @@
-"""
-Test chemistry integration with ICON physics
+"""Test chemistry integration with ICON physics
 
 This test verifies that chemistry is properly integrated into the
 ICON physics system.
@@ -98,8 +97,8 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Save initial chemistry state
-        initial_ozone = physics_data1.chemistry.ozone_vmr.copy()
-        initial_methane = physics_data1.chemistry.methane_vmr.copy()
+        physics_data1.chemistry.ozone_vmr.copy()
+        physics_data1.chemistry.methane_vmr.copy()
         
         # Run physics again (chemistry should evolve)
         tendencies2, physics_data2 = self.physics.compute_tendencies(
@@ -162,7 +161,7 @@ class TestChemistryIntegration(TestCase):
         
         # Ozone should have a maximum in the stratosphere (upper levels)
         # For our simplified setup, check that ozone generally increases with altitude
-        max_ozone_level = jnp.argmax(ozone_profile)
+        jnp.argmax(ozone_profile)
         # With the simplified ozone profile, the maximum may not be in the upper half
         # So just check that there is vertical structure (not all levels are the same)
         self.assertGreater(jnp.max(ozone_profile), jnp.min(ozone_profile))

@@ -1,5 +1,4 @@
-"""
-Main ICON Physics class for JAX-GCM
+"""Main ICON Physics class for JAX-GCM
 
 This module contains the main IconPhysics class that orchestrates the 
 ICON atmospheric physics parameterizations. It follows the same pattern
@@ -11,8 +10,6 @@ Date: 2025-01-09
 import jax
 from jax import jit
 import jax.numpy as jnp
-import tree_math
-from collections import abc
 from typing import Tuple, Optional
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
@@ -28,9 +25,8 @@ from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
-from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme # FIXME: would be good to use this
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
-from jcm.physics.icon.surface.surface_types import SurfaceState, AtmosphericForcing
+from jcm.physics.icon.surface.surface_types import AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
 from jcm.physics.icon.chemistry import simple_chemistry, initialize_chemistry_tracers
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
@@ -38,8 +34,7 @@ from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.forcing import apply_forcing_data
 
 class IconPhysics(Physics):
-    """
-    ICON atmospheric physics implementation for JAX-GCM
+    """ICON atmospheric physics implementation for JAX-GCM
     
     This class implements the ICON physics suite including:
     - Radiation (shortwave and longwave)
@@ -56,8 +51,7 @@ class IconPhysics(Physics):
                  checkpoint_terms: bool = True,
                  parameters: Optional[Parameters] = None,
                  dt_physics: Optional[float] = None):
-        """
-        Initialize the ICON physics.
+        """Initialize the ICON physics.
 
         Args:
             write_output: Whether to write physics output to predictions
@@ -67,6 +61,7 @@ class IconPhysics(Physics):
                 all internal physics timesteps (dt_conv, dt_rad, etc.) to match
                 the model integration timestep. This is important since we don't
                 have sub-timestepping - all physics must use the same timestep.
+
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
@@ -106,8 +101,7 @@ class IconPhysics(Physics):
         terrain: TerrainData,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
-        """
-        Compute the physical tendencies given the current state and data structs. Loops through the ICON physics terms, accumulating the tendencies.
+        """Compute the physical tendencies given the current state and data structs. Loops through the ICON physics terms, accumulating the tendencies.
 
         Args:
             state: Current state variables
@@ -118,6 +112,7 @@ class IconPhysics(Physics):
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
+
         """
         nodal_shape = self._icon_coords.nodal_shape
 
@@ -164,8 +159,7 @@ class IconPhysics(Physics):
         return tendencies, physics_data
     
     def _reshape_state_to_columns(self, state: PhysicsState, nlev: int, ncols: int) -> PhysicsState:
-        """
-        TPU-optimized reshape using single tree_map operation
+        """TPU-optimized reshape using single tree_map operation
         
         This creates one XLA operation instead of multiple reshapes, 
         which is crucial for TPUv4 performance at T85 resolution.
@@ -200,8 +194,7 @@ class IconPhysics(Physics):
         )
     
     def _initialize_column_tendencies(self, nlev: int, ncols: int, tracers: dict) -> dict:
-        """
-        Initialize tendency accumulators in column format
+        """Initialize tendency accumulators in column format
         
         Using dict avoids repeated PhysicsTendency object creation during accumulation
         """
@@ -214,8 +207,7 @@ class IconPhysics(Physics):
         }
     
     def _accumulate_column_tendencies(self, accumulated: dict, new_tendency: PhysicsTendency) -> dict:
-        """
-        Efficiently accumulate tendencies in column format
+        """Efficiently accumulate tendencies in column format
         
         Avoids object creation and intermediate arrays for optimal TPU performance
         """
@@ -231,10 +223,9 @@ class IconPhysics(Physics):
         }
     
     def _reshape_tendencies_to_3d(self, tendencies: dict, nlev: int, nlat: int, nlon: int) -> PhysicsTendency:
-        """
-        Final reshape to 3D format - single operation at the end
-        
-        This is the only reshape back to 3D, done once at the very end
+        """Reshape tendencies to 3D format as a single operation at the end.
+
+        This is the only reshape back to 3D, done once at the very end.
         """
         def reshape_to_3d(field):
             if field.ndim == 2:  # [nlev, ncols] → [nlev, nlon, nlat]
@@ -262,8 +253,7 @@ class IconPhysics(Physics):
         )
     
     def data_struct_to_dict(self, struct, nodal_shape=None, sep="."):
-        """
-        Convert physics data struct to dictionary, reshaping column data to 3D.
+        """Convert physics data struct to dictionary, reshaping column data to 3D.
 
         This overrides the base class method to handle ICON physics data which
         contains fields in column format that need reshaping for xarray output.
@@ -471,8 +461,7 @@ class IconPhysics(Physics):
         return filtered_result
 
     def reshape_physics_data_to_3d(self, physics_data: PhysicsData, nodal_shape=None) -> PhysicsData:
-        """
-        Reshape PhysicsData from column format to 3D nodal format for output.
+        """Reshape PhysicsData from column format to 3D nodal format for output.
 
         This converts arrays from (ncols,) or (nlev, ncols) to (nlon, nlat) or (nlev, nlon, nlat)
         respectively, making them suitable for plotting and analysis.
@@ -483,6 +472,7 @@ class IconPhysics(Physics):
 
         Returns:
             PhysicsData with arrays reshaped to 3D nodal format
+
         """
         nodal_shape = nodal_shape or self._icon_coords.nodal_shape
         nlev, nlon, nlat = nodal_shape
@@ -522,8 +512,7 @@ def _prepare_common_physics_state(
     forcing: ForcingData,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Prepare common physics variables that are used by multiple physics modules.
+    """Prepare common physics variables that are used by multiple physics modules.
     
     This reduces code duplication by computing pressure levels, heights, air density,
     and other commonly needed variables once for all physics modules.
@@ -535,6 +524,7 @@ def _prepare_common_physics_state(
         
     Returns:
         Dictionary with common physics variables
+
     """
     p0 = physical_constants.p0
     
@@ -633,7 +623,6 @@ def apply_radiation(state: PhysicsState,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply radiation heating rates"""
-    
     # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
     nlev, ncols = state.temperature.shape
     
@@ -742,7 +731,6 @@ def apply_convection(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
-    
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     layer_thickness = physics_data.diagnostics.layer_thickness
@@ -791,8 +779,7 @@ def apply_clouds(
     forcing: ForcingData,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply shallow cloud scheme """
-    
+    """Apply shallow cloud scheme"""
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     surface_pressure = physics_data.diagnostics.surface_pressure
@@ -848,7 +835,6 @@ def apply_microphysics(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply cloud microphysics scheme"""
-    
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     cloud_fraction = physics_data.clouds.cloud_fraction
@@ -959,7 +945,6 @@ def apply_vertical_diffusion(
                              surface_frac_col, roughness_col, ocean_u_scalar, ocean_v_scalar,
                              tke_col, thv_var_col):
         """Apply vertical diffusion to a single column with structured output"""
-        
         # Prepare state for this column - reshape to expected 2D format (1, nlev) or (1, nlev+1)
         vdiff_state = prepare_vertical_diffusion_state(
             u=u_col[None, :], v=v_col[None, :], temperature=temp_col[None, :], 
@@ -1012,7 +997,6 @@ def apply_vertical_diffusion(
     kh = vdiff_diagnostics.exchange_coeff_heat.T
     pbl_height = vdiff_diagnostics.boundary_layer_height  # Shape [ncols]
     u_star = vdiff_diagnostics.friction_velocity  # Shape [ncols]
-    b_flux = vdiff_diagnostics.surface_heat_flux  # Shape [ncols] (using heat flux as buoyancy proxy)
 
     # Extract surface exchange coefficients (per surface type)
     surface_exchange_heat = vdiff_diagnostics.surface_exchange_heat  # (ncols, nsfc_type)
@@ -1064,9 +1048,6 @@ def apply_surface(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply surface physics and calculate surface fluxes"""
-    from jcm.physics.icon.surface.surface_types import AtmosphericForcing
-    from jcm.physics.icon.surface import initialize_surface_state
-    
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full

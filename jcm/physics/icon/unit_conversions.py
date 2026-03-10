@@ -1,5 +1,4 @@
-"""
-Unit conversion utilities for ICON physics
+"""Unit conversion utilities for ICON physics
 
 This module ensures that physics state variables from the dynamics core
 are properly converted to the units expected by ICON physics modules.
@@ -23,20 +22,19 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from typing import Tuple
 from ..speedy.physical_constants import p0
 from .constants.physical_constants import grav, rd
 
 
 def convert_surface_pressure(surface_pressure_normalized: jnp.ndarray) -> jnp.ndarray:
-    """
-    Convert normalized surface pressure to Pascal.
+    """Convert normalized surface pressure to Pascal.
     
     Args:
         surface_pressure_normalized: Surface pressure normalized by p0 (dimensionless)
         
     Returns:
         Surface pressure in Pascal
+
     """
     return surface_pressure_normalized * p0
 
@@ -45,8 +43,7 @@ def calculate_pressure_levels(
     surface_pressure_normalized: jnp.ndarray,
     sigma_levels: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate pressure at each model level.
+    """Calculate pressure at each model level.
     
     Args:
         surface_pressure_normalized: Normalized surface pressure [ncols] or [nlat, nlon]
@@ -54,6 +51,7 @@ def calculate_pressure_levels(
         
     Returns:
         Pressure at each level in Pascal [nlev, ncols] or [nlev, nlat, nlon]
+
     """
     surface_pressure_pa = convert_surface_pressure(surface_pressure_normalized)
     
@@ -69,14 +67,14 @@ def calculate_pressure_levels(
 
 
 def geopotential_to_height(geopotential: jnp.ndarray) -> jnp.ndarray:
-    """
-    Convert geopotential to geometric height.
+    """Convert geopotential to geometric height.
     
     Args:
         geopotential: Geopotential in m²/s²
         
     Returns:
         Geometric height in meters
+
     """
     return geopotential / grav
 
@@ -85,8 +83,7 @@ def calculate_air_density(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate air density from pressure and temperature.
+    """Calculate air density from pressure and temperature.
     
     Args:
         pressure: Pressure in Pascal
@@ -94,6 +91,7 @@ def calculate_air_density(
         
     Returns:
         Air density in kg/m³
+
     """
     return pressure / (rd * temperature)
 
@@ -102,8 +100,7 @@ def calculate_layer_thickness(
     pressure_levels: jnp.ndarray,
     temperature: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate layer thickness using hydrostatic approximation.
+    """Calculate layer thickness using hydrostatic approximation.
     
     Args:
         pressure_levels: Pressure at each level in Pascal [nlev, ...]
@@ -111,8 +108,9 @@ def calculate_layer_thickness(
         
     Returns:
         Layer thickness in meters [nlev, ...]
+
     """
-    nlev = pressure_levels.shape[0]
+    pressure_levels.shape[0]
     air_density = calculate_air_density(pressure_levels, temperature)
     
     # Initialize with zeros
@@ -132,8 +130,7 @@ def calculate_layer_thickness(
 
 
 def prepare_physics_state_2d(state, icon_coords):
-    """
-    Prepare physics state with proper unit conversions for 2D (vectorized) format.
+    """Prepare physics state with proper unit conversions for 2D (vectorized) format.
 
     This is used within IconPhysics after state has been reshaped to [nlev, ncols].
 
@@ -143,6 +140,7 @@ def prepare_physics_state_2d(state, icon_coords):
 
     Returns:
         Tuple of converted quantities needed by physics schemes
+
     """
     nlev, ncols = state.temperature.shape
 
@@ -171,8 +169,7 @@ def prepare_physics_state_2d(state, icon_coords):
 
 
 def prepare_physics_state_3d(state, icon_coords):
-    """
-    Prepare physics state with proper unit conversions for 3D format.
+    """Prepare physics state with proper unit conversions for 3D format.
 
     This could be used for diagnostics or debugging with full 3D arrays.
 
@@ -182,6 +179,7 @@ def prepare_physics_state_3d(state, icon_coords):
 
     Returns:
         Tuple of converted quantities needed by physics schemes
+
     """
     nlev, nlat, nlon = state.temperature.shape
 
@@ -210,8 +208,7 @@ def prepare_physics_state_3d(state, icon_coords):
 
 
 def verify_physics_units(state, converted_state):
-    """
-    Verify that unit conversions produce reasonable values.
+    """Verify that unit conversions produce reasonable values.
     
     Args:
         state: Original PhysicsState
@@ -219,6 +216,7 @@ def verify_physics_units(state, converted_state):
         
     Returns:
         Dictionary of verification results
+
     """
     checks = {}
     

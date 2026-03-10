@@ -1,5 +1,4 @@
-"""
-Unit tests for Tiedtke-Nordeng convection scheme
+"""Unit tests for Tiedtke-Nordeng convection scheme
 
 This file provides comprehensive unit tests that can be run with pytest.
 
@@ -9,7 +8,6 @@ Date: 2025-01-09
 import pytest
 import jax.numpy as jnp
 import jax
-import numpy as np
 
 # Import convection modules
 from jcm.physics.icon.convection.tiedtke_nordeng import (
@@ -28,7 +26,6 @@ def create_realistic_atmosphere(nlev=20, unstable=True):
     """Create a realistic atmospheric profile for testing"""
     # Physical constants
     Rd = 287.05  # J/(kg*K) - gas constant for dry air
-    g = 9.80665  # m/s² - gravitational acceleration
 
     # Pressure levels (Pa) - from surface (1000 hPa) to top (~200 hPa)
     pressure = jnp.linspace(1e5, 2e4, nlev)

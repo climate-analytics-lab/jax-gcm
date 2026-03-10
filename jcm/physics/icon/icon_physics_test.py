@@ -1,6 +1,4 @@
-"""
-Integration tests for ICON Physics
-"""
+"""Integration tests for ICON Physics."""
 
 import unittest
 import jax.numpy as jnp
@@ -18,8 +16,7 @@ class TestIconPhysicsIntegration(unittest.TestCase):
 
     @pytest.mark.slow
     def test_icon_physics_integration_3_timesteps(self):
-        """
-        Test that ICON physics runs for 3 timesteps and produces sensible output.
+        """Test that ICON physics runs for 3 timesteps and produces sensible output.
 
         This test should catch known bugs:
         - Radiation causing excessive cooling (-143 K/day)
@@ -133,11 +130,11 @@ class TestIconPhysicsIntegration(unittest.TestCase):
         self.assertEqual(actual_time_steps, expected_time_steps,
                         f"Expected {expected_time_steps} time steps, got {actual_time_steps} - model may have crashed")
         
-        print(f"✓ ICON physics integration test passed!")
+        print("✓ ICON physics integration test passed!")
         print(f"  - Ran for {actual_time_steps} time steps")
         print(f"  - Temperature range: {temp_min:.1f} - {temp_max:.1f} K")
         print(f"  - Surface pressure range: {sp_min:.3f} - {sp_max:.3f} (normalized)")
-        print(f"  - No NaN values detected in key variables")
+        print("  - No NaN values detected in key variables")
 
 
 if __name__ == '__main__':

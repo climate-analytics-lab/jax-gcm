@@ -1,5 +1,4 @@
-"""
-Unit tests for cloud optics calculations
+"""Unit tests for cloud optics calculations
 
 Tests cloud optical properties including extinction, scattering,
 and asymmetry parameters for both water and ice clouds.
@@ -8,7 +7,6 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.radiation.cloud_optics import (
     cloud_optics,
     effective_radius_liquid,
@@ -18,7 +16,6 @@ from jcm.physics.icon.radiation.cloud_optics import (
 
 def test_effective_radius_liquid():
     """Test liquid cloud effective radius calculation"""
-    
     cdnc_factor = jnp.array(1.0)  # No aerosol influence
     # Test over ocean
     r_eff_ocean = effective_radius_liquid(cdnc_factor, land_fraction=0.0)
@@ -198,7 +195,6 @@ def test_cloud_optics_temperature_dependence():
 
 def test_cloud_optics_mixed_phase():
     """Test mixed-phase clouds (both water and ice)"""
-    nlev = 8
     temperature = jnp.array([288, 280, 270, 260, 250, 240, 230, 220])  # Mixed temp profile
     
     # Mixed phase: water and ice coexist
@@ -215,8 +211,6 @@ def test_cloud_optics_mixed_phase():
     
     # Levels with both water and ice should have higher optical depth
     mixed_level = 3  # Both water and ice present
-    water_only_level = 1  # Only water
-    ice_only_level = 5  # Only ice
     
     # Mixed phase should have substantial optical depth (only first n_bands)
     assert jnp.all(sw_optics.optical_depth[mixed_level, :2] > 0)

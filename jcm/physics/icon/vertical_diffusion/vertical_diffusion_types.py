@@ -1,5 +1,4 @@
-"""
-Data structures and types for vertical diffusion and boundary layer physics.
+"""Data structures and types for vertical diffusion and boundary layer physics.
 
 This module defines the key data structures used in vertical diffusion
 calculations, following the ICON model structure.

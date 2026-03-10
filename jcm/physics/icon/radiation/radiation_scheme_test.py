@@ -1,5 +1,4 @@
-"""
-Unit tests for the main radiation scheme
+"""Unit tests for the main radiation scheme
 
 Tests the complete radiation scheme including state preparation,
 gas and cloud optics integration, flux calculations, and output diagnostics.
@@ -8,7 +7,6 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.radiation.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
@@ -619,7 +617,6 @@ def test_radiation_scheme_reproducibility():
         
         if i == 0:
             tendencies_1 = tendencies
-            diagnostics_1 = diagnostics
         else:
             # Should produce consistent output shapes and structure
             assert tendencies_1.temperature_tendency.shape == tendencies.temperature_tendency.shape

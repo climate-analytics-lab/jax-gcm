@@ -1,5 +1,4 @@
-"""
-Simple test to verify the unified Parameters object works correctly
+"""Simple test to verify the unified Parameters object works correctly
 
 Date: 2025-01-10
 """

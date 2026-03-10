@@ -1,11 +1,10 @@
-"""
-Data structures and types for surface physics.
+"""Data structures and types for surface physics.
 
 This module defines the key data structures used in surface processes,
 following the ICON model structure for land-atmosphere exchange.
 """
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 import jax.numpy as jnp
 import tree_math
 

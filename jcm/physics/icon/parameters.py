@@ -1,5 +1,4 @@
-"""
-Overall parameters for ICON physics
+"""Overall parameters for ICON physics
 
 This module provides a unified Parameters class that contains all the 
 configuration parameters for the various ICON physics parameterizations.
@@ -19,8 +18,7 @@ from .aerosol.aerosol_params import AerosolParameters
 
 @tree_math.struct
 class Parameters:
-    """
-    Overall parameters for ICON physics
+    """Overall parameters for ICON physics
     
     This class contains all the configuration parameters for the various
     ICON physics parameterizations, following the same pattern as 
@@ -200,6 +198,7 @@ class Parameters:
         Returns:
             New Parameters with updated timesteps in convection, radiation,
             and microphysics (dt_sedi capped at dt_seconds).
+
         """
         import jax.numpy as jnp
 

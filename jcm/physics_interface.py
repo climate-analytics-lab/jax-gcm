@@ -36,6 +36,7 @@ class PhysicsState:
     tracers: Dict[str, jnp.ndarray]  # Additional tracers beyond specific_humidity
 
     def __init__(self, u_wind, v_wind, temperature, specific_humidity, geopotential, normalized_surface_pressure, tracers=None):
+        """Initialize PhysicsState with atmospheric variables."""
         self.u_wind = u_wind
         self.v_wind = v_wind
         self.temperature = temperature
@@ -114,6 +115,7 @@ class PhysicsTendency:
     tracers: Dict[str, jnp.ndarray]  # Tendencies for additional tracers
 
     def __init__(self, u_wind, v_wind, temperature, specific_humidity, tracers=None):
+        """Initialize PhysicsTendency with tendency fields."""
         self.u_wind = u_wind
         self.v_wind = v_wind
         self.temperature = temperature

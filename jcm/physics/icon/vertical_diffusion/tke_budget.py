@@ -1,5 +1,4 @@
-"""
-Turbulent kinetic energy (TKE) budget calculations for vertical diffusion.
+"""Turbulent kinetic energy (TKE) budget calculations for vertical diffusion.
 
 This module computes the TKE budget according to the standard TKE equation:
 d(TKE)/dt = Shear Production + Buoyancy Production - Dissipation + Transport
@@ -33,8 +32,7 @@ def compute_shear_production(
     dz: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute shear production term in TKE budget.
+    """Compute shear production term in TKE budget.
     
     P_s = K_m * [(∂u/∂z)² + (∂v/∂z)²]
     
@@ -46,6 +44,7 @@ def compute_shear_production(
         
     Returns:
         Shear production [m²/s³] (ncol, nlev)
+
     """
     # Compute vertical wind shear
     du_dz = jnp.diff(u, axis=1) / dz
@@ -79,8 +78,7 @@ def compute_buoyancy_production(
     exchange_coeff_heat: jnp.ndarray,
     gravity: float = PHYS_CONST.grav
 ) -> jnp.ndarray:
-    """
-    Compute buoyancy production term in TKE budget.
+    """Compute buoyancy production term in TKE budget.
     
     P_b = -K_h * (g/θ) * (∂θ/∂z)
     
@@ -92,6 +90,7 @@ def compute_buoyancy_production(
         
     Returns:
         Buoyancy production [m²/s³] (ncol, nlev)
+
     """
     # Compute vertical temperature gradient
     dt_dz = jnp.diff(temperature, axis=1) / dz
@@ -122,8 +121,7 @@ def compute_dissipation(
     mixing_length: jnp.ndarray,
     c_dissipation: float = 0.19
 ) -> jnp.ndarray:
-    """
-    Compute dissipation term in TKE budget.
+    """Compute dissipation term in TKE budget.
     
     ε = C_ε * e^(3/2) / l
     
@@ -134,6 +132,7 @@ def compute_dissipation(
         
     Returns:
         Dissipation rate [m²/s³] (ncol, nlev)
+
     """
     # Ensure TKE is positive
     tke_positive = jnp.maximum(tke, 1e-8)
@@ -151,8 +150,7 @@ def compute_tke_exchange_coefficient(
     mixing_length: jnp.ndarray,
     c_tke: float = 0.1
 ) -> jnp.ndarray:
-    """
-    Compute TKE exchange coefficient.
+    """Compute TKE exchange coefficient.
     
     K_e = C_tke * l * sqrt(e)
     
@@ -163,6 +161,7 @@ def compute_tke_exchange_coefficient(
         
     Returns:
         TKE exchange coefficient [m²/s] (ncol, nlev)
+
     """
     # Ensure TKE is positive
     tke_positive = jnp.maximum(tke, 1e-8)
@@ -181,8 +180,7 @@ def compute_tke_tendency(
     exchange_coeff_heat: jnp.ndarray,
     mixing_length: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute complete TKE tendency from budget equation.
+    """Compute complete TKE tendency from budget equation.
     
     d(TKE)/dt = Shear Production + Buoyancy Production - Dissipation + Transport
     
@@ -195,6 +193,7 @@ def compute_tke_tendency(
         
     Returns:
         TKE tendency [m²/s³] (ncol, nlev)
+
     """
     # Shear production
     shear_production = compute_shear_production(
@@ -210,7 +209,7 @@ def compute_tke_tendency(
     dissipation = compute_dissipation(state.tke, mixing_length)
     
     # TKE exchange coefficient for transport term
-    tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length) # FIXME: unused - also calculated in tke diagnostics?
+    compute_tke_exchange_coefficient(state.tke, mixing_length) # FIXME: unused - also calculated in tke diagnostics?
     
     # Transport term: ∂/∂z(K_e ∂e/∂z)
     # For now, we'll compute this as part of the matrix solver
@@ -231,8 +230,7 @@ def compute_tke_diagnostics(
     exchange_coeff_heat: jnp.ndarray,
     mixing_length: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute TKE budget diagnostics for analysis.
+    """Compute TKE budget diagnostics for analysis.
     
     Args:
         state: Atmospheric state
@@ -247,6 +245,7 @@ def compute_tke_diagnostics(
         - Buoyancy production [m²/s³] (ncol, nlev)
         - Dissipation [m²/s³] (ncol, nlev)
         - TKE exchange coefficient [m²/s] (ncol, nlev)
+
     """
     dz = jnp.diff(state.height_full, axis=1)
 
@@ -270,8 +269,7 @@ def minimum_tke_constraint(
     tke: jnp.ndarray,
     min_tke: float = 1e-6
 ) -> jnp.ndarray:
-    """
-    Apply minimum TKE constraint to prevent negative values.
+    """Apply minimum TKE constraint to prevent negative values.
     
     Args:
         tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
@@ -279,5 +277,6 @@ def minimum_tke_constraint(
         
     Returns:
         Constrained TKE [m²/s²] (ncol, nlev)
+
     """
     return jnp.maximum(tke, min_tke)

@@ -1,19 +1,16 @@
-"""
-Unit tests for cloud microphysics scheme
+"""Unit tests for cloud microphysics scheme
 
 Date: 2025-01-10
 """
 
 import jax.numpy as jnp
 import jax
-import pytest
 from .cloud_microphysics import (
-    MicrophysicsParameters, MicrophysicsState, MicrophysicsTendencies,
-    cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
+    MicrophysicsParameters, cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
-from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf
+from ..constants.physical_constants import tmelt
 
 
 class TestCloudDropletRadius:
@@ -328,8 +325,8 @@ class TestFullMicrophysics:
         cloud_water = jnp.zeros(nlev)
         cloud_water = cloud_water.at[5:10].set(1e-3)  # Cloud layer
         cloud_ice = jnp.zeros(nlev)
-        rain_water = jnp.zeros(nlev)
-        snow = jnp.zeros(nlev)
+        jnp.zeros(nlev)
+        jnp.zeros(nlev)
         cloud_fraction = jnp.zeros(nlev)
         cloud_fraction = cloud_fraction.at[5:10].set(0.8)
         
@@ -368,8 +365,8 @@ class TestFullMicrophysics:
         cloud_water = jnp.zeros(nlev)
         cloud_ice = jnp.zeros(nlev)
         cloud_ice = cloud_ice.at[5:10].set(0.5e-3)  # Ice cloud layer
-        rain_water = jnp.zeros(nlev)
-        snow = jnp.zeros(nlev)
+        jnp.zeros(nlev)
+        jnp.zeros(nlev)
         cloud_fraction = jnp.zeros(nlev)
         cloud_fraction = cloud_fraction.at[5:10].set(0.6)
         
@@ -459,7 +456,7 @@ class TestFullMicrophysics:
         dt = 60.0
         
         # Get initial total water
-        total_initial = (
+        (
             specific_humidity + cloud_water + cloud_ice + rain_water + snow
         ).sum()
         
@@ -492,8 +489,8 @@ class TestFullMicrophysics:
             specific_humidity = jnp.ones(nlev) * 0.005
             cloud_water = jnp.ones(nlev) * 0.0005
             cloud_ice = jnp.ones(nlev) * 0.0
-            rain_water = jnp.ones(nlev) * 0.0
-            snow = jnp.ones(nlev) * 0.0
+            jnp.ones(nlev) * 0.0
+            jnp.ones(nlev) * 0.0
             cloud_fraction = jnp.ones(nlev) * 0.5
             air_density = jnp.ones(nlev) * 1.0
             layer_thickness = jnp.ones(nlev) * 100.0

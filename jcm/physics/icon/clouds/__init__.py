@@ -1,5 +1,4 @@
-"""
-Cloud physics parameterizations for ICON
+"""Cloud physics parameterizations for ICON
 
 This module contains cloud microphysics and cloud cover schemes including:
 - Shallow cloud scheme with diagnostic cloud fraction

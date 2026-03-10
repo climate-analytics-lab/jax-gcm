@@ -1,10 +1,7 @@
-"""
-Unit tests for ocean surface physics.
-"""
+"""Unit tests for ocean surface physics."""
 
 import pytest
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.physics.icon.surface.ocean import (
     compute_ocean_albedo, compute_ocean_roughness, mixed_layer_ocean_step,
@@ -45,7 +42,6 @@ class TestOceanAlbedo:
     
     def test_ocean_albedo_zenith_angle_dependence(self):
         """Test ocean albedo dependence on solar zenith angle."""
-        ncol = 3
         solar_zenith_angle = jnp.array([0.0, jnp.pi/4, jnp.pi/2])  # 0°, 45°, 90°
         
         albedo_vis_dir, _, albedo_nir_dir, _ = compute_ocean_albedo(solar_zenith_angle)
@@ -56,7 +52,6 @@ class TestOceanAlbedo:
     
     def test_ocean_albedo_diffuse_constant(self):
         """Test that diffuse albedo is constant."""
-        ncol = 3
         solar_zenith_angle = jnp.array([0.0, jnp.pi/4, jnp.pi/2])
         
         _, albedo_vis_dif, _, albedo_nir_dif = compute_ocean_albedo(solar_zenith_angle)
@@ -67,7 +62,6 @@ class TestOceanAlbedo:
     
     def test_ocean_albedo_wavelength_dependence(self):
         """Test ocean albedo wavelength dependence."""
-        ncol = 3
         solar_zenith_angle = jnp.array([0.0, jnp.pi/4, jnp.pi/3])
         
         albedo_vis_dir, _, albedo_nir_dir, _ = compute_ocean_albedo(solar_zenith_angle)
@@ -162,7 +156,6 @@ class TestMixedLayerOcean:
     
     def test_mixed_layer_ocean_heat_capacity(self):
         """Test heat capacity scaling."""
-        ncol = 2
         ocean_temp = jnp.array([280.0, 280.0])
         surface_heat_flux = jnp.array([100.0, 100.0])
         shortwave_penetration = jnp.array([0.0, 0.0])
@@ -184,7 +177,6 @@ class TestMixedLayerOcean:
     
     def test_mixed_layer_ocean_energy_conservation(self):
         """Test energy conservation in mixed layer."""
-        ncol = 1
         ocean_temp = jnp.array([280.0])
         surface_heat_flux = jnp.array([100.0])  # W/m²
         shortwave_penetration = jnp.array([20.0])
@@ -340,7 +332,6 @@ class TestOceanTemperatureStep:
         ocean_temp = jnp.array([285.0])
         
         # Known energy flux
-        net_heat_flux = 100.0  # W/m²
         
         fluxes = SurfaceFluxes(
             sensible_heat=jnp.array([[50.0]]),
