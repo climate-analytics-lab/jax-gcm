@@ -845,8 +845,11 @@ def apply_microphysics(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Droplet number concentration (simple profile)
-    droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
+    # Droplet number concentration from aerosol scheme
+    # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
+    droplet_number = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     
     # Get microphysics configuration
     micro_config = parameters.microphysics

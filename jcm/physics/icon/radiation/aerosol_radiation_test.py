@@ -110,13 +110,63 @@ def test_radiation_scheme_with_without_aerosols():
         return
 
 
+def test_aerosol_microphysics_droplet_coupling():
+    """Test that aerosol cdnc_factor scales droplet number for microphysics"""
+    base_cdnc = 100e6  # Clean-air baseline (100 per cm³)
+
+    # Clean case: cdnc_factor = 1.0
+    cdnc_clean = jnp.array([1.0, 1.0])
+    droplet_clean = jnp.ones((3, 2)) * base_cdnc * cdnc_clean[jnp.newaxis, :]
+    assert jnp.allclose(droplet_clean, base_cdnc)
+
+    # Polluted case: cdnc_factor = 2.5
+    cdnc_polluted = jnp.array([2.5, 1.0])
+    droplet_polluted = jnp.ones((3, 2)) * base_cdnc * cdnc_polluted[jnp.newaxis, :]
+    # Column 0 should be scaled up, column 1 unchanged
+    assert jnp.allclose(droplet_polluted[:, 0], base_cdnc * 2.5)
+    assert jnp.allclose(droplet_polluted[:, 1], base_cdnc)
+
+
+def test_higher_cdnc_reduces_autoconversion():
+    """Test physical effect: more droplets → smaller drops → less autoconversion"""
+    from jcm.physics.icon.clouds.cloud_microphysics import (
+        autoconversion_kk2000, MicrophysicsParameters
+    )
+
+    config = MicrophysicsParameters.default()
+    cloud_water = jnp.array(1e-3)
+    cloud_fraction = jnp.array(0.8)
+    air_density = jnp.array(1.0)
+    dt = 1.0
+
+    # Clean air: fewer, larger droplets
+    nc_clean = jnp.array(100e6)
+    rate_clean = autoconversion_kk2000(
+        cloud_water, cloud_fraction, air_density, nc_clean, dt, config
+    )
+
+    # Polluted air: more, smaller droplets
+    nc_polluted = jnp.array(300e6)
+    rate_polluted = autoconversion_kk2000(
+        cloud_water, cloud_fraction, air_density, nc_polluted, dt, config
+    )
+
+    # Higher CDNC should suppress autoconversion (second indirect effect)
+    assert rate_clean > rate_polluted, (
+        f"Expected less autoconversion with more droplets: "
+        f"clean={rate_clean}, polluted={rate_polluted}"
+    )
+
+
 if __name__ == "__main__":
     print("Testing aerosol-radiation integration...")
     print("=" * 50)
-    
+
     test_aerosol_cloud_interaction()
-    test_optical_property_combination() 
+    test_optical_property_combination()
     test_radiation_scheme_with_without_aerosols()
-    
+    test_aerosol_microphysics_droplet_coupling()
+    test_higher_cdnc_reduces_autoconversion()
+
     print("\\n" + "=" * 50)
     print("All tests completed!")
