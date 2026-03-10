@@ -748,7 +748,7 @@ def apply_convection(
       air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
     # Unpack structured results directly (no tuple unpacking needed)
-    conv_tendencies_all, conv_states_all = conv_results # FIXME: investigate updraft states (conv_states_all.tu and .mfu)
+    conv_tendencies_all, conv_states_all = conv_results
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,

@@ -394,6 +394,87 @@ def default_config():
     return ConvectionParameters.default()
 
 
+class TestUpdraftDetrainment:
+    """Test updraft entrainment/detrainment profile."""
+
+    def test_organized_detrainment_increases_near_cloud_top(self):
+        """Organized detrainment should increase sharply near cloud top (tan profile)."""
+        # Sample the tan() profile at several heights
+        fracs = jnp.array([0.2, 0.5, 0.8, 0.95])  # fractional distance from base
+        tan_args = jnp.pi * (0.75 * fracs - 0.25)
+        profiles = jnp.maximum(jnp.tan(tan_args), 0.0)
+
+        # Detrainment should increase monotonically toward cloud top
+        for i in range(len(profiles) - 1):
+            assert float(profiles[i + 1]) >= float(profiles[i]), (
+                f"Detrainment should increase toward cloud top: "
+                f"frac={float(fracs[i]):.2f} -> {float(fracs[i+1]):.2f}"
+            )
+
+        # Near cloud top (frac=0.95) should be much larger than mid-cloud (frac=0.5)
+        assert float(profiles[3]) > 3.0 * float(profiles[1]), (
+            "Near-top detrainment should be much larger than mid-cloud"
+        )
+
+    def test_mass_flux_decreases_toward_cloud_top(self):
+        """With organized detrainment, updraft mass flux should decrease toward cloud top."""
+        from jcm.physics.icon.convection.updraft import calculate_updraft
+
+        nlev = 40
+        config = ConvectionParameters.default()
+        kbase = 30
+        ktop = 15
+
+        # Create a moist-unstable profile
+        pressure = jnp.linspace(100000, 10000, nlev)
+        temperature = 300.0 * (pressure / 100000.0) ** 0.286
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = 0.85 * qs
+        layer_thickness = jnp.ones(nlev) * 500.0
+        rho = pressure / (287.0 * temperature)
+
+        state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            kbase, ktop, ktype=1, mass_flux_base=0.1, config=config
+        )
+
+        # Mass flux at cloud top should be less than at cloud base
+        mf_base = float(state.mfu[kbase])
+        mf_top = float(state.mfu[ktop])
+        assert mf_base > 0, "Mass flux at cloud base should be positive"
+        assert mf_top < mf_base, (
+            f"Mass flux should decrease toward top: base={mf_base:.4f}, top={mf_top:.4f}"
+        )
+
+    def test_detrainment_exceeds_entrainment_near_top(self):
+        """Near cloud top, detrainment should exceed entrainment (organized component)."""
+        from jcm.physics.icon.convection.updraft import calculate_updraft
+
+        nlev = 40
+        config = ConvectionParameters.default()
+        kbase = 30
+        ktop = 15
+
+        pressure = jnp.linspace(100000, 10000, nlev)
+        temperature = 300.0 * (pressure / 100000.0) ** 0.286
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = 0.85 * qs
+        layer_thickness = jnp.ones(nlev) * 500.0
+        rho = pressure / (287.0 * temperature)
+
+        state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            kbase, ktop, ktype=1, mass_flux_base=0.1, config=config
+        )
+
+        # Near cloud top, detrainment should exceed entrainment
+        near_top = ktop + 2
+        assert float(state.detr[near_top]) > float(state.entr[near_top]), (
+            f"Near cloud top (k={near_top}): detr={float(state.detr[near_top]):.6f} "
+            f"should exceed entr={float(state.entr[near_top]):.6f}"
+        )
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     pytest.main([__file__, "-v"])

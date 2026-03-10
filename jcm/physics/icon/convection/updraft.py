@@ -35,114 +35,6 @@ class UpdatedraftState(NamedTuple):
     buoy: jnp.ndarray    # Buoyancy (m/s²)
 
 
-def calculate_entrainment_detrainment(
-    k: int,
-    kbase: int, 
-    ktop: int,
-    ktype: int,
-    mfu: jnp.ndarray,
-    buoy: jnp.ndarray,
-    dz: jnp.ndarray,
-    rho: jnp.ndarray,
-    env_temp: jnp.ndarray,
-    env_humidity: jnp.ndarray,
-    updraft_temp: jnp.ndarray,
-    updraft_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    config: ConvectionParameters
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate enhanced entrainment and detrainment rates
-    
-    Args:
-        k: Current level index
-        kbase: Cloud base level
-        ktop: Cloud top level
-        ktype: Convection type (1=deep, 2=shallow, 3=mid)
-        mfu: Mass flux at level k+1
-        buoy: Buoyancy at current level
-        dz: Layer thickness (m)
-        rho: Air density (kg/m³)
-        env_temp: Environmental temperature (K)
-        env_humidity: Environmental specific humidity (kg/kg)
-        updraft_temp: Updraft temperature (K)
-        updraft_humidity: Updraft specific humidity (kg/kg)
-        pressure: Pressure (Pa)
-        config: Convection configuration
-        
-    Returns:
-        Tuple of (entrainment_rate, detrainment_rate) in 1/m
-
-    """
-    # Base entrainment rate based on convection type
-    entr_base = lax.select(
-        ktype - 1,  # Index selector
-        jnp.array([config.entrpen, config.entrscv, config.entrmid])
-    )
-    
-    # Environmental humidity dependence (dry air increases entrainment)
-    from .tiedtke_nordeng import saturation_mixing_ratio
-    qs_env = saturation_mixing_ratio(pressure, env_temp)
-    relative_humidity = jnp.clip(env_humidity / qs_env, 0.0, 1.0)
-    
-    # Entrainment increases as RH decreases (more dry air entrainment)
-    humidity_factor = 1.0 + 2.0 * (1.0 - relative_humidity)**2
-    
-    # Buoyancy dependence - enhanced entrainment for negative buoyancy
-    buoyancy_factor = lax.cond(
-        buoy < 0.0,
-        lambda: 1.0 + 3.0 * jnp.abs(buoy),  # Increase based on negative buoyancy magnitude
-        lambda: 1.0
-    )
-    
-    # Thermal contrast dependence - more entrainment with larger temperature differences
-    temp_contrast = jnp.abs(updraft_temp - env_temp)
-    thermal_factor = 1.0 + 0.1 * temp_contrast  # Modest enhancement
-    
-    # Combined entrainment rate
-    entr = entr_base * humidity_factor * buoyancy_factor * thermal_factor
-    
-    # Limit maximum entrainment to prevent instability
-    entr = jnp.clip(entr, 0.0, 0.01)  # Max 1% per meter
-    
-    # Turbulent detrainment for mass conservation
-    detr_turb = entr * 0.5  # Partial compensation
-    
-    # Enhanced organized detrainment for deep convection
-    cloud_depth = jnp.maximum(kbase - ktop, 1)
-    
-    def enhanced_organized_detrainment():
-        # Calculate relative position in cloud (0 = cloud top, 1 = cloud base)
-        relative_height = (kbase - k) / cloud_depth
-        
-        # Enhanced profile with stronger detrainment in upper levels
-        # Peak detrainment around 0.8-0.9 relative height (near cloud top)
-        peak_position = 0.85
-        width = 0.3
-        
-        # Gaussian-like profile centered near cloud top
-        org_profile = jnp.exp(-0.5 * ((relative_height - peak_position) / width)**2)
-        
-        # Scale based on mass flux strength and cloud depth
-        detr_strength = 0.003 * jnp.sqrt(cloud_depth / 10.0)  # Stronger for deeper clouds
-        
-        return detr_strength * org_profile
-    
-    # Apply enhanced organized detrainment for deep convection
-    detr_org = lax.cond(
-        jnp.logical_and(ktype == 1, k <= kbase),  # Throughout deep cloud
-        enhanced_organized_detrainment,
-        lambda: 0.0
-    )
-    
-    # Total detrainment
-    detr = detr_turb + detr_org
-    
-    # Minimum detrainment to ensure some mixing
-    detr = jnp.maximum(detr, 0.0001)
-    
-    return entr, detr
-
-
 def saturation_adjustment(
     temperature: jnp.ndarray,
     total_water: jnp.ndarray,
@@ -191,82 +83,6 @@ def saturation_adjustment(
         return temperature, total_water, jnp.array(0.0)
     
     return lax.cond(is_saturated, condense, no_condensation)
-
-
-def updraft_step(
-    carry: UpdatedraftState,
-    level_inputs: Tuple
-) -> Tuple[UpdatedraftState, UpdatedraftState]:
-    """Single step of updraft calculation for use with lax.scan
-    
-    Args:
-        carry: Current updraft state
-        level_inputs: Tuple of (k, env_temp, env_q, pressure, dz, rho)
-        
-    Returns:
-        Tuple of (updated_carry, output_state)
-
-    """
-    k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, config = level_inputs
-    
-    # Skip if below cloud base
-    skip = k > kbase
-    
-    def compute_updraft():
-        # Safe array indexing - handle potential out-of-bounds access
-        next_level = jnp.minimum(k + 1, len(carry.mfu) - 1)
-        
-        # Get entrainment and detrainment rates
-        entr, detr = calculate_entrainment_detrainment(
-            k, kbase, ktop, ktype, carry.mfu[next_level], 
-            carry.buoy[next_level], dz, rho,
-            env_temp, env_q, carry.tu[k], carry.qu[k], pressure, config
-        )
-        
-        # Mass flux change due to entrainment/detrainment
-        dmf_entr = entr * carry.mfu[next_level] * dz
-        dmf_detr = detr * carry.mfu[next_level] * dz
-        
-        # Update mass flux
-        mfu_new = carry.mfu[next_level] + dmf_entr - dmf_detr
-        mfu_new = jnp.maximum(mfu_new, 0.0)  # No negative mass flux
-        
-        # Mix in environmental air
-        if_mfu = 1.0 / jnp.maximum(mfu_new, 1e-10)
-        
-        # Total water and energy after mixing
-        total_water = (carry.qu[next_level] + carry.lu[next_level]) * carry.mfu[next_level] + env_q * dmf_entr
-        total_water = total_water * if_mfu
-        
-        # Temperature after mixing (dry static energy conservation)
-        temp_mix = carry.tu[next_level] * carry.mfu[next_level] + env_temp * dmf_entr
-        temp_mix = temp_mix * if_mfu
-        
-        # Saturation adjustment
-        tu_new, qu_new, lu_new = saturation_adjustment(temp_mix, total_water, pressure)
-        
-        # Calculate buoyancy
-        virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
-        virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
-        buoy_new = grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
-        
-        # Update state
-        new_state = carry._replace(
-            tu=carry.tu.at[k].set(tu_new),
-            qu=carry.qu.at[k].set(qu_new),
-            lu=carry.lu.at[k].set(lu_new),
-            mfu=carry.mfu.at[k].set(mfu_new),
-            entr=carry.entr.at[k].set(entr),
-            detr=carry.detr.at[k].set(detr),
-            buoy=carry.buoy.at[k].set(buoy_new)
-        )
-        
-        return new_state
-    
-    # Skip calculation if below cloud base
-    updated_state = lax.cond(skip, lambda: carry, compute_updraft)
-    
-    return updated_state, updated_state
 
 
 def calculate_updraft(
@@ -327,39 +143,56 @@ def calculate_updraft(
     k_levels = jnp.arange(nlev)
     level_inputs = (
         k_levels, temperature, humidity, pressure, layer_thickness, rho,
-        jnp.full(nlev, kbase), jnp.full(nlev, ktop), 
-        jnp.full(nlev, ktype), 
+        jnp.full(nlev, kbase), jnp.full(nlev, ktop),
+        jnp.full(nlev, ktype),
         jnp.full(nlev, config.entrpen), jnp.full(nlev, config.entrscv),
         jnp.full(nlev, config.entrmid)
     )
-    
+
     # Create specialized step function with config parameters
     def updraft_step_with_config(carry, inputs):
         k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, entrpen, entrscv, entrmid = inputs
-        
+
         # Skip if outside cloud layer or at cloud base (boundary condition)
-        # Cloud base is the boundary condition, so we don't compute it
-        # We only compute levels between cloud base and cloud top (exclusive of base)
-        
-        # For standard ordering (pressure decreasing): ktop < kbase, compute ktop to kbase-1
-        # For reverse ordering: ktop > kbase, compute kbase+1 to ktop
         in_cloud_interior = jnp.logical_and(
             jnp.minimum(ktop, kbase) < k,
             k < jnp.maximum(ktop, kbase)
         )
-        
-        # Also include cloud top in the calculation
         at_cloud_top = (k == ktop)
-        
-        # Process cloud interior and cloud top, but not cloud base
         should_compute = jnp.logical_or(in_cloud_interior, at_cloud_top)
         skip = jnp.logical_not(should_compute)
-        
+
         def compute_updraft():
-            # Entrainment/detrainment calculation with proper physics
-            entr = jnp.where(ktype == 1, entrpen, 
-                            jnp.where(ktype == 2, entrscv, entrmid))
-            detr = entr  # Simplified - could be enhanced with organized detrainment
+            # Base entrainment rate by convection type
+            entr_base = jnp.where(ktype == 1, entrpen,
+                                  jnp.where(ktype == 2, entrscv, entrmid))
+
+            # Humidity-dependent entrainment: drier environment entrains more
+            qs_env = saturation_mixing_ratio(pressure, env_temp)
+            rh = jnp.clip(env_q / jnp.maximum(qs_env, 1e-10), 0.0, 1.0)
+            humidity_factor = 1.0 + 2.0 * (1.0 - rh) ** 2
+
+            entr = jnp.clip(entr_base * humidity_factor, 0.0, 0.01)
+
+            # Turbulent detrainment: fraction of entrainment
+            detr_turb = 0.5 * entr
+
+            # Organized detrainment for deep convection (Fortran tan() profile).
+            # The ICON cuentr subroutine uses a tan-based profile that produces
+            # sharp detrainment near cloud top, unlike a symmetric Gaussian.
+            cloud_depth = jnp.maximum(kbase - ktop, 1.0)
+            # Fractional distance from base (0 at base, 1 at top)
+            frac_height = jnp.clip((kbase - k) / cloud_depth, 0.0, 1.0)
+            # tan() profile: gentle in lower cloud, sharp increase near top
+            # Argument mapped to (-pi/4, pi/2) so tan ranges from ~-1 to inf
+            tan_arg = jnp.pi * (0.75 * frac_height - 0.25)
+            org_profile = jnp.maximum(jnp.tan(tan_arg), 0.0)
+            # Normalize: peak value of tan(pi/2 * 0.75 - pi/4) is bounded
+            # Scale strength with cloud depth
+            detr_strength = 0.003 * jnp.sqrt(cloud_depth / 10.0)
+            detr_org = jnp.where(ktype == 1, detr_strength * org_profile, 0.0)
+
+            detr = detr_turb + detr_org
             
             # Safe array indexing - clamp k+1 to valid range
             next_level = jnp.minimum(k + 1, nlev - 1)
