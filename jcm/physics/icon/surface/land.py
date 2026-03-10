@@ -235,17 +235,6 @@ def compute_transpiration(
     root_zone_moisture = soil_moisture[:, 0]  # Top layer
     water_stress = jnp.minimum(root_zone_moisture / 0.3, 1.0)  # Wilting point at 30%
     
-    # Canopy resistance (simplified)
-    canopy_resistance_min = 100.0  # s/m
-    canopy_resistance_min / water_stress
-    
-    # Aerodynamic resistance
-    1.0 / exchange_coeff_moisture
-    
-    # Saturation vapor pressure at surface
-    611.0 * jnp.exp(17.27 * (surface_temp - PHYS_CONST.t0) / 
-                           (surface_temp - PHYS_CONST.t0 + 237.3))
-    
     # Simplified Penman-Monteith equation
     # Transpiration = (Delta * Rn + rho * cp * VPD / ra) / (Delta + gamma * (1 + rc/ra))
     # where Delta = slope of saturation vapor pressure curve, gamma = psychrometric constant
@@ -371,8 +360,7 @@ def land_surface_physics_step(
 
     """
     ncol = soil_temp.shape[0]
-    soil_temp.shape[1]
-    
+
     # Surface temperature (top soil layer)
     surface_temp = soil_temp[:, 0]
     

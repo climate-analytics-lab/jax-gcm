@@ -88,10 +88,6 @@ def layer_reflectance_transmittance(
     # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
     # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
     
-    # Helper terms
-    1.0 / (lambda_val + gamma1)
-    1.0 / (lambda_val - gamma1)
-    
     # For large optical depths, avoid NaN by using safe values
     # Use finite values instead of inf for subsequent calculations
     exp_plus_safe = jnp.where(large_tau, 1.0, jnp.exp(lambda_tau))

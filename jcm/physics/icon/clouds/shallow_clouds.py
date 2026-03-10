@@ -258,19 +258,6 @@ def condensation_evaporation(
     # Calculate saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
     
-    # In-cloud specific humidity and saturation
-    # Assume saturation inside clouds
-    jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
-        0.0
-    )
-    jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_ice / cloud_fraction,
-        0.0
-    )
-    
     # Calculate condensation/evaporation
     # Positive for condensation, negative for evaporation
     q_excess = specific_humidity - qs

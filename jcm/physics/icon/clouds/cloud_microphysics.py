@@ -474,8 +474,6 @@ def sedimentation_flux(
         Tuple of (flux [nlev+1], tendency [nlev])
 
     """
-    hydrometeor.shape[0]
-    
     # Mass content (kg/m³)
     mass_content = hydrometeor * air_density
     

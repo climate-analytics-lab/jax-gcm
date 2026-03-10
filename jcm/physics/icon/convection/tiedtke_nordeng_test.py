@@ -153,11 +153,6 @@ class TestConvectionScheme:
         # For now, just check the function doesn't crash
         assert isinstance(state.ktype, jnp.ndarray)  # Function completed successfully
         
-        # Check physical consistency
-        # Total column heating should approximately balance moisture loss
-        jnp.sum(tendencies.dtedt) * 3600.0
-        jnp.sum(tendencies.dqdt) * 3600.0
-        
         # Precipitation should be positive for active convection
         if state.ktype > 0:
             assert tendencies.precip_conv >= 0.0

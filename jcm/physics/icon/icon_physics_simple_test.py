@@ -100,7 +100,6 @@ def test_simple_physics_integration():
     """Test simple physics integration without complex schemes"""
     # Setup
     nlev, nlat, nlon = 8, 64, 32
-    nlat * nlon
 
     # Create test physics with only simple terms
     class SimpleIconPhysics(IconPhysics):

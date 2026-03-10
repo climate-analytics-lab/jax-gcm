@@ -120,7 +120,6 @@ def brunt_vaisala_frequency(
     
     # Calculate vertical gradient of potential temperature
     # Use one-sided differences at boundaries
-    temperature.shape[0]
     dtheta_dz = jnp.zeros_like(theta)
     
     # Interior points - central differences

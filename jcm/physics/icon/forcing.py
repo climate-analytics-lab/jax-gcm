@@ -68,11 +68,6 @@ def apply_forcing_data(
     ch4_concentration = 1900.0  # ppbv
     o3_concentration = 300.0  # ppbv
 
-    # Sea ice fraction (from existing data)
-    #TODO: use these somewhere
-    sea_ice_fraction = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
-    jnp.where(sea_ice_fraction > 0.1, 1.0, 0.0)  # 1m where ice exists
-
     tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
     radiation_data = physics_data.radiation.copy(

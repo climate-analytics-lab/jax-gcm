@@ -48,18 +48,9 @@ def saturation_adjustment(
         Tuple of adjusted (temperature, specific_humidity, cloud_water, cloud_ice)
 
     """
-    # Total cloud condensate
-    total_cloud = cloud_water + cloud_ice
-    
-    # Get saturation mixing ratio
-    saturation_mixing_ratio(pressure, temperature)
-    
     # Convert specific humidity to mixing ratio
     r = specific_humidity / (1 - specific_humidity)
-    
-    # Total water (vapor + cloud)
-    r + total_cloud
-    
+
     def perform_adjustment(t, r, qc, qi):
         """Perform iterative saturation adjustment"""
         

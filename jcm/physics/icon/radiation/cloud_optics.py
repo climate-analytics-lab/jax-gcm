@@ -157,9 +157,6 @@ def mie_scattering_water(
     # Large particle limit (x >> 1) - Geometric optics
     def geometric_regime():
         # Geometric optics approximation
-        # Fresnel reflection coefficient at normal incidence
-        jnp.abs((m - 1.0) / (m + 1.0))**2
-        
         # Total extinction efficiency approaches 2 for large particles
         q_ext = 2.0
         
@@ -188,8 +185,6 @@ def mie_scattering_water(
     # Intermediate regime - approximate Mie solution
     def intermediate_regime():
         # Simplified Mie approximation based on van de Hulst (1957)
-        m * jnp.conj(m)
-        
         # Extinction efficiency
         q_ext = 2.0 - (4.0/x) * jnp.sin(x) + (4.0/x**2) * (1.0 - jnp.cos(x))
         

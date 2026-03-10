@@ -137,8 +137,6 @@ def prepare_radiation_state(
         RadiationState ready for radiation calculations
 
     """
-    temperature.shape[0]
-
     # Convert specific humidity to volume mixing ratio
     # q/(1-q) * Md/Mv where Md/Mv = 29/18 = 1.608
     h2o_vmr = specific_humidity / (1 - specific_humidity) * 1.608

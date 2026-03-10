@@ -315,8 +315,6 @@ def calculate_updraft(
     qu_init = qu_init.at[kbase].set(humidity[kbase])
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
     
-    # Calculate initial buoyancy at cloud base
-    temperature[kbase] * (1.0 + 0.608 * humidity[kbase])
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
     
     initial_state = UpdatedraftState(

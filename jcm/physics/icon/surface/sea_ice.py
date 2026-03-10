@@ -165,7 +165,6 @@ def ice_surface_temperature_step(
         Tuple of (ice_temp_tendency, surface_temp_tendency)
 
     """
-    ice_temp.shape[0]
     nice_layers = ice_temp.shape[1]
     
     # Surface temperature (top of ice/snow)
@@ -387,8 +386,7 @@ def sea_ice_physics_step(
 
     """
     ncol = ice_temp.shape[0]
-    ice_temp.shape[1]
-    
+
     # Surface temperature (top of ice/snow)
     surface_temp = ice_temp[:, 0]
     

@@ -242,7 +242,6 @@ class TestConvectiveAdjustment:
         # Humidity may decrease if warming causes condensation
         # Check that total tendency was applied
         t_expected = temperature + conv_tend_t * dt
-        specific_humidity + conv_tend_q * dt
         # Temperature should be at least the tendency-applied value
         assert t_adj >= t_expected - 0.1  # Allow small deviation
         

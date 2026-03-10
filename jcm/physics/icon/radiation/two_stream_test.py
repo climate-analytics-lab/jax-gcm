@@ -476,7 +476,6 @@ def test_shortwave_toa_net_flux():
     # Note: For optically thick atmospheres (τ>10), transmission can be <1%
     # This test mainly checks that surface flux is non-zero and properly reflects surface albedo
     surface_down = jnp.sum(flux_down_sw[-1, :n_sw_bands])
-    jnp.sum(flux_up_sw[-1, :n_sw_bands])
 
     assert surface_down > 0.0, "Surface SW down is zero - radiation not reaching surface!"
 

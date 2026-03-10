@@ -242,12 +242,6 @@ def ocean_surface_temperature_step(
         Ocean temperature tendency [K/s] (ncol,)
 
     """
-    # Net surface heat flux
-    (surface_fluxes.shortwave_net[:, 0] + 
-                    surface_fluxes.longwave_net[:, 0] - 
-                    surface_fluxes.sensible_heat[:, 0] - 
-                    surface_fluxes.latent_heat[:, 0])
-    
     # Account for shortwave penetration
     surface_absorbed_sw = (surface_fluxes.shortwave_net[:, 0] * 
                           (1.0 - shortwave_penetration_fraction))

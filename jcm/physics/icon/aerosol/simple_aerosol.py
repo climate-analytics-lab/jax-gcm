@@ -32,7 +32,6 @@ def get_simple_aerosol(
     aerosol_params = parameters.aerosol
     
     # Get grid coordinates from cached coordinates
-    physics_data.icon_coords.nodal_shape[1]
     lat, lon = jax.numpy.meshgrid(
         physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
         physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
@@ -43,8 +42,6 @@ def get_simple_aerosol(
     
     # Get height coordinate for vertical distribution
     height_full = physics_data.diagnostics.height_full
-    
-    # Reference wavelength for optical properties [nm]
     
     # Initialize output arrays
     aod_profile = jnp.zeros((nlev, ncols))

@@ -370,11 +370,6 @@ class TestVerticalDiffusionScheme:
         dp = jnp.diff(pressure_half, axis=1)
         air_mass = dp / PHYS_CONST.grav
         
-        initial_kinetic_energy = 0.5 * air_mass * (u**2 + v**2)
-        initial_potential_energy = air_mass * PHYS_CONST.cp * temperature
-        
-        jnp.sum(initial_kinetic_energy + initial_potential_energy)
-        
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
             u, v, temperature, qv, qc, qi,

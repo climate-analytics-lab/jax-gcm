@@ -160,8 +160,6 @@ class TestChemistryIntegration(TestCase):
         methane_profile = jnp.mean(physics_data.chemistry.methane_vmr, axis=1)
         
         # Ozone should have a maximum in the stratosphere (upper levels)
-        # For our simplified setup, check that ozone generally increases with altitude
-        jnp.argmax(ozone_profile)
         # With the simplified ozone profile, the maximum may not be in the upper half
         # So just check that there is vertical structure (not all levels are the same)
         self.assertGreater(jnp.max(ozone_profile), jnp.min(ozone_profile))

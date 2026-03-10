@@ -14,7 +14,6 @@ def test_aerosol_cloud_interaction():
     """Test that aerosols modify cloud effective radius"""
     print("Testing aerosol-cloud interactions...")
     
-    jnp.array([280.0])  # Single level test
     land_fraction = 0.5
     
     # Test without aerosols
@@ -92,14 +91,6 @@ def test_radiation_scheme_with_without_aerosols():
     
     # Create test data
     nlev = 10
-    temperature = jnp.linspace(220, 290, nlev)
-    jnp.full(nlev, 0.01)
-    jnp.array(101325.0)
-    jnp.linspace(0, 50000, nlev)
-    cloud_water = jnp.where(temperature > 273, 1e-5, 0.0)
-    cloud_ice = jnp.where(temperature <= 273, 1e-5, 0.0)
-    jnp.where((cloud_water > 0) | (cloud_ice > 0), 0.5, 0.0)
-    
     parameters = RadiationParameters.default(n_sw_bands=2, n_lw_bands=3)
     
     # Test with mock aerosol data to ensure array shapes are correct
@@ -110,8 +101,6 @@ def test_radiation_scheme_with_without_aerosols():
         aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9
         # Set LW bands to pure absorption
         aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
-        jnp.ones((nlev, total_bands)) * 0.7
-        jnp.array([1.5])
         
         print(f"✓ Created test aerosol data: τ shape {aerosol_tau.shape}")
         print(f"✓ SW bands: {int(parameters.n_sw_bands)}, LW bands: {int(parameters.n_lw_bands)}")

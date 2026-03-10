@@ -110,7 +110,6 @@ def calculate_layer_thickness(
         Layer thickness in meters [nlev, ...]
 
     """
-    pressure_levels.shape[0]
     air_density = calculate_air_density(pressure_levels, temperature)
     
     # Initialize with zeros
