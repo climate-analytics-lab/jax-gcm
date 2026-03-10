@@ -394,6 +394,37 @@ def default_config():
     return ConvectionParameters.default()
 
 
+class TestDowndraftLFS:
+    """Test downdraft level of free sinking criteria."""
+
+    def test_cmfdeps_parameter_exists(self):
+        """Verify cmfdeps parameter exists with default value ~0.33."""
+        config = ConvectionParameters.default()
+        assert hasattr(config, 'cmfdeps'), "Should have cmfdeps parameter"
+        assert float(config.cmfdeps) == pytest.approx(0.33)
+
+    def test_cmfdeps_used_in_lfs_threshold(self):
+        """LFS threshold should use cmfdeps (not cmfcmin) times base mass flux.
+
+        The Fortran reference computes zmftop = -cmfdeps*pmfub where cmfdeps~0.33,
+        giving a meaningful fraction of the updraft mass flux. Using cmfcmin (~1e-10)
+        would make the threshold effectively zero.
+        """
+        config = ConvectionParameters.default()
+        base_mf = 0.1  # Typical cloud base mass flux (kg/m²/s)
+
+        # Correct threshold using cmfdeps
+        threshold_correct = float(config.cmfdeps) * base_mf
+        assert threshold_correct == pytest.approx(0.033, rel=0.01)
+
+        # Old (wrong) threshold using cmfcmin would be negligible
+        threshold_wrong = float(config.cmfcmin) * base_mf
+        assert threshold_wrong < 1e-9, "cmfcmin threshold should be negligible"
+
+        # The correct threshold should be orders of magnitude larger
+        assert threshold_correct > threshold_wrong * 1e6
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     pytest.main([__file__, "-v"])

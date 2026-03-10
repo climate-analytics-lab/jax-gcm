@@ -126,8 +126,8 @@ def find_lfs(
         # Condensation in downdraft
         condensation = humidity[k] - qwb
         
-        # Minimum mass flux threshold
-        min_flux = config.cmfcmin * updraft_mf[kbase]
+        # Minimum mass flux threshold (Fortran: zmftop = -cmfdeps*pmfub)
+        min_flux = config.cmfdeps * updraft_mf[kbase]
         
         # Check LFS criteria:
         # 1. Negative buoyancy
