@@ -1261,6 +1261,189 @@ def freezing_below_238K(
 
     return ice_crystal_number, droplet_freezing_rate, droplet_number, freezing_rate, cloud_ice, cloud_liquid
 
+def het_mxphase_freezing(
+    freezing_condition: jnp.ndarray,  # Original: ld_mxphase_frz
+    pressure: jnp.ndarray,            # Original: papp1
+    tke: jnp.ndarray,                 # Original: ptkem1
+    vertical_velocity: jnp.ndarray,   # Original: pvervel
+    cloud_cover: jnp.ndarray,         # Original: paclc
+    bc_soluble_fraction: jnp.ndarray, # Original: pfracbcsol
+    bc_insoluble_fraction: jnp.ndarray, # Original: pfracbcinsol
+    dust_soluble_fraction: jnp.ndarray, # Original: pfracdusol
+    dust_accumulation_fraction: jnp.ndarray, # Original: pfracduai
+    dust_coarse_fraction: jnp.ndarray, # Original: pfracduci
+    air_density: jnp.ndarray,         # Original: prho
+    inv_air_density: jnp.ndarray,     # Original: prho_rcp
+    wet_radius_aitken: jnp.ndarray,   # Original: prwetki
+    wet_radius_accumulation: jnp.ndarray, # Original: prwetai
+    wet_radius_coarse: jnp.ndarray,   # Original: prwetci
+    temperature: jnp.ndarray,         # Original: ptp1tmp
+    min_cdnc: jnp.ndarray,            # Original: pcdnc_min
+    ice_crystal_number: jnp.ndarray,  # Original: picnc (INOUT)
+    droplet_number: jnp.ndarray,      # Original: pcdnc (INOUT)
+    freezing_rate: jnp.ndarray,       # Original: pfrl (INOUT)
+    cloud_ice: jnp.ndarray,           # Original: pxib (INOUT)
+    cloud_liquid: jnp.ndarray,        # Original: pxlb (INOUT)
+    timestep: float,                  # Original: ztmst
+    min_liquid_threshold: float       # Original: cqtmin
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Heterogeneous mixed-phase freezing for cloud microphysics.
+
+    Overview
+    --------
+    This routine simulates heterogeneous freezing in mixed-phase clouds, including
+    contact and immersion freezing by dust and soot aerosols. It updates the ice
+    crystal number concentration (ICNC), cloud droplet number concentration (CDNC),
+    freezing rate, cloud ice, and cloud liquid water mixing ratios.
+
+    Parameters
+    ----------
+    freezing_condition : jnp.ndarray
+        Boolean mask indicating where heterogeneous freezing occurs (original: ld_mxphase_frz).
+    pressure : jnp.ndarray
+        Pressure at full levels (t-1) [Pa] (original: papp1).
+    tke : jnp.ndarray
+        Turbulent kinetic energy (t-1) [m^2/s^2] (original: ptkem1).
+    vertical_velocity : jnp.ndarray
+        Large-scale vertical velocity [m/s] (original: pvervel).
+    cloud_cover : jnp.ndarray
+        Cloud cover fraction [0..1] (original: paclc).
+    bc_soluble_fraction : jnp.ndarray
+        Fraction of BC in all soluble mixed modes (original: pfracbcsol).
+    bc_insoluble_fraction : jnp.ndarray
+        Fraction of BC in all insoluble modes (original: pfracbcinsol).
+    dust_soluble_fraction : jnp.ndarray
+        Fraction of dust aerosols in all soluble mixed modes (original: pfracdusol).
+    dust_accumulation_fraction : jnp.ndarray
+        Fraction of dust in the insoluble accumulation mode (original: pfracduai).
+    dust_coarse_fraction : jnp.ndarray
+        Fraction of dust in the insoluble coarse mode (original: pfracduci).
+    air_density : jnp.ndarray
+        Air density [kg/m^3] (original: prho).
+    inv_air_density : jnp.ndarray
+        Inverse air density [m^3/kg] (original: prho_rcp).
+    wet_radius_aitken : jnp.ndarray
+        Wet radius of Aitken insoluble mode [m] (original: prwetki).
+    wet_radius_accumulation : jnp.ndarray
+        Wet radius of accumulation insoluble mode [m] (original: prwetai).
+    wet_radius_coarse : jnp.ndarray
+        Wet radius of coarse insoluble mode [m] (original: prwetci).
+    temperature : jnp.ndarray
+        Temperature at (t) [K] (original: ptp1tmp).
+    min_cdnc : jnp.ndarray
+        Minimum CDNC concentration computed from maximum radius [1/m^3] (original: pcdnc_min).
+    ice_crystal_number : jnp.ndarray
+        Ice crystal number concentration (ICNC) [1/m^3] (INOUT) (original: picnc).
+    droplet_number : jnp.ndarray
+        Cloud droplet number concentration (CDNC) [1/m^3] (INOUT) (original: pcdnc).
+    freezing_rate : jnp.ndarray
+        Freezing rate [kg/kg] (INOUT) (original: pfrl).
+    cloud_ice : jnp.ndarray
+        Cloud ice mixing ratio in the cloudy part of the grid box [kg/kg] (INOUT) (original: pxib).
+    cloud_liquid : jnp.ndarray
+        Cloud liquid water mixing ratio in the cloudy part of the grid box [kg/kg] (INOUT) (original: pxlb).
+    timestep : float
+        Time step [s] (original: ztmst).
+    min_liquid_threshold : float
+        Minimum threshold for cloud liquid water [kg/kg] (original: cqtmin).
+
+    Returns
+    -------
+    Updated values of ice_crystal_number, droplet_number, freezing_rate,
+    cloud_ice, cloud_liquid, and freezing_rate_number.
+    """
+
+    # -------------------------------------------------------------------------
+    # 1. Aerosol diffusivity due to Brownian motion
+    # -------------------------------------------------------------------------
+    # Compute aerosol diffusivity for different modes
+    ztmp1 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_aitken + 1e-12) * (p0s1_bg / pressure) * (temperature / tmelt)
+    ztmp2 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_accumulation + 1e-12) * (p0s1_bg / pressure) * (temperature / tmelt)
+    ztmp3 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_coarse + 1e-12) * (p0s1_bg / pressure) * (temperature / tmelt)
+
+    zeta_air = 1e-5 * (1.718 + 0.0049 * (temperature - tmelt) - 1.2e-5 * (temperature - tmelt) ** 2)
+
+    aerosol_diffusivity_bc = ak * temperature * ztmp1 / (6.0 * pi * zeta_air * (wet_radius_aitken + 1e-12))
+    aerosol_diffusivity_bc = jnp.where(wet_radius_aitken < 1e-12, 0.0, aerosol_diffusivity_bc)
+
+    aerosol_diffusivity_dust_accum = ak * temperature * ztmp2 / (6.0 * pi * zeta_air * (wet_radius_accumulation + 1e-12))
+    aerosol_diffusivity_dust_accum = jnp.where(wet_radius_accumulation < 1e-12, 0.0, aerosol_diffusivity_dust_accum)
+
+    aerosol_diffusivity_dust_coarse = ak * temperature * ztmp3 / (6.0 * pi * zeta_air * (wet_radius_coarse + 1e-12))
+    aerosol_diffusivity_dust_coarse = jnp.where(wet_radius_coarse < 1e-12, 0.0, aerosol_diffusivity_dust_coarse)
+
+    # -------------------------------------------------------------------------
+    # 2. Freezing rates (contact and immersion freezing)
+    # -------------------------------------------------------------------------
+    # Compute mean volume radius of cloud droplets
+    droplet_radius = (0.75 * cloud_liquid * air_density / (pi * rhoh2o * droplet_number)) ** (1.0 / 3.0)
+
+    # Contact freezing by dust and soot
+    contact_freezing_dust = jnp.minimum(1.0, jnp.maximum(0.0, -(0.1014 * (temperature - tmelt) + 0.3277)))
+    contact_freezing_bc = 0.0  # BC contact freezing disabled
+
+    # Immersion freezing by dust and soot
+    immersion_freezing_dust = 32.3 * dust_soluble_fraction
+    immersion_freezing_bc = 2.91e-3 * bc_soluble_fraction
+
+    # Compute freezing rates
+    freezing_rate_contact = (
+        cloud_liquid / droplet_number * air_density * 4.0 * pi * droplet_radius * droplet_number * inv_air_density
+        * (contact_freezing_dust * (aerosol_diffusivity_dust_accum * dust_accumulation_fraction
+                                    + aerosol_diffusivity_dust_coarse * dust_coarse_fraction)
+           + contact_freezing_bc * aerosol_diffusivity_bc * bc_insoluble_fraction)
+        * (droplet_number + ice_crystal_number)
+    )
+
+    freezing_rate_immersion = -(
+        (immersion_freezing_dust + immersion_freezing_bc) * air_density / rhoh2o
+        * jnp.exp(tmelt - temperature) * jnp.minimum(vertical_velocity - fact_tke * jnp.sqrt(tke) * air_density * grav, 0.0)
+    )
+
+    freezing_rate_contact = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_contact / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
+    freezing_rate_immersion = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_immersion * cloud_liquid / droplet_number * timestep))
+
+    # Total freezing rate
+    total_freezing_rate = freezing_rate_contact + freezing_rate_immersion
+    total_freezing_rate = jnp.clip(total_freezing_rate, 0.0, cloud_liquid)
+
+    # Freezing rate for number concentration
+    freezing_rate_number = droplet_number * total_freezing_rate / (cloud_liquid + 1e-12)
+    freezing_rate_number = jnp.maximum(freezing_rate_number, 0.0)
+
+    # -------------------------------------------------------------------------
+    # 3. Update cloud properties
+    # -------------------------------------------------------------------------
+    freezing_rate = jnp.where(freezing_condition, total_freezing_rate, freezing_rate)
+    freezing_rate_number = jnp.where(freezing_condition, freezing_rate_number, 0.0)
+
+    droplet_number = jnp.where(
+        freezing_condition,
+        jnp.maximum(droplet_number - freezing_rate_number, min_cdnc),
+        droplet_number
+    )
+
+    ice_crystal_number = jnp.where(
+        freezing_condition,
+        jnp.maximum(ice_crystal_number + freezing_rate_number, min_liquid_threshold),
+        ice_crystal_number
+    )
+
+    cloud_liquid = jnp.where(
+        freezing_condition,
+        cloud_liquid - freezing_rate,
+        cloud_liquid
+    )
+
+    cloud_ice = jnp.where(
+        freezing_condition,
+        cloud_ice + freezing_rate,
+        cloud_ice
+    )
+
+    return ice_crystal_number, droplet_number, freezing_rate, cloud_ice, cloud_liquid, freezing_rate_number
+
 def precip_formation_warm(
     warm_precip_mask: jnp.ndarray,
     autoconversion_factor: jnp.ndarray,
