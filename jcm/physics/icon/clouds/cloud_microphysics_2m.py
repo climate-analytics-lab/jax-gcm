@@ -2011,116 +2011,161 @@ def precip_formation_cold(
     )
 
 def update_precip_fluxes(
-    kk: int,
-    klev: int,
-    cloud_fraction: jnp.ndarray,                  # paclc
-    pressure_thickness: jnp.ndarray,              # pdp [Pa]
-    evaporation_rain_mmr: jnp.ndarray,            # rain_evap [kg/kg]
-    lsdcp: jnp.ndarray,                           # plsdcp = Ls/cpd
-    lvdcp: jnp.ndarray,                           # plvdcp = Lv/cpd
-    rain_formation_rate: jnp.ndarray,             # prpr [kg/kg]
-    snow_droplet_accretion_mmr: jnp.ndarray,      # psacl [kg/kg]
-    snow_formation_mmr: jnp.ndarray,              # pspr [kg/kg]
-    sublimation_snow_mmr: jnp.ndarray,            # snow_sublim [kg/kg]
-    temperature: jnp.ndarray,                     # ptp1tmp [K]
-    ice_flux_from_above: jnp.ndarray,             # pxiflux [kg/m2/s]
-    precip_fraction: jnp.ndarray,                 # pclcpre (INOUT) [0..1]
-    rain_flux: jnp.ndarray,                       # prfl (INOUT) [kg/m2/s]
-    snow_flux: jnp.ndarray,                       # psfl (INOUT) [kg/m2/s]
-    snow_melt_mmr: jnp.ndarray,                   # psmlt (INOUT) [kg/kg]
-    dt: jnp.ndarray,                              # ztmst [s]
+    cloud_fraction: jnp.ndarray,            # Original: paclc
+    pressure_thickness: jnp.ndarray,        # Original: pdp
+    rain_evap_mmr: jnp.ndarray,             # Original: pevp (evaporation of rain, kg/kg)
+    lsdcp: jnp.ndarray,                     # Original: plsdcp
+    lvdcp: jnp.ndarray,                     # Original: plvdcp
+    rain_formation: jnp.ndarray,            # Original: prpr
+    snow_accretion: jnp.ndarray,            # Original: psacl
+    snow_formation: jnp.ndarray,            # Original: pspr
+    snow_sublimation_mmr: jnp.ndarray,      # Original: psub (kg/kg)
+    temp_tmp: jnp.ndarray,                  # Original: ptp1tmp (K)
+    ice_flux_from_above: jnp.ndarray,       # Original: pxiflux
+    precip_cover: jnp.ndarray,              # Original: pclcpre (INOUT)
+    rain_flux: jnp.ndarray,                 # Original: prfl (INOUT) [kg/m2/s]
+    snow_flux: jnp.ndarray,                 # Original: psfl (INOUT) [kg/m2/s]
+    snow_melt: jnp.ndarray,                 # Original: psmlt (INOUT) [kg/kg]
+    dt: jnp.ndarray,                        # microphysics timestep used to form zcons2
 ) -> tuple[
-    jnp.ndarray,  # precip_fraction (updated)
-    jnp.ndarray,  # rain_flux (updated)
-    jnp.ndarray,  # snow_flux (updated)
-    jnp.ndarray,  # snow_melt_mmr (updated)
-    jnp.ndarray,  # pfevapr  evaporation of rain [kg/m2/s]
-    jnp.ndarray,  # pfrain   rain flux before evaporation [kg/m2/s]
-    jnp.ndarray,  # pfsnow   snow flux before sublimation [kg/m2/s]
-    jnp.ndarray,  # pfsubls  sublimation of snow [kg/m2/s]
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,  # updated inout: precip_cover, rain_flux, snow_flux, snow_melt
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray   # out: pfevapr, pfrain, pfsnow, pfsubls
 ]:
     """
-    JAX port of Fortran subroutine `update_precip_fluxes`.
+    Update precipitation fluxes entering/leaving a layer.
 
-    This updates rain/snow precipitation fluxes with local source terms (rain/snow formation),
-    applies evaporation/sublimation sinks, conditionally melts snow at the lowest level, and
-    updates precipitating area fraction `precip_fraction`.
+    The routine computes, in a grid-box (or column slice) of independent points:
+      1) Rain and snow mass produced in this level (autoconversion/accretion/aggregation).
+      2) Top-level melting of incoming ice into rain where temperature permits.
+      3) Update of the precip-covered fraction due to falling hydrometeors.
+      4) In-cloud rain/snow fluxes (pfrain, pfsnow) and area-integrated evaporation/sublimation.
+      5) Update of column rain_flux / snow_flux by adding produced flux and removing evaporated/sublimated mass.
+      6) Diagnostic outputs of surface-area-integrated evaporation/sublimation and in-cloud fluxes.
 
-    Notes
-    -----
-    - Fortran indexing uses (kbdim,kproma) and level counters (kk,klev). Here we assume
-      arrays already correspond to the horizontal slice (kproma), and kk/klev are Python ints.
-    - Uses helper `gridbox_frac_falling_hydrometeor(...)` (must exist in this module or be imported).
+    Parameters
+    ----------
+    cloud_fraction : jnp.ndarray
+        paclc, cloud cover fraction (0..1).
+    pressure_thickness : jnp.ndarray
+        pdp, layer pressure thickness [Pa].
+    rain_evap_mmr : jnp.ndarray
+        pevp, rain evaporation expressed as mixing-ratio [kg/kg].
+    lsdcp : jnp.ndarray
+        plsdcp, latent heat of sublimation / cpd [K].
+    lvdcp : jnp.ndarray
+        plvdcp, latent heat of vaporisation / cpd [K].
+    rain_formation : jnp.ndarray
+        prpr, rain production rate (grid-mean) [kg/kg].
+    snow_accretion : jnp.ndarray
+        psacl, snow accretion mass (grid-mean) [kg/kg].
+    snow_formation : jnp.ndarray
+        pspr, snow formation mass (grid-mean) [kg/kg].
+    snow_sublimation_mmr : jnp.ndarray
+        psub, snow sublimation expressed as mixing-ratio [kg/kg].
+    temp_tmp : jnp.ndarray
+        ptp1tmp, layer temperature used for melting decisions [K].
+    ice_flux_from_above : jnp.ndarray
+        pxiflux, falling-ice mass flux entering from above [kg/m^2/s].
+    precip_cover : jnp.ndarray
+        pclcpre (INOUT), precip-covered fraction (0..1).
+    rain_flux : jnp.ndarray
+        prfl (INOUT), column rain mass flux [kg/m^2/s].
+    snow_flux : jnp.ndarray
+        psfl (INOUT), column snow mass flux [kg/m^2/s].
+    snow_melt : jnp.ndarray
+        psmlt (INOUT), accumulated melting diagnostic [kg/kg].
+    dt : jnp.ndarray
+        Microphysics timestep (used to form zcons2 = dt * rgrav) [s].
+
+    Returns
+    -------
+    precip_cover : jnp.ndarray
+        Updated precip-covered fraction (pclcpre) [0..1].
+    rain_flux : jnp.ndarray
+        Updated column rain flux (prfl) [kg/m^2/s].
+    snow_flux : jnp.ndarray
+        Updated column snow flux (psfl) [kg/m^2/s].
+    snow_melt : jnp.ndarray
+        Updated accumulated snow melt diagnostic (psmlt) [kg/kg].
+    pfevapr : jnp.ndarray
+        Area-integrated rain evaporation [kg/m^2/s].
+    pfrain : jnp.ndarray
+        In-cloud rain flux (area-averaged) [kg/m^2/s].
+    pfsnow : jnp.ndarray
+        In-cloud snow flux (area-averaged) [kg/m^2/s].
+    pfsubls : jnp.ndarray
+        Area-integrated snow sublimation [kg/m^2/s].
     """
-    # Microphysics timestep constants
+    # 1) Rain & Snow Production (autoconversion / accretion / aggregation)
+    # timestep-dependent constant (zcons2 = dt * rgrav) and small guards
     _, _, _, zcons2, _ = microphysics_dt_constants(dt)
 
-    # local formed precip flux increments in this layer
-    zzdrr = zcons2 * pressure_thickness * rain_formation_rate
-    zzdrs = zcons2 * pressure_thickness * (snow_formation_mmr + snow_droplet_accretion_mmr)
+    # Precipitation produced in this level (mass flux units [kg/m2/s])
+    zzdrr = zcons2 * pressure_thickness * rain_formation
+    zzdrs = zcons2 * pressure_thickness * (snow_formation + snow_accretion)
 
-    # lowest level special treatment (kk == klev): add ice flux from above and melt snow if T > Tmelt
-    is_lowest = (kk == klev)
+    # If ice_flux_from_above is non-zero it must be included (caller should pass pxiflux at top level)
+    # Top-level melting: convert part of snow -> rain if T > tmelt (uses plsdcp/plvdcp)
+    # Note: Fortran gated with (kk .EQ. klev); here caller should incorporate ice_flux_from_above only when appropriate.
+    # We perform the melting step unconditionally where ice_flux_from_above>0 and temp_tmp>tmelt to preserve behaviour.
+    has_incoming_ice = ice_flux_from_above > 0.0
+    zzdrs = zzdrs + jnp.where(has_incoming_ice, ice_flux_from_above, 0.0)
 
-    if is_lowest:
-        zzdrs = zzdrs + ice_flux_from_above
+    # 2) Top-level Melting of Incoming Ice into Rain
+    # melting capacity (per area) limited by available energy
+    melt_capacity = zcons2 * pressure_thickness / jnp.maximum(lsdcp - lvdcp, eps) * jnp.maximum(0.0, (temp_tmp - tmelt))
+    # limit melting to a fraction xsec*zzdrs (same heuristic as Fortran)
+    ztmp2 = jnp.minimum(xsec * zzdrs, melt_capacity)
+    # apply melting where incoming ice exists and melting capacity>0
+    melt_applied = jnp.where(has_incoming_ice, ztmp2, 0.0)
+    zzdrr = zzdrr + melt_applied
+    zzdrs = zzdrs - melt_applied
+    # psmlt accumulates melting mass in kg/kg units (Fortran: psmlt += ztmp2/(zcons2*pdp))
+    snow_melt = snow_melt + melt_applied / jnp.maximum(zcons2 * pressure_thickness, eps)
 
-        # zcons = zcons2*pdp/(plsdcp-plvdcp) * max(0, T-Tmelt)
-        zcons = (
-            zcons2
-            * pressure_thickness
-            / jnp.maximum(lsdcp - lvdcp, eps)
-            * jnp.maximum(0.0, temperature - tmelt)
-        )
-
-        # zsnmlt = min(xsec*zzdrs, zcons)
-        zsnmlt = jnp.minimum(xsec * zzdrs, zcons)
-
-        # transfer melted snow to rain
-        zzdrr = zzdrr + zsnmlt
-        zzdrs = zzdrs - zsnmlt
-
-        # update diagnostic snow melt mixing ratio tendency (kg/kg)
-        snow_melt_mmr = snow_melt_mmr + zsnmlt / jnp.maximum(zcons2 * pressure_thickness, eps)
-
-    # total precip from above and formed here
+    # 3) Update Precip-covered Fraction due to Falling Hydrometeors
+    # Total precip from above (existing fluxes) and produced here (zpredel)
     zpretot = rain_flux + snow_flux
     zpredel = zzdrr + zzdrs
 
-    # update precipitating fraction (area of falling hydrometeors)
-    precip_fraction = gridbox_frac_falling_hydrometeor(
-        zpretot=zpretot,
-        precip_fraction=precip_fraction,
-        zpredel=zpredel,
-        cloud_fraction=cloud_fraction,
+    # Update precip-covered fraction using helper
+    # gridbox_frac_falling_hydrometeor signature:
+    #   (precip_flux_from_above, precip_frac_from_above, precip_flux_from_level, precip_frac_from_level)
+    precip_cover = gridbox_frac_falling_hydrometeor(
+        precip_flux_from_above=zpretot,
+        precip_frac_from_above=precip_cover,
+        precip_flux_from_level=zpredel,
+        precip_frac_from_level=cloud_fraction,
     )
 
-    # in-cloud scavenging diagnostics, only where precip_fraction > epsec
-    ll1 = precip_fraction > epsec
+    # 4) In-cloud Rain/Snow Fluxes and Area-integrated Evaporation/Sublimation
+    # in-cloud (area-averaged) rain/snow fluxes before evaporation/sublimation
+    ll1 = precip_cover > epsec
 
-    denom = jnp.maximum(precip_fraction, epsec)
+    ztmp1 = (rain_flux + zzdrr) / jnp.maximum(precip_cover, epsec)
+    ztmp2 = (snow_flux + zzdrs) / jnp.maximum(precip_cover, epsec)
 
-    # rain/snow flux before evaporation/sublimation (per precipitating area)
-    pfrain_raw = (rain_flux + zzdrr) / denom
-    pfsnow_raw = (snow_flux + zzdrs) / denom
-    pfrain = jnp.where(ll1, pfrain_raw, 0.0)
-    pfsnow = jnp.where(ll1, pfsnow_raw, 0.0)
+    pfrain = jnp.where(ll1, ztmp1, 0.0)
+    pfsnow = jnp.where(ll1, ztmp2, 0.0)
 
-    # evaporation/sublimation flux rates per precipitating area
-    pfevapr_raw = (zcons2 * pressure_thickness * evaporation_rain_mmr) / denom
-    pfsubls_raw = (zcons2 * pressure_thickness * sublimation_snow_mmr) / denom
-    pfevapr = jnp.where(ll1, pfevapr_raw, 0.0)
-    pfsubls = jnp.where(ll1, pfsubls_raw, 0.0)
+    # evaporation / sublimation area-integrated (kg/m2/s)
+    ztmp3 = (zcons2 * pressure_thickness * rain_evap_mmr) / jnp.maximum(precip_cover, epsec)
+    ztmp4 = (zcons2 * pressure_thickness * snow_sublimation_mmr) / jnp.maximum(precip_cover, epsec)
 
-    # update fluxes with sources and sinks (grid-mean)
-    rain_flux = rain_flux + zzdrr - zcons2 * pressure_thickness * evaporation_rain_mmr
-    snow_flux = snow_flux + zzdrs - zcons2 * pressure_thickness * sublimation_snow_mmr
+    pfevapr = jnp.where(ll1, ztmp3, 0.0)
+    pfsubls = jnp.where(ll1, ztmp4, 0.0)
 
+    # 5) Update Column Rain / Snow Fluxes (add produced, remove evaporated/sublimated)
+    # update column fluxes: add produced mass, remove evaporated/sublimated mass
+    rain_flux = rain_flux + zzdrr - zcons2 * pressure_thickness * rain_evap_mmr
+    snow_flux = snow_flux + zzdrs - zcons2 * pressure_thickness * snow_sublimation_mmr
+
+    # 6) Diagnostics: return updated cover/fluxes and area-integrated/in-cloud diagnostics
     return (
-        precip_fraction,
+        precip_cover,
         rain_flux,
         snow_flux,
-        snow_melt_mmr,
+        snow_melt,
         pfevapr,
         pfrain,
         pfsnow,

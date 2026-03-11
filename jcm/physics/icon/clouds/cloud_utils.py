@@ -15,7 +15,7 @@ from ..constants.physical_constants import (
 )
 from .cloud_params_2m import (
     epsec, eps, fact_PK, pow_PK, ldyn_cdnc_min, cdnc_min_fixed,
-    cdnc_min_lower, cdnc_min_upper, rcd_vol_max, cqtmin
+    cdnc_min_lower, cdnc_min_upper, rcd_vol_max, cqtmin, conv_effr2mvr
 )
 
 def get_util_var(nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1):
@@ -293,6 +293,47 @@ def gridbox_frac_falling_hydrometeor(
     total_precip_frac = jnp.where(ll1, weighted_precip_frac, 0.0)
 
     return total_precip_frac
+
+def effective_2_volmean_radius_param_Schuman_2011(prieff: jnp.ndarray) -> jnp.ndarray:
+    """
+    Convert effective radius to volume-mean radius using Schumann et al. (2011) parametrisation.
+
+    Parameters
+    ----------
+    prieff : jnp.ndarray
+        Effective ice crystal radius (Fortran: prieff) given in units of 1.e-6 m (i.e. microns).
+
+    Returns
+    -------
+    prvolmean : jnp.ndarray
+        Volume-mean ice crystal radius (Fortran: prvolmean) in metres.
+
+    Notes
+    -----
+    Fortran implementation:
+        prvolmean = MAX(1.e-6_dp, conv_effr2mvr*1.e-6_dp*prieff)
+    where conv_effr2mvr (imported) is the scheme constant converting effective -> vol-mean radius.
+    """
+    # Multiply prieff (1e-6 m units) by 1e-6 to get metres, apply conv_effr2mvr and enforce minimum 1e-6 m.
+    return jnp.maximum(1e-6, conv_effr2mvr * 1e-6 * prieff)
+
+def breadth_factor(pcdnc: jnp.ndarray) -> jnp.ndarray:
+    """
+    Breadth factor as a function of cloud droplet number concentration (CDNC).
+
+    Parameters
+    ----------
+    pcdnc : jnp.ndarray
+        Cloud droplet number concentration (Fortran: pcdnc) [1/m^3].
+
+    Returns
+    -------
+    pkap : jnp.ndarray
+        Breadth factor (Fortran: pkap). Parametrisation from Peng & Lohmann (2003), eq. 6:
+            pkap = 0.00045e-6 * pcdnc + 1.18
+        The constant 0.00045e-6 is equal to 4.5e-10.
+    """
+    return 4.5e-10 * pcdnc + 1.18
 
 def threshold_vert_vel(
     sat_vap_pres_water: jnp.ndarray,  # pesw [Pa]
