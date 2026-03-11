@@ -1854,6 +1854,79 @@ class TestHetMxphaseFreezing:
         for output in outputs:
             assert jnp.all(jnp.isfinite(output))
 
+class TestWBFProcess:
+    def _base_inputs(self, n: int = 4):
+        return dict(
+            wbf_mask=jnp.array([True, False, True, False]),
+            cloud_fraction=jnp.array([0.6, 0.6, 0.3, 0.0], dtype=jnp.float32),
+            lsdcp=jnp.full((n,), 2.836e6 / 1004.0, dtype=jnp.float32),
+            lvdcp=jnp.full((n,), 2.501e6 / 1004.0, dtype=jnp.float32),
+            cdnc=jnp.array([5e7, 5e7, 5e7, 5e7], dtype=jnp.float32),
+            cloud_liquid_in_cloud=jnp.array([2e-3, 1e-3, 5e-4, 1e-6], dtype=jnp.float32),
+            cloud_ice_in_cloud=jnp.array([1e-4, 2e-4, 3e-4, 0.0], dtype=jnp.float32),
+            cloud_liquid_tendency=jnp.array([1e-6, 2e-6, 3e-6, 4e-6], dtype=jnp.float32),
+            cloud_ice_tendency=jnp.array([0.0, 0.0, 0.0, 0.0], dtype=jnp.float32),
+            temp_tendency=jnp.array([0.0, 1e-7, 2e-7, 3e-7], dtype=jnp.float32),
+            dt=jnp.array(60.0, dtype=jnp.float32),
+        )
+
+    def test_wbf_applies_transfer_and_tendencies(self):
+        from .cloud_microphysics_2m import WBF_process
+        inputs = self._base_inputs()
+        # call
+        cdnc_o, ql_o, qi_o, qlt_o, qit_o, t_o = WBF_process(**inputs)
+
+        # compute expected ztmst_rcp and ztmp1
+        ztmst_rcp = 1.0 / jnp.maximum(inputs["dt"], eps)
+        ztmp1 = ztmst_rcp * inputs["cloud_liquid_in_cloud"] * inputs["cloud_fraction"]
+
+        mask = inputs["wbf_mask"]
+
+        # liquid should be zero where mask True, unchanged where False
+        assert jnp.all(ql_o[mask] == 0.0)
+        assert jnp.all(ql_o[~mask] == inputs["cloud_liquid_in_cloud"][~mask])
+
+        # ice should gain the full in-cloud liquid where mask True
+        assert jnp.allclose(qi_o[mask], inputs["cloud_ice_in_cloud"][mask] + inputs["cloud_liquid_in_cloud"][mask])
+        assert jnp.allclose(qi_o[~mask], inputs["cloud_ice_in_cloud"][~mask])
+
+        # tendencies updated by ztmp1 where mask True
+        assert jnp.allclose(qlt_o[mask], inputs["cloud_liquid_tendency"][mask] - ztmp1[mask])
+        assert jnp.allclose(qit_o[mask], inputs["cloud_ice_tendency"][mask] + ztmp1[mask])
+
+        # temperature tendency adjusted by (Ls/cpd - Lv/cpd) * ztmp1 where mask True
+        delta = (inputs["lsdcp"] - inputs["lvdcp"]) * ztmp1
+        assert jnp.allclose(t_o[mask], inputs["temp_tendency"][mask] + delta[mask])
+        assert jnp.allclose(t_o[~mask], inputs["temp_tendency"][~mask])
+
+    def test_wbf_sets_cdnc_min_and_preserves_where_false(self):
+        from .cloud_microphysics_2m import WBF_process
+        inputs = self._base_inputs()
+        inputs["cdnc"] = jnp.array([1e8, 1e8, 1e5, 1e8], dtype=jnp.float32)
+        cdnc_o, *_ = WBF_process(**inputs)
+
+        # where mask True -> cdnc set to cqtmin
+        mask = inputs["wbf_mask"]
+        assert jnp.all(cdnc_o[mask] == cqtmin)
+        # where mask False -> unchanged
+        assert jnp.all(cdnc_o[~mask] == inputs["cdnc"][~mask])
+
+    def test_wbf_noop_when_mask_false_everywhere(self):
+        from .cloud_microphysics_2m import WBF_process
+        inputs = self._base_inputs()
+        inputs["wbf_mask"] = jnp.full((4,), False)
+        before = {k: v.copy() for k, v in inputs.items() if k in ("cdnc","cloud_liquid_in_cloud","cloud_ice_in_cloud","cloud_liquid_tendency","cloud_ice_tendency","temp_tendency")}
+        out = WBF_process(**inputs)
+        # outputs mapped to same order as returned tuple
+        cdnc_o, ql_o, qi_o, qlt_o, qit_o, t_o = out
+
+        assert jnp.allclose(cdnc_o, before["cdnc"])
+        assert jnp.allclose(ql_o, before["cloud_liquid_in_cloud"])
+        assert jnp.allclose(qi_o, before["cloud_ice_in_cloud"])
+        assert jnp.allclose(qlt_o, before["cloud_liquid_tendency"])
+        assert jnp.allclose(qit_o, before["cloud_ice_tendency"])
+        assert jnp.allclose(t_o, before["temp_tendency"])
+
 class TestAutoconversion_2M:
     def test_precip_formation_warm_mask_false_no_change(self):
         """If warm_precip_mask is False everywhere, outputs should be zero rates and unchanged inputs."""
@@ -2420,6 +2493,11 @@ if __name__ == "__main__":
     test_het_mxphase_freezing_2m.test_mxphase_min_cdnc_limit()
     test_het_mxphase_freezing_2m.test_mxphase_freezing_rate_accumulation()
     # test_het_mxphase_freezing_2m.test_mxphase_jittable()
+
+    test_wbf_process_2m = TestWBFProcess()
+    test_wbf_process_2m.test_wbf_applies_transfer_and_tendencies()
+    test_wbf_process_2m.test_wbf_sets_cdnc_min_and_preserves_where_false()
+    test_wbf_process_2m.test_wbf_noop_when_mask_false_everywhere()
 
     test_auto_2m = TestAutoconversion_2M()
     test_auto_2m.test_precip_formation_warm_mask_false_no_change()

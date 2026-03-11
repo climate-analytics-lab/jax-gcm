@@ -1158,8 +1158,6 @@ def mixed_phase_deposition_and_corrections(
         qsat_tmp,
     )
 
-import jax.numpy as jnp
-
 def freezing_below_238K(
     freezing_condition: jnp.ndarray,    # ld_frz_below_238K
     cloud_cover: jnp.ndarray,           # paclc
@@ -1443,6 +1441,126 @@ def het_mxphase_freezing(
     )
 
     return ice_crystal_number, droplet_number, freezing_rate, cloud_ice, cloud_liquid, freezing_rate_number
+
+def WBF_process(
+    wbf_mask: jnp.ndarray,                 # Original: ld_WBF
+    cloud_fraction: jnp.ndarray,           # Original: paclc
+    lsdcp: jnp.ndarray,                    # Original: plsdcp  (Ls/cpd)
+    lvdcp: jnp.ndarray,                    # Original: plvdcp  (Lv/cpd)
+    cdnc: jnp.ndarray,                     # Original: pcdnc   (INOUT) CDNC [1/m^3]
+    cloud_liquid_in_cloud: jnp.ndarray,    # Original: pxlb    (INOUT) in-cloud liquid [kg/kg]
+    cloud_ice_in_cloud: jnp.ndarray,       # Original: pxib    (INOUT) in-cloud ice [kg/kg]
+    cloud_liquid_tendency: jnp.ndarray,    # Original: pxlte   (INOUT) liquid tendency [kg/kg/s]
+    cloud_ice_tendency: jnp.ndarray,       # Original: pxite   (INOUT) ice tendency [kg/kg/s]
+    temp_tendency: jnp.ndarray,            # Original: ptte    (INOUT) temperature tendency [K/s]
+    dt: jnp.ndarray                        # Microphysics timestep (used to form ztmst_rcp)
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Warm-bridge/freeze (WBF) process: transfer of in-cloud liquid to ice under WBF conditions.
+
+    JAX port of Fortran subroutine `WBF_process` (mo_cloud_microphysics_2m).
+
+    Overview
+    --------
+    Implements the WBF phase-transfer step used in the ICON/ECHAM 2‑moment microphysics.
+    Where the WBF condition holds (wbf_mask), in-cloud liquid is transferred to in-cloud ice,
+    tendencies for liquid/ice and temperature are adjusted to reflect the transfer and latent-heat
+    effects, and cloud droplet number concentration (CDNC) is reset to a minimum value.
+
+    Steps
+    -----
+    1. Compute transfer proxy ztmp1 = ztmst_rcp * pxlb * paclc (Fortran: ztmst_rcp*pxlb*paclc).
+    2. Subtract ztmp1 from the cloud-liquid tendency:
+         pxlte <- pxlte - ztmp1 (applied where wbf_mask True).
+    3. Add ztmp1 to the cloud-ice tendency:
+         pxite <- pxite + ztmp1 (applied where wbf_mask True).
+    4. Apply thermodynamic correction to temperature tendency:
+         ptte <- ptte + (plsdcp - plvdcp) * ztmp1 (applied where wbf_mask True).
+    5. Enforce minimum CDNC where WBF applies:
+         pcdnc <- cqtmin (Fortran MERGE(cqtmin, pcdnc, ld_WBF)).
+    6. Transfer remaining in-cloud liquid to in-cloud ice and zero liquid:
+         pxib <- pxib + pxlb ; pxlb <- 0  (applied where wbf_mask True).
+
+    Parameters
+    ----------
+    wbf_mask : jnp.ndarray
+        Logical mask where the WBF process is active. (Fortran: ld_WBF)
+    cloud_fraction : jnp.ndarray
+        Cloud cover fraction in the layer. (Fortran: paclc)
+    lsdcp : jnp.ndarray
+        Latent heat of sublimation divided by cpd (Ls/cpd). (Fortran: plsdcp)
+    lvdcp : jnp.ndarray
+        Latent heat of vaporization divided by cpd (Lv/cpd). (Fortran: plvdcp)
+    cdnc : jnp.ndarray
+        Cloud droplet number concentration (pcdnc) [1/m^3] (INOUT).
+    cloud_liquid_in_cloud : jnp.ndarray
+        In-cloud cloud liquid mixing ratio (pxlb) [kg/kg] (INOUT).
+    cloud_ice_in_cloud : jnp.ndarray
+        In-cloud cloud ice mixing ratio (pxib) [kg/kg] (INOUT).
+    cloud_liquid_tendency : jnp.ndarray
+        Tendency of in-cloud liquid (pxlte) [kg/kg/s] (INOUT).
+    cloud_ice_tendency : jnp.ndarray
+        Tendency of in-cloud ice (pxite) [kg/kg/s] (INOUT).
+    temp_tendency : jnp.ndarray
+        Temperature tendency (ptte) [K/s] (INOUT).
+    dt : jnp.ndarray or float
+        Microphysics timestep ztmst [s] used to form ztmst_rcp = 1/ztmst.
+
+    Returns
+    -------
+    cdnc :
+        Updated cloud droplet number concentration (pcdnc) [1/m^3].
+    cloud_liquid_in_cloud :
+        Updated in-cloud liquid mixing ratio (pxlb) [kg/kg].
+    cloud_ice_in_cloud :
+        Updated in-cloud ice mixing ratio (pxib) [kg/kg].
+    cloud_liquid_tendency :
+        Updated liquid tendency (pxlte) [kg/kg/s].
+    cloud_ice_tendency :
+        Updated ice tendency (pxite) [kg/kg/s].
+    temp_tendency :
+        Updated temperature tendency (ptte) [K/s].
+
+    Notes
+    -----
+    - ztmst_rcp (Fortran ztmst_rcp) is obtained from microphysics_dt_constants(dt).
+    - All operations are vectorised and preserve input shapes; values are only changed
+      where wbf_mask is True.
+    - cqtmin is used as the minimum CDNC (Fortran constant cqtmin).
+    """
+    
+    # get reciprocal timestep constant (ztmst_rcp = 1 / ztmst)
+    _, ztmst_rcp, *_ = microphysics_dt_constants(dt)
+
+    # ztmp1 = ztmst_rcp * pxlb * paclc  (evap / WBF proxy)
+    ztmp1 = ztmst_rcp * cloud_liquid_in_cloud * cloud_fraction
+
+    # cloud liquid tendency: pxlte <- MERGE(pxlte - ztmp1, pxlte, ld_WBF)
+    cloud_liquid_tendency = jnp.where(wbf_mask, cloud_liquid_tendency - ztmp1, cloud_liquid_tendency)
+
+    # cloud ice tendency: pxite <- MERGE(pxite + ztmp1, pxite, ld_WBF)
+    cloud_ice_tendency = jnp.where(wbf_mask, cloud_ice_tendency + ztmp1, cloud_ice_tendency)
+
+    # temperature tendency: ptte <- MERGE(ptte + (plsdcp - plvdcp)*ztmp1, ptte, ld_WBF)
+    temp_tendency = jnp.where(wbf_mask, temp_tendency + (lsdcp - lvdcp) * ztmp1, temp_tendency)
+
+    # cdnc <- MERGE(cqtmin, pcdnc, ld_WBF)  (set to minimum where WBF occurs)
+    cdnc = jnp.where(wbf_mask, cqtmin, cdnc)
+
+    # pxib <- MERGE(pxib + pxlb, pxib, ld_WBF)  (transfer liquid mass to ice)
+    cloud_ice_in_cloud = jnp.where(wbf_mask, cloud_ice_in_cloud + cloud_liquid_in_cloud, cloud_ice_in_cloud)
+
+    # pxlb <- MERGE(0.0, pxlb, ld_WBF)  (zero liquid where WBF occurs)
+    cloud_liquid_in_cloud = jnp.where(wbf_mask, 0.0, cloud_liquid_in_cloud)
+
+    return (
+        cdnc,
+        cloud_liquid_in_cloud,
+        cloud_ice_in_cloud,
+        cloud_liquid_tendency,
+        cloud_ice_tendency,
+        temp_tendency,
+    )
 
 def precip_formation_warm(
     warm_precip_mask: jnp.ndarray,
@@ -2009,245 +2127,231 @@ def update_precip_fluxes(
         pfsubls,
     )
 
-def update_in_cloud_water(
-    aerosol_total: jnp.ndarray, 
-    activated_cdnc: jnp.ndarray, 
-    condensation_increment: jnp.ndarray, 
-    deposition_increment: jnp.ndarray, 
-    cloud_cover_vari_i: jnp.ndarray, 
-    cloud_cover_vari_l: jnp.ndarray, 
-    activated_icnc: jnp.ndarray, 
-    specific_humidity: jnp.ndarray, 
-    saturation_specific_humidity: jnp.ndarray, 
-    air_density: jnp.ndarray, 
-    ice_mean_volume_radius: jnp.ndarray, 
-    temperature_previous: jnp.ndarray,
-    cloud_flag: jnp.ndarray, 
-    icnc: jnp.ndarray, 
-    droplet_nucleation_accumulated: jnp.ndarray, 
-    cdnc: jnp.ndarray, 
-    cloud_fraction: jnp.ndarray, 
-    in_cloud_ice_mixing_ratio: jnp.ndarray,
-    in_cloud_water_mixing_ratio: jnp.ndarray, 
-    dt: jnp.ndarray
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def sat_spec_hum(
+    pressure: jnp.ndarray,         # Original: pap
+    es_rd_over_rv: jnp.ndarray,    # Original: ptlucu  (lookup value e_s * Rd/Rv)
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Update in-cloud condensate (liquid/ice), droplet/ice number concentrations, and cloud cover.
-    TODO : debug to account for the dependency on time step length
+    Saturation vapour pressure / correction factor / saturation specific humidity.
 
-    This function is a close port of the ECHAM6/ICON Fortran subroutine
-    `update_in_cloud_water` (see mo_cloud_microphysics_2m). It performs a
-    bookkeeping/consistency update after condensation/deposition tendencies have
-    been computed, and after droplet activation / ice nucleation sources are known.
+    Overview
+    --------
+    Compute:
+      - pes : non-dimensional ratio (e_s * Rd/Rv) / p  (Fortran `pes`),
+              clipped to 0.5 to avoid pathological values from lookup tables;
+      - pcor: thermodynamic correction factor (Fortran `pcor`) = 1 / (1 - vtmpc1 * pes);
+      - saturation_specific_humidity  : saturation specific humidity (Fortran `pq`) = pes * pcor.
 
-    Conceptually, this routine:
-      (A) Updates in-cloud liquid water (in_cloud_water_mixing_ratio) and in-cloud ice (in_cloud_ice_mixing_ratio) by adding
-          condensation/deposition increments, accounting for cloud fraction.
-      (B) Creates cloud cover (cloud_fraction) in newly cloudy grid boxes based on relative
-          humidity if condensation/deposition occurs when no cloud existed.
-      (C) Computes a minimum CDNC (cdnc_min) implied by a maximum droplet size
-          constraint (via `minimum_CDNC`).
-      (D) Updates CDNC (cdnc) using newly activated droplet number (activated_cdnc),
-          but only if CDNC is below the minimum and the temperature is warm enough.
-      (E) Updates ICNC (icnc) if there is cloud ice and existing ICNC is too small,
-          using a cirrus nucleation parametrization selector (nic_cirrus).
+    Steps
+    -----
+    1. pes = es_rd_over_rv / pressure
+    2. Clip pes to a maximum of 0.5 (Fortran: MIN(pes, 0.5_dp))
+    3. pcor = 1.0 / (1.0 - vtmpc1 * pes) with a small safety floor on the denominator
+    4. pq = pes * pcor
 
-    Notes on ICON/ECHAM conventions
-    -------------------------------
-    - Many quantities are "in-cloud" (i.e., defined only in the cloudy fraction).
-      Specifically:
-        * in_cloud_water_mixing_ratio: in-cloud cloud liquid water mixing ratio [kg/kg]
-        * in_cloud_ice_mixing_ratio: in-cloud cloud ice mixing ratio [kg/kg]
-      When adding condensation/deposition increments (condensation_increment/deposition_increment), the increment is
-      divided by max(cloud_fraction, clc_min) to convert from grid-mean increment to the
-      in-cloud increment (Fortran uses MAX(cloud_fraction, clc_min) to avoid division by 0).
-
-    - `cloud_flag` is a boolean flag indicating whether the layer is considered cloudy.
-      In the Fortran code it is redefined midroutine from cloud_fraction (see below), so
-      its meaning changes slightly.
-
-    - JAX port: Fortran MERGE(a,b,mask) is implemented as jnp.where(mask, a, b).
-
-    Parameters (names match Fortran)
-    --------------------------------
-    aerosol_total : jnp.ndarray
-        Total number of aerosols available (used in one cirrus option).
-    activated_cdnc : jnp.ndarray
-        Number concentration of newly activated cloud droplets [1/m^3].
-    condensation_increment : jnp.ndarray
-        Condensation increment / rate proxy for this step [kg/kg].
-        (In Fortran: "condensation rate", but treated as an increment here.)
-    deposition_increment : jnp.ndarray
-        Deposition increment / rate proxy for this step [kg/kg].
-    cloud_cover_vari_i, cloud_cover_vari_l : jnp.ndarray
-        Additional sources used in Tompkins cloud cover scheme bookkeeping.
-        In Fortran they are added to deposition_increment/condensation_increment and then clipped to >= 0.
-    activated_icnc : jnp.ndarray
-        Number concentration of newly formed ice crystals (used in cirrus option 2).
-    specific_humidity : jnp.ndarray
-        Updated specific humidity at time t [kg/kg].
-    saturation_specific_humidity : jnp.ndarray
-        Updated saturation specific humidity [kg/kg].
-    air_density : jnp.ndarray
-        Air density [kg/m^3].
-    ice_mean_volume_radius : jnp.ndarray
-        Mean volume radius of ice crystals [m] (used in cirrus option 1).
-    temperature_previous : jnp.ndarray
-        Temperature at previous step (t-1) [K].
-
-    cloud_flag : jnp.ndarray (bool)
-        Cloud-present flag (in/out).
-    icnc : jnp.ndarray
-        Ice crystal number concentration (ICNC) [1/m^3] (in/out).
-    droplet_nucleation_accumulated : jnp.ndarray
-        Accumulated droplet nucleation number (in/out).
-        NOTE: In the original Fortran droplet_nucleation_accumulated is [1/m^3/s] and is incremented by zdt*ΔN.
-        In this Python port you currently add ΔN directly (see comment below).
-    cdnc : jnp.ndarray
-        Cloud droplet number concentration (CDNC) [1/m^3] (in/out).
-    cloud_fraction : jnp.ndarray
-        Cloud fraction / cloud cover [0..1] (in/out).
-    in_cloud_ice_mixing_ratio : jnp.ndarray
-        In-cloud ice mixing ratio [kg/kg] (in/out).
-    in_cloud_water_mixing_ratio : jnp.ndarray
-        In-cloud liquid mixing ratio [kg/kg] (in/out).
+    Parameters
+    ----------
+    pressure : jnp.ndarray
+        Full-level pressure (Fortran: pap) [Pa]. Can be 1D or 2D (or higher) as long as
+        shapes match es_rd_over_rv.
+    es_rd_over_rv : jnp.ndarray
+        Lookup-table value (Fortran: ptlucu) equal to e_s * Rd/Rv at the lookup temperature.
+        Same shape as pressure.
 
     Returns
     -------
-    cloud_flag : bool array
-        Updated cloud-present flag (rederived from cloud_fraction).
-    icnc : array
-        Updated ICNC [1/m^3].
-    droplet_nucleation_accumulated : array
-        Updated nucleation accumulator.
-    cdnc : array
-        Updated CDNC [1/m^3].
-    cloud_fraction : array
-        Updated cloud cover [0..1].
-    in_cloud_ice_mixing_ratio : array
-        Updated in-cloud ice mixing ratio [kg/kg].
-    in_cloud_water_mixing_ratio : array
-        Updated in-cloud liquid mixing ratio [kg/kg].
-    cdnc_min : array
-        Minimum CDNC [1/m^3] computed from maximum droplet-size constraint.
+    pes : jnp.ndarray
+        Scaled saturation vapour pressure (ECHAM: pes) (dimensionless, clipped <= 0.5).
+    pcor : jnp.ndarray
+        Correction factor (ECHAM: pcor) = 1 / (1 - vtmpc1 * pes).
+    saturation_specific_humidity : jnp.ndarray
+        Saturation specific humidity (ECHAM: pq) [kg/kg].
+
+    Notes
+    -----
+    - This single function replaces the 1D/2D ECHAM variants by operating elementwise
+      on arrays of arbitrary compatible shape.
+    - A safety floor (eps) is used when forming the denominator to avoid division-by-zero.
+    - ECHAM names: pap -> pressure, ptlucu -> es_rd_over_rv, pes/pcor/pq preserved.
     """
+    # pes = ptlucu / pap
+    pes = es_rd_over_rv / pressure
+    pes = jnp.minimum(pes, 0.5)
 
-    # ---------------------------------------------------------------------
-    # 0) Relative humidity and "effective" condensation/deposition increments
-    # ---------------------------------------------------------------------
-    # Here we guard saturation_specific_humidity to avoid inf/nan when saturation is tiny.
-    relative_humidity = specific_humidity / jnp.maximum(saturation_specific_humidity, 1e-12)
+    # pcor = 1 / (1 - vtmpc1 * pes)  (protect denominator)
+    from .cloud_params_2m import eps as _eps  # local small number from params
+    denom = jnp.maximum(1.0 - vtmpc1 * pes, _eps)
+    pcor = 1.0 / denom
 
-    # These "ztmp1/ztmp2" represent non-negative sources that can establish or
-    # enhance cloud condensate.
-    ztmp1 = jnp.maximum(deposition_increment + cloud_cover_vari_i, 0.0)   # (ice-side) deposition-like source
-    ztmp2 = jnp.maximum(condensation_increment + cloud_cover_vari_l, 0.0)   # (liquid-side) condensation-like source
+    # pq = pes * pcor
+    saturation_specific_humidity = pes * pcor
 
-    # ---------------------------------------------------------------------
-    # 1) If a grid box is already cloudy (cloud_flag=True), update in-cloud condensate
-    # ---------------------------------------------------------------------
-    # Convert grid-mean condensation/deposition increments to in-cloud increments
-    # by dividing by max(cloud_fraction, clc_min). This avoids huge increments when cloud_fraction ~ 0.
-   
-    ztmp3 = in_cloud_ice_mixing_ratio + deposition_increment / jnp.maximum(cloud_fraction, clc_min) # in-cloud ice growth increment
-    ztmp3 = jnp.maximum(ztmp3, 0.0) # 
+    return pes, pcor, saturation_specific_humidity
 
-    ztmp4 = in_cloud_water_mixing_ratio + condensation_increment / jnp.maximum(cloud_fraction, clc_min) # in-cloud liquid growth increment
-    ztmp4 = jnp.maximum(ztmp4, 0.0)
+# ...existing code...
+def update_in_cloud_water(
+    pressure: jnp.ndarray,               # Original: pap
+    activated_cdnc: jnp.ndarray,         # Original: pcdncact
+    condensation_rate: jnp.ndarray,      # Original: pcnd
+    deposition_rate: jnp.ndarray,        # Original: pdep
+    tompkins_genti: jnp.ndarray,         # Original: pgenti
+    tompkins_gentl: jnp.ndarray,         # Original: pgentl
+    newly_formed_ice: jnp.ndarray,       # Original: pnicex
+    specific_humidity_tmp: jnp.ndarray,  # Original: pqp1tmp
+    sat_spec_humidity_tmp: jnp.ndarray,  # Original: pqsp1tmp
+    air_density: jnp.ndarray,            # Original: prho
+    ice_radius_mean: jnp.ndarray,        # Original: prid
+    temp_prev: jnp.ndarray,              # Original: ptm1
+    cloud_flag: jnp.ndarray,             # Original: ld_cc (INOUT)
+    ice_crystal_number: jnp.ndarray,     # Original: picnc (INOUT)
+    nucleation_rate: jnp.ndarray,        # Original: pqnuc (INOUT)
+    droplet_number: jnp.ndarray,         # Original: pcdnc (INOUT)
+    cloud_fraction: jnp.ndarray,         # Original: paclc (INOUT)
+    cloud_ice_in_cloud: jnp.ndarray,     # Original: pxib (INOUT)
+    cloud_liquid_in_cloud: jnp.ndarray,  # Original: pxlb (INOUT)
+    dt: jnp.ndarray                       # Microphysics timestep (used for pqnuc accumulation)
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+]:
+    """
+    Update in-cloud water/ice, CDNC/ICNC activation/nucleation and cloud cover.
 
-    # Apply only where cloud_flag indicates "cloud exists".
-    # (MERGE(ztmp3, in_cloud_ice_mixing_ratio, cloud_flag) => where(cloud_flag, ztmp3, in_cloud_ice_mixing_ratio))
-    in_cloud_ice_mixing_ratio = jnp.where(cloud_flag, ztmp3, in_cloud_ice_mixing_ratio)
-    in_cloud_water_mixing_ratio = jnp.where(cloud_flag, ztmp4, in_cloud_water_mixing_ratio)
+    JAX port of Fortran subroutine `update_in_cloud_water`.
 
-    # ---------------------------------------------------------------------
-    # 2) If there is no cloud yet, but condensation/deposition wants to occur,
-    #    create cloud cover and initialize in-cloud condensate.
-    # ---------------------------------------------------------------------
-    # i.e. "new cloud formation condition".
-    ll1 = jnp.logical_and(~cloud_flag, jnp.logical_or(ztmp1 > 0.0, ztmp2 > 0.0))
+    Overview
+    --------
+    Updates in-cloud mixing ratios (liquid/ice), cloud fraction, CDNC/ICNC and
+    accumulates nucleation diagnostics following ICON/ECHAM logic.
 
-    # if new cloud is created, set cloud cover to a RH-based value.
-    ztmp3 = jnp.clip(relative_humidity, 0.01, 1.0)
-    cloud_fraction = jnp.where(ll1, ztmp3, cloud_fraction)
+    Steps
+    -----
+    1. Compute relative humidity and positive condensation/deposition sources.
+    2. Update in-cloud pxib/pxlb using deposition/condensation scaled by cloud fraction
+       (lower-limited by clc_min) where cloud already exists.
+    3. If no cloud but there are positive condensation/deposition sources, set cloud
+       fraction from relative humidity (clipped to [0.01,1.0]) and set in-cloud values
+       from source-per-cloud-area.
+    4. Compute minimum CDNC from in-cloud liquid mass density via minimum_CDNC().
+    5. Update cloud flag (ld_cc) from cloud_fraction>0.
+    6. Where cloud formed and liquid present, allow activation: increase CDNC up to
+       activated_cdnc and accumulate nucleation rate (pqnuc += dt * delta_cdnc).
+    7. Enforce CDNC >= computed minimum (pcdnc_min) or = cqtmin where no cloud present.
+    8. Update ICNC where cloud ice present and below icemin:
+       - nic_cirrus==1: prognostic conversion from ice mass -> number using rhoice and prid
+       - nic_cirrus==2: use pnicex (capped by pressure*1e6)
+       Then enforce picnc >= icemin (or cqtmin where no cloud).
 
-    # Initialize in-cloud ice/liquid in those newly cloudy points using the
-    # same "grid-mean to in-cloud" conversion.
-    ztmp3 = ztmp1 / jnp.maximum(cloud_fraction, clc_min)  # deposition source -> in-cloud ice
-    ztmp4 = ztmp2 / jnp.maximum(cloud_fraction, clc_min)  # condensation source -> in-cloud liquid
+    Parameters
+    ----------
+    (see argument list above; original Fortran names in parentheses)
 
-    in_cloud_ice_mixing_ratio = jnp.where(ll1, ztmp3, in_cloud_ice_mixing_ratio)
-    in_cloud_water_mixing_ratio = jnp.where(ll1, ztmp4, in_cloud_water_mixing_ratio)
+    Returns
+    -------
+    Updated (in same-ish order):
+      - cloud_flag (ld_cc)
+      - ice_crystal_number (picnc)
+      - nucleation_rate (pqnuc)
+      - droplet_number (pcdnc)
+      - cloud_fraction (paclc)
+      - cloud_ice_in_cloud (pxib)
+      - cloud_liquid_in_cloud (pxlb)
+      - pcdnc_min : minimum CDNC computed from max radius [1/m^3]
 
-    # ---------------------------------------------------------------------
-    # 3) Compute minimum CDNC implied by maximum droplet radius constraint
-    # ---------------------------------------------------------------------
-    # Here ztmp1 is cloud liquid water mass concentration [kg/m^3]
-    # (because in_cloud_water_mixing_ratio is [kg/kg] and air_density is [kg/m^3]).
-    ztmp1 = in_cloud_water_mixing_ratio * air_density
-    cdnc_min = minimum_CDNC(ztmp1)
+    Notes
+    -----
+    - Uses jnp.where (Fortran MERGE) to preserve values where masks are False.
+    - Uses helper minimum_CDNC(...) to compute pcdnc_min from in-cloud liquid mass density.
+    - The logic mirrors the Fortran ordering and masks; numerical safeguards (clipping,
+      max denominators) follow the Fortran intent.
+    """
+    # safety eps already imported as eps; other constants available (clc_min, cqtmin, icemin, nic_cirrus, rhoice)
+    # 1) relative humidity
+    relhum = specific_humidity_tmp / jnp.maximum(sat_spec_humidity_tmp, eps)
 
-    # ---------------------------------------------------------------------
-    # 4) Re-derive cloud_flag from cloud fraction
-    # ---------------------------------------------------------------------
+    # positive deposition / condensation sources (limit negative contributions)
+    src_dep = jnp.maximum(deposition_rate + tompkins_genti, 0.0)
+    src_cnd = jnp.maximum(condensation_rate + tompkins_gentl, 0.0)
+
+    # 2) update in-cloud ice/liquid where cloud already exists:
+    # pxib_new = pxib + pdep / max(paclc, clc_min)
+    pxib_candidate = cloud_ice_in_cloud + src_dep / jnp.maximum(cloud_fraction, clc_min)
+    pxib_candidate = jnp.maximum(pxib_candidate, 0.0)
+    cloud_ice_in_cloud = jnp.where(cloud_flag, pxib_candidate, cloud_ice_in_cloud)
+
+    pxlb_candidate = cloud_liquid_in_cloud + src_cnd / jnp.maximum(cloud_fraction, clc_min)
+    pxlb_candidate = jnp.maximum(pxlb_candidate, 0.0)
+    cloud_liquid_in_cloud = jnp.where(cloud_flag, pxlb_candidate, cloud_liquid_in_cloud)
+
+    # 3) if no cloud but there are positive sources, set cloud fraction from relhum and
+    #    set in-cloud values to source-per-cloud-area
+    make_cloud_mask = jnp.logical_and(~cloud_flag, jnp.logical_or(src_dep > 0.0, src_cnd > 0.0))
+
+    paclc_from_rh = jnp.clip(relhum, 0.01, 1.0)
+    cloud_fraction = jnp.where(make_cloud_mask, paclc_from_rh, cloud_fraction)
+
+    pxib_from_src = src_dep / jnp.maximum(cloud_fraction, clc_min)
+    pxib_from_src = jnp.maximum(pxib_from_src, 0.0)
+    cloud_ice_in_cloud = jnp.where(make_cloud_mask, pxib_from_src, cloud_ice_in_cloud)
+
+    pxlb_from_src = src_cnd / jnp.maximum(cloud_fraction, clc_min)
+    pxlb_from_src = jnp.maximum(pxlb_from_src, 0.0)
+    cloud_liquid_in_cloud = jnp.where(make_cloud_mask, pxlb_from_src, cloud_liquid_in_cloud)
+
+    # 4) compute minimum CDNC from in-cloud liquid mass density (kg/kg * rho -> kg/m^3)
+    liquid_mass_density = cloud_liquid_in_cloud * air_density  # [kg/m^3]
+    pcdnc_min = minimum_CDNC(liquid_mass_density)
+
+    # 5) redefine cloud flag
     cloud_flag = cloud_fraction > 0.0
 
-    # ---------------------------------------------------------------------
-    # 5) Update CDNC (cdnc) + accumulate nucleation proxy (droplet_nucleation_accumulated)
-    # ---------------------------------------------------------------------
-    # ll1: only if cloudy and enough liquid exists.
-    ll1 = jnp.logical_and(cloud_flag, in_cloud_water_mixing_ratio > cqtmin)
+    # 6) activation / nucleation: only where cloud exists and liquid > cqtmin
+    ll1 = jnp.logical_and(cloud_flag, cloud_liquid_in_cloud > cqtmin)
+    ll2 = jnp.logical_and(ll1, jnp.logical_and(droplet_number <= pcdnc_min, temp_prev > cthomi))
 
-    # ll2: only if CDNC is <= minimum and temperature is above homogeneous
-    # nucleation threshold (temperature_previous > cthomi).
-    # Interpretation: If CDNC is too low compared with what maximum droplet size
-    # would allow, then allow additional activated droplets (activated_cdnc) to increase
-    # CDNC, but not in very cold conditions.
-    ll2 = jnp.logical_and(ll1, jnp.logical_and(cdnc <= cdnc_min, temperature_previous > cthomi))
+    # desired additional droplets
+    delta_cdnc = jnp.maximum(activated_cdnc - droplet_number, 0.0)
 
-    # Candidate increase in CDNC from activation: ΔN = max(activated_cdnc - cdnc, 0)
-    ztmp1 = jnp.maximum(0.0, activated_cdnc - cdnc)
+    # only count activation where ll2
+    delta_cdnc_applied = jnp.where(ll2, delta_cdnc, 0.0)
 
-    # nucleation_rate_cdnc holds actual nucleation increment (for diagnostics in Fortran).
-    nucleation_rate_cdnc = jnp.where(ll2, ztmp1, 0.0)
+    # update droplet number and nucleation-rate diagnostic (pqnuc += dt * delta)
+    droplet_number = droplet_number + delta_cdnc_applied
+    nucleation_rate = nucleation_rate + dt * delta_cdnc_applied
 
-    # Apply the increase to CDNC and the accumulator.
-    cdnc = cdnc + nucleation_rate_cdnc
+    # 7) enforce minimum CDNC or set to cqtmin where no meaningful cloud (Fortran MERGE semantics)
+    # ztmp1 = max(pcdnc, pcdnc_min)
+    tmp_cdnc_max = jnp.maximum(droplet_number, pcdnc_min)
+    # Fortran: pcdnc = MERGE( ztmp1, cqtmin, ll1 ) -> if ll1 True -> tmp_cdnc_max else -> cqtmin
+    droplet_number = jnp.where(ll1, tmp_cdnc_max, cqtmin)
 
-    # The Fortran code accumulates droplet nucleation as droplet_nucleation_accumulated = droplet_nucleation_accumulated + zdt * ΔN.
-    # In this Python implementation, the `dt` parameter is explicitly passed to the function.
-    # The accumulation is performed as droplet_nucleation_accumulated += dt * nucleation_rate_cdnc,
-    # ensuring that droplet_nucleation_accumulated is updated correctly as [1/m^3/s].
-    droplet_nucleation_accumulated += dt * nucleation_rate_cdnc
+    # 8) update ICNC similarly
+    ll1_ic = jnp.logical_and(cloud_flag, cloud_ice_in_cloud > cqtmin)
+    ll2_ic = jnp.logical_and(ll1_ic, ice_crystal_number <= icemin)
 
-    # Enforce at least minimum CDNC if cloudy & has liquid, otherwise set to cqtmin.
-    ztmp1 = jnp.maximum(cdnc, cdnc_min)
-    cdnc = jnp.where(ll1, ztmp1, cqtmin)
+    # compute candidate ICNC depending on nic_cirrus
+    if int(nic_cirrus) == 1:
+        # 0.75 / (pi * rhoice) * prho * pxib / prid^3  (note units)
+        icnc_candidate = 0.75 / (pi * rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, eps)
+    elif int(nic_cirrus) == 2:
+        # min(pnicex, pap*1e6)
+        icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)
+    else:
+        # default: leave unchanged candidate (set to existing to be MERGE-safe)
+        icnc_candidate = ice_crystal_number
 
-    # ---------------------------------------------------------------------
-    # 6) Update ICNC (icnc) based on chosen cirrus nucleation scheme
-    # ---------------------------------------------------------------------
-    # ll1: only if cloudy and enough ice exists.
-    ll1 = jnp.logical_and(cloud_flag, in_cloud_ice_mixing_ratio > cqtmin)
+    ice_crystal_number = jnp.where(ll2_ic, icnc_candidate, ice_crystal_number)
 
-    # ll2: only if ICNC is too small (<= icemin) in icy cloud.
-    ll2 = jnp.logical_and(ll1, icnc <= icemin)
+    # enforce minimum icnc or set to cqtmin where no cloud-ice
+    tmp_icnc_max = jnp.maximum(ice_crystal_number, icemin)
+    ice_crystal_number = jnp.where(ll1_ic, tmp_icnc_max, cqtmin)
 
-    # This produces a diagnostic ICNC consistent with available ice mass and
-    # a prescribed crystal size (option 1), or from an explicit nucleation number
-    # limited by aerosol availability (option 2).
-    if nic_cirrus == 1:
-        ztmp1 = 0.75 / (pi * rhoice) * air_density * in_cloud_ice_mixing_ratio / jnp.maximum(ice_mean_volume_radius**3, 1e-12)
-    elif nic_cirrus == 2:
-        ztmp1 = jnp.minimum(activated_icnc, aerosol_total * 1e6)
-
-    # Update icnc only where ll2 requests a reset/increase.
-    icnc = jnp.where(ll2, ztmp1, icnc)
-
-    # Enforce a minimum ICNC in icy clouds; otherwise set to cqtmin (as in Fortran).
-    ztmp1 = jnp.maximum(icnc, icemin)
-    icnc = jnp.where(ll1, ztmp1, cqtmin)
-    
-    #return cloud_flag, icnc, droplet_nucleation_accumulated, cdnc, cloud_fraction, in_cloud_ice_mixing_ratio, in_cloud_water_mixing_ratio, cdnc_min
-    pass
-
+    return (
+        cloud_flag,
+        ice_crystal_number,
+        nucleation_rate,
+        droplet_number,
+        cloud_fraction,
+        cloud_ice_in_cloud,
+        cloud_liquid_in_cloud,
+        pcdnc_min,
+    )
