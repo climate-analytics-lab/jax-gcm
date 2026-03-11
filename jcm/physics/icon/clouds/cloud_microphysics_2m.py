@@ -2188,7 +2188,6 @@ def sat_spec_hum(
 
     return pes, pcor, saturation_specific_humidity
 
-# ...existing code...
 def update_in_cloud_water(
     pressure: jnp.ndarray,               # Original: pap
     activated_cdnc: jnp.ndarray,         # Original: pcdncact
@@ -2215,8 +2214,6 @@ def update_in_cloud_water(
 ]:
     """
     Update in-cloud water/ice, CDNC/ICNC activation/nucleation and cloud cover.
-
-    JAX port of Fortran subroutine `update_in_cloud_water`.
 
     Overview
     --------
