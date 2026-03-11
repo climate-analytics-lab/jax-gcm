@@ -41,7 +41,8 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
         aod_total=aod_total,
         aod_anthropogenic=aod_anthropogenic,
         aod_background=aod_background,
-        cdnc_factor=cdnc_factor
+        cdnc_factor=cdnc_factor,
+        angstrom=jnp.ones(ncols) * 1.5,
     )
 
 

@@ -48,9 +48,13 @@ def get_simple_aerosol(
     ssa_profile = jnp.zeros((nlev, ncols))
     asy_profile = jnp.zeros((nlev, ncols))
     
+    # Get temporal weights from forcing data (allows time-varying emissions)
+    year_weight = forcing.aerosol_year_weight
+    ann_cycle = forcing.aerosol_ann_cycle
+
     # Calculate anthropogenic and background AOD using vectorized operations
-    aod_anthropogenic = get_anthropogenic_aod(lats, lons, aerosol_params)
-    aod_background = get_background_aod(lats, lons, aerosol_params)
+    aod_anthropogenic = get_anthropogenic_aod(lats, lons, aerosol_params, year_weight, ann_cycle)
+    aod_background = get_background_aod(lats, lons, aerosol_params, ann_cycle)
     
     # Calculate vertical profiles for each plume using vectorized operations
     plume_profiles = get_vertical_profiles(height_full, aerosol_params)
@@ -77,16 +81,16 @@ def get_simple_aerosol(
     aod_profile = plume_contribution + bg_contribution
     
     # Calculate optical properties using weighted averages
-    ssa_profile, asy_profile = get_optical_properties(
+    ssa_profile, asy_profile, angstrom = get_optical_properties(
         aod_profile, spatial_dist, aerosol_params
     )
-    
+
     # Calculate total column AOD
     aod_total = jnp.sum(aod_profile, axis=0)
-    
+
     # Calculate Twomey effect using proper CDNC relationship
     cdnc_factor = get_CDNC(aod_anthropogenic) / get_CDNC(jnp.zeros_like(aod_anthropogenic))
-    
+
     # Update aerosol data
     aerosol_data = physics_data.aerosol.copy(
         aod_profile=aod_profile,
@@ -95,7 +99,8 @@ def get_simple_aerosol(
         aod_total=aod_total,
         aod_anthropogenic=aod_anthropogenic,
         aod_background=aod_background,
-        cdnc_factor=cdnc_factor
+        cdnc_factor=cdnc_factor,
+        angstrom=angstrom
     )
     
     physics_data = physics_data.copy(aerosol=aerosol_data)
@@ -175,26 +180,24 @@ def get_plume_spatial_distribution(lats, lons, parameters):
     return jnp.sum(weighted_gaussian, axis=0)  # (nplumes, ncols)
 
 
-def get_background_aod(lats, lons, parameters, constant_background=0.02):
+def get_background_aod(lats, lons, parameters, ann_cycle, constant_background=0.02):
     """Calculate background (pre-industrial) aerosol optical depth
-    
+
     Args:
         lats: Array of latitudes [degrees]
         lons: Array of longitudes [degrees]
         parameters: AerosolParameters object
+        ann_cycle: Annual cycle weights (nplumes,) from forcing data
         constant_background: Constant background AOD value
-        
+
     Returns:
         Background AOD array of shape (ncols,)
 
     """
-    # Use annual cycle parameter for background
-    time_weight_bg = parameters.ann_cycle
-
     # Multiply the Gaussians through the grid
     spatial_dist = get_plume_spatial_distribution(lats, lons, parameters)
-    cw_bg = time_weight_bg[:, jnp.newaxis] * parameters.aod_fmbg[:, jnp.newaxis] * spatial_dist
-    
+    cw_bg = ann_cycle[:, jnp.newaxis] * parameters.aod_fmbg[:, jnp.newaxis] * spatial_dist
+
     # calculate contribution to plume from its different features, to get a column weight for the anthropogenic
     #   (cw_an) and the fine-mode background aerosol (cw_bg)
     aod_PI = jnp.sum(cw_bg, axis=0) + constant_background
@@ -202,20 +205,22 @@ def get_background_aod(lats, lons, parameters, constant_background=0.02):
     return aod_PI
 
 
-def get_anthropogenic_aod(lats, lons, parameters):
+def get_anthropogenic_aod(lats, lons, parameters, year_weight, ann_cycle):
     """Calculate anthropogenic aerosol optical depth
-    
+
     Args:
         lats: Array of latitudes [degrees]
         lons: Array of longitudes [degrees]
         parameters: AerosolParameters object
-        
+        year_weight: Year-specific emission weights (nplumes,) from forcing data
+        ann_cycle: Annual cycle weights (nplumes,) from forcing data
+
     Returns:
         Anthropogenic AOD array of shape (ncols,)
 
     """
     # Use time weights for anthropogenic emissions
-    time_weight = parameters.year_weight * parameters.ann_cycle
+    time_weight = year_weight * ann_cycle
 
     # Multiply the Gaussians through the grid
     spatial_dist = get_plume_spatial_distribution(lats, lons, parameters)
@@ -291,44 +296,49 @@ def get_background_vertical_profile(height_full):
 
 
 def get_optical_properties(aod_profile, spatial_dist, parameters):
-    """Calculate single scattering albedo and asymmetry parameter profiles
-    
+    """Calculate single scattering albedo, asymmetry parameter, and Angstrom exponent
+
     Args:
         aod_profile: AOD profile array of shape (nlev, ncols)
         spatial_dist: Spatial distribution array of shape (nplumes, ncols)
         parameters: AerosolParameters object
-        
+
     Returns:
-        Tuple of (ssa_profile, asy_profile) arrays of shape (nlev, ncols)
+        Tuple of (ssa_profile, asy_profile, angstrom) where profiles are
+        (nlev, ncols) and angstrom is (ncols,)
 
     """
     # Weight optical properties by AOD contribution from each plume
     # aod_profile: (nlev, ncols)
     # spatial_dist: (nplumes, ncols)
-    # parameters.ssa550, parameters.asy550: (nplumes,)
-    
+    # parameters.ssa550, parameters.asy550, parameters.angstrom: (nplumes,)
+
     # Calculate plume contributions to total AOD
     total_aod = jnp.sum(aod_profile, axis=0, keepdims=True)  # (1, ncols)
     total_aod = jnp.where(total_aod > 0, total_aod, 1.0)  # Avoid division by zero
-    
+
     # Weight by spatial distribution
     plume_weights = spatial_dist / jnp.sum(spatial_dist, axis=0, keepdims=True)
-    
+
     # Calculate weighted optical properties
     ssa_weighted = jnp.sum(
-        plume_weights * parameters.ssa550[:, jnp.newaxis], 
+        plume_weights * parameters.ssa550[:, jnp.newaxis],
         axis=0
     )
     asy_weighted = jnp.sum(
-        plume_weights * parameters.asy550[:, jnp.newaxis], 
+        plume_weights * parameters.asy550[:, jnp.newaxis],
         axis=0
     )
-    
+    angstrom_weighted = jnp.sum(
+        plume_weights * parameters.angstrom[:, jnp.newaxis],
+        axis=0
+    )
+
     # Expand to full vertical profile
     ssa_profile = jnp.ones_like(aod_profile) * ssa_weighted[jnp.newaxis, :]
     asy_profile = jnp.ones_like(aod_profile) * asy_weighted[jnp.newaxis, :]
-    
-    return ssa_profile, asy_profile
+
+    return ssa_profile, asy_profile, angstrom_weighted
 
 
 def get_CDNC(AOD, A=60, B=20):

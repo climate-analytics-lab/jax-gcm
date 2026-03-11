@@ -43,8 +43,6 @@ class TestAerosolParameters:
         assert params.sig_lat_W.shape == (2, 9)
         assert params.theta.shape == (2, 9)
         assert params.ftr_weight.shape == (2, 9)
-        assert params.ann_cycle.shape == (9,)
-        assert params.year_weight.shape == (9,)
         assert jnp.isscalar(params.background_aod)
     
     def test_parameter_ranges(self):
@@ -215,7 +213,7 @@ class TestAODCalculations:
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
         
-        aod_anth = get_anthropogenic_aod(lats, lons, params)
+        aod_anth = get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes))
         
         assert aod_anth.shape == (ncols,)
         assert jnp.all(aod_anth >= 0)
@@ -228,7 +226,7 @@ class TestAODCalculations:
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
         
-        aod_bg = get_background_aod(lats, lons, params)
+        aod_bg = get_background_aod(lats, lons, params, jnp.ones(params.nplumes))
         
         assert aod_bg.shape == (ncols,)
         assert jnp.all(aod_bg >= 0)
@@ -245,8 +243,10 @@ class TestAODCalculations:
         remote_lats = jnp.array([0.0, 0.0, 0.0])
         remote_lons = jnp.array([0.0, 90.0, 180.0])
         
-        aod_plume = get_anthropogenic_aod(plume_lats, plume_lons, params)
-        aod_remote = get_anthropogenic_aod(remote_lats, remote_lons, params)
+        year_weight = jnp.ones(params.nplumes)
+        ann_cycle = jnp.ones(params.nplumes)
+        aod_plume = get_anthropogenic_aod(plume_lats, plume_lons, params, year_weight, ann_cycle)
+        aod_remote = get_anthropogenic_aod(remote_lats, remote_lons, params, year_weight, ann_cycle)
         
         # AOD should be higher at plume centers
         assert jnp.all(aod_plume > aod_remote)
@@ -264,7 +264,7 @@ class TestOpticalProperties:
         aod_profile = jnp.ones((nlev, ncols)) * 0.1
         spatial_dist = jnp.ones((params.nplumes, ncols)) / params.nplumes
         
-        ssa_profile, asy_profile = get_optical_properties(aod_profile, spatial_dist, params)
+        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
         
         assert ssa_profile.shape == (nlev, ncols)
         assert asy_profile.shape == (nlev, ncols)
@@ -285,7 +285,7 @@ class TestOpticalProperties:
         spatial_dist = jnp.zeros((params.nplumes, ncols))
         spatial_dist = spatial_dist.at[0, :].set(1.0)  # Only first plume
         
-        ssa_profile, asy_profile = get_optical_properties(aod_profile, spatial_dist, params)
+        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
         
         # Should match first plume properties
         expected_ssa = params.ssa550[0]
@@ -378,7 +378,7 @@ class TestJAXCompatibility:
         params = AerosolParameters.default()
         
         def aod_sum(lats, lons):
-            return jnp.sum(get_anthropogenic_aod(lats, lons, params))
+            return jnp.sum(get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes)))
         
         ncols = 20
         lats = jnp.linspace(-90, 90, ncols)
@@ -412,8 +412,8 @@ class TestIntegration:
         height_full = jnp.repeat(height_full, ncols, axis=1)
         
         # Test individual functions work together
-        aod_anth = get_anthropogenic_aod(lats, lons, params)
-        aod_bg = get_background_aod(lats, lons, params)
+        aod_anth = get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes))
+        aod_bg = get_background_aod(lats, lons, params, jnp.ones(params.nplumes))
         
         assert aod_anth.shape == (ncols,)
         assert aod_bg.shape == (ncols,)
@@ -430,7 +430,7 @@ class TestIntegration:
         
         # Test optical properties
         aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        ssa_profile, asy_profile = get_optical_properties(aod_profile, spatial_dist, params)
+        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
         
         assert ssa_profile.shape == (nlev, ncols)
         assert asy_profile.shape == (nlev, ncols)
@@ -443,20 +443,22 @@ class TestIntegration:
         """Test that individual functions can be JIT compiled"""
         params = AerosolParameters.default()
         ncols = 50
-        
+
         # Test JIT compilation of each function
         jit_spatial = jax.jit(get_plume_spatial_distribution)
         jit_aod_anth = jax.jit(get_anthropogenic_aod)
         jit_aod_bg = jax.jit(get_background_aod)
-        
+
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
-        
+        year_weight = jnp.ones(params.nplumes)
+        ann_cycle = jnp.ones(params.nplumes)
+
         # All should compile and run without errors
         spatial_dist = jit_spatial(lats, lons, params)
-        aod_anth = jit_aod_anth(lats, lons, params)
-        aod_bg = jit_aod_bg(lats, lons, params)
-        
+        aod_anth = jit_aod_anth(lats, lons, params, year_weight, ann_cycle)
+        aod_bg = jit_aod_bg(lats, lons, params, ann_cycle)
+
         assert spatial_dist.shape == (params.nplumes, ncols)
         assert aod_anth.shape == (ncols,)
         assert aod_bg.shape == (ncols,)
@@ -469,7 +471,7 @@ class TestIntegration:
         params = AerosolParameters.default()
         
         def total_aod(lats, lons):
-            return jnp.sum(get_anthropogenic_aod(lats, lons, params))
+            return jnp.sum(get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes)))
         
         ncols = 20
         lats = jnp.linspace(-90, 90, ncols)
@@ -512,7 +514,7 @@ class TestIntegration:
         spatial_dist = get_plume_spatial_distribution(lats, lons, params)
         
         aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        ssa_profile, asy_profile = get_optical_properties(aod_profile, spatial_dist, params)
+        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
         
         # Should be within range of parameter values
         assert jnp.all(ssa_profile >= jnp.min(params.ssa550))

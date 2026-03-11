@@ -662,6 +662,7 @@ def apply_radiation(state: PhysicsState,
         aod_total=physics_data.aerosol.aod_total.reshape(ncols),  # (ncols,)
         aod_anthropogenic=physics_data.aerosol.aod_anthropogenic.reshape(ncols),  # (ncols,)
         aod_background=physics_data.aerosol.aod_background.reshape(ncols),  # (ncols,)
+        angstrom=physics_data.aerosol.angstrom.reshape(ncols),  # (ncols,)
     )
     
     radiation_results = jax.vmap(

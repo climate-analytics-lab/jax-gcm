@@ -228,40 +228,54 @@ def radiation_scheme(
 
     """
     nlev = temperature.shape[0]
-    
-    # For now, assume aerosol properties are spectrally uniform
-    # Expand aerosol profiles to radiation bands
+
+    # Expand aerosol profiles to radiation bands with Angstrom spectral scaling
+    # AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
     # Handle both 1D (single column from vmap) and 2D (full grid) aerosol data
     if aerosol_data.aod_profile.ndim == 1:
         # 1D case: single column from vmap
-        aerosol_aod_col = aerosol_data.aod_profile[:, None]  # Make it [nlev, 1]
-        aerosol_ssa_col = aerosol_data.ssa_profile[:, None]
-        aerosol_asy_col = aerosol_data.asy_profile[:, None]
+        aerosol_aod_col = aerosol_data.aod_profile  # [nlev]
+        aerosol_ssa_col = aerosol_data.ssa_profile
+        aerosol_asy_col = aerosol_data.asy_profile
+        angstrom = aerosol_data.angstrom  # scalar from vmap
     else:
         # 2D case: take first column
-        aerosol_aod_col = aerosol_data.aod_profile[:, 0:1]
-        aerosol_ssa_col = aerosol_data.ssa_profile[:, 0:1]
-        aerosol_asy_col = aerosol_data.asy_profile[:, 0:1]
-    
+        aerosol_aod_col = aerosol_data.aod_profile[:, 0]
+        aerosol_ssa_col = aerosol_data.ssa_profile[:, 0]
+        aerosol_asy_col = aerosol_data.asy_profile[:, 0]
+        angstrom = aerosol_data.angstrom[0]
+
     # SW bands - use fixed default values (2 SW bands, 3 LW bands)
-    # This is standard for ICON radiation and avoids tracer issues
     default_n_sw_bands = 2
     default_n_lw_bands = 3
-    
-    aerosol_tau_sw = jnp.tile(aerosol_aod_col, (1, default_n_sw_bands))
-    aerosol_ssa_sw = jnp.tile(aerosol_ssa_col, (1, default_n_sw_bands))
-    aerosol_asy_sw = jnp.tile(aerosol_asy_col, (1, default_n_sw_bands))
-    
-    # LW bands (pure absorption for aerosols)
-    aerosol_tau_lw = jnp.tile(aerosol_aod_col, (1, default_n_lw_bands))
-    aerosol_ssa_lw = jnp.zeros((nlev, default_n_lw_bands))  # Pure absorption
+
+    # Compute representative wavelengths (μm) from SW band limits (wavenumbers cm⁻¹)
+    # λ = 1e4 / ν_mid, where ν_mid is the midpoint wavenumber of the band
+    sw_band_limits = parameters.sw_band_limits  # [[4000, 14500], [14500, 50000]]
+    sw_wavelengths = 1e4 / ((sw_band_limits[:, 0] + sw_band_limits[:, 1]) / 2.0)
+
+    # Apply Angstrom scaling: AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
+    ref_wavelength = 0.55  # μm (550 nm reference)
+    sw_scaling = (sw_wavelengths / ref_wavelength) ** (-angstrom)  # [n_sw_bands]
+
+    aerosol_tau_sw = aerosol_aod_col[:, None] * sw_scaling[None, :]  # [nlev, n_sw_bands]
+    aerosol_ssa_sw = jnp.tile(aerosol_ssa_col[:, None], (1, default_n_sw_bands))
+    aerosol_asy_sw = jnp.tile(aerosol_asy_col[:, None], (1, default_n_sw_bands))
+
+    # LW bands: apply Angstrom scaling (gives very small AOD at long wavelengths)
+    lw_band_limits = parameters.lw_band_limits  # [[10, 350], [350, 500], [500, 2500]]
+    lw_wavelengths = 1e4 / ((lw_band_limits[:, 0] + lw_band_limits[:, 1]) / 2.0)
+    lw_scaling = (lw_wavelengths / ref_wavelength) ** (-angstrom)
+
+    aerosol_tau_lw = aerosol_aod_col[:, None] * lw_scaling[None, :]  # [nlev, n_lw_bands]
+    aerosol_ssa_lw = jnp.zeros((nlev, default_n_lw_bands))  # Pure absorption in LW
     aerosol_asy_lw = jnp.zeros((nlev, default_n_lw_bands))
-    
-    # For SW use scattering properties, for LW use absorption
+
+    # Concatenate SW and LW
     aerosol_optical_depth = jnp.concatenate([aerosol_tau_sw, aerosol_tau_lw], axis=1)
     aerosol_ssa = jnp.concatenate([aerosol_ssa_sw, aerosol_ssa_lw], axis=1)
     aerosol_asymmetry = jnp.concatenate([aerosol_asy_sw, aerosol_asy_lw], axis=1)
-    
+
     # Cloud droplet number concentration factor
     # Handle both 1D (single column from vmap) and 2D (full grid) cases
     if aerosol_data.cdnc_factor.ndim == 0:
@@ -269,7 +283,7 @@ def radiation_scheme(
         cdnc_factor = aerosol_data.cdnc_factor
     else:
         # 1D case: take first element
-        cdnc_factor = aerosol_data.cdnc_factor[0] 
+        cdnc_factor = aerosol_data.cdnc_factor[0]
     
     # Now perform the actual radiation calculation
     

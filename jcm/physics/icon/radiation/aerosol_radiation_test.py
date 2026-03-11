@@ -9,6 +9,11 @@ from jcm.physics.icon.radiation.radiation_scheme import (
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters, OpticalProperties
 from jcm.physics.icon.radiation.cloud_optics import effective_radius_liquid
+from jcm.physics.icon.aerosol.simple_aerosol import (
+    get_optical_properties,
+    get_anthropogenic_aod,
+)
+from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
 
 def test_aerosol_cloud_interaction():
     """Test that aerosols modify cloud effective radius"""
@@ -110,13 +115,99 @@ def test_radiation_scheme_with_without_aerosols():
         return
 
 
+def test_angstrom_spectral_scaling():
+    """Test that Angstrom exponent produces correct spectral AOD scaling"""
+    # AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
+    ref_wavelength = 0.55  # μm
+
+    # Test with known Angstrom exponent
+    alpha = 1.5
+    aod_550 = 0.3
+
+    # Shorter wavelength should have higher AOD (more scattering)
+    lambda_short = 0.4  # μm
+    lambda_long = 1.0   # μm
+
+    aod_short = aod_550 * (lambda_short / ref_wavelength) ** (-alpha)
+    aod_long = aod_550 * (lambda_long / ref_wavelength) ** (-alpha)
+
+    assert aod_short > aod_550, "AOD at shorter λ should be higher"
+    assert aod_long < aod_550, "AOD at longer λ should be lower"
+
+    # Check exact values
+    expected_short = aod_550 * (0.4 / 0.55) ** (-1.5)
+    expected_long = aod_550 * (1.0 / 0.55) ** (-1.5)
+    assert jnp.allclose(aod_short, expected_short, rtol=1e-6)
+    assert jnp.allclose(aod_long, expected_long, rtol=1e-6)
+
+
+def test_angstrom_weighted_average():
+    """Test that get_optical_properties returns proper Angstrom weighted average"""
+    params = AerosolParameters.default()
+    nlev, ncols = 10, 50
+
+    aod_profile = jnp.ones((nlev, ncols)) * 0.1
+
+    # Single plume dominating
+    spatial_dist = jnp.zeros((params.nplumes, ncols))
+    spatial_dist = spatial_dist.at[0, :].set(1.0)
+
+    _, _, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
+
+    # Should match first plume's Angstrom exponent
+    assert jnp.allclose(angstrom, params.angstrom[0], rtol=1e-6)
+
+    # Equal-weight plumes
+    spatial_dist_equal = jnp.ones((params.nplumes, ncols)) / params.nplumes
+    _, _, angstrom_equal = get_optical_properties(aod_profile, spatial_dist_equal, params)
+
+    # Should be mean of all plume values
+    expected = jnp.mean(params.angstrom)
+    assert jnp.allclose(angstrom_equal[0], expected, rtol=1e-5)
+
+
+def test_temporal_weights_scale_aod():
+    """Test that temporal weights from forcing scale anthropogenic AOD"""
+    params = AerosolParameters.default()
+    ncols = 100
+    lats = jnp.linspace(-90, 90, ncols)
+    lons = jnp.linspace(-180, 180, ncols)
+
+    # Present-day: weights = 1
+    year_weight_pd = jnp.ones(params.nplumes)
+    ann_cycle = jnp.ones(params.nplumes)
+    aod_pd = get_anthropogenic_aod(lats, lons, params, year_weight_pd, ann_cycle)
+
+    # Pre-industrial: weights = 0
+    year_weight_pi = jnp.zeros(params.nplumes)
+    aod_pi = get_anthropogenic_aod(lats, lons, params, year_weight_pi, ann_cycle)
+
+    # Half emissions
+    year_weight_half = jnp.ones(params.nplumes) * 0.5
+    aod_half = get_anthropogenic_aod(lats, lons, params, year_weight_half, ann_cycle)
+
+    assert jnp.all(aod_pi == 0), "Pre-industrial AOD should be zero"
+    assert jnp.allclose(aod_half, aod_pd * 0.5, rtol=1e-6), "Half weights should give half AOD"
+
+    # Seasonal cycle: reduce one plume
+    ann_cycle_reduced = jnp.ones(params.nplumes)
+    ann_cycle_reduced = ann_cycle_reduced.at[0].set(0.5)
+    aod_seasonal = get_anthropogenic_aod(lats, lons, params, year_weight_pd, ann_cycle_reduced)
+
+    # Total AOD should decrease compared to present-day
+    assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)
+
+
 if __name__ == "__main__":
     print("Testing aerosol-radiation integration...")
     print("=" * 50)
-    
+
     test_aerosol_cloud_interaction()
-    test_optical_property_combination() 
+    test_optical_property_combination()
     test_radiation_scheme_with_without_aerosols()
-    
-    print("\\n" + "=" * 50)
+    test_angstrom_spectral_scaling()
+    test_angstrom_weighted_average()
+    test_temporal_weights_scale_aod()
+
+    print("\n" + "=" * 50)
     print("All tests completed!")
