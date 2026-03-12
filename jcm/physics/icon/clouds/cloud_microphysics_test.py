@@ -18,14 +18,15 @@ from .cloud_utils import (
     get_util_var, get_cloud_bounds, eff_ice_crystal_radius, minimum_CDNC
 )
 from .cloud_microphysics_2m import (
-    MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain, sedimentation_ice,
-    mixed_phase_deposition_and_corrections, freezing_below_238K, het_mxphase_freezing, precip_formation_warm, precip_formation_cold, update_in_cloud_water
+    MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain, 
+    sedimentation_ice, mixed_phase_deposition_and_corrections, freezing_below_238K, het_mxphase_freezing, 
+    precip_formation_warm, precip_formation_cold, update_in_cloud_water, update_tendencies_and_important_vars
 )
 from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf, rhoh2o, ak, p0s1_bg, rv, t0
 
 from .cloud_params_2m import (cqtmin, ldyn_cdnc_min, rcd_vol_max, cdnc_min_fixed, 
                               cdnc_min_lower, cdnc_min_upper, fact_PK, pow_PK, icemin, clc_min,
-                              cthomi, tmelt, nic_cirrus, eps
+                              cthomi, tmelt, nic_cirrus, eps, ccwmin
                               )
 
 from math import pi
@@ -2341,6 +2342,223 @@ class TestUpdatePrecipFluxes_2M:
         assert float(rain_flux_o[1]) == 0.0
         assert float(snow_melt_o[1]) == 0.0
 
+class TestUpdateTendencies_2M:
+    """Unit tests for update_tendencies_and_important_vars."""
+
+    def test_tracer_tendencies_and_shapes(self):
+        from .cloud_microphysics_2m import update_tendencies_and_important_vars, microphysics_dt_constants
+        n = 4
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        icnc = _full(n, 5e4)
+        cdnc = _full(n, 1e8)
+        ice_mmr_prev = _full(n, ccwmin * 1.1)   # ensure ice_mmr_next >= ccwmin so tracer term kept
+        liq_mmr_prev = _zeros(n)
+        tracer_tm1_cdnc = _zeros(n)
+        tracer_tm1_icnc = _zeros(n)
+
+        # small source terms to exercise tendency accumulation
+        condensation_rate = _full(n, 1e-6)
+        deposition_rate = _zeros(n)
+        rain_evap_mmr = _zeros(n)
+        freezing_rate = _zeros(n)
+        tompkins_ice = _zeros(n)
+        tompkins_liq = _zeros(n)
+        incloud_ice_melt = _zeros(n)
+        lsdcp = _full(n, 2.836e6 / 1004.0)
+        lvdcp = _full(n, 2.501e6 / 1004.0)
+        air_density = _full(n, 1.2)
+        inv_air_density = 1.0 / air_density
+
+        rain_formation = _zeros(n)
+        snow_accretion = _zeros(n)
+        snow_formation = _zeros(n)
+        cloud_ice_evap = _zeros(n)
+        ice_flux_melt = _zeros(n)
+        pxitec = _zeros(n)
+        pxlevap = _zeros(n)
+        pxltec = _zeros(n)
+        pxisub = _zeros(n)
+        snow_sublimation_mmr = _zeros(n)
+        snow_melt = _zeros(n)
+
+        cloud_ice_in_cloud = _zeros(n)
+        cloud_liquid_in_cloud = _zeros(n)
+        temp_tmp = _full(n, 280.0)
+        liquid_cloud_flag = jnp.ones((n,), dtype=bool)
+        ice_cloud_flag = jnp.ones((n,), dtype=bool)
+
+        # INOUT arrays (start zeros / small)
+        cloud_fraction = _full(n, 0.5)
+        specific_humidity_tendency = _zeros(n)
+        temp_tendency = _zeros(n)
+        ice_tendency = _zeros(n)
+        liq_tendency = _zeros(n)
+        tracer_tendency_cdnc = _zeros(n)
+        tracer_tendency_icnc = _zeros(n)
+        incloud_liq_before_rain = _full(n, 1e-4)
+        incloud_ice_before_snow = _full(n, 1e-4)
+
+        out = update_tendencies_and_important_vars(
+            icnc, cdnc, ice_mmr_prev, liq_mmr_prev, tracer_tm1_cdnc, tracer_tm1_icnc,
+            condensation_rate, deposition_rate, rain_evap_mmr, freezing_rate,
+            tompkins_ice, tompkins_liq, incloud_ice_melt, lsdcp, lvdcp,
+            air_density, inv_air_density, rain_formation, snow_accretion,
+            snow_formation, cloud_ice_evap, ice_flux_melt, pxitec, pxlevap,
+            pxltec, pxisub, snow_sublimation_mmr, snow_melt,
+            cloud_ice_in_cloud, cloud_liquid_in_cloud, temp_tmp,
+            liquid_cloud_flag, ice_cloud_flag,
+            cloud_fraction, specific_humidity_tendency, temp_tendency,
+            ice_tendency, liq_tendency, tracer_tendency_cdnc, tracer_tendency_icnc,
+            incloud_liq_before_rain, incloud_ice_before_snow,
+            dt
+        )
+
+        # outputs order: cloud_fraction, specific_humidity_tendency, temp_tendency, ice_tendency, liq_tendency,
+        # tracer_tendency_cdnc, tracer_tendency_icnc, incloud_liq_before_rain, incloud_ice_before_snow, out_preffl, out_preffi
+        assert len(out) == 11
+        for a in out:
+            assert a.shape == (n,)
+            assert jnp.all(jnp.isfinite(a))
+
+        # tracer tendencies computed exactly by microphysics_dt_constants relation
+        _, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt)
+        expected_tte_cdnc = ztmst_rcp * (cdnc * inv_air_density - tracer_tm1_cdnc)
+        expected_tte_icnc = ztmst_rcp * (icnc * inv_air_density - tracer_tm1_icnc)
+
+        assert jnp.allclose(out[5], expected_tte_cdnc)
+        assert jnp.allclose(out[6], expected_tte_icnc)
+
+    def test_small_cloud_fraction_zeroes_incloud_accumulators(self):
+        from .cloud_microphysics_2m import update_tendencies_and_important_vars
+        n = 3
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        # Build minimal inputs reusing _full/_zeros above
+        args = {
+            "icnc": _zeros(n),
+            "cdnc": _zeros(n),
+            "ice_mmr_prev": _zeros(n),
+            "liq_mmr_prev": _zeros(n),
+            "tracer_tm1_cdnc": _zeros(n),
+            "tracer_tm1_icnc": _zeros(n),
+            "condensation_rate": _zeros(n),
+            "deposition_rate": _zeros(n),
+            "rain_evap_mmr": _zeros(n),
+            "freezing_rate": _zeros(n),
+            "tompkins_ice": _zeros(n),
+            "tompkins_liq": _zeros(n),
+            "incloud_ice_melt": _zeros(n),
+            "lsdcp": _full(n, 2.836e6 / 1004.0),
+            "lvdcp": _full(n, 2.501e6 / 1004.0),
+            "air_density": _full(n, 1.2),
+            "inv_air_density": _full(n, 1.0 / 1.2),
+            "rain_formation": _zeros(n),
+            "snow_accretion": _zeros(n),
+            "snow_formation": _zeros(n),
+            "cloud_ice_evap": _zeros(n),
+            "ice_flux_melt": _zeros(n),
+            "pxitec": _zeros(n),
+            "pxlevap": _zeros(n),
+            "pxltec": _zeros(n),
+            "pxisub": _zeros(n),
+            "snow_sublimation_mmr": _zeros(n),
+            "snow_melt": _zeros(n),
+            "cloud_ice_in_cloud": _zeros(n),
+            "cloud_liquid_in_cloud": _zeros(n),
+            "temp_tmp": _full(n, 280.0),
+            "liquid_cloud_flag": jnp.zeros((n,), dtype=bool),
+            "ice_cloud_flag": jnp.zeros((n,), dtype=bool),
+            # INOUTs
+            "cloud_fraction": _zeros(n),  # small cloud_fraction triggers clearing
+            "specific_humidity_tendency": _full(n, 1e-6),
+            "temp_tendency": _full(n, 1e-6),
+            "ice_tendency": _full(n, 1e-6),
+            "liq_tendency": _full(n, 1e-6),
+            "tracer_tendency_cdnc": _full(n, 1e-6),
+            "tracer_tendency_icnc": _full(n, 1e-6),
+            "incloud_liq_before_rain": _full(n, 1e-21),  # below 1e-20 -> should be zeroed
+            "incloud_ice_before_snow": _full(n, 1e-21),
+            "dt": dt,
+        }
+
+        out = update_tendencies_and_important_vars(**args)
+
+        cloud_fraction_o = out[0]
+        incloud_liq_o = out[7]
+        incloud_ice_o = out[8]
+
+        assert jnp.all(cloud_fraction_o == 0.0)
+        assert jnp.all(incloud_liq_o == 0.0)
+        assert jnp.all(incloud_ice_o == 0.0)
+
+    def test_effective_radii_respect_cloud_flags(self):
+        from .cloud_microphysics_2m import update_tendencies_and_important_vars
+        n = 2
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        # Provide in-cloud condensate and number concentrations
+        cloud_liq = _full(n, 1e-4)
+        cloud_ice = _full(n, 2e-4)
+        cdnc = _full(n, 1e7)
+        icnc = _full(n, 5e4)
+        air_density = _full(n, 1.2)
+
+        args = {
+            "icnc": icnc,
+            "cdnc": cdnc,
+            "ice_mmr_prev": _zeros(n),
+            "liq_mmr_prev": _zeros(n),
+            "tracer_tm1_cdnc": _zeros(n),
+            "tracer_tm1_icnc": _zeros(n),
+            "condensation_rate": _zeros(n),
+            "deposition_rate": _zeros(n),
+            "rain_evap_mmr": _zeros(n),
+            "freezing_rate": _zeros(n),
+            "tompkins_ice": _zeros(n),
+            "tompkins_liq": _zeros(n),
+            "incloud_ice_melt": _zeros(n),
+            "lsdcp": _full(n, 2.836e6 / 1004.0),
+            "lvdcp": _full(n, 2.501e6 / 1004.0),
+            "air_density": air_density,
+            "inv_air_density": 1.0 / air_density,
+            "rain_formation": _zeros(n),
+            "snow_accretion": _zeros(n),
+            "snow_formation": _zeros(n),
+            "cloud_ice_evap": _zeros(n),
+            "ice_flux_melt": _zeros(n),
+            "pxitec": _zeros(n),
+            "pxlevap": _zeros(n),
+            "pxltec": _zeros(n),
+            "pxisub": _zeros(n),
+            "snow_sublimation_mmr": _zeros(n),
+            "snow_melt": _zeros(n),
+            "cloud_ice_in_cloud": cloud_ice,
+            "cloud_liquid_in_cloud": cloud_liq,
+            "temp_tmp": _full(n, 270.0),
+            # Flags: both False -> radii must be zero
+            "liquid_cloud_flag": jnp.zeros((n,), dtype=bool),
+            "ice_cloud_flag": jnp.zeros((n,), dtype=bool),
+            # INOUTs
+            "cloud_fraction": _full(n, 0.5),
+            "specific_humidity_tendency": _zeros(n),
+            "temp_tendency": _zeros(n),
+            "ice_tendency": _zeros(n),
+            "liq_tendency": _zeros(n),
+            "tracer_tendency_cdnc": _zeros(n),
+            "tracer_tendency_icnc": _zeros(n),
+            "incloud_liq_before_rain": _zeros(n),
+            "incloud_ice_before_snow": _zeros(n),
+            "dt": dt,
+        }
+
+        out = update_tendencies_and_important_vars(**args)
+        preffl = out[9]  # liquid effective radius [um]
+        preffi = out[10]  # ice effective radius [um]
+
+        assert jnp.all(preffl == 0.0)
+        assert jnp.all(preffi == 0.0)
+
 if __name__ == "__main__":
     # Run tests
     test_radius = TestCloudDropletRadius()
@@ -2445,6 +2663,11 @@ if __name__ == "__main__":
     test_update_precip_fluxes_2m.test_no_sources_leaves_fluxes_unchanged()
     test_update_precip_fluxes_2m.test_rain_evaporation_reduces_rain_flux()
     test_update_precip_fluxes_2m.test_incoming_ice_can_melt_into_rain_at_top()
+
+    test_update_tendencies_2m = TestUpdateTendencies_2M()
+    test_update_tendencies_2m.test_tracer_tendencies_and_shapes()
+    test_update_tendencies_2m.test_small_cloud_fraction_zeroes_incloud_accumulators()
+    test_update_tendencies_2m.test_effective_radii_respect_cloud_flags()
     
     
     print("All tests passed!")

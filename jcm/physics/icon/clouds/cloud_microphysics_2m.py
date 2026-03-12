@@ -70,7 +70,8 @@ from .cloud_params_2m import (
 )
 
 from .cloud_utils import (get_util_var, get_cloud_bounds, eff_ice_crystal_radius, minimum_CDNC,
-                          consistency_number_to_mass, gridbox_frac_falling_hydrometeor, threshold_vert_vel
+                          consistency_number_to_mass, gridbox_frac_falling_hydrometeor, threshold_vert_vel, 
+                          breadth_factor, effective_2_volmean_radius_param_Schuman_2011
 )
 
 # @tree_math.struct
@@ -2170,6 +2171,256 @@ def update_precip_fluxes(
         pfrain,
         pfsnow,
         pfsubls,
+    )
+
+def update_tendencies_and_important_vars(
+    icnc: jnp.ndarray,                       # picnc
+    cdnc: jnp.ndarray,                       # pcdnc
+    ice_mmr_prev: jnp.ndarray,               # pxim1
+    liq_mmr_prev: jnp.ndarray,               # pxlm1
+    tracer_tm1_cdnc: jnp.ndarray,            # pxtm1_cdnc
+    tracer_tm1_icnc: jnp.ndarray,            # pxtm1_icnc
+    condensation_rate: jnp.ndarray,          # pcnd
+    deposition_rate: jnp.ndarray,            # pdep
+    rain_evap_mmr: jnp.ndarray,              # pevp
+    freezing_rate: jnp.ndarray,              # pfrl
+    tompkins_ice: jnp.ndarray,               # pgenti
+    tompkins_liq: jnp.ndarray,               # pgentl
+    incloud_ice_melt: jnp.ndarray,           # pimlt
+    lsdcp: jnp.ndarray,                      # plsdcp
+    lvdcp: jnp.ndarray,                      # plvdcp
+    air_density: jnp.ndarray,                # prho
+    inv_air_density: jnp.ndarray,            # prho_rcp
+    rain_formation: jnp.ndarray,             # prpr
+    snow_accretion: jnp.ndarray,             # psacl
+    snow_formation: jnp.ndarray,             # pspr
+    cloud_ice_evap: jnp.ndarray,             # pxievap
+    ice_flux_melt: jnp.ndarray,              # pximlt
+    pxitec: jnp.ndarray,                     # pxitec
+    pxlevap: jnp.ndarray,                    # pxlevap
+    pxltec: jnp.ndarray,                     # pxltec
+    pxisub: jnp.ndarray,                     # pxisub
+    snow_sublimation_mmr: jnp.ndarray,       # psub
+    snow_melt: jnp.ndarray,                  # psmlt
+    cloud_ice_in_cloud: jnp.ndarray,         # pxib
+    cloud_liquid_in_cloud: jnp.ndarray,      # pxlb
+    temp_tmp: jnp.ndarray,                   # ptp1tmp
+    liquid_cloud_flag: jnp.ndarray,          # ld_liqcl (logical)
+    ice_cloud_flag: jnp.ndarray,             # ld_icecl (logical)
+    # INOUTs
+    cloud_fraction: jnp.ndarray,             # paclc (INOUT)
+    specific_humidity_tendency: jnp.ndarray, # pqte (INOUT)
+    temp_tendency: jnp.ndarray,              # ptte (INOUT)
+    ice_tendency: jnp.ndarray,               # pxite (INOUT)
+    liq_tendency: jnp.ndarray,               # pxlte (INOUT)
+    tracer_tendency_cdnc: jnp.ndarray,       # pxtte_cdnc (INOUT)
+    tracer_tendency_icnc: jnp.ndarray,       # pxtte_icnc (INOUT)
+    incloud_liq_before_rain: jnp.ndarray,    # pmlwc (INOUT)
+    incloud_ice_before_snow: jnp.ndarray,    # pmiwc (INOUT)
+    # time constant
+    dt: jnp.ndarray,
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+]:
+    """
+    Update tendencies and compute in-cloud effective radii.
+
+    Overview
+    --------
+    - Accumulates temperature and humidity tendencies from microphysical sources.
+    - Advances prognostic in-cloud liquid/ice mixing ratios and updates their tendencies.
+    - Computes tracer tendencies for prognostic CDNC/ICNC and applies corrections to
+      prevent negative in-cloud mass.
+    - Computes effective in-cloud liquid and ice radii (µm).
+
+    Steps
+    -----
+    1. Form timestep constants (ztmst, ztmst_rcp).
+    2. Accumulate specific-humidity and temperature tendencies from condensation,
+       deposition, evaporation/sublimation, melting, freezing and Tompkins sources.
+    3. Advance in-cloud liquid and ice prognostics and update pxlte/pxite tendencies.
+    4. Compute tracer tendencies for CDNC/ICNC from current-incloud values and
+       previous tracer fields.
+    5. Apply corrections when prognostic in-cloud mass falls below thresholds:
+       - remove negative bias via zdxlcor/zdxicor,
+       - adjust tracer tendencies accordingly,
+       - possibly set cloud fraction to zero or clamp to clc_min.
+    6. Compute effective liquid droplet radius (preffl) using breadth_factor and
+       in-cloud liquid; compute ice effective radius (preffi) via eff_ice_crystal_radius
+       with cirrus correction when nic_cirrus==1 and cold.
+    7. Return updated INOUTs and effective radii.
+
+    Parameters
+    ----------
+    icnc, cdnc :
+        ICNC and CDNC (picnc, pcdnc).
+    ice_mmr_prev, liq_mmr_prev :
+        Previous in-cloud ice/liquid mmr (pxim1, pxlm1).
+    tracer_tm1_cdnc, tracer_tm1_icnc :
+        Tracer fields at t-1 for CDNC/ICNC (pxtm1_cdnc, pxtm1_icnc).
+    condensation_rate, deposition_rate, rain_evap_mmr, freezing_rate :
+        Process rates (pcnd, pdep, pevp, pfrl).
+    tompkins_ice, tompkins_liq :
+        Tompkins source terms (pgenti, pgentl).
+    incloud_ice_melt, ice_flux_melt, snow_melt :
+        Melting diagnostics (pimlt, pximlt, psmlt).
+    lsdcp, lvdcp :
+        Latent-heat constants (Ls/cpd, Lv/cpd).
+    air_density, inv_air_density :
+        prho, prho_rcp.
+    rain_formation, snow_accretion, snow_formation :
+        Rain/snow production (prpr, psacl, pspr).
+    cloud_ice_evap, pxlevap, pxitec, pxltec, pxisub, snow_sublimation_mmr :
+        Additional process terms used in tendencies.
+    cloud_ice_in_cloud, cloud_liquid_in_cloud :
+        In-cloud mixing ratios (pxib, pxlb).
+    temp_tmp :
+        Temporary layer temperature (ptp1tmp).
+    liquid_cloud_flag, ice_cloud_flag :
+        Logical masks for liquid/ice cloud presence.
+    cloud_fraction, specific_humidity_tendency, temp_tendency, ice_tendency,
+    liq_tendency, tracer_tendency_cdnc, tracer_tendency_icnc,
+    incloud_liq_before_rain, incloud_ice_before_snow :
+        INOUT arrays updated in-place.
+    dt :
+        Microphysics timestep ztmst [s].
+
+    Returns
+    -------
+    Tuple (updated INOUTs + effective radii):
+    - cloud_fraction
+    - specific_humidity_tendency
+    - temp_tendency
+    - ice_tendency
+    - liq_tendency
+    - tracer_tendency_cdnc
+    - tracer_tendency_icnc
+    - incloud_liq_before_rain
+    - incloud_ice_before_snow
+    - out_liq_eff_radius_um (preffl) : liquid effective radius [µm]
+    - out_ice_eff_radius_um (preffi) : ice effective radius [µm]
+
+    Notes
+    -----
+    - Timestep constants are obtained via microphysics_dt_constants(dt).
+    - Correction thresholds use module constants (ccwmin, clc_min, eps, etc.).
+    - Breadth and ice-radius helpers (breadth_factor, eff_ice_crystal_radius)
+      are used to compute effective radii. Cirrus branch applied when nic_cirrus==1.
+    """
+    # timestep constants
+    ztmst, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt)
+
+    # --- 1) temperature & humidity tendencies accumulated from microphysical sources
+    specific_humidity_tendency = specific_humidity_tendency + ztmst_rcp * (
+        -condensation_rate - tompkins_liq + rain_evap_mmr + pxlevap
+        - deposition_rate - tompkins_ice + snow_sublimation_mmr + cloud_ice_evap
+        + pxisub
+    )
+
+    temp_tendency = temp_tendency + ztmst_rcp * (
+        lvdcp * (condensation_rate + tompkins_liq - rain_evap_mmr - pxlevap)
+        + lsdcp * (deposition_rate + tompkins_ice - snow_sublimation_mmr - cloud_ice_evap - pxisub)
+        + (lsdcp - lvdcp) * (-snow_melt - incloud_ice_melt - ice_flux_melt + freezing_rate + snow_accretion)
+    )
+
+    # --- 2) liquid prognostic advance and tendencies
+    ztmp1 = pxltec + liq_tendency
+    ztmp2 = incloud_ice_melt + ice_flux_melt - freezing_rate - rain_formation - snow_accretion + condensation_rate + tompkins_liq - pxlevap
+    liq_mmr_next = liq_mmr_prev + ztmst * ztmp1 + ztmp2
+    liq_tendency = ztmp1 + ztmst_rcp * ztmp2
+
+    # --- 3) ice prognostic advance and tendencies
+    ztmp1 = pxitec + ice_tendency
+    ztmp2 = freezing_rate - snow_formation + deposition_rate + tompkins_ice - cloud_ice_evap
+    ice_mmr_next = ice_mmr_prev + ztmst * ztmp1 + ztmp2
+    ice_tendency = ztmp1 + ztmst_rcp * ztmp2
+
+    # --- 4) tracer tendencies for prognostic CDNC/ICNC (mapped exactly)
+    tracer_tendency_cdnc = ztmst_rcp * (cdnc * inv_air_density - tracer_tm1_cdnc)
+    tracer_tendency_icnc = ztmst_rcp * (icnc * inv_air_density - tracer_tm1_icnc)
+
+    # --- 5) Corrections to avoid negative in-cloud mass (merge logic)
+    # liquid
+    ll_liq_neg = liq_mmr_next < ccwmin
+    zdxlcor = jnp.where(ll_liq_neg, -ztmst_rcp * liq_mmr_next, 0.0)
+    liq_tendency = liq_tendency + zdxlcor
+
+    # adjust tracer tendency for cdnc where negative-correction applied
+    tracer_tendency_cdnc = jnp.where(
+        ll_liq_neg,
+        tracer_tendency_cdnc - ztmst_rcp * cdnc * inv_air_density,
+        tracer_tendency_cdnc,
+    )
+
+    # ice
+    ll_ice_neg = ice_mmr_next < ccwmin
+    zdxicor = jnp.where(ll_ice_neg, -ztmst_rcp * ice_mmr_next, 0.0)
+    ice_tendency = ice_tendency + zdxicor
+
+    tracer_tendency_icnc = jnp.where(
+        ll_ice_neg,
+        tracer_tendency_icnc - ztmst_rcp * icnc * inv_air_density,
+        tracer_tendency_icnc,
+    )
+
+    # where both liquid and ice are tiny, set cloud_fraction to 0
+    cloud_fraction = jnp.where(jnp.logical_and(ll_liq_neg, ll_ice_neg), 0.0, cloud_fraction)
+
+    # clamp small cloud fraction values to zero (Fortran MERGE with clc_min)
+    ll_small_clc = cloud_fraction < clc_min
+    cloud_fraction = jnp.where(ll_small_clc, 0.0, cloud_fraction)
+
+    # zero tiny in-cloud accumulators (Fortran used 1e-20 checks)
+    pmlwc_flag = jnp.logical_or(ll_small_clc, incloud_liq_before_rain < 1e-20)
+    incloud_liq_before_rain = jnp.where(pmlwc_flag, 0.0, incloud_liq_before_rain)
+
+    pmiwc_flag = jnp.logical_or(ll_small_clc, incloud_ice_before_snow < 1e-20)
+    incloud_ice_before_snow = jnp.where(pmiwc_flag, 0.0, incloud_ice_before_snow)
+
+    # adjust tendencies by removing the correction contributions
+    specific_humidity_tendency = specific_humidity_tendency - zdxlcor - zdxicor
+    temp_tendency = temp_tendency + lvdcp * zdxlcor + lsdcp * zdxicor
+
+    # --- 6) effective liquid droplet radius [um] (preffl)
+    # breadth_factor returns dimensionless breadth parameter (Fortran breadth_factor)
+    breadth = breadth_factor(cdnc)
+    # convert to effective radius (um): 1e6 * breadth * ((3/(4*pi*rhoh2o)) * pxlb * prho / pcdnc)^(1/3)
+    liq_eff_radius = 1.0e6 * breadth * ((3.0 / (4.0 * pi * rhoh2o)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, eps)) ** (1.0 / 3.0)
+    liq_eff_radius = jnp.where(liquid_cloud_flag, liq_eff_radius, 0.0)
+
+    # --- 7) ice crystal effective radius [um] (preffi)
+    # convert in-cloud ice kg/kg -> g/m^3: 1000 * pxib * prho
+    ice_gm3 = 1000.0 * cloud_ice_in_cloud * air_density
+    ice_eff_rad = eff_ice_crystal_radius(ice_gm3, icnc)  # returns microns (as in module helpers)
+
+    # cirrus correction branch as in Fortran when nic_cirrus==1 and cold
+    if int(nic_cirrus) == 1:
+        is_cold = temp_tmp < cthomi
+        ztmp2 = 83.8 * (1e3 * jnp.maximum(cloud_ice_in_cloud, eps) * air_density) ** 0.216
+        ice_eff_rad = jnp.where(is_cold, ztmp2, ice_eff_rad)
+
+    # clip bounds
+    ice_eff_rad = jnp.maximum(ice_eff_rad, ceffmin)
+    ice_eff_rad = jnp.minimum(ice_eff_rad, ceffmax)
+    ice_eff_rad = jnp.where(ice_cloud_flag, ice_eff_rad, 0.0)
+
+    # --- finalize returns (match Fortran order)
+    out_preffl = liq_eff_radius
+    out_preffi = ice_eff_rad
+
+    return (
+        cloud_fraction,
+        specific_humidity_tendency,
+        temp_tendency,
+        ice_tendency,
+        liq_tendency,
+        tracer_tendency_cdnc,
+        tracer_tendency_icnc,
+        incloud_liq_before_rain,
+        incloud_ice_before_snow,
+        out_preffl,
+        out_preffi,
     )
 
 def sat_spec_hum(
