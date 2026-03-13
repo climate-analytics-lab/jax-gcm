@@ -184,10 +184,7 @@ def get_surface_fluxes(
         drls = 4.0 * esbc * tsk3
         rlus = rlus.at[:, :, 0].set(esbc * tsk3 * tskin)
 
-        hfluxn = hfluxn.at[:, :, 0].set(
-                        rsds * (1.0 - alb_l) + rlds -\
-                            (rlus[:, :, 0] + shf[:, :, 0] + (alhc * evap[:, :, 0]))
-                    )
+        hfluxn = hfluxn.at[:, :, 0].set(rsds * (1.0 - alb_l) + rlds - (rlus[:, :, 0] + shf[:, :, 0] + alhc * evap[:, :, 0]))
 
         # 3.2 Re-definition of skin temperature from energy balance
         def skin_temp(operand):
@@ -260,7 +257,7 @@ def get_surface_fluxes(
     
     # 4.5 Lw emission and net heat fluxes
     rlus = rlus.at[:, :, 1].set(esbc * (forcing.sea_surface_temperature ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1])
+    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - (rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1]))
 
     # Weighted average of surface fluxes and temperatures according to land-sea mask
     weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
