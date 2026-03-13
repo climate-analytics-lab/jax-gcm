@@ -106,7 +106,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.rlus[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 668.53546]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 123.54051]), atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tsfc[0, 0], 290.0, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tskin[0, 0], 297.22821044921875, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.u0[0, 0], 0.949999988079071, atol=1e-4))
@@ -120,7 +120,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ua = jnp.ones(zxy) #zonal wind
         va = jnp.ones(zxy) #meridional wind
         ta = 288. * jnp.ones(zxy) #temperature
-        qa = 5. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #specific humidity
         rh = 0.8 * jnp.ones(zxy) #relative humidity
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
@@ -145,21 +145,23 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         sflux_data = physics_data.surface_flux
 
         # old outputs: ustr, vstr, shf, evap, rlus, hfluxn, tsfc, tskin, u0, v0, t0
-        test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
-            4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-1.50404554e-02,-1.50404554e-02, 7.55662489e+00, 2.64080837e-02,
-            3.93007751e+02, 1.06054558e+02, 2.89000000e+02, 2.96575317e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-9.61105898e-03,-9.61105898e-03, 5.54379463e+01, 3.52742635e-02,
-            4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
-            9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
+        test_data = jnp.array([[-4.1813999e-03, -1.5040455e-02, -9.6110590e-03],
+                               [-4.1813999e-03, -1.5040455e-02, -9.6110590e-03],
+                               [ 1.0822081e+02,  7.5566249e+00,  5.5437946e+01],
+                               [ 4.8004247e-02,  2.6408084e-02,  3.5274263e-02],
+                               [ 4.8786639e+02,  3.9300775e+02,  4.3233978e+02],
+                               [ 3.3338889e+02,  1.0605444e+02,  2.2399849e+02],
+                               [ 2.8900000e+02,  2.8900000e+02,  2.8900000e+02],
+                               [ 2.9885480e+02,  2.9657532e+02,  2.9718643e+02],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 2.8800000e+02,  2.8800000e+02,  2.8800000e+02]])
         
         # pulling the subset of return values to be testsed against the test data
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-            test_data.T,
+            test_data,
             rtol=2e-5
         ))
 
@@ -195,22 +197,23 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         sflux_data = physics_data.surface_flux
 
-
-        test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.08220810e+02, 4.80042472e-02,
-            4.87866394e+02, 4.80595490e+02, 2.89000000e+02, 2.98854797e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-1.50404749e-02,-1.50404749e-02, 7.55662489e+00, 2.64080837e-02,
-            3.93007751e+02, 1.06054558e+02, 2.89000000e+02, 2.96575317e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-9.61106271e-03,-9.61106271e-03, 5.54379463e+01, 3.52742635e-02,
-            4.32339783e+02, 2.97601044e+02, 2.89000000e+02, 2.97186432e+02,
-            9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
+        test_data = jnp.array([[-4.1813999e-03, -1.5040475e-02, -9.6110627e-03],
+                               [-4.1813999e-03, -1.5040475e-02, -9.6110627e-03],
+                               [ 1.0822081e+02,  7.5566249e+00,  5.5437946e+01],
+                               [ 4.8004247e-02,  2.6408084e-02,  3.5274263e-02],
+                               [ 4.8786639e+02,  3.9300775e+02,  4.3233978e+02],
+                               [ 3.3338889e+02,  1.0605444e+02,  2.2399849e+02],
+                               [ 2.8900000e+02,  2.8900000e+02,  2.8900000e+02],
+                               [ 2.9885480e+02,  2.9657532e+02,  2.9718643e+02],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 2.8800000e+02,  2.8800000e+02,  2.8800000e+02]])
             
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-            test_data.T,
+            test_data,
             rtol=2e-5
         ))
 
@@ -221,7 +224,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ua = jnp.ones(zxy) #zonal wind
         va = jnp.ones(zxy) #meridional wind
         ta = 288. * jnp.ones(zxy) #temperature
-        qa = 5. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #specific humidity
         rh = 0.8 * jnp.ones(zxy) #relative humidity
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = -10. * jnp.ones((ix, il)) #surface geopotential
@@ -246,21 +249,23 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         sflux_data = physics_data.surface_flux
 
-        test_data = jnp.array([[-4.18139994e-03,-4.18139994e-03, 1.05182373e+02, 4.66440842e-02,
-            4.92244934e+02, 4.80595490e+02, 2.89000000e+02, 2.99263367e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-1.50404554e-02,-1.50404554e-02, 7.55662489e+00, 2.64080837e-02,
-            3.93007751e+02, 1.09651382e+02, 2.89000000e+02, 2.96832245e+02,
-            9.49999988e-01, 9.49999988e-01, 2.88000000e+02],
-            [-9.61105898e-03,-9.61105898e-03, 5.36600761e+01, 3.45076099e-02,
-            4.33961243e+02, 2.99674957e+02, 2.89000000e+02, 2.97482452e+02,
-            9.50001001e-01, 9.50001001e-01, 2.88000000e+02]])
+        test_data = jnp.array([[-4.1813999e-03, -1.5040455e-02, -9.6110590e-03],
+                               [-4.1813999e-03, -1.5040455e-02, -9.6110590e-03],
+                               [ 1.0518237e+02,  7.5566249e+00,  5.3660076e+01],
+                               [ 4.6644084e-02,  2.6408084e-02,  3.4507610e-02],
+                               [ 4.9224493e+02,  3.9300775e+02,  4.3396124e+02],
+                               [ 3.3338889e+02,  1.0965121e+02,  2.2607188e+02],
+                               [ 2.8900000e+02,  2.8900000e+02,  2.8900000e+02],
+                               [ 2.9926337e+02,  2.9683224e+02,  2.9748245e+02],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 2.8800000e+02,  2.8800000e+02,  2.8800000e+02]])
     
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-            test_data.T,
+            test_data,
             rtol=2e-5
         ))
 
@@ -271,7 +276,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ua = jnp.ones(zxy) #zonal wind
         va = jnp.ones(zxy) #meridional wind
         ta = 300. * jnp.ones(zxy) #temperature
-        qa = 5. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #specific humidity
         rh = 0.8 * jnp.ones(zxy) #relative humidity
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
@@ -297,21 +302,23 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         sflux_data = physics_data.surface_flux
 
-        test_data = jnp.array([[-1.98534015e-03,-1.98534015e-03, 3.40381584e+01, 2.68966686e-02,
-            5.22806824e+02, 4.20411835e+02, 2.89000000e+02, 3.02115173e+02,
-            9.49999988e-01, 9.49999988e-01, 3.00000000e+02],
-            [-1.44388555e-02,-1.44388555e-02,-1.79395313e+01, 1.25386305e-02,
-            3.93007751e+02, 1.78033081e+02, 2.89000000e+02, 3.01716644e+02,
-            9.49999988e-01, 9.49999988e-01, 3.00000000e+02],
-            [-8.21213890e-03,-8.21213890e-03, 7.37131262e+00, 1.92672648e-02,
-            4.57831177e+02, 3.00025909e+02, 2.89000000e+02, 3.01831757e+02,
-            9.50001001e-01, 9.50001001e-01, 3.00000000e+02]])
+        test_data = jnp.array([[-1.98534015e-03, -1.44388555e-02, -8.21213890e-03],
+                               [-1.98534015e-03, -1.44388555e-02, -8.21213890e-03],
+                               [ 3.40381584e+01, -1.79395313e+01,  7.37131262e+00],
+                               [ 2.68966686e-02,  1.25386305e-02,  1.92672648e-02],
+                               [ 5.22806824e+02,  3.93007751e+02,  4.57831177e+02],
+                               [ 3.93572662e+02,  1.78033020e+02,  2.86608398e+02],
+                               [ 2.89000000e+02,  2.89000000e+02,  2.89000000e+02],
+                               [ 3.02115173e+02,  3.01716644e+02,  3.01831757e+02],
+                               [ 9.49999988e-01,  9.49999988e-01,  9.50001001e-01],
+                               [ 9.49999988e-01,  9.49999988e-01,  9.50001001e-01],
+                               [ 3.00000000e+02,  3.00000000e+02,  3.00000000e+02]])
 
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-            test_data.T,
+            test_data,
             rtol=2e-5
         ))
 
@@ -322,7 +329,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         ua = jnp.ones(zxy) #zonal wind
         va = jnp.ones(zxy) #meridional wind
         ta = 285. * jnp.ones(zxy) #temperature
-        qa = 5. * jnp.ones(zxy) #temperature
+        qa = 5. * jnp.ones(zxy) #specific humidity
         rh = 0.8 * jnp.ones(zxy) #relative humidity
         phi = 5000. * jnp.ones(zxy) #geopotential
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
@@ -347,21 +354,23 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         sflux_data = physics_data.surface_flux
         
-        test_data = jnp.array([[-6.3609974e-03,-6.3609974e-03, 1.5656566e+02, 5.3803049e-02,
-            4.6281613e+02, 5.3620532e+02, 2.8900000e+02, 2.9651727e+02,
-            9.4999999e-01, 9.4999999e-01, 2.8500000e+02],
-            [-1.5198796e-02,-1.5198796e-02, 2.8738983e+01, 4.0173572e-02,
-            3.9300775e+02, 7.0954407e+01, 2.8900000e+02, 2.9406818e+02,
-            9.4999999e-01, 9.4999999e-01, 2.8500000e+02],
-            [-1.0780082e-02,-1.0780082e-02, 8.8576477e+01, 4.5306068e-02,
-            4.1897797e+02, 3.0835028e+02, 2.8900000e+02, 2.9474951e+02,
-            9.5000100e-01, 9.5000100e-01, 2.8500000e+02]])
+        test_data = jnp.array([[-6.3609974e-03, -1.5198796e-02, -1.0780082e-02],
+                               [-6.3609974e-03, -1.5198796e-02, -1.0780082e-02],
+                               [ 1.5656566e+02,  2.8738983e+01,  8.8576477e+01],
+                               [ 5.3803049e-02,  4.0173572e-02,  4.5306068e-02],
+                               [ 4.6281613e+02,  3.9300775e+02,  4.1897797e+02],
+                               [ 2.7777893e+02,  7.0954254e+01,  1.7913458e+02],
+                               [ 2.8900000e+02,  2.8900000e+02,  2.8900000e+02],
+                               [ 2.9651727e+02,  2.9406818e+02,  2.9474951e+02],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 9.4999999e-01,  9.4999999e-01,  9.5000100e-01],
+                               [ 2.8500000e+02,  2.8500000e+02,  2.8500000e+02]])
         
         vars = [sflux_data.ustr, sflux_data.vstr, sflux_data.shf, sflux_data.evap, sflux_data.rlus, sflux_data.hfluxn, sflux_data.tsfc, sflux_data.tskin, sflux_data.u0, sflux_data.v0, sflux_data.t0]
 
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
-            test_data.T,
+            test_data,
             rtol=2e-5
         ))
 
