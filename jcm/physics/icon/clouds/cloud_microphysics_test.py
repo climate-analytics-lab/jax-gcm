@@ -20,7 +20,8 @@ from .cloud_utils import (
 from .cloud_microphysics_2m import (
     MicrophysicsState_2M, MicrophysicsTendencies_2M, melting_snow_and_ice, sublimation_snow_and_ice_evaporation_rain, 
     sedimentation_ice, mixed_phase_deposition_and_corrections, freezing_below_238K, het_mxphase_freezing, 
-    precip_formation_warm, precip_formation_cold, update_in_cloud_water, update_tendencies_and_important_vars
+    precip_formation_warm, precip_formation_cold, update_in_cloud_water, update_tendencies_and_important_vars,
+    diagnostics, microphysics_dt_constants
 )
 from ..constants.physical_constants import tmelt, rhow, cp, alhc, alhs, alhf, rhoh2o, ak, p0s1_bg, rv, t0
 
@@ -2346,7 +2347,6 @@ class TestUpdateTendencies_2M:
     """Unit tests for update_tendencies_and_important_vars."""
 
     def test_tracer_tendencies_and_shapes(self):
-        from .cloud_microphysics_2m import update_tendencies_and_important_vars, microphysics_dt_constants
         n = 4
         dt = jnp.array(60.0, dtype=jnp.float32)
 
@@ -2430,7 +2430,6 @@ class TestUpdateTendencies_2M:
         assert jnp.allclose(out[6], expected_tte_icnc)
 
     def test_small_cloud_fraction_zeroes_incloud_accumulators(self):
-        from .cloud_microphysics_2m import update_tendencies_and_important_vars
         n = 3
         dt = jnp.array(60.0, dtype=jnp.float32)
 
@@ -2493,7 +2492,6 @@ class TestUpdateTendencies_2M:
         assert jnp.all(incloud_ice_o == 0.0)
 
     def test_effective_radii_respect_cloud_flags(self):
-        from .cloud_microphysics_2m import update_tendencies_and_important_vars
         n = 2
         dt = jnp.array(60.0, dtype=jnp.float32)
 
@@ -2558,6 +2556,93 @@ class TestUpdateTendencies_2M:
 
         assert jnp.all(preffl == 0.0)
         assert jnp.all(preffi == 0.0)
+
+class TestDiagnostics:
+    """Unit tests for diagnostics(...) accumulator updates."""
+
+    def test_accumulators_liquid_and_ice(self):
+        n = 4
+        dt = jnp.array(60.0, dtype=jnp.float32)
+        cdnc = _full(n, 1e8)
+        icnc = _full(n, 5e4)
+        paclc = jnp.ones((n,), dtype=jnp.float32)
+        pdpg = _full(n, 1e3)
+        pdz = _full(n, 100.0)
+        pfrln = _zeros(n)
+        prho = _full(n, 1.2)
+        prprn = _zeros(n)
+        psacln = _zeros(n)
+        pxib = _full(n, 1e-4)
+        pxlb = _full(n, 2e-4)
+        ptp1tmp = _full(n, 280.0)
+        preffl = _full(n, 5.0)   # µm
+        preffi = _full(n, 10.0)  # µm
+        ld_liqcl = jnp.ones((n,), dtype=bool)
+        ld_icecl = jnp.ones((n,), dtype=bool)
+
+        # INOUT accumulators start at zero
+        inout_accums = [_zeros(n) for _ in range(26)]
+        args = [
+            cdnc, icnc, paclc, pdpg, pdz, pfrln, prho, prprn, psacln, pxib, pxlb, ptp1tmp,
+            preffl, preffi, ld_liqcl, ld_icecl,
+            *inout_accums,
+        ]
+        # ktop and level_index
+        ktop = jnp.zeros((n,), dtype=jnp.int32)
+        kk = 0
+
+        out = diagnostics(*args, ktop=ktop, level_index=kk, dt=dt)
+
+        # mapping: cdnc_ave_acc index 1, icnc_ave_acc index 7, eff_radius_liq_acc index 18, cloud_fraction_acc index 25
+        cdnc_ave_acc = out[1]
+        icnc_ave_acc = out[7]
+        eff_radius_liq_acc = out[18]
+        cloud_fraction_acc = out[25]
+
+        assert jnp.allclose(cdnc_ave_acc, dt * cdnc)
+        assert jnp.allclose(icnc_ave_acc, dt * icnc)
+        assert jnp.allclose(eff_radius_liq_acc, dt * preffl)
+        assert jnp.allclose(cloud_fraction_acc, dt * paclc)
+
+    def test_tovs_tau_update_for_ice(self):
+        n = 3
+        dt = jnp.array(60.0, dtype=jnp.float32)
+
+        cdnc = _zeros(n)
+        icnc = _full(n, 5e4)
+        paclc = _full(n, 0.8)
+        pdpg = _full(n, 1e3)
+        pdz = _full(n, 100.0)
+        pfrln = _zeros(n)
+        prho = _full(n, 0.45)
+        prprn = _zeros(n)
+        psacln = _zeros(n)
+        pxib = _full(n, 2e-4)     # in-cloud ice
+        pxlb = _zeros(n)
+        ptp1tmp = _full(n, 240.0) # cold
+        preffl = _zeros(n)
+        preffi = _full(n, 15.0)   # µm
+        ld_liqcl = jnp.zeros((n,), dtype=bool)
+        ld_icecl = jnp.array([True, False, False])
+
+        # INOUT accumulators (init zeros)
+        accum = [_zeros(n) for _ in range(26)]  # enough placeholders
+        # build full arglist matching diagnostics signature
+        args = [
+            cdnc, icnc, paclc, pdpg, pdz, pfrln, prho, prprn, psacln, pxib, pxlb, ptp1tmp,
+            preffl, preffi, ld_liqcl, ld_icecl,
+            *accum  # expand zeros for all INOUTs
+        ]
+        ktop = jnp.zeros((n,), dtype=jnp.int32)
+        kk = 0
+
+        out = diagnostics(*args, ktop=ktop, level_index=kk, dt=dt)
+
+        # tau1i index 23 should be updated for the first element where ld_icecl True
+        tau1i = out[23]
+        assert tau1i.shape == (n,)
+        assert jnp.isfinite(tau1i[0])
+        assert float(tau1i[0]) > 0.0
 
 if __name__ == "__main__":
     # Run tests
@@ -2669,6 +2754,9 @@ if __name__ == "__main__":
     test_update_tendencies_2m.test_small_cloud_fraction_zeroes_incloud_accumulators()
     test_update_tendencies_2m.test_effective_radii_respect_cloud_flags()
     
+    test_diagnostics = TestDiagnostics()
+    test_diagnostics.test_accumulators_liquid_and_ice()
+    test_diagnostics.test_tovs_tau_update_for_ice()
     
     print("All tests passed!")
         

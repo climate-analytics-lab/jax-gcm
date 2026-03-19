@@ -2423,6 +2423,98 @@ def update_tendencies_and_important_vars(
         out_preffi,
     )
 
+def lookup_1d_interp(
+    table: jnp.ndarray,
+    pt: jnp.ndarray,
+    scale: float,
+    i_min: int,
+    i_max: int,
+    overflow_penalty_scale: float = 1e-6
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Differentiable 1D lookup via linear interpolation.
+    Returns (value, overflow_penalty).
+    - table indexed with integer indices [i_min..i_max]
+    - continuous index = pt * scale
+
+    Notes:
+    Intended as differentiable approximation to replace set_lookup_index_1d from ECHAM.
+    Compute a continuous index, clip it to table bounds (no hard error), and return a linearly-interpolated 
+    value (or soft-weighted sum) that keeps gradients w.r.t. pt.
+    """
+    idx_raw = pt * scale
+    # detect overflow BEFORE clipping (differentiable boolean -> float penalty)
+    overflow_low = jnp.maximum(0.0, (i_min - idx_raw))
+    overflow_high = jnp.maximum(0.0, (idx_raw - i_max))
+    overflow_penalty = overflow_penalty_scale * (overflow_low**2 + overflow_high**2)
+
+    # clip into safe continuous range that allows interpolation between i and i+1
+    idx = jnp.clip(idx_raw, i_min, jnp.maximum(i_min, i_max - 1e-6))
+
+    i0 = jnp.floor(idx).astype(int)
+    w = idx - jnp.floor(idx)
+    v0 = jnp.take(table, i0, axis=0)
+    v1 = jnp.take(table, jnp.clip(i0 + 1, 0, table.shape[0] - 1), axis=0)
+    value = (1.0 - w) * v0 + w * v1
+
+    return value, overflow_penalty
+
+
+def lookup_2d_interp(
+    table: jnp.ndarray,
+    pt1: jnp.ndarray,
+    pt2: jnp.ndarray,
+    scale1: float,
+    scale2: float,
+    i1_min: int,
+    i1_max: int,
+    i2_min: int,
+    i2_max: int,
+    overflow_penalty_scale: float = 1e-6
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Differentiable 2D lookup via bilinear interpolation.
+    table shape: [N1, N2]; pt1, pt2 shapes broadcastable to each other.
+    Returns (value, overflow_penalty).
+
+    Notes:
+    Intended as differentiable approximation to replace set_lookup_index_2d from ECHAM.
+    Compute a continuous index, clip it to table bounds (no hard error), and return a linearly-interpolated 
+    value (or soft-weighted sum) that keeps gradients w.r.t. pt. 
+    """
+    idx1_raw = pt1 * scale1
+    idx2_raw = pt2 * scale2
+
+    # overflow penalties
+    ol1 = jnp.maximum(0.0, (i1_min - idx1_raw))
+    oh1 = jnp.maximum(0.0, (idx1_raw - i1_max))
+    ol2 = jnp.maximum(0.0, (i2_min - idx2_raw))
+    oh2 = jnp.maximum(0.0, (idx2_raw - i2_max))
+    overflow_penalty = overflow_penalty_scale * (ol1**2 + oh1**2 + ol2**2 + oh2**2)
+
+    # clip to safe continuous ranges
+    idx1 = jnp.clip(idx1_raw, i1_min, jnp.maximum(i1_min, i1_max - 1e-6))
+    idx2 = jnp.clip(idx2_raw, i2_min, jnp.maximum(i2_min, i2_max - 1e-6))
+
+    i1 = jnp.floor(idx1).astype(int)
+    i2 = jnp.floor(idx2).astype(int)
+    w1 = idx1 - jnp.floor(idx1)
+    w2 = idx2 - jnp.floor(idx2)
+
+    i1p = jnp.clip(i1 + 1, 0, table.shape[0] - 1)
+    i2p = jnp.clip(i2 + 1, 0, table.shape[1] - 1)
+
+    # gather four corners
+    v00 = table[i1, i2]
+    v10 = table[i1p, i2]
+    v01 = table[i1, i2p]
+    v11 = table[i1p, i2p]
+
+    # bilinear interpolation
+    value = (1 - w1) * (1 - w2) * v00 + w1 * (1 - w2) * v10 + (1 - w1) * w2 * v01 + w1 * w2 * v11
+
+    return value, overflow_penalty
+
 def sat_spec_hum(
     pressure: jnp.ndarray,         # Original: pap
     es_rd_over_rv: jnp.ndarray,    # Original: ptlucu  (lookup value e_s * Rd/Rv)
@@ -2647,4 +2739,268 @@ def update_in_cloud_water(
         cloud_ice_in_cloud,
         cloud_liquid_in_cloud,
         pcdnc_min,
+    )
+
+def diagnostics(
+    cdnc: jnp.ndarray,                    # pcdnc
+    icnc: jnp.ndarray,                    # picnc
+    cloud_fraction: jnp.ndarray,          # paclc
+    dp_over_g: jnp.ndarray,               # pdpg
+    layer_thickness: jnp.ndarray,         # pdz
+    freezing_number_rate: jnp.ndarray,    # pfrln
+    air_density: jnp.ndarray,             # prho
+    rain_number_formation: jnp.ndarray,   # prprn
+    snow_number_accretion: jnp.ndarray,   # psacln
+    incloud_ice: jnp.ndarray,             # pxib
+    incloud_liquid: jnp.ndarray,          # pxlb
+    temp_tmp: jnp.ndarray,                # ptp1tmp
+    eff_radius_liq: jnp.ndarray,          # preffl (µm)
+    eff_radius_ice: jnp.ndarray,          # preffi (µm)
+    liquid_cloud_flag: jnp.ndarray,       # ld_liqcl (logical)
+    ice_cloud_flag: jnp.ndarray,          # ld_icecl (logical)
+    # INOUT accumulators (order preserved from Fortran)
+    cdnc_ave: jnp.ndarray,                # pcdnc_ave
+    cdnc_ave_acc: jnp.ndarray,            # pcdnc_ave_acc
+    cdnc_ave_burd: jnp.ndarray,           # pcdnc_ave_burd
+    cdnc_ct: jnp.ndarray,                 # pcdnc_ct
+    cld_ice_time: jnp.ndarray,            # pcliwc_time
+    cld_liq_time: jnp.ndarray,            # pcloud_time
+    icnc_ave: jnp.ndarray,                # picnc_ave
+    icnc_ave_acc: jnp.ndarray,            # picnc_ave_acc
+    icnc_ave_burd: jnp.ndarray,           # picnc_ave_burd
+    ice_water_content_acc: jnp.ndarray,   # piwc_acc
+    iwp_tovs: jnp.ndarray,                # piwp_tovs
+    liq_water_content_acc: jnp.ndarray,   # plwc_acc
+    cdnc_accretion: jnp.ndarray,          # pqacc
+    cdnc_autoconv: jnp.ndarray,           # pqaut
+    cdnc_freezing: jnp.ndarray,           # pqfre
+    eff_radius_ice_acc: jnp.ndarray,      # preffi_acc
+    eff_radius_ice_time: jnp.ndarray,     # preffi_time
+    eff_radius_ice_tovs: jnp.ndarray,     # preffi_tovs
+    eff_radius_liq_acc: jnp.ndarray,      # preffl_acc
+    eff_radius_liq_ct: jnp.ndarray,       # preffl_ct
+    eff_radius_liq_time: jnp.ndarray,     # preffl_time
+    cdnc_burden: jnp.ndarray,             # pcdnc_burden
+    icnc_burden: jnp.ndarray,             # picnc_burden
+    tau1i: jnp.ndarray,                   # ptau1i
+    eff_radius_ct_m: jnp.ndarray,         # preffct (m)
+    cloud_fraction_acc: jnp.ndarray,      # paclcac
+    ktop: jnp.ndarray,                    # ktop (integer flags per column top)
+    level_index: int,                     # kk (current level index)
+    dt: jnp.ndarray,                      # microphysics timestep (s) -> used as zdt / zdtime
+) -> tuple:
+    """
+    Diagnostics accumulator updates.
+
+    Overview
+    --------
+    - Update time-accumulated diagnostics and burdens for liquid/ice clouds,
+      CDNC/ICNC, effective radii, TOVS-style IWP diagnostics and related accumulators.
+
+    Steps
+    -----
+    1. Subtract instantaneous number-process contributions (autoconversion, freezing, accretion).
+    2. Update liquid-cloud accumulators (CDNC averages, liquid water content, times, burdens).
+    3. Update cloud-top liquid diagnostics where applicable.
+    4. Update ice-cloud accumulators (ICNC averages, ice water content, times, burdens).
+    5. Compute TOVS-style cirrus diagnostics and select sampling candidates.
+    6. Accumulate icnc/liquid burdens and total cloud-fraction accumulation.
+    7. Return updated INOUT accumulators in the original Fortran order.
+
+    Parameters
+    ----------
+    cdnc, icnc : jnp.ndarray
+        Cloud droplet and ice-crystal number concentrations (pcdnc, picnc).
+    cloud_fraction : jnp.ndarray
+        Cloud cover fraction (paclc).
+    dp_over_g : jnp.ndarray
+        dp/g (pdpg).
+    layer_thickness : jnp.ndarray
+        Layer thickness (pdz).
+    freezing_number_rate : jnp.ndarray
+        Number of freezing events per timestep (pfrln).
+    air_density : jnp.ndarray
+        Air density (prho).
+    rain_number_formation : jnp.ndarray
+        Rain number formation rate (prprn).
+    snow_number_accretion : jnp.ndarray
+        Snow number accretion (psacln).
+    incloud_ice, incloud_liquid : jnp.ndarray
+        In-cloud ice/liquid mixing ratios (pxib, pxlb).
+    temp_tmp : jnp.ndarray
+        Layer temperature used in diagnostics (ptp1tmp).
+    eff_radius_liq, eff_radius_ice : jnp.ndarray
+        Effective radii (preffl, preffi) in µm.
+    liquid_cloud_flag, ice_cloud_flag : jnp.ndarray
+        Logical masks for liquid/ice cloud presence (ld_liqcl, ld_icecl).
+    INOUT accumulators : jnp.ndarray
+        Various accumulator arrays (order preserved from Fortran):
+        cdnc_ave, cdnc_ave_acc, cdnc_ave_burd, cdnc_ct, cld_ice_time, cld_liq_time,
+        icnc_ave, icnc_ave_acc, icnc_ave_burd, ice_water_content_acc, iwp_tovs,
+        liq_water_content_acc, cdnc_accretion, cdnc_autoconv, cdnc_freezing,
+        eff_radius_ice_acc, eff_radius_ice_time, eff_radius_ice_tovs,
+        eff_radius_liq_acc, eff_radius_liq_ct, eff_radius_liq_time,
+        cdnc_burden, icnc_burden, tau1i, eff_radius_ct_m, cloud_fraction_acc.
+    ktop : jnp.ndarray
+        Column-top level flags.
+    level_index : int
+        Current level index (kk).
+    dt : jnp.ndarray
+        Microphysics timestep (zdt / zdtime).
+
+    Returns
+    -------
+    Tuple of updated INOUT accumulators in the same order as provided:
+    (cdnc_ave, cdnc_ave_acc, cdnc_ave_burd, cdnc_ct, cld_ice_time, cld_liq_time,
+     icnc_ave, icnc_ave_acc, icnc_ave_burd, ice_water_content_acc, iwp_tovs,
+     liq_water_content_acc, cdnc_accretion, cdnc_autoconv, cdnc_freezing,
+     eff_radius_ice_acc, eff_radius_ice_time, eff_radius_ice_tovs,
+     eff_radius_liq_acc, eff_radius_liq_ct, eff_radius_liq_time,
+     cdnc_burden, icnc_burden, tau1i, eff_radius_ct_m, cloud_fraction_acc)
+
+    Notes
+    -----
+    - Time-step scalars zdt and zdtime are taken equal to dt.
+    """
+
+    # time-step scalars used in Fortran as zdt / zdtime
+    zdt = dt
+    zdtime = dt
+
+    # 1) subtract instantaneous number-process contributions over the timestep
+    cdnc_autoconv = cdnc_autoconv - zdt * rain_number_formation
+    cdnc_freezing = cdnc_freezing - zdt * freezing_number_rate
+    cdnc_accretion = cdnc_accretion - zdt * snow_number_accretion
+
+    # 2) liquid-cloud diagnostics (update only where liquid cloud flag True)
+    tmp = cdnc_ave_acc + zdtime * cdnc
+    cdnc_ave_acc = jnp.where(liquid_cloud_flag, tmp, cdnc_ave_acc)
+
+    tmp = liq_water_content_acc + zdtime * incloud_liquid * air_density
+    liq_water_content_acc = jnp.where(liquid_cloud_flag, tmp, liq_water_content_acc)
+
+    tmp = cld_liq_time + zdtime
+    cld_liq_time = jnp.where(liquid_cloud_flag, tmp, cld_liq_time)
+
+    tmp = cdnc_burden + cdnc * layer_thickness
+    cdnc_burden = jnp.where(liquid_cloud_flag, tmp, cdnc_burden)
+
+    tmp = cdnc_ave + zdtime * cdnc * cloud_fraction
+    cdnc_ave = jnp.where(liquid_cloud_flag, tmp, cdnc_ave)
+
+    tmp = cdnc_ave_burd + zdtime * cdnc * layer_thickness * cloud_fraction
+    cdnc_ave_burd = jnp.where(liquid_cloud_flag, tmp, cdnc_ave_burd)
+
+    # accumulated in-cloud liquid effective radius (unconditional add)
+    eff_radius_liq_acc = eff_radius_liq_acc + zdtime * eff_radius_liq
+
+    # 3) cloud-top liquid diagnostics (complex mask ll1)
+    # ll1 = (
+    #     jnp.logical_and.reduce(
+    #         (
+    #             liquid_cloud_flag,
+    #             ktop == level_index,
+    #             temp_tmp > tmelt,
+    #             eff_radius_ct_m < 4.0,
+    #             eff_radius_liq >= 4.0,
+    #         )
+    #     )
+    # )
+    ll1 = jnp.logical_and.reduce(
+    jnp.stack(
+        (
+            liquid_cloud_flag,
+            (ktop == level_index),
+            (temp_tmp > tmelt),
+            (eff_radius_ct_m < 4.0),
+            (eff_radius_liq >= 4.0),
+        ),
+        axis=0,
+    ),
+    axis=0,
+)
+
+    tmp = eff_radius_liq_ct + zdtime * eff_radius_liq
+    eff_radius_liq_ct = jnp.where(ll1, tmp, eff_radius_liq_ct)
+
+    tmp = cdnc_ct + zdtime * cdnc * cloud_fraction
+    cdnc_ct = jnp.where(ll1, tmp, cdnc_ct)
+
+    tmp = eff_radius_liq_time + zdtime
+    eff_radius_liq_time = jnp.where(ll1, tmp, eff_radius_liq_time)
+
+    eff_radius_ct_m = jnp.where(ll1, eff_radius_liq, eff_radius_ct_m)
+
+    # 4) ice-cloud diagnostics (update only where ice cloud flag True)
+    tmp = icnc_ave_acc + zdtime * icnc
+    icnc_ave_acc = jnp.where(ice_cloud_flag, tmp, icnc_ave_acc)
+
+    tmp = ice_water_content_acc + zdtime * incloud_ice * air_density
+    ice_water_content_acc = jnp.where(ice_cloud_flag, tmp, ice_water_content_acc)
+
+    eff_radius_ice_acc = eff_radius_ice_acc + zdtime * eff_radius_ice
+
+    tmp = cld_ice_time + zdtime
+    cld_ice_time = jnp.where(ice_cloud_flag, tmp, cld_ice_time)
+
+    # 5) TOVS-style semi-transparent cirrus diagnostics
+    ll2 = jnp.logical_and(ice_cloud_flag, jnp.logical_not(ll1))
+
+    ztmp3 = 1000.0 * incloud_ice * cloud_fraction * dp_over_g  # IWP [g/m2]
+    ztmp4 = tau1i + 1.9787 * ztmp3 * jnp.maximum(eff_radius_ice, ceffmin) ** (-1.0365)
+    tau1i = jnp.where(ll2, ztmp4, tau1i)
+
+    # 6) selection for TOVS sampling
+    ll3 = jnp.logical_and(ll2, jnp.logical_and(tau1i > 0.7, tau1i < 3.8))
+
+    tmp = eff_radius_ice_tovs + zdtime * eff_radius_ice
+    eff_radius_ice_tovs = jnp.where(ll3, tmp, eff_radius_ice_tovs)
+
+    tmp = eff_radius_ice_time + zdtime
+    eff_radius_ice_time = jnp.where(ll3, tmp, eff_radius_ice_time)
+
+    tmp = iwp_tovs + zdtime * ztmp3
+    iwp_tovs = jnp.where(ll3, tmp, iwp_tovs)
+
+    # 7) icnc burden / averages (ice)
+    tmp = icnc_burden + icnc * layer_thickness
+    icnc_burden = jnp.where(ice_cloud_flag, tmp, icnc_burden)
+
+    tmp = icnc_ave + zdtime * icnc * cloud_fraction
+    icnc_ave = jnp.where(ice_cloud_flag, tmp, icnc_ave)
+
+    tmp = icnc_ave_burd + zdtime * icnc * layer_thickness * cloud_fraction
+    icnc_ave_burd = jnp.where(ice_cloud_flag, tmp, icnc_ave_burd)
+
+    # 8) accumulate cloud fraction
+    cloud_fraction_acc = cloud_fraction_acc + zdtime * cloud_fraction
+
+    # return updated INOUTs in the same order as arguments were provided
+    return (
+        cdnc_ave,
+        cdnc_ave_acc,
+        cdnc_ave_burd,
+        cdnc_ct,
+        cld_ice_time,
+        cld_liq_time,
+        icnc_ave,
+        icnc_ave_acc,
+        icnc_ave_burd,
+        ice_water_content_acc,
+        iwp_tovs,
+        liq_water_content_acc,
+        cdnc_accretion,
+        cdnc_autoconv,
+        cdnc_freezing,
+        eff_radius_ice_acc,
+        eff_radius_ice_time,
+        eff_radius_ice_tovs,
+        eff_radius_liq_acc,
+        eff_radius_liq_ct,
+        eff_radius_liq_time,
+        cdnc_burden,
+        icnc_burden,
+        tau1i,
+        eff_radius_ct_m,
+        cloud_fraction_acc,
     )
