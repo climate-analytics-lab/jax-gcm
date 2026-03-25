@@ -1,5 +1,4 @@
-"""
-ICON Atmospheric Physics Package for JAX-GCM
+"""ICON Atmospheric Physics Package for JAX-GCM
 
 This package contains JAX implementations of the ICON atmospheric physics
 parameterizations originally written in Fortran. The modules are organized

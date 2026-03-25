@@ -18,6 +18,7 @@ Contents
 
    getting_started
    speedy_physics
+   icon_physics
    speedy_translation
    api
    design

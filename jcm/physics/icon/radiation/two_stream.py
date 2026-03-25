@@ -1,5 +1,4 @@
-"""
-Two-stream radiative transfer solver
+"""Two-stream radiative transfer solver
 
 This module implements the two-stream approximation for radiative
 transfer through a multi-layer atmosphere.
@@ -20,24 +19,22 @@ from .radiation_types import OpticalProperties
 
 @jax.jit
 def two_stream_coefficients(
-    tau: jnp.ndarray, # FIXME: remove this if unused
     ssa: jnp.ndarray,
     g: jnp.ndarray,
     mu0: Optional[float] = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate two-stream coefficients.
+    """Calculate two-stream coefficients.
     
     Using Eddington approximation (Meador & Weaver 1980).
     
     Args:
-        tau: Optical depth
         ssa: Single scattering albedo
         g: Asymmetry factor
         mu0: Cosine of solar zenith angle (for SW only)
         
     Returns:
         Tuple of (gamma1, gamma2, gamma3, gamma4)
+
     """
     # Eddington approximation coefficients
     gamma1 = (7.0 - ssa * (4.0 + 3.0 * g)) / 4.0
@@ -49,8 +46,8 @@ def two_stream_coefficients(
         gamma4 = 1.0 - gamma3
     else:
         # Longwave (no direct beam)
-        gamma3 = jnp.zeros_like(tau)
-        gamma4 = jnp.ones_like(tau)
+        gamma3 = jnp.zeros_like(ssa)
+        gamma4 = jnp.ones_like(ssa)
     
     return gamma1, gamma2, gamma3, gamma4
 
@@ -62,8 +59,7 @@ def layer_reflectance_transmittance(
     g: jnp.ndarray,
     mu0: Optional[float] = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate layer reflectance and transmittance.
+    """Calculate layer reflectance and transmittance.
     
     Args:
         tau: Optical depth
@@ -74,9 +70,10 @@ def layer_reflectance_transmittance(
     Returns:
         Tuple of (R_dif, T_dif, R_dir, T_dir)
         For LW, only diffuse components are used
+
     """
     # Get two-stream coefficients
-    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(tau, ssa, g, mu0)
+    gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(ssa, g, mu0)
     
     # Calculate lambda (eigenvalue)
     lambda_val = jnp.sqrt(gamma1**2 - gamma2**2)
@@ -90,10 +87,6 @@ def layer_reflectance_transmittance(
     
     # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
     # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
-    
-    # Helper terms
-    term1 = 1.0 / (lambda_val + gamma1)
-    term2 = 1.0 / (lambda_val - gamma1)
     
     # For large optical depths, avoid NaN by using safe values
     # Use finite values instead of inf for subsequent calculations
@@ -149,8 +142,7 @@ def adding_method(
     R2: jnp.ndarray,
     T2: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Combine two layers using adding method.
+    """Combine two layers using adding method.
     
     Args:
         R1, T1: Reflectance and transmittance of upper layer
@@ -158,6 +150,7 @@ def adding_method(
         
     Returns:
         Combined reflectance and transmittance
+
     """
     # Denominator with numerical stability
     denom = 1.0 - R1 * R2
@@ -209,7 +202,6 @@ def longwave_fluxes_single_band(
         flux_below = carry
         lev, R, T, S = x
         # CRITICAL FIX: Removed R * flux_below term
-        # Upward flux = transmitted from below + emitted by layer
         # The R * flux_below term was incorrectly reflecting upward flux back upward
         # which doesn't make physical sense and was causing flux to be 15-25x too large
         flux_above = T * flux_below + S
@@ -252,8 +244,7 @@ def longwave_fluxes(
     surface_planck: jnp.ndarray,
     n_bands: int = 3
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate longwave fluxes using two-stream method.
+    """Calculate longwave fluxes using two-stream method.
     
     Args:
         optical_properties: Layer optical properties
@@ -265,6 +256,7 @@ def longwave_fluxes(
         
     Returns:
         Tuple of (upward_flux, downward_flux) at interfaces [nlev+1, n_bands]
+
     """
     # Process all bands using vmap
     def process_band(band_idx):
@@ -324,8 +316,10 @@ def shortwave_fluxes_single_band(
     flux_direct = toa_flux * direct_trans_full
     
     # Diffuse radiation calculation
-    # Source from direct beam scattering
+    # Source from direct beam scattering (split into upward/downward components)
     source_diffuse = toa_flux * R_dir * direct_trans_full[:-1]
+    source_up = 0.5 * source_diffuse
+    source_down = 0.5 * source_diffuse
     
     # Initialize diffuse fluxes
     flux_down_dif = jnp.zeros(nlev + 1)
@@ -344,7 +338,7 @@ def shortwave_fluxes_single_band(
     _, flux_up_levels = jax.lax.scan(
         upward_diffuse_step,
         flux_up_dif[nlev],
-        (R_dif[::-1], T_dif[::-1], source_diffuse[::-1])
+        (R_dif[::-1], T_dif[::-1], source_up[::-1])
     )
     flux_up_dif = flux_up_dif.at[:-1].set(flux_up_levels[::-1])
 
@@ -358,7 +352,7 @@ def shortwave_fluxes_single_band(
     _, flux_down_levels = jax.lax.scan(
         downward_diffuse_step,
         0.0,  # No diffuse at TOA
-        (R_dif, T_dif, source_diffuse, flux_up_dif[:-1])
+        (R_dif, T_dif, source_down, flux_up_dif[:-1])
     )
     flux_down_dif = flux_down_dif.at[1:].set(flux_down_levels)
 
@@ -372,9 +366,17 @@ def shortwave_fluxes_single_band(
     _, flux_up_levels = jax.lax.scan(
         upward_diffuse_step,
         flux_up_dif[nlev],
-        (R_dif[::-1], T_dif[::-1], source_diffuse[::-1])
+        (R_dif[::-1], T_dif[::-1], source_up[::-1])
     )
     flux_up_dif = flux_up_dif.at[:-1].set(flux_up_levels[::-1])
+
+    # Recalculate downward diffuse with updated upward flux for consistency
+    _, flux_down_levels = jax.lax.scan(
+        downward_diffuse_step,
+        0.0,  # No diffuse at TOA
+        (R_dif, T_dif, source_down, flux_up_dif[:-1])
+    )
+    flux_down_dif = flux_down_dif.at[1:].set(flux_down_levels)
     
     # Total fluxes
     flux_down_total = flux_direct + flux_down_dif
@@ -391,8 +393,7 @@ def shortwave_fluxes(
     surface_albedo: jnp.ndarray,
     n_bands: int = 2
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate shortwave fluxes using two-stream method.
+    """Calculate shortwave fluxes using two-stream method.
     
     Args:
         optical_properties: Layer optical properties
@@ -404,6 +405,7 @@ def shortwave_fluxes(
     Returns:
         Tuple of (up_flux, down_flux, down_direct, down_diffuse)
         All at interfaces [nlev+1, n_bands]
+
     """
     # Process all bands using vmap
     def process_band(band_idx):
@@ -445,8 +447,7 @@ def flux_to_heating_rate(
     g: float = 9.81,  # m/s^2
     cp: float = 1004.0  # J/kg/K
 ) -> jnp.ndarray:
-    """
-    Convert flux divergence to heating rate.
+    """Convert flux divergence to heating rate.
     
     dT/dt = -g/cp * dF/dp
     
@@ -458,6 +459,7 @@ def flux_to_heating_rate(
         
     Returns:
         Heating rate (K/s) [nlev]
+
     """
     # Net flux at interfaces
     net_flux_down = flux_down - flux_up

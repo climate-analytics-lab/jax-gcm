@@ -1,18 +1,15 @@
-"""
-Unit tests for gravity wave drag parameterization
+"""Unit tests for gravity wave drag parameterization
 
 Date: 2025-01-10
 """
 
 import jax.numpy as jnp
 import jax
-import pytest
 from .gravity_wave_drag import (
-    GravityWaveParameters, GravityWaveState, GravityWaveTendencies,
-    brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
+    GravityWaveParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
     gravity_wave_drag
 )
-from ..constants.physical_constants import grav, rd, cp
+from ..constants.physical_constants import grav, cp
 
 
 class TestBruntVaisalaFrequency:

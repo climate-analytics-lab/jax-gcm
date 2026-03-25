@@ -1,5 +1,4 @@
-"""
-Constants for ICON radiation scheme.
+"""Constants for ICON radiation scheme.
 
 This module contains physical and numerical constants used throughout
 the ICON radiation implementation.

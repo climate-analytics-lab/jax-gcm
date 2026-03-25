@@ -1,4 +1,4 @@
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
 from jcm.forcing import ForcingData
@@ -13,15 +13,15 @@ def set_forcing(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData=None,
-    geometry: Geometry=None
+    terrain: TerrainData=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     # 2. daily-mean radiative forcing
-    physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, geometry=geometry)
+    physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, terrain=terrain)
     tyear = physics_data.date.tyear
     model_year = physics_data.date.model_year
 
     # total surface albedo
-    fmask = geometry.fmask
+    fmask = terrain.fmask
 
     snowc = jnp.minimum(1.0, forcing.snowc_am)
     alb_l = forcing.alb0 + snowc * (parameters.mod_radcon.albsn - forcing.alb0)

@@ -1,10 +1,7 @@
-"""
-Unit tests for surface types and data structures.
-"""
+"""Unit tests for surface types and data structures."""
 
 import pytest
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.physics.icon.surface.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing, 

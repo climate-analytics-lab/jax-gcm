@@ -1,5 +1,4 @@
-"""
-Enhanced cloud optical properties with Mie scattering
+"""Enhanced cloud optical properties with Mie scattering
 
 This module calculates optical properties of clouds using proper Mie scattering
 theory for liquid droplets and improved parameterizations for ice crystals.
@@ -10,11 +9,10 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from typing import Tuple, Optional
+from typing import Tuple
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
-from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS
 
 
 # Physical constants for Mie scattering
@@ -41,8 +39,7 @@ WATER_ABSORPTION_COEFF = {
 
 
 def get_band_wavelength(band: int, is_sw: bool = True) -> float:
-    """
-    Get representative wavelength for a spectral band.
+    """Get representative wavelength for a spectral band.
     
     Args:
         band: Band index
@@ -50,6 +47,7 @@ def get_band_wavelength(band: int, is_sw: bool = True) -> float:
         
     Returns:
         Representative wavelength in micrometers
+
     """
     # Define all SW wavelengths
     sw_wavelengths = jnp.array([
@@ -91,14 +89,14 @@ def get_band_wavelength(band: int, is_sw: bool = True) -> float:
 
 @jax.jit
 def interpolate_refractive_index(wavelength: float) -> Tuple[float, float]:
-    """
-    Interpolate refractive index of water at given wavelength.
+    """Interpolate refractive index of water at given wavelength.
     
     Args:
         wavelength: Wavelength in micrometers
         
     Returns:
         Tuple of (real_part, imaginary_part)
+
     """
     # Available wavelengths and values
     wl_points = jnp.array([0.25, 0.31, 0.38, 0.55, 0.94, 2.5])
@@ -119,8 +117,7 @@ def mie_scattering_water(
     n_real: float,
     n_imag: float
 ) -> Tuple[float, float, float]:
-    """
-    Calculate Mie scattering properties for water droplets.
+    """Calculate Mie scattering properties for water droplets.
     
     Approximations based on Wiscombe (1980) and Bohren & Huffman (1983).
     
@@ -132,6 +129,7 @@ def mie_scattering_water(
         
     Returns:
         Tuple of (extinction_efficiency, single_scatter_albedo, asymmetry_factor)
+
     """
     # Size parameter
     x = 2.0 * jnp.pi * radius / wavelength
@@ -159,9 +157,6 @@ def mie_scattering_water(
     # Large particle limit (x >> 1) - Geometric optics
     def geometric_regime():
         # Geometric optics approximation
-        # Fresnel reflection coefficient at normal incidence
-        rho = jnp.abs((m - 1.0) / (m + 1.0))**2
-        
         # Total extinction efficiency approaches 2 for large particles
         q_ext = 2.0
         
@@ -190,8 +185,6 @@ def mie_scattering_water(
     # Intermediate regime - approximate Mie solution
     def intermediate_regime():
         # Simplified Mie approximation based on van de Hulst (1957)
-        m_sq = m * jnp.conj(m)
-        
         # Extinction efficiency
         q_ext = 2.0 - (4.0/x) * jnp.sin(x) + (4.0/x**2) * (1.0 - jnp.cos(x))
         
@@ -246,8 +239,7 @@ def effective_radius_liquid(
     cdnc_factor: jnp.ndarray,
     land_fraction: float = 0.5
 ) -> jnp.ndarray:
-    """
-    Calculate effective radius for liquid cloud droplets.
+    """Calculate effective radius for liquid cloud droplets.
     
     Simple parameterization based on temperature and surface type,
     with optional aerosol-cloud interactions (Twomey effect).
@@ -258,6 +250,7 @@ def effective_radius_liquid(
 
     Returns:
         Effective radius (microns)
+
     """
     # Different values over land and ocean
     r_eff_ocean = 14.0  # microns
@@ -275,8 +268,7 @@ def effective_radius_ice(
     temperature: jnp.ndarray,
     ice_water_content: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate effective radius for ice crystals.
+    """Calculate effective radius for ice crystals.
     
     Based on temperature and ice water content.
     
@@ -286,6 +278,7 @@ def effective_radius_ice(
         
     Returns:
         Effective radius (microns)
+
     """
     # Base radius depends on temperature
     # Colder = smaller crystals
@@ -304,8 +297,7 @@ def liquid_cloud_optics_sw(
     effective_radius: jnp.ndarray,
     band: int
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate shortwave optical properties for liquid clouds using Mie scattering.
+    """Calculate shortwave optical properties for liquid clouds using Mie scattering.
     
     Enhanced implementation with proper Mie scattering calculations.
     
@@ -316,6 +308,7 @@ def liquid_cloud_optics_sw(
         
     Returns:
         Tuple of (optical_depth, single_scatter_albedo, asymmetry_factor)
+
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=True)
@@ -360,8 +353,7 @@ def ice_cloud_optics_sw(
     effective_radius: jnp.ndarray,
     band: int
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate shortwave optical properties for ice clouds.
+    """Calculate shortwave optical properties for ice clouds.
     
     Enhanced parameterization based on ice crystal habits and database calculations.
     Based on Yang et al. (2013) and Baum et al. (2014).
@@ -373,6 +365,7 @@ def ice_cloud_optics_sw(
         
     Returns:
         Tuple of (optical_depth, single_scatter_albedo, asymmetry_factor)
+
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=True)
@@ -443,8 +436,7 @@ def liquid_cloud_optics_lw(
     effective_radius: jnp.ndarray,
     band: int
 ) -> jnp.ndarray:
-    """
-    Calculate longwave optical properties for liquid clouds.
+    """Calculate longwave optical properties for liquid clouds.
     
     Enhanced implementation with improved spectral dependence.
     Longwave assumes pure absorption (no scattering).
@@ -456,6 +448,7 @@ def liquid_cloud_optics_lw(
         
     Returns:
         Optical depth (absorption)
+
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
@@ -502,8 +495,7 @@ def ice_cloud_optics_lw(
     effective_radius: jnp.ndarray,
     band: int
 ) -> jnp.ndarray:
-    """
-    Calculate longwave optical properties for ice clouds.
+    """Calculate longwave optical properties for ice clouds.
     
     Enhanced implementation with improved spectral dependence.
     
@@ -514,6 +506,7 @@ def ice_cloud_optics_lw(
         
     Returns:
         Optical depth (absorption)
+
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
@@ -562,8 +555,7 @@ def cloud_optics(
     cdnc_factor: jnp.ndarray,
     land_fraction: float = 0.5
 ) -> Tuple[OpticalProperties, OpticalProperties]:
-    """
-    Calculate complete cloud optical properties.
+    """Calculate complete cloud optical properties.
     
     Args:
         cloud_water_path: Cloud water path (kg/m²) [nlev]
@@ -574,6 +566,7 @@ def cloud_optics(
         
     Returns:
         Tuple of (sw_optics, lw_optics)
+
     """
     nlev = temperature.shape[0]
     
@@ -667,8 +660,7 @@ def cloud_overlap_factor(
     cloud_fraction_current: jnp.ndarray,
     overlap_param: float = 0.5
 ) -> jnp.ndarray:
-    """
-    Calculate cloud overlap factor.
+    """Calculate cloud overlap factor.
     
     Maximum-random overlap approximation.
     
@@ -679,6 +671,7 @@ def cloud_overlap_factor(
         
     Returns:
         Overlap factor
+
     """
     # Maximum overlap
     max_overlap = jnp.minimum(cloud_fraction_above, cloud_fraction_current)
@@ -695,7 +688,6 @@ def cloud_overlap_factor(
 # Test functions
 def test_cloud_optics():
     """Test cloud optics calculations"""
-    
     # Test data
     nlev = 10
     temperature = jnp.linspace(250, 290, nlev)

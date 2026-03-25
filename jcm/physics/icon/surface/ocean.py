@@ -1,5 +1,4 @@
-"""
-Ocean surface physics for ICON surface scheme.
+"""Ocean surface physics for ICON surface scheme.
 
 This module implements a simple mixed-layer ocean model and ocean-atmosphere
 coupling following ICON's approach.
@@ -11,7 +10,7 @@ from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
+    SurfaceParameters, AtmosphericForcing, 
     SurfaceFluxes, SurfaceTendencies
 )
 
@@ -24,8 +23,7 @@ def compute_ocean_albedo(
     solar_zenith_angle: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute ocean surface albedo as a function of solar zenith angle.
+    """Compute ocean surface albedo as a function of solar zenith angle.
     
     Args:
         solar_zenith_angle: Solar zenith angle [rad] (ncol,)
@@ -34,6 +32,7 @@ def compute_ocean_albedo(
     Returns:
         Tuple of (albedo_vis_direct, albedo_vis_diffuse, 
                  albedo_nir_direct, albedo_nir_diffuse)
+
     """
     # Fresnel reflection formula for direct beam
     # Simplified parameterization based on zenith angle
@@ -57,8 +56,7 @@ def compute_ocean_roughness(
     ocean_v: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute ocean surface roughness using Charnock relation.
+    """Compute ocean surface roughness using Charnock relation.
     
     Args:
         wind_speed: Wind speed [m/s] (ncol,)
@@ -68,6 +66,7 @@ def compute_ocean_roughness(
         
     Returns:
         Ocean roughness length [m] (ncol,)
+
     """
     # Relative wind speed (wind minus ocean current)
     # For simplicity, assume wind_speed is the magnitude and ocean currents are small
@@ -97,8 +96,7 @@ def mixed_layer_ocean_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Evolve mixed layer ocean temperature.
+    """Evolve mixed layer ocean temperature.
     
     Args:
         ocean_temp: Ocean temperature [K] (ncol,)
@@ -109,6 +107,7 @@ def mixed_layer_ocean_step(
         
     Returns:
         Ocean temperature tendency [K/s] (ncol,)
+
     """
     # Mixed layer heat capacity [J/m²/K]
     heat_capacity = params.rho_water * params.cp_water * params.ml_depth
@@ -134,8 +133,7 @@ def compute_ocean_surface_fluxes(
     solar_zenith_angle: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, jnp.ndarray]:
-    """
-    Compute surface fluxes over ocean.
+    """Compute surface fluxes over ocean.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -150,6 +148,7 @@ def compute_ocean_surface_fluxes(
         
     Returns:
         Tuple of (surface_fluxes, roughness_length)
+
     """
     ncol = ocean_temp.shape[0]
     
@@ -230,8 +229,7 @@ def ocean_surface_temperature_step(
     dt: float = 3600.0,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Update ocean surface temperature using energy balance.
+    """Update ocean surface temperature using energy balance.
     
     Args:
         ocean_temp: Ocean temperature [K] (ncol,)
@@ -242,13 +240,8 @@ def ocean_surface_temperature_step(
         
     Returns:
         Ocean temperature tendency [K/s] (ncol,)
+
     """
-    # Net surface heat flux
-    net_heat_flux = (surface_fluxes.shortwave_net[:, 0] + 
-                    surface_fluxes.longwave_net[:, 0] - 
-                    surface_fluxes.sensible_heat[:, 0] - 
-                    surface_fluxes.latent_heat[:, 0])
-    
     # Account for shortwave penetration
     surface_absorbed_sw = (surface_fluxes.shortwave_net[:, 0] * 
                           (1.0 - shortwave_penetration_fraction))
@@ -281,8 +274,7 @@ def ocean_physics_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
-    """
-    Complete ocean physics step.
+    """Complete ocean physics step.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -298,6 +290,7 @@ def ocean_physics_step(
         
     Returns:
         Tuple of (surface_fluxes, tendencies, roughness_length)
+
     """
     ncol = ocean_temp.shape[0]
     
@@ -333,8 +326,7 @@ def compute_ocean_coupling_fluxes(
     precipitation_rate: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute fluxes for ocean-atmosphere coupling.
+    """Compute fluxes for ocean-atmosphere coupling.
     
     Args:
         surface_fluxes: Surface fluxes
@@ -343,6 +335,7 @@ def compute_ocean_coupling_fluxes(
         
     Returns:
         Tuple of (heat_flux, freshwater_flux, momentum_flux_magnitude)
+
     """
     # Net heat flux into ocean [W/m²]
     heat_flux = (surface_fluxes.shortwave_net[:, 0] + 

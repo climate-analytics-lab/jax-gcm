@@ -10,7 +10,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         from dinosaur.scales import SI_SCALE
         from dinosaur import primitive_equations
         from dinosaur import xarray_utils
-        from jcm.utils import get_coords
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
         kx, ix, il = 8, 96, 48
@@ -21,7 +21,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         phi = jnp.ones((kx, ix, il)) * 5000
         sp = jnp.ones((kx, ix, il))
 
-        coords = get_coords()
+        coords = get_speedy_coords()
         _, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=coords,
             physics_specs=PHYSICS_SPECS,
@@ -36,9 +36,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
             coords,
             PHYSICS_SPECS)
 
-        # Create empty tracers dict for the state
-        tracers = {}
-        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp, tracers)
+        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp)
 
         dynamics_state = physics_state_to_dynamics_state(state, primitive)
         physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)
@@ -52,7 +50,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         kx, ix, il = 8, 96, 48
         qa = jnp.ones((kx, il, ix)) * -1
 
-        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa, tracers={})
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
 
         updated_state = verify_state(state)
 
@@ -60,6 +58,6 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
 
         qa = jnp.ones((kx, il, ix)) * -1e-5
 
-        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa, tracers={})
+        state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
 
         updated_state = verify_state(state)

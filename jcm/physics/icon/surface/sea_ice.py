@@ -1,5 +1,4 @@
-"""
-Sea ice thermodynamics for ICON surface scheme.
+"""Sea ice thermodynamics for ICON surface scheme.
 
 This module implements sea ice thermodynamics following ICON's approach,
 including ice growth/melt, thermal conduction, and snow processes.
@@ -11,7 +10,7 @@ from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
+    SurfaceParameters, AtmosphericForcing, 
     SurfaceFluxes, SurfaceTendencies
 )
 
@@ -25,8 +24,7 @@ def compute_ice_albedo(
     snow_depth: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute sea ice albedo as a function of ice thickness and snow cover.
+    """Compute sea ice albedo as a function of ice thickness and snow cover.
     
     Args:
         ice_thickness: Ice thickness [m] (ncol,)
@@ -36,6 +34,7 @@ def compute_ice_albedo(
     Returns:
         Tuple of (albedo_vis_direct, albedo_vis_diffuse, 
                  albedo_nir_direct, albedo_nir_diffuse)
+
     """
     # Base ice albedo (depends on ice thickness)
     thick_ice_albedo_vis = 0.75  # Thick ice visible albedo
@@ -78,8 +77,7 @@ def compute_ice_roughness(
     snow_depth: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute sea ice surface roughness.
+    """Compute sea ice surface roughness.
     
     Args:
         ice_thickness: Ice thickness [m] (ncol,)
@@ -88,6 +86,7 @@ def compute_ice_roughness(
         
     Returns:
         Ice roughness length [m] (ncol,)
+
     """
     # Base ice roughness
     z0_ice_base = params.z0_ice
@@ -113,8 +112,7 @@ def ice_heat_conduction(
     ocean_temp: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute heat conduction through sea ice.
+    """Compute heat conduction through sea ice.
     
     Args:
         ice_temp: Ice temperature [K] (ncol, nice_layers)
@@ -125,6 +123,7 @@ def ice_heat_conduction(
         
     Returns:
         Heat conduction flux [W/m²] (ncol,)
+
     """
     # Simple 1-layer ice model
     # Thermal conductivity through ice
@@ -151,8 +150,7 @@ def ice_surface_temperature_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Update ice surface temperature and check for melting.
+    """Update ice surface temperature and check for melting.
     
     Args:
         ice_temp: Ice temperature [K] (ncol, nice_layers)
@@ -165,8 +163,8 @@ def ice_surface_temperature_step(
         
     Returns:
         Tuple of (ice_temp_tendency, surface_temp_tendency)
+
     """
-    ncol = ice_temp.shape[0]
     nice_layers = ice_temp.shape[1]
     
     # Surface temperature (top of ice/snow)
@@ -216,8 +214,7 @@ def ice_thickness_evolution(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute ice thickness evolution due to freezing/melting.
+    """Compute ice thickness evolution due to freezing/melting.
     
     Args:
         ice_thickness: Ice thickness [m] (ncol, nice_layers)
@@ -229,6 +226,7 @@ def ice_thickness_evolution(
         
     Returns:
         Ice thickness tendency [m/s] (ncol, nice_layers)
+
     """
     ncol = ice_thickness.shape[0]
     nice_layers = ice_thickness.shape[1]
@@ -307,8 +305,7 @@ def snow_evolution(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute snow depth evolution on sea ice.
+    """Compute snow depth evolution on sea ice.
     
     Args:
         snow_depth: Snow depth [m] (ncol,)
@@ -320,6 +317,7 @@ def snow_evolution(
         
     Returns:
         Snow depth tendency [m/s] (ncol,)
+
     """
     # Snow accumulation from precipitation
     rho_snow = 300.0  # kg/m³ (fresh snow density)
@@ -369,8 +367,7 @@ def sea_ice_physics_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
-    """
-    Complete sea ice physics step.
+    """Complete sea ice physics step.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -386,10 +383,10 @@ def sea_ice_physics_step(
         
     Returns:
         Tuple of (surface_fluxes, tendencies, roughness_length)
+
     """
     ncol = ice_temp.shape[0]
-    nice_layers = ice_temp.shape[1]
-    
+
     # Surface temperature (top of ice/snow)
     surface_temp = ice_temp[:, 0]
     

@@ -8,24 +8,25 @@ The corrections are applied in grid space as a physics parameterization.
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import rgas, grav, gamma, hscale, hshum, refrh1
 from jcm.physics.speedy.physics_data import PhysicsData
 
 
-def compute_temperature_correction_vertical_profile(geometry: Geometry, parameters: Parameters) -> jnp.ndarray:
+def compute_temperature_correction_vertical_profile(terrain: TerrainData, physics_data: PhysicsData, parameters: Parameters) -> jnp.ndarray:
     """Compute vertical profile for temperature orographic correction (tcorv).
-    
+
     From SPEEDY horizontal_diffusion.f90:
     tcorv(1) = 0
     tcorv(k) = fsg(k)^rgam for k = 2 to kx
     where rgam = rgas * gamma / (1000 * grav)
-    
+
     Args:
-        geometry: Model geometry containing sigma levels
+        terrain: TerrainData containing boundary conditions
+        physics_data: PhysicsData containing speedy_coords for sigma levels
         parameters: SPEEDY parameters containing gamma
-        
+
     Returns:
         Vertical profile array of shape (layers,)
 
@@ -34,7 +35,7 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
     rgam = rgas * gamma / (1000.0 * grav)
     
     # Get sigma levels (fsg in SPEEDY) - use layer midpoints
-    sigma_levels = geometry.fsg  # These are the full sigma levels
+    sigma_levels = physics_data.speedy_coords.fsg  # These are the full sigma levels
     
     # Get number of layers - use shape of sigma_levels to avoid accessing nodal_shape
     layers = sigma_levels.shape[0]
@@ -52,18 +53,19 @@ def compute_temperature_correction_vertical_profile(geometry: Geometry, paramete
     return tcorv
 
 
-def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters: Parameters) -> jnp.ndarray:
+def compute_humidity_correction_vertical_profile(terrain: TerrainData, physics_data: PhysicsData, parameters: Parameters) -> jnp.ndarray:
     """Compute vertical profile for humidity orographic correction (qcorv).
-    
+
     From SPEEDY horizontal_diffusion.f90:
     qcorv(1) = qcorv(2) = 0
     qcorv(k) = fsg(k)^qexp for k = 3 to kx
     where qexp = hscale / hshum
-    
+
     Args:
-        geometry: Model geometry containing sigma levels
+        terrain: TerrainData containing boundary conditions
+        physics_data: PhysicsData containing speedy_coords for sigma levels
         parameters: SPEEDY parameters
-        
+
     Returns:
         Vertical profile array of shape (layers,)
 
@@ -71,7 +73,7 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
     qexp = hscale / hshum
     
     # Get sigma levels - use layer midpoints
-    sigma_levels = geometry.fsg
+    sigma_levels = physics_data.speedy_coords.fsg
     
     # Get number of layers - use shape of sigma_levels to avoid accessing nodal_shape
     layers = sigma_levels.shape[0]
@@ -89,15 +91,16 @@ def compute_humidity_correction_vertical_profile(geometry: Geometry, parameters:
     return qcorv
 
 
-def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray:
+def compute_temperature_correction_horizontal(terrain: TerrainData, physics_data: PhysicsData) -> jnp.ndarray:
     """Compute horizontal temperature correction in grid space.
-    
+
     From SPEEDY forcing.f90:
     corh(i,j) = gamlat(j) * phis0(i,j)
     where gamlat = gamma / (1000 * grav) (constant)
     
     Args:
-        geometry: Model geometry
+        terrain: TerrainData
+        physics_data: PhysicsData containing speedy_coords
         
     Returns:
         Horizontal correction array of shape (lon, lat)
@@ -106,7 +109,7 @@ def compute_temperature_correction_horizontal(geometry: Geometry) -> jnp.ndarray
     gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
     
     # Apply correction: gamlat * phis0 (spectrally-filtered surface geopotential)
-    corh = gamlat * geometry.phis0
+    corh = gamlat * terrain.phis0
     
     return corh
 
@@ -178,7 +181,7 @@ def get_orographic_correction_tendencies(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData = None,
-    geometry: Geometry = None
+    terrain: TerrainData = None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Compute orographic correction tendencies for temperature and specific humidity.
     
@@ -193,7 +196,8 @@ def get_orographic_correction_tendencies(
         physics_data: Physics data structure (passed through unchanged)
         parameters: SPEEDY parameters
         forcing: Forcing data containing orography
-        geometry: Model geometry
+        terrain: TerrainData
+        physics_data: PhysicsData containing speedy_coords
         
     Returns:
         tuple: (PhysicsTendency, updated PhysicsData)
@@ -202,16 +206,16 @@ def get_orographic_correction_tendencies(
 
     """
     # Compute vertical profiles
-    tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
-    qcorv = compute_humidity_correction_vertical_profile(geometry, parameters)
+    tcorv = compute_temperature_correction_vertical_profile(terrain, physics_data, parameters)
+    qcorv = compute_humidity_correction_vertical_profile(terrain, physics_data, parameters)
     
     # Compute horizontal corrections
-    tcorh = compute_temperature_correction_horizontal(geometry)
+    tcorh = compute_temperature_correction_horizontal(terrain, physics_data)
     
     # For humidity correction, we need the temperature correction and land temperature
     # Get land temperature from physics data (land model)
     land_temperature = forcing.stl_am
-    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature)
+    qcorh = compute_humidity_correction_horizontal(forcing, terrain.fmask, tcorh, land_temperature)
     
     # Apply corrections: field_corrected = field + horizontal * vertical
     temp_correction = tcorh * tcorv[:, None, None]
@@ -243,8 +247,9 @@ def get_orographic_correction_tendencies(
 
 def apply_orographic_corrections_to_state(
     state: PhysicsState,
+    physics_data: PhysicsData,
     forcing: ForcingData,
-    geometry: Geometry,
+    terrain: TerrainData,
     parameters: Parameters,
     land_temperature: jnp.ndarray = None,
     day: int = 0
@@ -257,7 +262,8 @@ def apply_orographic_corrections_to_state(
     Args:
         state: Physics state to correct
         forcing: Forcing data containing orography
-        geometry: Model geometry
+        terrain: TerrainData
+        physics_data: PhysicsData containing speedy_coords
         parameters: SPEEDY parameters
         land_temperature: Land surface temperature (if None, uses a default value)
         day: day of year (for SST)
@@ -267,18 +273,18 @@ def apply_orographic_corrections_to_state(
 
     """
     # Compute vertical profiles
-    tcorv = compute_temperature_correction_vertical_profile(geometry, parameters)
-    qcorv = compute_humidity_correction_vertical_profile(geometry, parameters)
+    tcorv = compute_temperature_correction_vertical_profile(terrain, physics_data, parameters)
+    qcorv = compute_humidity_correction_vertical_profile(terrain, physics_data, parameters)
     
     # Compute horizontal corrections
-    tcorh = compute_temperature_correction_horizontal(geometry)
+    tcorh = compute_temperature_correction_horizontal(terrain, physics_data)
     
     # For humidity correction, use provided land temperature or default value
     if land_temperature is None:
         # Use a default land temperature (288K) for testing
-        land_temperature = jnp.full(geometry.orog.shape, 288.0)
+        land_temperature = jnp.full(terrain.orog.shape, 288.0)
     
-    qcorh = compute_humidity_correction_horizontal(forcing, geometry.fmask, tcorh, land_temperature)
+    qcorh = compute_humidity_correction_horizontal(forcing, terrain.fmask, tcorh, land_temperature)
     
     # Apply corrections
     temp_correction = tcorh * tcorv[:, None, None]

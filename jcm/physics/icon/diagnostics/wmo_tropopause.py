@@ -1,5 +1,4 @@
-"""
-WMO Tropopause Diagnostic for ICON Physics
+"""WMO Tropopause Diagnostic for ICON Physics
 
 This module implements the WMO (1957) tropopause definition following the
 ICON mo_tropopause.f90 implementation. The tropopause is defined as the
@@ -12,7 +11,7 @@ Date: 2025-01-09
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple, Optional
+from typing import Optional
 from jcm.physics.icon.constants import physical_constants
 
 # WMO tropopause constants
@@ -23,8 +22,7 @@ P_DEFAULT = 20000.0  # Pa - Default tropopause pressure (~200 hPa)
 def compute_geopotential_height(pressure: jnp.ndarray, 
                               temperature: jnp.ndarray,
                               surface_pressure: jnp.ndarray) -> jnp.ndarray:
-    """
-    Compute geopotential height from pressure and temperature.
+    """Compute geopotential height from pressure and temperature.
     
     Uses the hypsometric equation with proper handling of model levels.
     
@@ -35,6 +33,7 @@ def compute_geopotential_height(pressure: jnp.ndarray,
         
     Returns:
         Geopotential height [m] (shape: [..., nlev])
+
     """
     # Constants
     g = physical_constants.grav
@@ -75,8 +74,7 @@ def compute_geopotential_height(pressure: jnp.ndarray,
 
 def compute_lapse_rate(temperature: jnp.ndarray, 
                       height: jnp.ndarray) -> jnp.ndarray:
-    """
-    Compute temperature lapse rate dT/dz.
+    """Compute temperature lapse rate dT/dz.
     
     Args:
         temperature: Temperature [K] (shape: [..., nlev])
@@ -84,6 +82,7 @@ def compute_lapse_rate(temperature: jnp.ndarray,
         
     Returns:
         Lapse rate [K/m] (shape: [..., nlev-1])
+
     """
     # Compute finite differences
     dT = temperature[..., 1:] - temperature[..., :-1]
@@ -101,8 +100,7 @@ def find_tropopause_level(temperature: jnp.ndarray,
                          height: jnp.ndarray,
                          ncctop: int = 13,
                          nccbot: int = 35) -> jnp.ndarray:
-    """
-    Find the tropopause level following WMO definition.
+    """Find the tropopause level following WMO definition.
     
     Args:
         temperature: Temperature [K] (shape: [..., nlev])
@@ -113,6 +111,7 @@ def find_tropopause_level(temperature: jnp.ndarray,
         
     Returns:
         Tropopause pressure [Pa] (shape: [...])
+
     """
     # Limit search to specified vertical range
     search_temp = temperature[..., ncctop:nccbot]
@@ -123,7 +122,6 @@ def find_tropopause_level(temperature: jnp.ndarray,
     lapse_rate = compute_lapse_rate(search_temp, search_height)
     
     # Find levels where lapse rate is >= GWMO (-2 K/km)
-    stable_mask = lapse_rate >= GWMO
     
     nlev_search = search_temp.shape[-1]
     nlev_lapse = lapse_rate.shape[-1]
@@ -131,7 +129,6 @@ def find_tropopause_level(temperature: jnp.ndarray,
     
     def find_tropopause_column(temp_col, pres_col, height_col, lapse_col):
         """Find tropopause for a single column using JAX-compatible operations"""
-        
         # Start from bottom (surface) and work up to find the LOWEST level
         # that meets the criteria (this is the key to WMO definition)
         level_indices = jnp.arange(nlev_lapse)
@@ -234,8 +231,7 @@ def wmo_tropopause(temperature: jnp.ndarray,
                   pressure: jnp.ndarray,
                   surface_pressure: jnp.ndarray,
                   previous_tropopause: Optional[jnp.ndarray] = None) -> jnp.ndarray:
-    """
-    Compute WMO tropopause pressure diagnostic.
+    """Compute WMO tropopause pressure diagnostic.
     
     Follows the WMO (1957) definition: the tropopause is the lowest level
     at which the lapse rate decreases to 2°C per kilometer or less,
@@ -251,6 +247,7 @@ def wmo_tropopause(temperature: jnp.ndarray,
         
     Returns:
         Tropopause pressure [Pa] (shape: [...])
+
     """
     # Compute geopotential height
     height = compute_geopotential_height(pressure, temperature, surface_pressure)

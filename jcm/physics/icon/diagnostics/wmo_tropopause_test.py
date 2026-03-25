@@ -1,11 +1,9 @@
-"""
-Tests for WMO tropopause diagnostic
+"""Tests for WMO tropopause diagnostic
 
 Date: 2025-01-09
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.icon.diagnostics.wmo_tropopause import (
     wmo_tropopause, 
     compute_geopotential_height,
@@ -66,7 +64,6 @@ def create_test_atmosphere():
 def test_compute_geopotential_height():
     """Test geopotential height computation"""
     # Simple test case
-    nlev = 5
     temperature = jnp.array([288.0, 285.0, 280.0, 275.0, 270.0])
     pressure = jnp.array([100000.0, 85000.0, 70000.0, 50000.0, 30000.0])
     surface_pressure = jnp.array([100000.0])

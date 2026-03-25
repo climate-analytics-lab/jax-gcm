@@ -1,15 +1,11 @@
-"""
-Unit tests for main surface physics interface.
-"""
+"""Unit tests for main surface physics interface."""
 
 import pytest
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.physics.icon.surface.surface_physics import (
     initialize_surface_state, surface_physics_step,
-    combine_surface_fluxes, combine_surface_tendencies,
-    update_surface_state
+    combine_surface_fluxes, update_surface_state
 )
 from jcm.physics.icon.surface.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,

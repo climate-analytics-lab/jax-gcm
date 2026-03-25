@@ -1,12 +1,10 @@
-"""
-Simplified tests for convection scheme focusing on basic functionality
+"""Simplified tests for convection scheme focusing on basic functionality
 
 Date: 2025-01-09
 """
 
 import jax.numpy as jnp
 import jax
-import numpy as np
 
 # Import basic convection functions
 from jcm.physics.icon.convection.tiedtke_nordeng import (
@@ -21,7 +19,6 @@ def create_simple_atmosphere(nlev=20):
     """Create a simple test atmospheric profile"""
     # Physical constants
     Rd = 287.05  # J/(kg*K) - gas constant for dry air
-    g = 9.80665  # m/s² - gravitational acceleration
 
     # Pressure levels (Pa) - from surface (1000 hPa) to top (~200 hPa)
     pressure = jnp.linspace(1e5, 2e4, nlev)

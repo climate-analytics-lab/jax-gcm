@@ -1,5 +1,4 @@
-"""
-Gravity wave drag parameterization for ICON physics
+"""Gravity wave drag parameterization for ICON physics
 
 This module implements the orographic and non-orographic gravity wave drag
 parameterizations. The scheme accounts for momentum deposition from breaking
@@ -104,8 +103,7 @@ def brunt_vaisala_frequency(
     pressure: jnp.ndarray,
     height: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate Brunt-Väisälä frequency
+    """Calculate Brunt-Väisälä frequency
     
     Args:
         temperature: Temperature profile (K) [nlev]
@@ -114,6 +112,7 @@ def brunt_vaisala_frequency(
         
     Returns:
         N²: Brunt-Väisälä frequency squared (s⁻²) [nlev]
+
     """
     # Calculate potential temperature
     p0 = 100000.0  # Reference pressure
@@ -121,7 +120,6 @@ def brunt_vaisala_frequency(
     
     # Calculate vertical gradient of potential temperature
     # Use one-sided differences at boundaries
-    nlev = temperature.shape[0]
     dtheta_dz = jnp.zeros_like(theta)
     
     # Interior points - central differences
@@ -154,8 +152,7 @@ def orographic_source(
     h_std: jnp.ndarray,
     config: GravityWaveParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate orographic gravity wave source
+    """Calculate orographic gravity wave source
     
     Args:
         u_sfc: Surface zonal wind (m/s)
@@ -166,6 +163,7 @@ def orographic_source(
         
     Returns:
         Tuple of (tau_x, tau_y): Surface momentum fluxes (N/m²)
+
     """
     # Surface wind speed
     wind_speed = jnp.sqrt(u_sfc**2 + v_sfc**2)
@@ -201,8 +199,7 @@ def wave_breaking_criterion(
     rho: jnp.ndarray,
     config: GravityWaveParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Determine wave breaking and momentum deposition
+    """Determine wave breaking and momentum deposition
     
     Uses saturation hypothesis - waves break when amplitude exceeds
     critical threshold based on Richardson number criterion.
@@ -217,6 +214,7 @@ def wave_breaking_criterion(
         
     Returns:
         Tuple of (breaking_mask, deposited_momentum)
+
     """
     nlev = u.shape[0]
     
@@ -291,8 +289,7 @@ def gravity_wave_drag(
     dt: float,
     config: Optional[GravityWaveParameters] = None
 ) -> Tuple[GravityWaveTendencies, GravityWaveState]:
-    """
-    Calculate gravity wave drag tendencies
+    """Calculate gravity wave drag tendencies
     
     Args:
         u_wind: Zonal wind (m/s) [nlev]
@@ -307,6 +304,7 @@ def gravity_wave_drag(
         
     Returns:
         Tuple of (tendencies, state)
+
     """
     if config is None:
         config = GravityWaveParameters.default()

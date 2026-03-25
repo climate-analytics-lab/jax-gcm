@@ -4,7 +4,7 @@ version of the Tiedtke (1993) mass-flux convection scheme.
 """
 from jax import jit
 import jax.numpy as jnp
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
@@ -15,8 +15,9 @@ from jcm.physics.speedy.physical_constants import p0, alhc, grav, cp
 def diagnose_convection(
     psa, se, qa, qsat,
     parameters: Parameters,
+    physics_data: PhysicsData,
     forcing: ForcingData=None,
-    geometry: Geometry=None
+    terrain: TerrainData=None
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Diagnose convectively unstable gridboxes
 
@@ -61,13 +62,13 @@ def diagnose_convection(
     mss0 = jnp.maximum(mse0, mss[kx-1])
 
     mss2 = jnp.pad(
-        mss[:-1] + geometry.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(mss, axis=0),
+        mss[:-1] + physics_data.speedy_coords.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(mss, axis=0),
         ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0 # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
     )
 
     # If there is any instability, cloud top is the first unstable level (from top down)
     # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match icltop convention
+    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
     possible_cltop_levels = jnp.arange(2, kx-3)
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
@@ -101,7 +102,7 @@ def get_convection_tendencies(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData=None,
-    geometry: Geometry=None
+    terrain: TerrainData=None
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Compute convective fluxes of dry static energy and moisture using a simplified mass-flux scheme.
 
@@ -131,26 +132,26 @@ def get_convection_tendencies(
     dfse, dfqa = _zeros_3d(), _zeros_3d()
 
     # Entrainment profile (up to sigma = 0.5)
-    entr = jnp.maximum(0.0, geometry.fsg[1:kx-1] - 0.5)**2.0
+    entr = jnp.maximum(0.0, physics_data.speedy_coords.fsg[1:kx-1] - 0.5)**2.0
     sentr = jnp.sum(entr)
     entr *= parameters.convection.entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
-    fm0 = p0*geometry.dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
+    fm0 = p0*physics_data.speedy_coords.dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
     rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection
-    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, forcing, geometry)
+    iptop, qdif = diagnose_convection(psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
 
     # 3. Convection over selected grid-points
-    mask = iptop < kx
+    mask = ~(iptop == kx+1)
     # 3.1 Boundary layer (cloud base)
     k = kx - 1
 
     # Maximum specific humidity in the PBL
     qmax = jnp.maximum(1.01 * qa[-1], qsat[-1])
 
-    interpolate = lambda tracer: tracer[:-1] + geometry.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(tracer, axis=0)
+    interpolate = lambda tracer: tracer[:-1] + physics_data.speedy_coords.wvi[:-1, 1, jnp.newaxis, jnp.newaxis] * jnp.diff(tracer, axis=0)
     _sb_3d, _qb_3d = (_zeros_3d().at[1:].set(interpolate(tracer)) for tracer in (se, qa))
     
     # Dry static energy and moisture at upper boundary
@@ -173,8 +174,8 @@ def get_convection_tendencies(
     # 3.2 Intermediate layers (entrainment)
 
     # replace loop with masking
-    loop_mask = (kx - 2 >= jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]) & \
-                (jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] >= iptop)
+    _k_3d = jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]
+    loop_mask = (kx - 2 >= _k_3d) & (_k_3d >= iptop)
     
     #start by making entrainment profile:
     _enmass_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa * cbmf)
@@ -188,7 +189,7 @@ def get_convection_tendencies(
     # Downward fluxes
     _fds_3d, _fdq_3d = (_fmass_3d * _sb_3d).at[-1].set(fds), (_fmass_3d * _qb_3d).at[-1].set(fdq)
 
-    # Calculate flux convergence
+    # Calculate flux convergences
     dfse = dfse.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fus_3d - _fds_3d, axis=0)))
     dfqa = dfqa.at[:-1].set(loop_mask[:-1] * (jnp.diff(_fuq_3d - _fdq_3d, axis=0)))
 
@@ -222,8 +223,8 @@ def get_convection_tendencies(
 
     # Compute tendencies due to convection. Logic from physics.f90:127-130
     rps = 1/psa
-    ttend = dfse.at[1:].set(dfse[1:] * rps * geometry.grdscp[1:, jnp.newaxis, jnp.newaxis])
-    qtend = dfqa.at[1:].set(dfqa[1:] * rps * geometry.grdsig[1:, jnp.newaxis, jnp.newaxis])
+    ttend = dfse.at[1:].set(dfse[1:] * rps * physics_data.speedy_coords.grdscp[1:, jnp.newaxis, jnp.newaxis])
+    qtend = dfqa.at[1:].set(dfqa[1:] * rps * physics_data.speedy_coords.grdsig[1:, jnp.newaxis, jnp.newaxis])
 
     convection_out = physics_data.convection.copy(se=se, iptop=iptop, cbmf=cbmf, qdif=qdif, precnv=precnv)
     physics_data = physics_data.copy(convection=convection_out)

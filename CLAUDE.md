@@ -1,248 +1,155 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Project Overview
 
-## Overview
+JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
 
-JAX-GCM is a JAX-based General Circulation Model that combines the Dinosaur dynamical core with JAX implementations of atmospheric physics parameterizations. It provides a fully differentiable climate model suitable for ML-enhanced weather and climate modeling.
+- **Package name:** `jcm`
+- **Python:** >= 3.11 (strict requirement)
+- **License:** Apache 2.0
+- **Status:** Alpha (v1.0.0)
 
-## Key Components
+## Repository Structure
 
-### Architecture
-- **Dynamical Core**: Uses [Dinosaur](https://github.com/neuralgcm/dinosaur) for atmospheric dynamics
-- **Physics Packages**:
-  - **SPEEDY Physics**: Complete JAX implementation of SPEEDY atmospheric physics
-  - **ICON Physics**: New JAX implementation of ICON parameterizations (active development)
-  - **Held-Suarez**: Simplified physics for testing
-- **Configuration**: Hydra-based configuration system with YAML files
-
-### Project Structure
 ```
-jcm/                      # Main package (JAX Climate Model)
-├── physics/              # Physics implementations
-│   ├── speedy/          # SPEEDY physics modules
-│   ├── icon/            # ICON physics (radiation, convection, clouds, etc.)
-│   └── held_suarez/     # Simplified physics
-├── model.py             # Main model class
-├── physics_interface.py # Physics abstraction layer
-├── geometry.py          # Grid and coordinate handling
-├── date.py              # Time/date management
-└── forcing.py           # Surface boundary conditions
+jcm/                          # Main package
+├── model.py                  # Core Model class - main entry point
+├── main.py                   # CLI entry point (Hydra config)
+├── constants.py              # Global physical constants
+├── utils.py                  # Utilities and lookup tables
+├── geometry.py               # Grid geometry and terrain
+├── forcing.py                # Boundary conditions and I/O
+├── date.py                   # Date handling
+├── physics_interface.py      # Physics-dynamics coupling
+├── diffusion.py              # Diffusion filter
+├── config/                   # Hydra configuration files
+├── physics/
+│   ├── speedy/               # SPEEDY physics parameterizations
+│   │   ├── speedy_physics.py # Main SPEEDY orchestrator
+│   │   ├── params.py         # Tunable parameter structs
+│   │   ├── convection.py     # Convection scheme
+│   │   ├── humidity.py       # Moisture processes
+│   │   ├── large_scale_condensation.py
+│   │   ├── shortwave_radiation.py
+│   │   ├── longwave_radiation.py
+│   │   ├── surface_flux.py   # Surface exchange
+│   │   ├── vertical_diffusion.py
+│   │   └── *_test.py         # Co-located unit tests
+│   └── held_suarez/          # Simplified Held-Suarez physics
+├── data/
+│   ├── bc/                   # Boundary condition data (T30 climatology)
+│   └── test/                 # Test reference data
+└── *_test.py                 # Co-located unit tests
+docs/                         # Sphinx documentation (RST + Furo theme)
+notebooks/                    # Example Jupyter notebooks
 ```
 
-## Development Commands
+## Build & Install
 
-### Installation
 ```bash
-pip install -e .  # Development mode
+pip install -e .
 ```
 
-### Testing
+Dependencies are in `requirements.txt`: dinosaur, flax, jax-datetime, tree-math, hydra-core, xarray.
+
+## Running Tests
+
 ```bash
-# Run all tests
+# All tests
 pytest
 
-# Run specific module tests
-pytest jcm/physics/icon/ -v
-
-# Run with coverage (90% minimum required)
-pytest --cov=jcm --cov-fail-under=90
-
-# Skip slow tests
+# Fast tests only (skip slow integration tests >1 min)
 pytest -m "not slow"
 
-# Run single test
-pytest path/to/test_file.py::test_function_name -v
+# Specific test file
+pytest jcm/model_test.py
+
+# With coverage
+pytest --cov=jcm --cov-fail-under=90
 ```
 
-### Linting
+Test files use the `*_test.py` naming convention and are co-located with their source modules. Tests use `unittest.TestCase` classes run via pytest. The `conftest.py` at root cleans `jcm` module imports between tests to prevent state leakage.
+
+**CI thresholds:**
+- Push: fast tests only, 90% coverage required
+- Pull request: includes slow tests, 80% coverage required
+
+## Linting
+
 ```bash
-# Uses Ruff (configured for Python 3.11)
-ruff --format=github --target-version=py311 .
+ruff check .
 ```
 
-### Documentation
+Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
+
+## Key Coding Conventions
+
+### Functional programming with JAX
+- All functions must be **pure** (no side effects) to work with JAX transformations (`jit`, `grad`, `vmap`)
+- Use **immutable data structures** via `@tree_math.struct` decorator
+- No Python `if/else` on JAX-traced values — use `jax.lax.cond()` or `jnp.where()` instead
+- Array shapes must be **statically known** where possible
+- See `JAX_gotchas.md` for common pitfalls
+
+### Data structures
+```python
+@tree_math.struct
+class PhysicsState:
+    u_wind: jnp.ndarray
+    v_wind: jnp.ndarray
+    temperature: jnp.ndarray
+    ...
+```
+
+### Import conventions
+```python
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap, lax
+import numpy as np
+import xarray as xr
+import tree_math
+from dinosaur import primitive_equations
+```
+
+### Naming
+- **snake_case** for functions and variables
+- **PascalCase** for classes
+- Descriptive names for physics variables: `u_wind`, `specific_humidity`, `surface_pressure`
+- Abbreviated names acceptable in performance-critical inner functions
+
+### Function patterns
+- `get_*` — computation functions (e.g., `get_convection_tendencies`)
+- `diagnose_*` — diagnostic calculations
+- `compute_*` — derived quantity computation
+- `set_*` — parameter/state modification
+
+### Type hints and docstrings
+- Type hints in function signatures (not strictly enforced)
+- NumPy-style docstrings for public functions
+
+### Testing
+- Test files: `module_name_test.py` in the same directory as the module
+- Mark slow tests (>1 min) with `@pytest.mark.slow`
+- Include gradient checks (`check_vjp`, `check_jvp`) for JAX functions
+- PRs should include tests for new functionality and bug fixes
+
+## Documentation
+
+Built with Sphinx + Furo theme:
+
 ```bash
 cd docs && make html
 ```
 
-## JAX Development Patterns
+Auto-generated physics variable translation docs come from `jcm/physics/speedy/units_table.csv` via `docs/generate_docs.py`.
 
-### Critical JAX Rules
-1. **No Python control flow on JAX arrays** - Use JAX alternatives:
-   - `if/else` → `jnp.where` or `lax.cond`
-   - `for` loops → `lax.scan` or vectorized operations
-   - `while` loops → `lax.while_loop`
+## Architecture Notes
 
-2. **Static shapes required** - All array shapes must be known at compile time
-
-3. **Pure functions only** - No side effects or stateful operations
-
-4. **Vectorization pattern** - Use `vmap` for spatial operations:
-   ```python
-   # Centralized vectorization in physics modules
-   tendency_fn = jax.vmap(compute_tendency, in_axes=(0, None))
-   ```
-
-### Common Conversions
-See `JAX_CONVERSION_PATTERNS.md` and `JAX_gotchas.md` for detailed patterns:
-- Replace `np.maximum(0, x)` with `jax.nn.relu(x)`
-- Replace boolean indexing with `jnp.where`
-- Use `lax.scan` for accumulation over sequences
-- Use `lax.cond` with lambda functions to avoid eager evaluation
-- Implement custom gradients with `jax.custom_vjp`
-
-## Testing Best Practices
-
-1. **Use real objects instead of mocks**:
-   - Create `DateData` with: `jcm.date.DateData(...)`
-   - Create geometry with: `jcm.geometry.Geometry.from_grid_shape(...)`
-   - These objects are JAX-compatible and easy to instantiate
-
-2. **Test JAX transformations**:
-   - Test `jax.jit` compilation
-   - Test `jax.grad` for differentiability
-   - Test `jax.vmap` for vectorization
-
-3. **Coverage requirements**: Maintain >90% test coverage
-
-## Physics Implementation Guidelines
-
-### Physics Interface
-All physics modules implement this protocol:
-```python
-class ExamplePhysics(Physics):
-    def compute_tendencies(
-        self,
-        state: PhysicsState,
-        forcing: ForcingData,
-        geometry: Geometry,
-        date: DateData,
-    ) -> Tuple[PhysicsTendency, PhysicsData]:
-       ...
-```
-
-Each major physics term typically has a method like:
-```python
-@jit
-def _apply_radiation(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    geometry: Geometry
-) -> tuple[PhysicsTendency, PhysicsData]:
-   ...
-```
-
-### ICON Physics Structure
-The ICON physics package (`jcm/physics/icon/`) includes:
-- **Radiation**: Shortwave and longwave schemes
-- **Convection**: Deep and shallow convection (Tiedtke-Nordeng scheme)
-- **Clouds**: Cloud microphysics and cover
-- **Vertical Diffusion**: Turbulent mixing
-- **Surface**: Land-atmosphere interactions
-- **Gravity Waves**: Orographic and non-orographic
-- **Chemistry**: Chemical tracers (if enabled)
-- **Aerosol**: Aerosol interactions (if enabled)
-
-Each module follows:
-1. Modular design with clear interfaces
-2. Full JAX compatibility (autodiff, JIT, vmap)
-3. Comprehensive test coverage (33+ test files in physics)
-4. Detailed documentation
-
-### Unit Conversions
-See `jcm/physics/icon/UNIT_CONVERSIONS.md` for details on converting between:
-- Physics interface units (normalized surface pressure, geopotential)
-- ICON expected units (Pa, meters, kg/m³)
-
-Key conversions handled automatically:
-- Surface pressure: `normalized * p0` (p0 = 100000 Pa)
-- Pressure levels: `sigma * surface_pressure_pa`
-- Height: `geopotential / g`
-- Air density: `pressure / (Rd * temperature)`
-
-### State Management
-- `PhysicsState`: Immutable atmospheric state (u, v, T, q, φ, ps)
-- `PhysicsTendency`: Time derivatives of state variables
-- Tree-structured data using `tree_math` for arithmetic operations
-
-## Model Interface
-
-### Constructor vs Run Method
-
-**Model Configuration (Constructor)**: Physics and geometry settings are specified when creating the model:
-```python
-from jcm.model import Model
-from jcm.physics.speedy import SpeedyPhysics
-from jcm.physics.icon import IconPhysics
-
-# Configure model with physics and geometry
-model = Model(
-    time_step=30.0,              # Model timestep in minutes
-    layers=8,                    # Vertical layers
-    horizontal_resolution=31,    # Spectral resolution
-    physics=SpeedyPhysics(),     # Physics package
-    use_hybrid_coords=False      # Coordinate system (auto-detected from physics)
-)
-```
-
-**Simulation Parameters (Run Method)**: Run-specific settings are passed to `model.run()`:
-```python
-# Run simulation with specific parameters
-predictions = model.run(
-    initial_state=None,                    # Optional initial state
-    forcing=None,                          # Boundary conditions (default aquaplanet)
-    save_interval=10.0,                    # Save interval in days
-    total_time=120.0,                      # Total simulation time in days
-    start_date=Timestamp.from_datetime(datetime(2000, 1, 1))
-)
-```
-
-### Coordinate System Auto-Detection
-The model automatically detects coordinate systems:
-- **ICON Physics** → Hybrid sigma-pressure coordinates
-- **SPEEDY Physics** → Pure sigma coordinates
-- Override with `use_hybrid_coords=True/False`
-
-### Resume Capability
-Use `model.resume()` to continue from where `run()` left off:
-```python
-# Continue simulation
-more_predictions = model.resume(
-    save_interval=10.0,
-    total_time=60.0  # Additional 60 days
-)
-```
-
-## Dependencies and Requirements
-
-- **Python**: 3.11+ (required for jax-solar)
-- **Core**: JAX, Dinosaur, tree-math
-- **Configuration**: hydra-core
-- **I/O**: xarray, netCDF4
-- **Testing**: pytest, pytest-cov
-- **Documentation**: Sphinx with Furo theme
-
-## Validation Framework
-
-The `validation/` directory contains comprehensive validation tests:
-
-### Emergent Properties Validation
-Tests fundamental atmospheric phenomena (ITCZ, Hadley cells, energy balance):
-```bash
-# Run comprehensive validation
-python validation/emergent_climate_validation.py --duration 30 --output results/emergent_validation.json
-
-# Quick test
-python validation/test_emergent_climate.py --quick
-```
-
-### Test Cases
-- Tropical convection (0°N, 180°E)
-- Mid-latitude winter (50°N, 0°E)
-- Arctic polar (85°N, 0°E)
-- Subtropical clear (30°N, 30°W)
-
-See `validation/README.md` for detailed validation framework documentation.
+- **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core)
+- **Physics** parameterizations are modular — SPEEDY is the main implementation, Held-Suarez is a simpler alternative
+- **physics_interface.py** bridges dynamics (spectral space) and physics (gridpoint space) with `PhysicsState` and `PhysicsTendency` structs
+- **model.py** orchestrates time-stepping, combining dynamics and physics
+- Configuration is managed via **Hydra** (see `jcm/config/`)
+- Supports multiple resolutions: T21 to T425 spectral truncations
+- SPMD sharding support for multi-device execution

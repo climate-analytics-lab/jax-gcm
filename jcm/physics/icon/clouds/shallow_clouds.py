@@ -1,5 +1,4 @@
-"""
-Shallow cloud scheme for ICON physics
+"""Shallow cloud scheme for ICON physics
 
 This module implements a simplified cloud scheme focusing on:
 - Cloud fraction diagnosis based on relative humidity
@@ -12,13 +11,11 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-import jax
-from jax import lax
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 from ..constants.physical_constants import (
-    tmelt, alhc, alhs, rd, rv, cp, eps, grav
+    tmelt, alhc, alhs, cp, eps
 )
 
 
@@ -92,28 +89,28 @@ class CloudTendencies(NamedTuple):
 
 
 def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate saturation vapor pressure over water using Tetens formula
+    """Calculate saturation vapor pressure over water using Tetens formula
     
     Args:
         temperature: Temperature (K)
         
     Returns:
         Saturation vapor pressure (Pa)
+
     """
     t_celsius = temperature - tmelt
     return 610.78 * jnp.exp(17.27 * t_celsius / (t_celsius + 237.3))
 
 
 def saturation_vapor_pressure_ice(temperature: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate saturation vapor pressure over ice using Tetens formula
+    """Calculate saturation vapor pressure over ice using Tetens formula
     
     Args:
         temperature: Temperature (K)
         
     Returns:
         Saturation vapor pressure (Pa)
+
     """
     t_celsius = temperature - tmelt
     return 610.78 * jnp.exp(21.87 * t_celsius / (t_celsius + 265.5))
@@ -123,8 +120,7 @@ def saturation_specific_humidity(
     pressure: jnp.ndarray, 
     temperature: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate saturation specific humidity
+    """Calculate saturation specific humidity
     
     Args:
         pressure: Pressure (Pa)
@@ -132,6 +128,7 @@ def saturation_specific_humidity(
         
     Returns:
         Saturation specific humidity (kg/kg)
+
     """
     # Use appropriate saturation vapor pressure based on temperature
     es_water = saturation_vapor_pressure_water(temperature)
@@ -154,8 +151,7 @@ def calculate_cloud_fraction(
     surface_pressure: float,
     config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate cloud fraction using relative humidity scheme
+    """Calculate cloud fraction using relative humidity scheme
     
     Based on Lohmann and Roeckner (1996) diagnostic cloud scheme.
     
@@ -168,6 +164,7 @@ def calculate_cloud_fraction(
         
     Returns:
         Tuple of (cloud_fraction, relative_humidity)
+
     """
     # Calculate saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
@@ -206,8 +203,7 @@ def partition_cloud_phase(
     total_cloud_water: jnp.ndarray,
     config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Partition cloud water between liquid and ice phases
+    """Partition cloud water between liquid and ice phases
     
     Args:
         temperature: Temperature (K)
@@ -216,6 +212,7 @@ def partition_cloud_phase(
         
     Returns:
         Tuple of (cloud_liquid, cloud_ice)
+
     """
     # Calculate ice fraction based on temperature
     # All ice below t_ice, all liquid above tmelt
@@ -242,8 +239,7 @@ def condensation_evaporation(
     dt: float,
     config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Calculate condensation/evaporation tendencies
+    """Calculate condensation/evaporation tendencies
     
     Args:
         temperature: Temperature (K)
@@ -257,22 +253,10 @@ def condensation_evaporation(
         
     Returns:
         Tuple of (dT/dt, dq/dt, dqc/dt, dqi/dt)
+
     """
     # Calculate saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
-    
-    # In-cloud specific humidity and saturation
-    # Assume saturation inside clouds
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
-        0.0
-    )
-    qi_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_ice / cloud_fraction,
-        0.0
-    )
     
     # Calculate condensation/evaporation
     # Positive for condensation, negative for evaporation
@@ -341,8 +325,7 @@ def shallow_cloud_scheme(
     dt: float,
     config: Optional[CloudParameters] = None
 ) -> Tuple[CloudTendencies, CloudState]:
-    """
-    Main shallow cloud scheme
+    """Run shallow cloud scheme
     
     Args:
         temperature: Temperature (K) [nlev] or scalar
@@ -356,6 +339,7 @@ def shallow_cloud_scheme(
         
     Returns:
         Tuple of (tendencies, cloud_state)
+
     """
     if config is None:
         config = CloudParameters.default()

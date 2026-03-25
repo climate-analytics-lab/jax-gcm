@@ -1,5 +1,4 @@
-"""
-Gravity wave drag parameterizations for ICON physics
+"""Gravity wave drag parameterizations for ICON physics
 
 This module contains gravity wave parameterizations including orographic
 and non-orographic gravity wave drag schemes.

@@ -1,5 +1,4 @@
-"""
-Tridiagonal matrix solver for vertical diffusion.
+"""Tridiagonal matrix solver for vertical diffusion.
 
 This module implements the implicit tridiagonal matrix solver used in ICON's
 vertical diffusion scheme, following the downward sweep/upward sweep approach.
@@ -7,7 +6,6 @@ vertical diffusion scheme, following the downward sweep/upward sweep approach.
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .vertical_diffusion_types import (
@@ -28,8 +26,7 @@ def setup_matrix_system(
     dt: float,
     tke_exchange_coeff: jnp.ndarray = None
 ) -> VDiffMatrixSystem:
-    """
-    Set up the tridiagonal matrix system for vertical diffusion.
+    """Set up the tridiagonal matrix system for vertical diffusion.
 
     Following ICON's mo_vdiff_solver.f90 and mo_turbulence_diag.f90:
     - The matrix coefficient is: K* = dt * tpfac1 * K * prefactor
@@ -46,6 +43,7 @@ def setup_matrix_system(
 
     Returns:
         Matrix system ready for solution
+
     """
     ncol, nlev = state.u.shape
     nsfc_type = 3  # Fixed number of surface types (water, ice, land)
@@ -146,8 +144,7 @@ def setup_momentum_matrix_with_prefactor(
     scaled_prefactor: jnp.ndarray,
     matrix_idx: int
 ) -> jnp.ndarray:
-    """
-    Set up tridiagonal matrix for vertical diffusion with proper prefactor.
+    """Set up tridiagonal matrix for vertical diffusion with proper prefactor.
 
     Following ICON's mo_vdiff_solver.f90:
     - zkstar = pprfac * pcfm (scaled exchange coefficient at half levels)
@@ -164,6 +161,7 @@ def setup_momentum_matrix_with_prefactor(
 
     Returns:
         Updated matrix coefficients
+
     """
     ncol, nlev = exchange_coeff.shape
 
@@ -339,8 +337,7 @@ def setup_rhs_vectors(
     state: VDiffState,
     params: VDiffParameters
 ) -> jnp.ndarray:
-    """
-    Set up right-hand side vectors for the linear system.
+    """Set up right-hand side vectors for the linear system.
 
     Following ICON's semi-implicit time stepping (mo_vdiff_solver.f90):
     - Matrix equation: (I - dt*tpfac1*L) * bb = tpfac2 * X_old
@@ -374,8 +371,7 @@ def solve_tridiagonal_system(
     rhs_vectors: jnp.ndarray,
     variable_to_matrix: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Solve the tridiagonal matrix system using Thomas algorithm.
+    """Solve the tridiagonal matrix system using Thomas algorithm.
     
     Args:
         matrix_coeffs: Coefficient matrices [ncol, nlev, 3, nmatrix]
@@ -384,6 +380,7 @@ def solve_tridiagonal_system(
         
     Returns:
         Solution vectors [ncol, nlev, nvar]
+
     """
     ncol, nlev, nvar = rhs_vectors.shape
     solution = jnp.zeros_like(rhs_vectors)
@@ -413,8 +410,7 @@ def solve_tridiagonal_single(
     c: jnp.ndarray,
     d: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Solve a single tridiagonal system using Thomas algorithm.
+    """Solve a single tridiagonal system using Thomas algorithm.
     
     Args:
         a: Sub-diagonal [ncol, nlev]
@@ -424,6 +420,7 @@ def solve_tridiagonal_single(
         
     Returns:
         Solution [ncol, nlev]
+
     """
     ncol, nlev = b.shape
     
@@ -484,8 +481,7 @@ def compute_tendencies_from_solution(
     params: VDiffParameters,
     dt: float
 ) -> VDiffTendencies:
-    """
-    Compute tendencies from the solution of the matrix system.
+    """Compute tendencies from the solution of the matrix system.
 
     Following ICON's semi-implicit time stepping (mo_vdiff_solver.f90:840-851):
     - bb is the matrix solution (solution of (I - dt*tpfac1*L) * bb = tpfac2 * X_old)
@@ -501,6 +497,7 @@ def compute_tendencies_from_solution(
 
     Returns:
         Tendencies for all variables
+
     """
     ncol, nlev = state.u.shape
 
@@ -561,8 +558,7 @@ def vertical_diffusion_step(
     dt: float,
     tke_exchange_coeff: jnp.ndarray = None
 ) -> VDiffTendencies:
-    """
-    Perform one vertical diffusion time step.
+    """Perform one vertical diffusion time step.
     
     Args:
         state: Atmospheric state
@@ -574,6 +570,7 @@ def vertical_diffusion_step(
         
     Returns:
         Tendencies for all variables
+
     """
     # Default TKE exchange coefficient if not provided
     if tke_exchange_coeff is None:

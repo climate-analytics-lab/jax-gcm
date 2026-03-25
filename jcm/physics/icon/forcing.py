@@ -1,6 +1,7 @@
-from jcm.geometry import Geometry
-from jcm.physics.icon.icon_physics import PhysicsData, Parameters
+from jcm.physics.icon.icon_physics_data import PhysicsData
+from jcm.physics.icon.parameters import Parameters
 from jcm.forcing import ForcingData
+from jcm.terrain import TerrainData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 import jax.numpy as jnp
 from jax import jit
@@ -11,31 +12,30 @@ def apply_forcing_data(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Compute time-varying boundary conditions for ICON physics
+    """Compute time-varying boundary conditions for ICON physics
     
     This function updates the boundary conditions with time-varying values
     for solar forcing, greenhouse gases, and surface properties.
     
     Args:
         boundaries: Current boundary conditions
-        geometry: Geometry object containing latitude information
+        terrain: TerrainData object containing terrain/surface data
         day_of_year: Day of year (1-365)
         time_of_day: Time of day (hours, 0-24)
         year: Year (for solar variability)
         
     Returns:
         Updated boundary conditions
+
     """
-    
     # Get expected output shape from physics_data (column format)
     ncols = physics_data.surface.surface_temperature.shape[0]
 
     # Compute surface properties based on existing masks
     surface_albedo_vis, surface_albedo_nir, surface_emissivity = _compute_surface_properties(
-        geometry.fmask,  # Land fraction
+        terrain.fmask,  # Land fraction
         forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am,  # Sea ice
     )
 
@@ -43,14 +43,14 @@ def apply_forcing_data(
     land_temp = forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3 else forcing.stl_am
     sst = forcing.sea_surface_temperature[..., 0] if forcing.sea_surface_temperature.ndim == 3 else forcing.sea_surface_temperature
     surface_temperature = jnp.where(
-        geometry.fmask > 0.5,  # Land
+        terrain.fmask > 0.5,  # Land
         land_temp,  # Land temp
         sst  # SST
     )
 
     # Roughness length (higher over land)
     roughness_length = jnp.where(
-        geometry.fmask > 0.5,  # Land
+        terrain.fmask > 0.5,  # Land
         0.01,  # 1 cm over land
         0.0001  # 0.1 mm over ocean
     )
@@ -67,11 +67,6 @@ def apply_forcing_data(
     co2_concentration = 420.0  # ppmv
     ch4_concentration = 1900.0  # ppbv
     o3_concentration = 300.0  # ppbv
-
-    # Sea ice fraction (from existing data)
-    #TODO: use these somewhere
-    sea_ice_fraction = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
-    sea_ice_thickness = jnp.where(sea_ice_fraction > 0.1, 1.0, 0.0)  # 1m where ice exists
 
     tendencies = PhysicsTendency.zeros(state.temperature.shape)
 

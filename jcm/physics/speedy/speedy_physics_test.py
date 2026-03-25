@@ -2,20 +2,27 @@ import unittest
 
 class TestSpeedyPhysicsUnit(unittest.TestCase):
     def setUp(self):
-        global PhysicsState, SpeedyPhysics, ForcingData, Parameters, Geometry, DateData
+        global PhysicsState, SpeedyPhysics, ForcingData, Parameters, terrain, DateData, coords, ix, il, kx
+        ix, il, kx = 96, 48, 8
+
         from jcm.physics_interface import PhysicsState
         from jcm.physics.speedy.speedy_physics import SpeedyPhysics
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.params import Parameters
-        from jcm.geometry import Geometry
         from jcm.date import DateData
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
 
     def test_speedy_forcing(self):
-        grid_shape = (8,1,1)
-        tendencies, data = SpeedyPhysics().compute_tendencies(
+        grid_shape = (kx,ix,il)
+        physics = SpeedyPhysics()
+        physics.cache_coords(coords)
+        tendencies, data = physics.compute_tendencies(
             state=PhysicsState.zeros(grid_shape),
             forcing=ForcingData.ones(grid_shape[1:]),
-            geometry=Geometry.single_column_geometry(num_levels=grid_shape[0]),
+            terrain=terrain,
             date=DateData.zeros()
         )
         self.assertIsNotNone(tendencies)

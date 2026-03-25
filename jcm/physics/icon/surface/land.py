@@ -1,5 +1,4 @@
-"""
-Land surface physics for ICON surface scheme.
+"""Land surface physics for ICON surface scheme.
 
 This module implements simplified land surface processes including
 soil thermodynamics, vegetation effects, and land-atmosphere coupling.
@@ -11,7 +10,7 @@ from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
+    SurfaceParameters, AtmosphericForcing, 
     SurfaceFluxes, SurfaceTendencies
 )
 
@@ -26,8 +25,7 @@ def compute_land_albedo(
     snow_depth: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute land surface albedo based on vegetation, soil, and snow.
+    """Compute land surface albedo based on vegetation, soil, and snow.
     
     Args:
         vegetation_fraction: Vegetation fraction [-] (ncol,)
@@ -38,6 +36,7 @@ def compute_land_albedo(
     Returns:
         Tuple of (albedo_vis_direct, albedo_vis_diffuse, 
                  albedo_nir_direct, albedo_nir_diffuse)
+
     """
     # Vegetation albedo
     veg_albedo_vis = 0.05  # Green vegetation visible
@@ -84,8 +83,7 @@ def compute_land_roughness(
     snow_depth: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute land surface roughness.
+    """Compute land surface roughness.
     
     Args:
         vegetation_fraction: Vegetation fraction [-] (ncol,)
@@ -94,6 +92,7 @@ def compute_land_roughness(
         
     Returns:
         Land roughness length [m] (ncol,)
+
     """
     # Vegetation roughness
     z0_vegetation = 0.5  # m (forest)
@@ -120,8 +119,7 @@ def soil_heat_conduction(
     soil_depths: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute heat conduction in soil layers.
+    """Compute heat conduction in soil layers.
     
     Args:
         soil_temp: Soil temperature [K] (ncol, nsoil_layers)
@@ -131,6 +129,7 @@ def soil_heat_conduction(
         
     Returns:
         Heat conduction flux [W/m²] (ncol,)
+
     """
     # Soil thermal properties
     thermal_conductivity = 1.5  # W/m/K (typical soil)
@@ -154,8 +153,7 @@ def soil_temperature_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Update soil temperature using heat diffusion equation.
+    """Update soil temperature using heat diffusion equation.
     
     Args:
         soil_temp: Soil temperature [K] (ncol, nsoil_layers)
@@ -167,6 +165,7 @@ def soil_temperature_step(
         
     Returns:
         Soil temperature tendency [K/s] (ncol, nsoil_layers)
+
     """
     ncol, nsoil_layers = soil_temp.shape
     
@@ -213,8 +212,7 @@ def compute_transpiration(
     air_density: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Compute transpiration from vegetation using simplified Penman-Monteith.
+    """Compute transpiration from vegetation using simplified Penman-Monteith.
     
     Args:
         vegetation_fraction: Vegetation fraction [-] (ncol,)
@@ -228,6 +226,7 @@ def compute_transpiration(
         
     Returns:
         Transpiration rate [kg/m²/s] (ncol,)
+
     """
     # Only transpire where there's vegetation
     veg_mask = vegetation_fraction > 0.01
@@ -235,17 +234,6 @@ def compute_transpiration(
     # Soil water availability (use root zone moisture)
     root_zone_moisture = soil_moisture[:, 0]  # Top layer
     water_stress = jnp.minimum(root_zone_moisture / 0.3, 1.0)  # Wilting point at 30%
-    
-    # Canopy resistance (simplified)
-    canopy_resistance_min = 100.0  # s/m
-    canopy_resistance = canopy_resistance_min / water_stress
-    
-    # Aerodynamic resistance
-    aerodynamic_resistance = 1.0 / exchange_coeff_moisture
-    
-    # Saturation vapor pressure at surface
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - PHYS_CONST.t0) / 
-                           (surface_temp - PHYS_CONST.t0 + 237.3))
     
     # Simplified Penman-Monteith equation
     # Transpiration = (Delta * Rn + rho * cp * VPD / ra) / (Delta + gamma * (1 + rc/ra))
@@ -271,8 +259,7 @@ def soil_moisture_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
-    """
-    Update soil moisture including precipitation, evaporation, and transpiration.
+    """Update soil moisture including precipitation, evaporation, and transpiration.
     
     Args:
         soil_moisture: Soil moisture [-] (ncol, nsoil_layers)
@@ -285,6 +272,7 @@ def soil_moisture_step(
         
     Returns:
         Soil moisture tendency [1/s] (ncol, nsoil_layers)
+
     """
     ncol, nsoil_layers = soil_moisture.shape
     
@@ -351,8 +339,7 @@ def land_surface_physics_step(
     dt: float,
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
-    """
-    Complete land surface physics step.
+    """Complete land surface physics step.
     
     Args:
         atmospheric_state: Atmospheric forcing
@@ -370,10 +357,10 @@ def land_surface_physics_step(
         
     Returns:
         Tuple of (surface_fluxes, tendencies, roughness_length)
+
     """
     ncol = soil_temp.shape[0]
-    nsoil_layers = soil_temp.shape[1]
-    
+
     # Surface temperature (top soil layer)
     surface_temp = soil_temp[:, 0]
     

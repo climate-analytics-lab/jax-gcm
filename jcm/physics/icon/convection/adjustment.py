@@ -1,5 +1,4 @@
-"""
-Convective adjustment for Tiedtke-Nordeng scheme
+"""Convective adjustment for Tiedtke-Nordeng scheme
 
 This module implements the final adjustment step of the convection scheme,
 including:
@@ -15,14 +14,13 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from jax import lax
-from typing import Tuple, Optional
-from functools import partial
+from typing import Tuple
 
 from ..constants.physical_constants import (
-    cp, alhc, alhs, tmelt, rd, rv, eps
+    cp, alhc, alhs, tmelt
 )
 from .tiedtke_nordeng import (
-    ConvectionParameters, saturation_mixing_ratio
+    saturation_mixing_ratio
 )
 
 
@@ -34,8 +32,7 @@ def saturation_adjustment(
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Perform saturation adjustment after convective updates
+    """Perform saturation adjustment after convective updates
     
     This ensures that the updated state is thermodynamically consistent,
     removing any supersaturation through condensation.
@@ -49,20 +46,11 @@ def saturation_adjustment(
         
     Returns:
         Tuple of adjusted (temperature, specific_humidity, cloud_water, cloud_ice)
+
     """
-    
-    # Total cloud condensate
-    total_cloud = cloud_water + cloud_ice
-    
-    # Get saturation mixing ratio
-    rs = saturation_mixing_ratio(pressure, temperature)
-    
     # Convert specific humidity to mixing ratio
     r = specific_humidity / (1 - specific_humidity)
-    
-    # Total water (vapor + cloud)
-    rtot = r + total_cloud
-    
+
     def perform_adjustment(t, r, qc, qi):
         """Perform iterative saturation adjustment"""
         
@@ -134,8 +122,7 @@ def energy_conservation_check(
     precipitation: jnp.ndarray,
     dt: float
 ) -> jnp.ndarray:
-    """
-    Check energy conservation in convective adjustment
+    """Check energy conservation in convective adjustment
     
     Args:
         *_old: State before adjustment
@@ -145,6 +132,7 @@ def energy_conservation_check(
         
     Returns:
         Energy imbalance (W/m²)
+
     """
     # Sensible heat change
     dT = temperature_new - temperature_old
@@ -186,8 +174,7 @@ def convective_adjustment(
     convective_tendency_qi: jnp.ndarray,
     dt: float
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Apply convective tendencies and perform saturation adjustment
+    """Apply convective tendencies and perform saturation adjustment
     
     This is the main interface for applying convection results to the
     model state, ensuring thermodynamic consistency.
@@ -203,6 +190,7 @@ def convective_adjustment(
         
     Returns:
         Tuple of adjusted (temperature, specific_humidity, cloud_water, cloud_ice)
+
     """
     # Apply convective tendencies
     t_conv = temperature + convective_tendency_t * dt
@@ -238,7 +226,6 @@ def test_saturation_adjustment():
     specific_humidity = 1.2 * qs
     cloud_water = jnp.array(0.0)
     cloud_ice = jnp.array(0.0)
-    dt = 100.0
     
     # Perform adjustment
     t_adj, q_adj, qc_adj, qi_adj = saturation_adjustment(

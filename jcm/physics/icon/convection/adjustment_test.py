@@ -1,18 +1,15 @@
-"""
-Unit tests for convective adjustment module
+"""Unit tests for convective adjustment module
 
 Date: 2025-01-10
 """
 
 import jax.numpy as jnp
 import jax
-import pytest
 from .adjustment import (
     saturation_adjustment, energy_conservation_check,
     convective_adjustment
 )
-from .tiedtke_nordeng import ConvectionParameters, saturation_mixing_ratio
-from ..constants.physical_constants import tmelt, cp, alhc, alhs
+from .tiedtke_nordeng import saturation_mixing_ratio
 
 
 class TestSaturationAdjustment:
@@ -245,7 +242,6 @@ class TestConvectiveAdjustment:
         # Humidity may decrease if warming causes condensation
         # Check that total tendency was applied
         t_expected = temperature + conv_tend_t * dt
-        q_expected = specific_humidity + conv_tend_q * dt
         # Temperature should be at least the tendency-applied value
         assert t_adj >= t_expected - 0.1  # Allow small deviation
         

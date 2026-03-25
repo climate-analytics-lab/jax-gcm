@@ -1,5 +1,4 @@
-"""
-Turbulence coefficient calculations for vertical diffusion.
+"""Turbulence coefficient calculations for vertical diffusion.
 
 This module computes exchange coefficients for momentum, heat, and moisture
 based on atmospheric stability and turbulence closure schemes.
@@ -25,8 +24,7 @@ def compute_richardson_number(
     height_half: jnp.ndarray,
     gravity: float = PHYS_CONST.grav
 ) -> jnp.ndarray:
-    """
-    Compute bulk Richardson number for atmospheric stability.
+    """Compute bulk Richardson number for atmospheric stability.
     
     Args:
         u: Zonal wind [m/s] (ncol, nlev)
@@ -38,6 +36,7 @@ def compute_richardson_number(
         
     Returns:
         Richardson number [-] (ncol, nlev-1)
+
     """
     # Compute vertical gradients between adjacent full levels
     du_dz = jnp.diff(u, axis=1) / jnp.diff(height_full, axis=1)
@@ -71,8 +70,7 @@ def compute_mixing_length(
     von_karman: float = 0.4,
     ri_critical: float = 0.25
 ) -> jnp.ndarray:
-    """
-    Compute mixing length for turbulence parameterization.
+    """Compute mixing length for turbulence parameterization.
     
     Args:
         height_full: Full level heights [m] (ncol, nlev)
@@ -84,6 +82,7 @@ def compute_mixing_length(
         
     Returns:
         Mixing length [m] (ncol, nlev)
+
     """
     ncol, nlev = height_full.shape
     
@@ -140,8 +139,7 @@ def compute_exchange_coefficients(
     mixing_length: jnp.ndarray,
     richardson_number: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute exchange coefficients for momentum, heat, and moisture.
+    """Compute exchange coefficients for momentum, heat, and moisture.
     
     Args:
         state: Atmospheric state
@@ -154,6 +152,7 @@ def compute_exchange_coefficients(
         - Momentum exchange coefficient [m²/s] (ncol, nlev)
         - Heat exchange coefficient [m²/s] (ncol, nlev)
         - Moisture exchange coefficient [m²/s] (ncol, nlev)
+
     """
     ncol, nlev = state.u.shape
     
@@ -210,8 +209,7 @@ def compute_surface_exchange_coefficients(
     temperature_surface: jnp.ndarray,
     temperature_air: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Compute surface exchange coefficients for different surface types.
+    """Compute surface exchange coefficients for different surface types.
     
     Args:
         state: Atmospheric state
@@ -224,6 +222,7 @@ def compute_surface_exchange_coefficients(
         Tuple of:
         - Surface heat exchange coefficient [m²/s] (ncol, nsfc_type)
         - Surface moisture exchange coefficient [m²/s] (ncol, nsfc_type)
+
     """
     ncol, nsfc_type = temperature_surface.shape
     
@@ -285,8 +284,7 @@ def compute_boundary_layer_height(
     exchange_coeff_heat: jnp.ndarray,
     threshold: float = 1.0
 ) -> jnp.ndarray:
-    """
-    Compute boundary layer height based on exchange coefficient profile.
+    """Compute boundary layer height based on exchange coefficient profile.
     
     Args:
         state: Atmospheric state
@@ -295,6 +293,7 @@ def compute_boundary_layer_height(
         
     Returns:
         Boundary layer height [m] (ncol,)
+
     """
     ncol, nlev = state.height_full.shape
     
@@ -330,8 +329,7 @@ def compute_friction_velocity(
     momentum_flux_v: jnp.ndarray,
     air_density: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute friction velocity from surface momentum flux.
+    """Compute friction velocity from surface momentum flux.
     
     Args:
         momentum_flux_u: U-momentum flux [N/m²] (ncol,)
@@ -340,6 +338,7 @@ def compute_friction_velocity(
         
     Returns:
         Friction velocity [m/s] (ncol,)
+
     """
     momentum_flux_magnitude = jnp.sqrt(momentum_flux_u**2 + momentum_flux_v**2)
     friction_velocity = jnp.sqrt(momentum_flux_magnitude / air_density)
@@ -349,14 +348,14 @@ def compute_friction_velocity(
 
 @jax.jit
 def stability_function_momentum(zeta: jnp.ndarray) -> jnp.ndarray:
-    """
-    Monin-Obukhov stability function for momentum.
+    """Monin-Obukhov stability function for momentum.
     
     Args:
         zeta: Stability parameter z/L
         
     Returns:
         Stability function value
+
     """
     # Stable conditions (zeta > 0)
     stable = 1.0 + 5.0 * zeta
@@ -372,14 +371,14 @@ def stability_function_momentum(zeta: jnp.ndarray) -> jnp.ndarray:
 
 @jax.jit
 def stability_function_heat(zeta: jnp.ndarray) -> jnp.ndarray:
-    """
-    Monin-Obukhov stability function for heat/moisture.
+    """Monin-Obukhov stability function for heat/moisture.
     
     Args:
         zeta: Stability parameter z/L
         
     Returns:
         Stability function value
+
     """
     # Stable conditions (zeta > 0)
     stable = 1.0 + 5.0 * zeta
@@ -398,8 +397,7 @@ def compute_surface_fluxes(
     z_half: jnp.ndarray,
     air_density: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Compute surface momentum, heat, and moisture fluxes using Monin-Obukhov similarity theory.
+    """Compute surface momentum, heat, and moisture fluxes using Monin-Obukhov similarity theory.
     
     Args:
         state: Vertical diffusion state
@@ -409,6 +407,7 @@ def compute_surface_fluxes(
         
     Returns:
         Tuple of (momentum_flux_u, momentum_flux_v, heat_flux, moisture_flux)
+
     """
     from ..constants.physical_constants import grav, cp, karman_const
     
@@ -424,7 +423,6 @@ def compute_surface_fluxes(
     # Surface roughness lengths (simplified - would come from surface model)
     z0_momentum = jnp.full_like(wind_speed, 0.001)  # 1 mm for momentum
     z0_heat = z0_momentum * 0.1  # Heat roughness length
-    z0_moisture = z0_heat  # Moisture roughness length
     
     # Temperature and humidity differences
     temp_surface = state.surface_temperature[:, 0]  # Use first surface type
@@ -493,8 +491,7 @@ def compute_turbulence_diagnostics(
     exchange_coeff_heat: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray
 ) -> VDiffDiagnostics:
-    """
-    Compute complete set of turbulence diagnostics.
+    """Compute complete set of turbulence diagnostics.
     
     Args:
         state: Atmospheric state
@@ -505,6 +502,7 @@ def compute_turbulence_diagnostics(
         
     Returns:
         Complete diagnostics structure
+
     """
     ncol = state.u.shape[0]
     

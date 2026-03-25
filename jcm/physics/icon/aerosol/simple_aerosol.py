@@ -1,12 +1,9 @@
 from typing import Tuple
 import jax.numpy as jnp
-from jax import lax
-from jax.scipy.special import betainc
 from jcm.physics.icon.icon_physics_data import PhysicsData
-from jcm.physics.icon.icon_physics import PhysicsTendency
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from .aerosol_params import AerosolParameters
 
 
@@ -15,10 +12,9 @@ def get_simple_aerosol(
     physics_data: PhysicsData,
     parameters: AerosolParameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> Tuple[PhysicsTendency, PhysicsData]:
-    """
-    Apply MACv2-SP (Simple Plumes) aerosol scheme
+    """Apply MACv2-SP (Simple Plumes) aerosol scheme
     
     This implements the simplified aerosol parametrization based on
     Kinne et al. climatology with 9 anthropogenic plumes plus natural background.
@@ -35,11 +31,10 @@ def get_simple_aerosol(
     nlev, ncols = state.temperature.shape
     aerosol_params = parameters.aerosol
     
-    # Get grid coordinates from geometry
-    nlon = geometry.nodal_shape[1]
+    # Get grid coordinates from cached coordinates
     lat, lon = jax.numpy.meshgrid(
-        geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
-        geometry.lon * 180.0 / jnp.pi,  # degrees
+        physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
+        physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
     )
     # Then reshape to (ncols,) to match column format
     lats = lat.reshape(ncols)
@@ -47,9 +42,6 @@ def get_simple_aerosol(
     
     # Get height coordinate for vertical distribution
     height_full = physics_data.diagnostics.height_full
-    
-    # Reference wavelength for optical properties [nm]
-    lambda_ref = 550.0
     
     # Initialize output arrays
     aod_profile = jnp.zeros((nlev, ncols))
@@ -115,8 +107,7 @@ def get_simple_aerosol(
     return physics_tendencies, physics_data
 
 def get_plume_spatial_distribution(lats, lons, parameters):
-    """
-    Calculate spatial distribution of aerosol plumes using Gaussian functions
+    """Calculate spatial distribution of aerosol plumes using Gaussian functions
     
     Args:
         lats: Array of latitudes [degrees]
@@ -125,6 +116,7 @@ def get_plume_spatial_distribution(lats, lons, parameters):
         
     Returns:
         Spatial distribution array of shape (nplumes, ncols)
+
     """
     # Expand dimensions for vectorized operations
     # lats, lons: (ncols,)
@@ -184,8 +176,7 @@ def get_plume_spatial_distribution(lats, lons, parameters):
 
 
 def get_background_aod(lats, lons, parameters, constant_background=0.02):
-    """
-    Calculate background (pre-industrial) aerosol optical depth
+    """Calculate background (pre-industrial) aerosol optical depth
     
     Args:
         lats: Array of latitudes [degrees]
@@ -195,6 +186,7 @@ def get_background_aod(lats, lons, parameters, constant_background=0.02):
         
     Returns:
         Background AOD array of shape (ncols,)
+
     """
     # Use annual cycle parameter for background
     time_weight_bg = parameters.ann_cycle
@@ -211,8 +203,7 @@ def get_background_aod(lats, lons, parameters, constant_background=0.02):
 
 
 def get_anthropogenic_aod(lats, lons, parameters):
-    """
-    Calculate anthropogenic aerosol optical depth
+    """Calculate anthropogenic aerosol optical depth
     
     Args:
         lats: Array of latitudes [degrees]
@@ -221,6 +212,7 @@ def get_anthropogenic_aod(lats, lons, parameters):
         
     Returns:
         Anthropogenic AOD array of shape (ncols,)
+
     """
     # Use time weights for anthropogenic emissions
     time_weight = parameters.year_weight * parameters.ann_cycle
@@ -234,8 +226,7 @@ def get_anthropogenic_aod(lats, lons, parameters):
 
 
 def get_vertical_profiles(height_full, parameters):
-    """
-    Calculate vertical profiles for all plumes using beta function distribution
+    """Calculate vertical profiles for all plumes using beta function distribution
     
     Args:
         height_full: Height coordinate array of shape (nlev, ncols)
@@ -243,6 +234,7 @@ def get_vertical_profiles(height_full, parameters):
         
     Returns:
         Vertical profiles array of shape (nplumes, nlev, ncols)
+
     """
     # Normalize height to 0-1 range (0 at surface, 1 at 15km)
     height_norm = jnp.clip(height_full / 15000.0, 0.0, 1.0)
@@ -275,14 +267,14 @@ def get_vertical_profiles(height_full, parameters):
 
 
 def get_background_vertical_profile(height_full):
-    """
-    Calculate vertical profile for background aerosol
+    """Calculate vertical profile for background aerosol
     
     Args:
         height_full: Height coordinate array of shape (nlev, ncols)
         
     Returns:
         Background vertical profile array of shape (nlev,)
+
     """
     # Simple exponential decay for background aerosol
     # Use mean height profile across columns
@@ -299,8 +291,7 @@ def get_background_vertical_profile(height_full):
 
 
 def get_optical_properties(aod_profile, spatial_dist, parameters):
-    """
-    Calculate single scattering albedo and asymmetry parameter profiles
+    """Calculate single scattering albedo and asymmetry parameter profiles
     
     Args:
         aod_profile: AOD profile array of shape (nlev, ncols)
@@ -309,6 +300,7 @@ def get_optical_properties(aod_profile, spatial_dist, parameters):
         
     Returns:
         Tuple of (ssa_profile, asy_profile) arrays of shape (nlev, ncols)
+
     """
     # Weight optical properties by AOD contribution from each plume
     # aod_profile: (nlev, ncols)
@@ -340,10 +332,9 @@ def get_optical_properties(aod_profile, spatial_dist, parameters):
 
 
 def get_CDNC(AOD, A=60, B=20):
-    """
-    Derive CDNC from AOD using a relationship of the form: CDNC = A * ln(B*AOD + 1)
-        Ross' amazon work: A=410 B=5
-        MODIS original: A=16 B=1000
-        AEROCOM P1 original: A=60, B=20
+    """Derive CDNC from AOD using a relationship of the form: CDNC = A * ln(B*AOD + 1)
+    Ross' amazon work: A=410 B=5
+    MODIS original: A=16 B=1000
+    AEROCOM P1 original: A=60, B=20
     """
     return 1 + A * jnp.log(B * AOD + 1)

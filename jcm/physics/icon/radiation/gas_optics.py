@@ -1,5 +1,4 @@
-"""
-Gas optics for radiation calculations
+"""Gas optics for radiation calculations
 
 This module computes absorption coefficients and optical depths
 for atmospheric gases in both shortwave and longwave spectral regions.
@@ -24,8 +23,7 @@ def water_vapor_continuum(
     h2o_vmr: jnp.ndarray,
     band: int
 ) -> jnp.ndarray:
-    """
-    Calculate water vapor continuum absorption.
+    """Calculate water vapor continuum absorption.
     
     Simplified parameterization of H2O continuum absorption.
     
@@ -37,6 +35,7 @@ def water_vapor_continuum(
         
     Returns:
         Absorption coefficient (m²/kg)
+
     """
     # Reference temperature and pressure
     T_ref = 296.0  # K
@@ -125,8 +124,7 @@ def co2_absorption(
     co2_vmr: float,
     band: int
 ) -> jnp.ndarray:
-    """
-    Calculate CO2 absorption.
+    """Calculate CO2 absorption.
     
     Simplified parameterization for CO2 15-micron band.
     
@@ -138,6 +136,7 @@ def co2_absorption(
         
     Returns:
         Absorption coefficient (m²/kg)
+
     """
     # CO2 absorption in multiple bands
     # Main CO2 band (667 cm⁻¹) is in band 2 (280-400 cm⁻¹)
@@ -154,8 +153,7 @@ def co2_absorption(
 
 
 def _calculate_co2_band1(temperature, pressure, co2_vmr):
-    """
-    Enhanced CO2 absorption calculation with improved temperature/pressure dependence.
+    """Enhanced CO2 absorption calculation with improved temperature/pressure dependence.
     
     Based on HITRAN line data parameterization for the 15 μm CO2 band.
     """
@@ -195,8 +193,7 @@ def ozone_absorption_sw(
     temperature: jnp.ndarray,
     band: int
 ) -> jnp.ndarray:
-    """
-    Enhanced ozone absorption in shortwave with temperature-dependent UV cross-sections.
+    """Enhanced ozone absorption in shortwave with temperature-dependent UV cross-sections.
     
     Based on Hartley-Huggins bands and Chappuis band parameterizations.
     
@@ -207,6 +204,7 @@ def ozone_absorption_sw(
         
     Returns:
         Absorption coefficient (m²/kg)
+
     """
     # Reference temperature
     T_ref = 273.15
@@ -255,8 +253,7 @@ def ozone_absorption_lw(
     o3_vmr: jnp.ndarray,
     band: int
 ) -> jnp.ndarray:
-    """
-    Calculate ozone absorption in longwave.
+    """Calculate ozone absorption in longwave.
     
     Simplified parameterization for 9.6 micron band.
     
@@ -267,6 +264,7 @@ def ozone_absorption_lw(
         
     Returns:
         Absorption coefficient (m²/kg)
+
     """
     # Ozone 9.6 micron band (around 1042 cm⁻¹) - mainly in band 6 (1000-1200 cm⁻¹)
     # Some contribution also in band 5 (800-1000 cm⁻¹)
@@ -297,8 +295,7 @@ def gas_optical_depth_lw(
     layer_thickness: jnp.ndarray,
     air_density: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate longwave gas optical depths.
+    """Calculate longwave gas optical depths.
     
     Args:
         temperature: Temperature (K) [nlev]
@@ -312,6 +309,7 @@ def gas_optical_depth_lw(
         
     Returns:
         Optical depth [nlev, n_bands]
+
     """
     nlev = temperature.shape[0]
     
@@ -351,8 +349,7 @@ def gas_optical_depth_sw(
     air_density: jnp.ndarray,
     cos_zenith: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Calculate shortwave gas optical depths with enhanced temperature dependence.
+    """Calculate shortwave gas optical depths with enhanced temperature dependence.
     
     Args:
         temperature: Temperature (K) [nlev]
@@ -365,6 +362,7 @@ def gas_optical_depth_sw(
         
     Returns:
         Optical depth [nlev, n_bands]
+
     """
     nlev = pressure.shape[0]
     
@@ -405,8 +403,7 @@ def rayleigh_optical_depth(
     layer_thickness: jnp.ndarray,
     wavelength: float = 0.55  # microns
 ) -> jnp.ndarray:
-    """
-    Calculate Rayleigh scattering optical depth.
+    """Calculate Rayleigh scattering optical depth.
     
     Args:
         pressure: Pressure (Pa) [nlev]
@@ -415,6 +412,7 @@ def rayleigh_optical_depth(
         
     Returns:
         Rayleigh optical depth [nlev]
+
     """
     # Rayleigh scattering coefficient
     # τ_Ray = 0.008569 * λ^(-4) * (1 + 0.0113 * λ^(-2) + 0.00013 * λ^(-4))
@@ -441,8 +439,7 @@ def create_gas_optics(
     cos_zenith,
     config,
 ) -> Tuple[OpticalProperties, OpticalProperties]:
-    """
-    Create gas optical properties for SW and LW.
+    """Create gas optical properties for SW and LW.
     
     Args:
         temperature: Temperature (K) [nlev]
@@ -456,6 +453,7 @@ def create_gas_optics(
         
     Returns:
         Tuple of (sw_optics, lw_optics)
+
     """
     # Longwave optical depths
     tau_lw = gas_optical_depth_lw(

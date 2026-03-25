@@ -1,36 +1,27 @@
-"""
-Standalone tests for Tiedtke-Nordeng convection scheme
+"""Standalone tests for Tiedtke-Nordeng convection scheme
 
 This file tests the convection scheme without relying on the full jcm framework.
 
 Date: 2025-01-09
 """
 
-import pytest
 import jax.numpy as jnp
 import jax
-import numpy as np
-from jax import random
 
 # Import convection modules directly
 from jcm.physics.icon.convection.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
     ConvectionParameters,
-    ConvectionState,
-    ConvectionTendencies,
     saturation_mixing_ratio,
     find_cloud_base,
     calculate_cape_cin
 )
-from jcm.physics.icon.convection.updraft import calculate_updraft
-from jcm.physics.icon.convection.downdraft import calculate_downdraft
 
 
 def create_test_atmosphere(nlev=20, unstable=True):
     """Create a test atmospheric profile"""
     # Physical constants
     Rd = 287.05  # J/(kg*K) - gas constant for dry air
-    g = 9.80665  # m/s² - gravitational acceleration
 
     # Pressure levels (Pa) - from surface to top
     # Use a more realistic atmosphere (surface to ~200 hPa)

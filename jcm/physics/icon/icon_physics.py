@@ -1,5 +1,4 @@
-"""
-Main ICON Physics class for JAX-GCM
+"""Main ICON Physics class for JAX-GCM
 
 This module contains the main IconPhysics class that orchestrates the 
 ICON atmospheric physics parameterizations. It follows the same pattern
@@ -11,13 +10,14 @@ Date: 2025-01-09
 import jax
 from jax import jit
 import jax.numpy as jnp
-from collections import abc
 from typing import Tuple, Optional
+from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.physics_interface import PhysicsState, PhysicsTendency, Physics
 from jcm.forcing import ForcingData
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.physics.icon.constants import physical_constants
+from jcm.physics.icon.icon_coords import IconCoords
 
 # Import physics modules (will be implemented progressively)
 from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme
@@ -25,9 +25,8 @@ from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.icon.convection import tiedtke_nordeng_convection
 from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
-from jcm.physics.icon.vertical_diffusion import vertical_diffusion_scheme # FIXME: would be good to use this
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
-from jcm.physics.icon.surface.surface_types import SurfaceState, AtmosphericForcing
+from jcm.physics.icon.surface.surface_types import AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
 from jcm.physics.icon.chemistry import simple_chemistry, initialize_chemistry_tracers
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
@@ -35,8 +34,7 @@ from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.forcing import apply_forcing_data
 
 class IconPhysics(Physics):
-    """
-    ICON atmospheric physics implementation for JAX-GCM
+    """ICON atmospheric physics implementation for JAX-GCM
     
     This class implements the ICON physics suite including:
     - Radiation (shortwave and longwave)
@@ -53,8 +51,7 @@ class IconPhysics(Physics):
                  checkpoint_terms: bool = True,
                  parameters: Optional[Parameters] = None,
                  dt_physics: Optional[float] = None):
-        """
-        Initialize the ICON physics.
+        """Initialize the ICON physics.
 
         Args:
             write_output: Whether to write physics output to predictions
@@ -64,6 +61,7 @@ class IconPhysics(Physics):
                 all internal physics timesteps (dt_conv, dt_rad, etc.) to match
                 the model integration timestep. This is important since we don't
                 have sub-timestepping - all physics must use the same timestep.
+
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
@@ -74,6 +72,9 @@ class IconPhysics(Physics):
             params = params.with_timestep(dt_physics)
         self.parameters = params
         
+        # Cached coordinate data (populated by cache_coords)
+        self._icon_coords = None
+
         # Build list of physics terms
         self.terms = [
             _prepare_common_physics_state,
@@ -89,30 +90,36 @@ class IconPhysics(Physics):
             apply_gravity_waves
         ]
     
+    def cache_coords(self, coords: CoordinateSystem):
+        """Cache coordinate system data needed by ICON physics."""
+        self._icon_coords = IconCoords.from_coordinate_system(coords)
+
     def compute_tendencies(
         self,
         state: PhysicsState,
         forcing: ForcingData,
-        geometry: Geometry,
+        terrain: TerrainData,
         date: DateData,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
-        """
-        Compute the physical tendencies given the current state and data structs. Loops through the ICON physics terms, accumulating the tendencies.
+        """Compute the physical tendencies given the current state and data structs. Loops through the ICON physics terms, accumulating the tendencies.
 
         Args:
             state: Current state variables
-            parameters: Parameters object
-            boundaries: Boundary data
-            geometry: Geometry data
+            forcing: Forcing data
+            terrain: Terrain data (boundary conditions)
             date: Date data
 
         Returns:
             Physical tendencies in PhysicsTendency format
             Object containing physics data (PhysicsData format)
+
         """
+        nodal_shape = self._icon_coords.nodal_shape
+
         physics_data = PhysicsData.zeros(
-            (geometry.nodal_shape[1]*geometry.nodal_shape[2], ),
-            geometry.nodal_shape[0],
+            (nodal_shape[1]*nodal_shape[2], ),
+            nodal_shape[0],
+            icon_coords=self._icon_coords,
             date=date
         )
 
@@ -138,7 +145,7 @@ class IconPhysics(Physics):
             
             # Apply term to vectorized state (returns column format)
             term_tendency, physics_data = term(
-                vectorized_state, physics_data, self.parameters, forcing, geometry
+                vectorized_state, physics_data, self.parameters, forcing, terrain
             )
             
             # OPTIMIZATION: Direct accumulation in column format (no reshape)
@@ -152,8 +159,7 @@ class IconPhysics(Physics):
         return tendencies, physics_data
     
     def _reshape_state_to_columns(self, state: PhysicsState, nlev: int, ncols: int) -> PhysicsState:
-        """
-        TPU-optimized reshape using single tree_map operation
+        """TPU-optimized reshape using single tree_map operation
         
         This creates one XLA operation instead of multiple reshapes, 
         which is crucial for TPUv4 performance at T85 resolution.
@@ -188,8 +194,7 @@ class IconPhysics(Physics):
         )
     
     def _initialize_column_tendencies(self, nlev: int, ncols: int, tracers: dict) -> dict:
-        """
-        Initialize tendency accumulators in column format
+        """Initialize tendency accumulators in column format
         
         Using dict avoids repeated PhysicsTendency object creation during accumulation
         """
@@ -202,8 +207,7 @@ class IconPhysics(Physics):
         }
     
     def _accumulate_column_tendencies(self, accumulated: dict, new_tendency: PhysicsTendency) -> dict:
-        """
-        Efficiently accumulate tendencies in column format
+        """Efficiently accumulate tendencies in column format
         
         Avoids object creation and intermediate arrays for optimal TPU performance
         """
@@ -219,10 +223,9 @@ class IconPhysics(Physics):
         }
     
     def _reshape_tendencies_to_3d(self, tendencies: dict, nlev: int, nlat: int, nlon: int) -> PhysicsTendency:
-        """
-        Final reshape to 3D format - single operation at the end
-        
-        This is the only reshape back to 3D, done once at the very end
+        """Reshape tendencies to 3D format as a single operation at the end.
+
+        This is the only reshape back to 3D, done once at the very end.
         """
         def reshape_to_3d(field):
             if field.ndim == 2:  # [nlev, ncols] → [nlev, nlon, nlat]
@@ -249,37 +252,44 @@ class IconPhysics(Physics):
             tracers=reshaped_tracers
         )
     
-    def data_struct_to_dict(self, struct, geometry, sep="."):
-        """
-        Convert physics data struct to dictionary, reshaping column data to 3D.
-        
+    def data_struct_to_dict(self, struct, nodal_shape=None, sep="."):
+        """Convert physics data struct to dictionary, reshaping column data to 3D.
+
         This overrides the base class method to handle ICON physics data which
         contains fields in column format that need reshaping for xarray output.
         """
         if struct is None:
             return {}
-        
+
+        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
+
+        # Use a simple namespace to pass nodal_shape to helper methods
+        class _ShapeInfo:
+            pass
+        shape_info = _ShapeInfo()
+        shape_info.nodal_shape = nodal_shape
+
         # Get the base struct conversion or handle manually if needed
-        result = self._get_base_struct_dict(struct, geometry, sep)
-        
+        result = self._get_base_struct_dict(struct, shape_info, sep)
+
         # Reshape all arrays to add time dimension and convert column format to spatial grid
-        result = self._reshape_arrays_for_xarray(result, geometry)
-        
+        result = self._reshape_arrays_for_xarray(result, shape_info)
+
         # Handle multi-channel arrays and filter problematic fields
-        result = self._process_multi_channel_arrays(result, geometry)
-        
+        result = self._process_multi_channel_arrays(result, shape_info)
+
         # Filter out non-array and scalar fields
         return self._filter_xarray_compatible_fields(result)
     
-    def _get_base_struct_dict(self, struct, geometry, sep):
+    def _get_base_struct_dict(self, struct, shape_info, sep):
         """Get the base dictionary conversion, handling AttributeError gracefully."""
         try:
-            return super().data_struct_to_dict(struct, geometry, sep)
+            return super().data_struct_to_dict(struct, nodal_shape=shape_info.nodal_shape, sep=sep)
         except AttributeError:
             # Handle case where some fields are not arrays
-            return self._manual_struct_to_dict(struct, geometry, sep)
+            return self._manual_struct_to_dict(struct, shape_info, sep)
     
-    def _manual_struct_to_dict(self, struct, geometry, sep):
+    def _manual_struct_to_dict(self, struct, shape_info, sep):
         """Manual conversion when base class fails."""
         def _to_dict_recursive(obj, parent_key=""):
             items = {}
@@ -290,26 +300,27 @@ class IconPhysics(Physics):
                 else:
                     items[new_key] = val
             return items
-        
+
         result = _to_dict_recursive(struct)
-        
+        nodal_shape = shape_info.nodal_shape
+
         # Process array fields for multi-channel splitting (from base class)
         _original_keys = list(result.keys())
         for k in _original_keys:
             val = result[k]
             if hasattr(val, 'shape'):
                 s = val.shape
-                if len(s) == 5 and s[1:-1] == geometry.nodal_shape or len(s) == 4 and s[1:-1] == geometry.nodal_shape[1:]:
+                if len(s) == 5 and s[1:-1] == nodal_shape or len(s) == 4 and s[1:-1] == nodal_shape[1:]:
                     result.update({f"{k}.{i}": result[k][..., i] for i in range(s[-1])})
                     del result[k]
-        
+
         return result
     
-    def _reshape_arrays_for_xarray(self, result, geometry):
+    def _reshape_arrays_for_xarray(self, result, shape_info):
         """Reshape arrays to add time dimension and handle column format."""
         import numpy as np
-        
-        nlev, nlon, nlat = geometry.nodal_shape
+
+        nlev, nlon, nlat = shape_info.nodal_shape
         ncols = nlon * nlat
         
         for key, value in list(result.items()):
@@ -401,9 +412,9 @@ class IconPhysics(Physics):
         
         return None
     
-    def _process_multi_channel_arrays(self, result, geometry):
+    def _process_multi_channel_arrays(self, result, shape_info):
         """Handle multi-channel arrays and filter problematic fields."""
-        nlev, nlon, nlat = geometry.nodal_shape
+        nlev, nlon, nlat = shape_info.nodal_shape
                 
         _original_keys = list(result.keys())
         for k in _original_keys:
@@ -449,21 +460,22 @@ class IconPhysics(Physics):
         
         return filtered_result
 
-    def reshape_physics_data_to_3d(self, physics_data: PhysicsData, geometry: Geometry) -> PhysicsData:
-        """
-        Reshape PhysicsData from column format to 3D nodal format for output.
+    def reshape_physics_data_to_3d(self, physics_data: PhysicsData, nodal_shape=None) -> PhysicsData:
+        """Reshape PhysicsData from column format to 3D nodal format for output.
 
         This converts arrays from (ncols,) or (nlev, ncols) to (nlon, nlat) or (nlev, nlon, nlat)
         respectively, making them suitable for plotting and analysis.
 
         Args:
             physics_data: PhysicsData in column format (ncols,) or (nlev, ncols)
-            geometry: Geometry object containing nodal_shape information
+            nodal_shape: Tuple (nlev, nlon, nlat). If None, uses cached nodal_shape.
 
         Returns:
             PhysicsData with arrays reshaped to 3D nodal format
+
         """
-        nlev, nlon, nlat = geometry.nodal_shape
+        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
+        nlev, nlon, nlat = nodal_shape
         ncols = nlon * nlat
 
         def reshape_array(arr):
@@ -498,10 +510,9 @@ def _prepare_common_physics_state(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """
-    Prepare common physics variables that are used by multiple physics modules.
+    """Prepare common physics variables that are used by multiple physics modules.
     
     This reduces code duplication by computing pressure levels, heights, air density,
     and other commonly needed variables once for all physics modules.
@@ -513,16 +524,17 @@ def _prepare_common_physics_state(
         
     Returns:
         Dictionary with common physics variables
+
     """
     p0 = physical_constants.p0
     
     # Calculate pressure levels from surface pressure and sigma coordinates
     surface_pressure = state.normalized_surface_pressure * p0  # Convert to Pa
-    sigma_levels = geometry.fsg  # sigma coordinates at level centers
+    sigma_levels = physics_data.icon_coords.fsg  # sigma coordinates at level centers
     pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
-    
+
     # Calculate pressure at interfaces (half levels)
-    sigma_half = geometry.hsg
+    sigma_half = physics_data.icon_coords.hsg
     pressure_half = sigma_half[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
     
     # Convert geopotential to height
@@ -608,17 +620,16 @@ def apply_radiation(state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply radiation heating rates"""
-    
     # Note: state is already in 2D format [nlev, ncols] from compute_tendencies
     nlev, ncols = state.temperature.shape
     
-    # Get lat/lon from geometry
+    # Get lat/lon from cached coordinates
     lat, lon = jax.numpy.meshgrid(
-        geometry.lat * 180.0 / jnp.pi,  # Convert to degrees
-        geometry.lon * 180.0 / jnp.pi,  # degrees
+        physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
+        physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
     )
     # Then reshape to (ncols,) to match column format
     latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
@@ -717,10 +728,9 @@ def apply_convection(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
-    
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     layer_thickness = physics_data.diagnostics.layer_thickness
@@ -738,7 +748,7 @@ def apply_convection(
       air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
     # Unpack structured results directly (no tuple unpacking needed)
-    conv_tendencies_all, conv_states_all = conv_results # FIXME: investigate updraft states (conv_states_all.tu and .mfu)
+    conv_tendencies_all, conv_states_all = conv_results
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
@@ -767,10 +777,9 @@ def apply_clouds(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply shallow cloud scheme """
-    
+    """Apply shallow cloud scheme"""
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     surface_pressure = physics_data.diagnostics.surface_pressure
@@ -823,10 +832,9 @@ def apply_microphysics(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply cloud microphysics scheme"""
-    
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     cloud_fraction = physics_data.clouds.cloud_fraction
@@ -837,8 +845,11 @@ def apply_microphysics(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Droplet number concentration (simple profile)
-    droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
+    # Droplet number concentration from aerosol scheme
+    # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
+    droplet_number = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     
     # Get microphysics configuration
     micro_config = parameters.microphysics
@@ -940,7 +951,7 @@ def apply_vertical_diffusion(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply vertical diffusion and boundary layer physics"""
     from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
@@ -996,7 +1007,6 @@ def apply_vertical_diffusion(
                              surface_frac_col, roughness_col, ocean_u_scalar, ocean_v_scalar,
                              tke_col, thv_var_col):
         """Apply vertical diffusion to a single column with structured output"""
-        
         # Prepare state for this column - reshape to expected 2D format (1, nlev) or (1, nlev+1)
         vdiff_state = prepare_vertical_diffusion_state(
             u=u_col[None, :], v=v_col[None, :], temperature=temp_col[None, :], 
@@ -1049,7 +1059,14 @@ def apply_vertical_diffusion(
     kh = vdiff_diagnostics.exchange_coeff_heat.T
     pbl_height = vdiff_diagnostics.boundary_layer_height  # Shape [ncols]
     u_star = vdiff_diagnostics.friction_velocity  # Shape [ncols]
-    b_flux = vdiff_diagnostics.surface_heat_flux  # Shape [ncols] (using heat flux as buoyancy proxy)
+
+    # Extract surface exchange coefficients (per surface type)
+    surface_exchange_heat = vdiff_diagnostics.surface_exchange_heat  # (ncols, nsfc_type)
+    surface_exchange_moisture = vdiff_diagnostics.surface_exchange_moisture  # (ncols, nsfc_type)
+    # Momentum: use lowest-level profile coefficient, broadcast across surface types
+    surface_exchange_momentum = jnp.repeat(
+        vdiff_diagnostics.exchange_coeff_momentum[:, -1:], nsfc_type, axis=1
+    )  # (ncols, nsfc_type)
     
     # Update TKE
     new_tke = tke + dt * tke_tend
@@ -1071,11 +1088,13 @@ def apply_vertical_diffusion(
     # Only update fields that actually exist in VerticalDiffusionData
     vdiff_data = physics_data.vertical_diffusion.copy(
         tke=new_tke,
-        km=km,  # Use correct field name
-        kh=kh,  # Use correct field name
+        km=km,
+        kh=kh,
+        surface_exchange_heat=surface_exchange_heat,
+        surface_exchange_moisture=surface_exchange_moisture,
+        surface_exchange_momentum=surface_exchange_momentum,
         pbl_height=pbl_height,
         surface_friction_velocity=u_star,
-        # Note: thv_variance and surface_buoyancy_flux don't exist in VerticalDiffusionData
     )
     
     updated_physics_data = physics_data.copy(vertical_diffusion=vdiff_data)
@@ -1088,12 +1107,9 @@ def apply_surface(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply surface physics and calculate surface fluxes"""
-    from jcm.physics.icon.surface.surface_types import AtmosphericForcing
-    from jcm.physics.icon.surface import initialize_surface_state
-    
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
@@ -1101,13 +1117,18 @@ def apply_surface(
     # Reshape boundary fields to column format
     surface_temp = physics_data.surface.surface_temperature.reshape(ncols)
 
-    # Initialize surface state (simplified)
-    # In reality, this should come from the model's surface state
-    nsfc_type = 3  # Fixed value: water, ice, land
+    # Surface tile fractions: water (0), sea ice (1), land (2).
+    # Sea ice fraction is taken from prescribed boundary conditions and
+    # constrained to the non-land area so that fractions sum to exactly 1.
+    nsfc_type = 3
     surface_fractions = jnp.zeros((ncols, nsfc_type))
-    land_fraction = geometry.fmask.reshape((ncols,))
-    surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
-    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME: verify/improve this setup
+    land_fraction = terrain.fmask.reshape((ncols,))
+    raw_ice = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
+    sea_ice_fraction = jnp.clip(raw_ice.reshape((ncols,)), 0.0, 1.0 - land_fraction)
+    water_fraction = 1.0 - land_fraction - sea_ice_fraction
+    surface_fractions = surface_fractions.at[:, 0].set(water_fraction)
+    surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
+    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
@@ -1129,13 +1150,12 @@ def apply_surface(
     ref_height = physics_data.diagnostics.height_full[-1, :] - physics_data.diagnostics.height_full[-1, :].min()
     ref_height = jnp.maximum(ref_height, 10.0)  # At least 10m
     
-    # Create atmospheric forcing for all columns
-    # Initialize exchange coefficients with dummy values for now
+    # Get exchange coefficients from vertical diffusion diagnostics
     nsfc_type = 3
-    dummy_exchange = jnp.ones((ncols, nsfc_type)) * 0.001  # Small exchange coefficient FIXME: replace with real values
-    
-    # Surface properties are now extracted earlier in the function
-    
+    exchange_coeff_heat = physics_data.vertical_diffusion.surface_exchange_heat.reshape(ncols, nsfc_type)
+    exchange_coeff_moisture = physics_data.vertical_diffusion.surface_exchange_moisture.reshape(ncols, nsfc_type)
+    exchange_coeff_momentum = physics_data.vertical_diffusion.surface_exchange_momentum.reshape(ncols, nsfc_type)
+
     atm_forcing = AtmosphericForcing(
         temperature=atm_temp,
         humidity=atm_qv,
@@ -1146,9 +1166,9 @@ def apply_surface(
         lw_downward=physics_data.radiation.surface_lw_down,
         rain_rate=jnp.zeros(ncols),  # No rain for now
         snow_rate=jnp.zeros(ncols),  # No snow for now
-        exchange_coeff_heat=dummy_exchange,
-        exchange_coeff_moisture=dummy_exchange,
-        exchange_coeff_momentum=dummy_exchange
+        exchange_coeff_heat=exchange_coeff_heat,
+        exchange_coeff_moisture=exchange_coeff_moisture,
+        exchange_coeff_momentum=exchange_coeff_momentum
     )
     
     # Apply surface physics to all columns
@@ -1225,7 +1245,7 @@ def apply_gravity_waves(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply gravity wave drag"""
     nlev, ncols = state.temperature.shape
@@ -1271,7 +1291,7 @@ def apply_chemistry(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    geometry: Geometry
+    terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply chemistry tendencies
     

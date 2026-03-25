@@ -1,5 +1,4 @@
-"""
-Planck function calculations for longwave radiation
+"""Planck function calculations for longwave radiation
 
 This module computes Planck functions and related quantities
 for thermal radiation calculations.
@@ -25,8 +24,7 @@ def planck_function_wavenumber(
     temperature: jnp.ndarray,
     wavenumber: float
 ) -> jnp.ndarray:
-    """
-    Calculate Planck function for given temperature and wavenumber.
+    """Calculate Planck function for given temperature and wavenumber.
 
     B(ν,T) = 2hc²ν³ / (exp(hcν/kT) - 1)
 
@@ -36,6 +34,7 @@ def planck_function_wavenumber(
 
     Returns:
         Planck radiance (W/m²/sr/cm⁻¹)
+
     """
     # Convert wavenumber from cm⁻¹ to m⁻¹
     nu = wavenumber * 100.0
@@ -57,8 +56,7 @@ def integrated_planck_function(
     temperature: jnp.ndarray,
     band_limits: Tuple[float, float]
 ) -> jnp.ndarray:
-    """
-    Calculate band-integrated Planck function.
+    """Calculate band-integrated Planck function.
 
     Integrates Planck function over a spectral band and converts to flux.
 
@@ -68,6 +66,7 @@ def integrated_planck_function(
 
     Returns:
         Integrated Planck flux (W/m²)
+
     """
     # Use several points for integration
     n_points = 5
@@ -123,8 +122,7 @@ def planck_derivative(
     temperature: jnp.ndarray,
     wavenumber: float
 ) -> jnp.ndarray:
-    """
-    Calculate derivative of Planck function with respect to temperature.
+    """Calculate derivative of Planck function with respect to temperature.
     
     dB/dT = B(T) * (hcν/kT²) * exp(hcν/kT) / (exp(hcν/kT) - 1)
     
@@ -134,6 +132,7 @@ def planck_derivative(
         
     Returns:
         dB/dT (W/m²/sr/cm⁻¹/K)
+
     """
     # Get Planck function
     b = planck_function_wavenumber(temperature, wavenumber)
@@ -153,8 +152,7 @@ def planck_derivative(
 
 @jax.jit
 def total_thermal_emission(temperature: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate total thermal emission using Stefan-Boltzmann law.
+    """Calculate total thermal emission using Stefan-Boltzmann law.
     
     E = σT⁴
     
@@ -163,14 +161,14 @@ def total_thermal_emission(temperature: jnp.ndarray) -> jnp.ndarray:
         
     Returns:
         Total emission (W/m²)
+
     """
     return STEFAN_BOLTZMANN * temperature**4
 
 
 @jax.jit
 def effective_temperature(flux: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculate effective temperature from thermal flux.
+    """Calculate effective temperature from thermal flux.
     
     T = (F/σ)^(1/4)
     
@@ -179,6 +177,7 @@ def effective_temperature(flux: jnp.ndarray) -> jnp.ndarray:
         
     Returns:
         Effective temperature (K)
+
     """
     return (flux / STEFAN_BOLTZMANN) ** 0.25
 
@@ -188,8 +187,7 @@ def band_fraction(
     band_limits: Tuple[Tuple[float, float], ...],
     is_lw: bool = True
 ) -> jnp.ndarray:
-    """
-    Calculate fraction of total thermal emission in each band.
+    """Calculate fraction of total thermal emission in each band.
     
     Args:
         temperature: Temperature (K)
@@ -198,6 +196,7 @@ def band_fraction(
         
     Returns:
         Fraction of total emission in each band [n_bands]
+
     """
     # Create separate JIT'd functions to avoid tracer issues
     if is_lw:
@@ -255,8 +254,7 @@ def layer_planck_function(
     t_level_above: jnp.ndarray,
     band_limits: Tuple[float, float]
 ) -> jnp.ndarray:
-    """
-    Calculate effective Planck function for a layer.
+    """Calculate effective Planck function for a layer.
     
     Uses linear-in-tau approximation.
     
@@ -267,6 +265,7 @@ def layer_planck_function(
         
     Returns:
         Layer-averaged Planck function (W/m²/sr)
+
     """
     # Simple average (can be improved with linear-in-tau)
     t_layer = 0.5 * (t_level_below + t_level_above)
@@ -279,8 +278,7 @@ def interface_planck_function(
     t_above: jnp.ndarray,
     band_limits: Tuple[float, float]
 ) -> jnp.ndarray:
-    """
-    Calculate Planck function at interface.
+    """Calculate Planck function at interface.
     
     Linear interpolation in temperature.
     
@@ -291,6 +289,7 @@ def interface_planck_function(
         
     Returns:
         Interface Planck function (W/m²/sr)
+
     """
     t_interface = 0.5 * (t_below + t_above)
     return integrated_planck_function(t_interface, band_limits)
@@ -299,7 +298,6 @@ def interface_planck_function(
 # Test functions
 def test_planck_functions():
     """Test Planck function calculations"""
-    
     # Test single Planck function
     T = 300.0
     nu = 1000.0  # cm⁻¹

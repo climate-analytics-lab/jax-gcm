@@ -1,15 +1,10 @@
-"""
-ICON vertical hybrid sigma-pressure coordinate definitions.
+"""ICON vertical hybrid sigma-pressure coordinate definitions.
 
 This module provides ICON's vertical coordinate tables for various numbers
 of atmospheric levels, parsed from the official ICON vertical_coord_tables.
 """
 
-import dataclasses
 import jax.numpy as jnp
-import numpy as np
-from pathlib import Path
-from typing import Dict, Optional
 from dinosaur.hybrid_coordinates import HybridCoordinates
 
 
@@ -18,6 +13,7 @@ def get_icon_levels(nlevels: int) -> 'HybridCoordinates':
     
     Args:
         nlevels: Number of vertical levels (must be available in ICON tables)
+
     Returns:
         HybridLevels object with coefficients
 

@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""
-Test emergent atmospheric properties in JAX-GCM ICON physics.
+"""Test emergent atmospheric properties in JAX-GCM ICON physics.
 
 This script tests key emergent properties like ITCZ formation, Hadley cell circulation,
 and global energy balance to validate the physics implementation.
 """
 
 import jax.numpy as jnp
-import jax
 import numpy as np
-import xarray as xr
 import matplotlib.pyplot as plt
 from typing import Dict, Tuple, Any
 import sys
@@ -18,7 +15,8 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from jcm.geometry import Geometry
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
 from jcm.physics.icon.icon_physics import IconPhysics
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.date import DateData
@@ -28,7 +26,6 @@ class EmergentPropertiesValidator:
     
     def __init__(self, grid_config: Dict[str, Any] = None):
         """Initialize validator with grid configuration"""
-        
         # Default grid configuration
         default_config = {
             'nlat': 64,
@@ -39,15 +36,16 @@ class EmergentPropertiesValidator:
         
         self.config = {**default_config, **(grid_config or {})}
         
-        # Create geometry
-        self.geometry = Geometry.from_grid_shape(
-            nlon=self.config['nlon'],
-            nlat=self.config['nlat'], 
-            nlev=self.config['nlev']
-        )
-        
+        # Create coords and terrain
+        # TODO: Update this to use proper sigma boundaries for the configured number of levels
+        sigma_boundaries = np.linspace(0, 1, self.config['nlev'] + 1)
+        nodal_shape = (self.config['nlon'], self.config['nlat'])
+        self.coords = get_coords(sigma_boundaries, nodal_shape=nodal_shape)
+        self.terrain = TerrainData.aquaplanet(self.coords)
+
         # Initialize physics
         self.physics = IconPhysics()
+        self.physics.cache_coords(self.coords)
         
         # Create latitude/longitude arrays
         self.lat = jnp.linspace(-90, 90, self.config['nlat'])
@@ -57,7 +55,6 @@ class EmergentPropertiesValidator:
         
     def create_aquaplanet_state(self, sst: float = 300.0) -> PhysicsData:
         """Create initial aquaplanet state"""
-        
         ncol = self.config['nlat'] * self.config['nlon']
         nlev = self.config['nlev']
         
@@ -154,7 +151,6 @@ class EmergentPropertiesValidator:
     
     def run_physics_timestep(self, state: PhysicsData, date: DateData) -> Tuple[PhysicsData, Dict]:
         """Run single physics timestep"""
-        
         # Compute physics tendencies
         tendencies, diagnostics = self.physics.compute_tendencies(
             state, self.geometry, date
@@ -175,7 +171,6 @@ class EmergentPropertiesValidator:
     
     def run_short_integration(self, days: int = 5) -> Dict[str, jnp.ndarray]:
         """Run short integration to test basic physics"""
-        
         print(f"Running {days}-day integration...")
         
         # Initialize state
@@ -225,7 +220,6 @@ class EmergentPropertiesValidator:
     
     def test_temperature_distribution(self, history: Dict) -> Dict[str, Any]:
         """Test temperature distribution and gradients"""
-        
         print("Testing temperature distribution...")
         
         # Get final temperature
@@ -262,14 +256,13 @@ class EmergentPropertiesValidator:
         }
         
         print(f"  Temperature contrast: {temp_contrast:.1f} K")
-        print(f"  Expected range: 30-80 K")
+        print("  Expected range: 30-80 K")
         print(f"  Test passed: {results['test_passed']}")
         
         return results
     
     def test_energy_balance(self, history: Dict) -> Dict[str, Any]:
         """Test basic energy balance"""
-        
         print("Testing energy balance...")
         
         # Simple energy balance check
@@ -312,7 +305,6 @@ class EmergentPropertiesValidator:
     
     def test_physics_stability(self, history: Dict) -> Dict[str, Any]:
         """Test physics stability and reasonable values"""
-        
         print("Testing physics stability...")
         
         # Check for NaN or infinite values
@@ -345,7 +337,6 @@ class EmergentPropertiesValidator:
     
     def generate_validation_plots(self, history: Dict, results: Dict):
         """Generate validation plots"""
-        
         print("Generating validation plots...")
         
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -397,7 +388,6 @@ class EmergentPropertiesValidator:
     
     def run_comprehensive_validation(self, days: int = 5) -> Dict[str, Any]:
         """Run comprehensive validation test suite"""
-        
         print("=" * 60)
         print("JAX-GCM ICON Physics Emergent Properties Validation")
         print("=" * 60)
@@ -442,7 +432,6 @@ class EmergentPropertiesValidator:
 
 def main():
     """Run emergent properties validation"""
-    
     # Create validator
     validator = EmergentPropertiesValidator()
     

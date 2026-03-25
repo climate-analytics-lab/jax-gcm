@@ -1,1 +1,1 @@
-from .radiation_types import RadiationParameters
+from .radiation_types import RadiationParameters as RadiationParameters

@@ -1,5 +1,4 @@
-"""
-Main vertical diffusion scheme for ICON physics.
+"""Main vertical diffusion scheme for ICON physics.
 
 This module provides the main interface for vertical diffusion and boundary layer
 physics, integrating turbulence coefficient calculations with the matrix solver.
@@ -13,18 +12,18 @@ from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
     compute_turbulence_diagnostics
 )
 from .matrix_solver import vertical_diffusion_step
 from .tke_budget import (
-    compute_tke_tendency, compute_tke_exchange_coefficient, 
-    compute_tke_diagnostics, minimum_tke_constraint
+    compute_tke_exchange_coefficient,
+    compute_tke_diagnostics
 )
+
+# Create constants instance
+PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -32,8 +31,7 @@ def compute_dry_static_energy(
     temperature: jnp.ndarray,
     geopotential: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute dry static energy.
+    """Compute dry static energy.
     
     Args:
         temperature: Temperature [K]
@@ -41,6 +39,7 @@ def compute_dry_static_energy(
         
     Returns:
         Dry static energy [J/kg]
+
     """
     return PHYS_CONST.cp * temperature + geopotential
 
@@ -50,8 +49,7 @@ def compute_virtual_temperature(
     temperature: jnp.ndarray,
     qv: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Compute virtual temperature.
+    """Compute virtual temperature.
     
     Args:
         temperature: Temperature [K]
@@ -59,6 +57,7 @@ def compute_virtual_temperature(
         
     Returns:
         Virtual temperature [K]
+
     """
     return temperature * (1.0 + 0.608 * qv)
 
@@ -84,8 +83,7 @@ def prepare_vertical_diffusion_state(
     tke: jnp.ndarray,
     thv_variance: jnp.ndarray
 ) -> VDiffState:
-    """
-    Prepare the vertical diffusion state from input variables.
+    """Prepare the vertical diffusion state from input variables.
     
     Args:
         u: Zonal wind [m/s] (ncol, nlev)
@@ -109,6 +107,7 @@ def prepare_vertical_diffusion_state(
         
     Returns:
         Complete vertical diffusion state
+
     """
     # Compute air masses
     # dp should be positive (higher pressure - lower pressure)
@@ -148,8 +147,7 @@ def vertical_diffusion_column(
     params: VDiffParameters,
     dt: float
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
-    """
-    Compute vertical diffusion for a single column.
+    """Compute vertical diffusion for a single column.
     
     Args:
         state: Vertical diffusion state
@@ -158,6 +156,7 @@ def vertical_diffusion_column(
         
     Returns:
         Tuple of (tendencies, diagnostics)
+
     """
     # Compute turbulence coefficients
     ri = compute_richardson_number(
@@ -222,8 +221,7 @@ def vertical_diffusion_scheme(
     dt: float,
     params: VDiffParameters
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
-    """
-    Main vertical diffusion scheme interface.
+    """Run vertical diffusion scheme interface.
     
     Args:
         u: Zonal wind [m/s] (ncol, nlev)
@@ -249,6 +247,7 @@ def vertical_diffusion_scheme(
         
     Returns:
         Tuple of (tendencies, diagnostics)
+
     """
     # Prepare state
     state = prepare_vertical_diffusion_state(

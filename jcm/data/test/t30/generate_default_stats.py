@@ -1,5 +1,3 @@
-from pathlib import Path
-
 default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specific_humidity',
                      'normalized_surface_pressure','humidity.rh','shortwave_rad.ftop','longwave_rad.ftop',
                      'shortwave_rad.cloudstr','shortwave_rad.qcloud','convection.precnv','condensation.precls']
@@ -9,19 +7,18 @@ def run_default_speedy_model(save_interval=None):
     T31, 40min timestep
     """
     from jcm.model import Model
-    from jcm.geometry import Geometry
+    from jcm.terrain import TerrainData
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
     from jcm.forcing import ForcingData
+    from importlib import resources
 
-    # First, generate forcing and terrain files for T31 resolution
-    from jcm.data.bc.interpolate import main as interpolate_main
-    interpolate_main(['31'])
-
-    forcing_dir = Path(__file__).resolve().parent / '../../bc/'
+    forcing_dir = resources.files('jcm.data.bc.t30.clim')
 
     # Load the terrain and forcing data
-    realistic_geometry = Geometry.from_file(forcing_dir / 'terrain_t31.nc')
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing_t31.nc')
-
+    
+    coords = get_speedy_coords()
+    realistic_terrain = TerrainData.from_file(forcing_dir / 'terrain.nc', coords=coords)
+    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', coords=coords)
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average
@@ -34,7 +31,8 @@ def run_default_speedy_model(save_interval=None):
         output_averages = True
 
     model = Model(
-        geometry=realistic_geometry,
+        coords=coords,
+        terrain=realistic_terrain,
         time_step=time_step,
     )
 

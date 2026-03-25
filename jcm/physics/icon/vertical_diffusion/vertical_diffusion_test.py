@@ -1,20 +1,13 @@
-"""
-Comprehensive unit tests for vertical diffusion physics.
+"""Comprehensive unit tests for vertical diffusion physics.
 
 This module provides extensive testing of the vertical diffusion scheme,
 including individual components and integrated behavior.
 """
 
-import jax
 import jax.numpy as jnp
-import pytest
-from typing import Tuple
 
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from .vertical_diffusion_types import VDiffParameters, VDiffState
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
     compute_boundary_layer_height, compute_friction_velocity
@@ -26,6 +19,9 @@ from .vertical_diffusion import (
     vertical_diffusion_scheme, prepare_vertical_diffusion_state,
     compute_dry_static_energy, compute_virtual_temperature
 )
+
+# Create constants instance
+PHYS_CONST = PhysicalConstants()
 
 
 class TestTurbulenceCoefficients:
@@ -373,11 +369,6 @@ class TestVerticalDiffusionScheme:
         # Compute initial energy
         dp = jnp.diff(pressure_half, axis=1)
         air_mass = dp / PHYS_CONST.grav
-        
-        initial_kinetic_energy = 0.5 * air_mass * (u**2 + v**2)
-        initial_potential_energy = air_mass * PHYS_CONST.cp * temperature
-        
-        initial_total_energy = jnp.sum(initial_kinetic_energy + initial_potential_energy)
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(

@@ -1,6 +1,4 @@
-"""
-Integration tests for ICON Physics
-"""
+"""Integration tests for ICON Physics."""
 
 import unittest
 import jax.numpy as jnp
@@ -18,26 +16,27 @@ class TestIconPhysicsIntegration(unittest.TestCase):
 
     @pytest.mark.slow
     def test_icon_physics_integration_3_timesteps(self):
-        """
-        Test that ICON physics runs for 3 timesteps and produces sensible output.
+        """Test that ICON physics runs for 3 timesteps and produces sensible output.
 
         This test should catch known bugs:
         - Radiation causing excessive cooling (-143 K/day)
         - Convection causing temperature blowup (to 1300 K in 4-6 hours)
         - Vertical diffusion producing T=0K
         """
+        import numpy as np
         from jcm.utils import get_coords
-        from jcm.geometry import Geometry
+        from jcm.terrain import TerrainData
 
         # Create model with ICON physics using sigma coordinates
-        coords = get_coords(hybrid_vertical=False, layers=40, spectral_truncation=31)
-        geometry = Geometry.from_coords(coords)
+        sigma_boundaries = np.linspace(0, 1, 41)  # 40 layers
+        coords = get_coords(sigma_boundaries, spectral_truncation=31)
+        terrain = TerrainData.aquaplanet(coords)
 
         model = Model(
-            geometry=geometry,
+            coords=coords,
             time_step=30,  # 30 minutes - reasonable for atmospheric physics
+            terrain=terrain,
             physics=IconPhysics(),
-            use_hybrid_coords=False
         )
         
         # Run the model for 6 hours (with radiation/convection bugs should crash)
@@ -126,16 +125,16 @@ class TestIconPhysicsIntegration(unittest.TestCase):
         self.assertGreaterEqual(q_min, 0.0, "Specific humidity should be non-negative")
         
         # Check that the time dimension exists and matches expected save intervals
-        expected_time_steps = int(total_time / save_interval) + 1  # +1 for initial state
+        expected_time_steps = int(total_time / save_interval) 
         actual_time_steps = dynamics_predictions.temperature.shape[0]
         self.assertEqual(actual_time_steps, expected_time_steps,
                         f"Expected {expected_time_steps} time steps, got {actual_time_steps} - model may have crashed")
         
-        print(f"✓ ICON physics integration test passed!")
+        print("✓ ICON physics integration test passed!")
         print(f"  - Ran for {actual_time_steps} time steps")
         print(f"  - Temperature range: {temp_min:.1f} - {temp_max:.1f} K")
         print(f"  - Surface pressure range: {sp_min:.3f} - {sp_max:.3f} (normalized)")
-        print(f"  - No NaN values detected in key variables")
+        print("  - No NaN values detected in key variables")
 
 
 if __name__ == '__main__':

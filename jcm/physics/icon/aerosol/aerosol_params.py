@@ -1,5 +1,4 @@
-"""
-JAX-compatible aerosol parameters for MACv2-SP (Simple Plumes) scheme
+"""JAX-compatible aerosol parameters for MACv2-SP (Simple Plumes) scheme
 
 This module defines the aerosol parameters following the SpeedyPhysics pattern
 using tree_math.struct for JAX compatibility. Based on the ICON implementation
@@ -15,8 +14,7 @@ from jax import tree_util
 
 @tree_math.struct
 class AerosolParameters:
-    """
-    Parameters for MACv2-SP (Simple Plumes) aerosol scheme
+    """Parameters for MACv2-SP (Simple Plumes) aerosol scheme
     
     This implements the simple plume aerosol parametrization based on
     Kinne et al. climatology with 9 anthropogenic plumes and natural
@@ -61,8 +59,7 @@ class AerosolParameters:
     
     @classmethod
     def default(cls, background_aod=0.02) -> 'AerosolParameters':
-        """
-        Create default MACv2-SP aerosol parameters
+        """Create default MACv2-SP aerosol parameters
         
         These values are representative of the MACv2-SP climatology
         for demonstration purposes. In a full implementation, these

@@ -1,5 +1,4 @@
-"""
-Type definitions and parameters for radiation calculations
+"""Type definitions and parameters for radiation calculations
 
 This module defines the data structures and configuration parameters
 used throughout the radiation scheme.
@@ -8,7 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 import tree_math
 
 

@@ -1,5 +1,4 @@
-"""
-Unit tests for cloud microphysics scheme
+"""Unit tests for cloud microphysics scheme
 
 Date: 2025-01-10
 """
@@ -7,10 +6,8 @@ print("name:", __name__)
 print("package:", __package__)
 import jax.numpy as jnp
 import jax
-import pytest
 from .cloud_microphysics import (
-    MicrophysicsParameters, MicrophysicsState, MicrophysicsTendencies,
-    cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
+    MicrophysicsParameters, cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
@@ -29,8 +26,10 @@ from .cloud_params_2m import (cqtmin, ldyn_cdnc_min, rcd_vol_max, cdnc_min_fixed
                               cdnc_min_lower, cdnc_min_upper, fact_PK, pow_PK, icemin, clc_min,
                               cthomi, tmelt, nic_cirrus, eps, ccwmin
                               )
-
 from math import pi
+
+# from cloud_params_2m import CloudParams2M
+from ..constants.physical_constants import tmelt
 
 def _zeros(n: int) -> jnp.ndarray:
         return jnp.zeros((n,), dtype=jnp.float32)
@@ -38,10 +37,6 @@ def _zeros(n: int) -> jnp.ndarray:
 
 def _full(n: int, v: float) -> jnp.ndarray:
     return jnp.full((n,), v, dtype=jnp.float32)
-
-
-# from cloud_params_2m import CloudParams2M
-
 
 class TestCloudDropletRadius:
     """Test cloud droplet radius calculations"""
@@ -355,8 +350,6 @@ class TestFullMicrophysics:
         cloud_water = jnp.zeros(nlev)
         cloud_water = cloud_water.at[5:10].set(1e-3)  # Cloud layer
         cloud_ice = jnp.zeros(nlev)
-        rain_water = jnp.zeros(nlev)
-        snow = jnp.zeros(nlev)
         cloud_fraction = jnp.zeros(nlev)
         cloud_fraction = cloud_fraction.at[5:10].set(0.8)
         
@@ -395,8 +388,6 @@ class TestFullMicrophysics:
         cloud_water = jnp.zeros(nlev)
         cloud_ice = jnp.zeros(nlev)
         cloud_ice = cloud_ice.at[5:10].set(0.5e-3)  # Ice cloud layer
-        rain_water = jnp.zeros(nlev)
-        snow = jnp.zeros(nlev)
         cloud_fraction = jnp.zeros(nlev)
         cloud_fraction = cloud_fraction.at[5:10].set(0.6)
         
@@ -477,18 +468,11 @@ class TestFullMicrophysics:
         specific_humidity = jnp.ones(nlev) * 0.005
         cloud_water = jnp.ones(nlev) * 0.0005
         cloud_ice = jnp.ones(nlev) * 0.0002
-        rain_water = jnp.ones(nlev) * 0.0001
-        snow = jnp.ones(nlev) * 0.0001
         cloud_fraction = jnp.ones(nlev) * 0.5
         air_density = jnp.ones(nlev) * 1.0
         layer_thickness = jnp.ones(nlev) * 100.0
         droplet_number = jnp.ones(nlev) * 100e6
         dt = 60.0
-        
-        # Get initial total water
-        total_initial = (
-            specific_humidity + cloud_water + cloud_ice + rain_water + snow
-        ).sum()
         
         tendencies, state = cloud_microphysics(
             temperature, specific_humidity, pressure,
@@ -519,8 +503,6 @@ class TestFullMicrophysics:
             specific_humidity = jnp.ones(nlev) * 0.005
             cloud_water = jnp.ones(nlev) * 0.0005
             cloud_ice = jnp.ones(nlev) * 0.0
-            rain_water = jnp.ones(nlev) * 0.0
-            snow = jnp.ones(nlev) * 0.0
             cloud_fraction = jnp.ones(nlev) * 0.5
             air_density = jnp.ones(nlev) * 1.0
             layer_thickness = jnp.ones(nlev) * 100.0

@@ -1,5 +1,4 @@
-"""
-Physical constants for ICON atmospheric physics
+"""Physical constants for ICON atmospheric physics
 
 This module contains physical constants used throughout the ICON physics
 parameterizations. These constants are based on the ICON mo_physical_constants
@@ -9,7 +8,6 @@ Some constants are from the ECHAM-6.3 mo_physical_constants module (2025-12-15).
 Date: 2025-01-09
 """
 
-import jax.numpy as jnp
 from typing import NamedTuple
 
 class PhysicalConstants(NamedTuple):

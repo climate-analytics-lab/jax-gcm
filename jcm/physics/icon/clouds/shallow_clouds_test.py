@@ -1,15 +1,12 @@
-"""
-Unit tests for shallow cloud scheme
+"""Unit tests for shallow cloud scheme
 
 Date: 2025-01-10
 """
 
 import jax.numpy as jnp
 import jax
-import pytest
 from .shallow_clouds import (
-    CloudParameters, CloudState, CloudTendencies,
-    saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
+    CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
     saturation_specific_humidity, calculate_cloud_fraction,
     partition_cloud_phase, condensation_evaporation,
     shallow_cloud_scheme

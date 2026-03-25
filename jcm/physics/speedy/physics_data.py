@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
+from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jax import tree_util
 
 ablco2_ref = 6.0
@@ -464,9 +465,10 @@ class PhysicsData:
     surface_flux: SurfaceFluxData
     date: DateData
     land_model: LandModelData
+    speedy_coords: SpeedyCoords
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, num_levels),
@@ -477,10 +479,11 @@ class PhysicsData:
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
             date = date if date is not None else DateData.zeros(),
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
+            speedy_coords = speedy_coords,
         )
     
     @classmethod
-    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, num_levels),
@@ -490,9 +493,11 @@ class PhysicsData:
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, num_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
             date = date if date is not None else DateData.ones(),
-            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape)        )
+            land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
+            speedy_coords = speedy_coords,
+        )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -502,12 +507,14 @@ class PhysicsData:
             condensation=condensation if condensation is not None else self.condensation,
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             date=date if date is not None else self.date,
-            land_model=land_model if land_model is not None else self.land_model
+            land_model=land_model if land_model is not None else self.land_model,
+            speedy_coords=speedy_coords if speedy_coords is not None else self.speedy_coords
         )
 
-    # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to 
-    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in 
+    # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to
+    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in
     # valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
+    # We also skip the check on speedy_coords because it's a constant coordinate cache that should not have gradients.
     def isnan(self):
         return PhysicsData(
             shortwave_rad=self.shortwave_rad.isnan(),
@@ -518,7 +525,8 @@ class PhysicsData:
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
             date=0,
-            land_model=self.land_model.isnan()
+            land_model=self.land_model.isnan(),
+            speedy_coords=0
         )
     
     def any_true(self):
