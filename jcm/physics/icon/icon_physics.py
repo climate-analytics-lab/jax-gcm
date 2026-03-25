@@ -749,7 +749,7 @@ def apply_convection(
       air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
     
     # Unpack structured results directly (no tuple unpacking needed)
-    conv_tendencies_all, conv_states_all = conv_results # FIXME: investigate updraft states (conv_states_all.tu and .mfu)
+    conv_tendencies_all, conv_states_all = conv_results
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
@@ -846,8 +846,11 @@ def apply_microphysics(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
     
-    # Droplet number concentration (simple profile)
-    droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
+    # Droplet number concentration from aerosol scheme
+    # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
+    droplet_number = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     
     # Get microphysics configuration
     micro_config = parameters.microphysics
@@ -1056,13 +1059,18 @@ def apply_surface(
     # Reshape boundary fields to column format
     surface_temp = physics_data.surface.surface_temperature.reshape(ncols)
 
-    # Initialize surface state (simplified)
-    # In reality, this should come from the model's surface state
-    nsfc_type = 3  # Fixed value: water, ice, land
+    # Surface tile fractions: water (0), sea ice (1), land (2).
+    # Sea ice fraction is taken from prescribed boundary conditions and
+    # constrained to the non-land area so that fractions sum to exactly 1.
+    nsfc_type = 3
     surface_fractions = jnp.zeros((ncols, nsfc_type))
     land_fraction = terrain.fmask.reshape((ncols,))
-    surface_fractions = surface_fractions.at[:, 0].set(1.0 - land_fraction)
-    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)  # FIXME: verify/improve this setup
+    raw_ice = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
+    sea_ice_fraction = jnp.clip(raw_ice.reshape((ncols,)), 0.0, 1.0 - land_fraction)
+    water_fraction = 1.0 - land_fraction - sea_ice_fraction
+    surface_fractions = surface_fractions.at[:, 0].set(water_fraction)
+    surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
+    surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
     ocean_temp = surface_temp
     ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
