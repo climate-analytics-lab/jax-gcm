@@ -168,9 +168,10 @@ Attributes:
 
 class Physics:
     UNITS_TABLE_CSV_PATH = None
+    cached_coords = None
 
     def cache_coords(self, coords: CoordinateSystem):
-        return None
+        self.model_coords = coords
 
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.

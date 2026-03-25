@@ -35,7 +35,11 @@ PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_S
 
 @tree_math.struct
 class Predictions:
-    """Container for model prediction outputs from a single timestep.
+    """Internal container for model prediction outputs (JAX pytree).
+
+    This is the internal pytree-compatible struct used during JAX transformations
+    (scan, tree_map, etc.). Users should interact with ModelPredictions instead,
+    which wraps this struct and provides to_xarray() conversion.
 
     Attributes:
         dynamics (PhysicsState): The physical state variables converted from
@@ -49,60 +53,82 @@ class Predictions:
     physics: Any
     times: Any
 
-    def to_xarray(self, physics_module: Physics=None):
-        """Convert the full prediction trajectory to a final xarray.Dataset.
-        This function unpacks the nested dictionary structure from the simulation
-        output, formats the data, and converts the time coordinate to a
-        datetime object.
 
-        Args:
-            physics_module (optional): instance of the Physics module used to generate the predictions, used to parse physics fields (default SpeedyPhysics).
+class ModelPredictions:
+    """User-facing container for model prediction outputs.
+
+    Wraps the internal Predictions pytree with the coordinate system and
+    physics module needed for xarray conversion. Returned by Model.run(),
+    Model.resume(), and Model.run_from_state().
+
+    Attributes:
+        dynamics (PhysicsState): The physical state variables.
+        physics (Any): Diagnostic physics data.
+        times (Any): Timestamps of the predictions.
+
+    """
+
+    def __init__(self, predictions: Predictions, coords: 'CoordinateSystem', physics: Physics):  # noqa: D107
+        self._predictions = predictions
+        self._coords = coords
+        self._physics = physics
+
+    @property
+    def dynamics(self):
+        return self._predictions.dynamics
+
+    @property
+    def physics(self):
+        return self._predictions.physics
+
+    @property
+    def times(self):
+        return self._predictions.times
+
+    def to_xarray(self):
+        """Convert the full prediction trajectory to an xarray.Dataset.
 
         Returns:
-            A final `xarray.Dataset` ready for analysis and plotting.
+            An xarray.Dataset ready for analysis and plotting.
 
         """
         from jcm.utils import data_to_xarray
-        
+
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays
         # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives
         float0s_to_nans = lambda pytree: tree_map(lambda x: jnp.full_like(x, jnp.nan, dtype=jnp.float32) if x.dtype == jax.dtypes.float0 else x, pytree)
 
-        # extract dynamics predictions (PhysicsState format)
-        # and physics predictions from postprocessed output
-
         dynamics_predictions = float0s_to_nans(self.dynamics)
         physics_predictions = float0s_to_nans(self.physics)
 
         nodal_shape = dynamics_predictions.u_wind.shape[1:]
-        from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        coords = get_speedy_coords(layers=nodal_shape[0], nodal_shape=nodal_shape[1:])
 
         # prepare physics predictions for xarray conversion
-        # (e.g. separate multi-channel fields so they are compatible with data_to_xarray)
-        physics_module = physics_module or SpeedyPhysics()
-        physics_module.cache_coords(coords)
-        physics_preds_dict = physics_module.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
+        physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
         times = jax.device_get(self.times)
-        coords = jax.device_get(coords)
+        coords = jax.device_get(self._coords)
 
-        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict, 
+        # get additional coords from physics-specific cached coords (e.g. SpeedyCoords, IconCoords)
+        additional_coords = {}
+        if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
+            additional_coords = self._physics.cached_coords.xarray_additional_coords()
+
+        pred_ds = data_to_xarray(dynamics_predictions.asdict() | physics_preds_dict,
                                  coords=coords, serialize_coords_to_attrs=False,
                                  times=times - times[0],
-                                 additional_coords={'wvi_id': jnp.array([1,2]),
-                                                    'hsg_level': jnp.arange(nodal_shape[0]+1)})
+                                 additional_coords=additional_coords)
 
         # Import units attribute associated with each xarray output from units_table.csv
         units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
-        if physics_module.UNITS_TABLE_CSV_PATH is not None:
-            units_df = pd.concat([units_df, pd.read_csv(physics_module.UNITS_TABLE_CSV_PATH)], ignore_index=True)
+        if self._physics.UNITS_TABLE_CSV_PATH is not None:
+            units_df = pd.concat([units_df, pd.read_csv(self._physics.UNITS_TABLE_CSV_PATH)], ignore_index=True)
         for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
             if var in pred_ds:
                 pred_ds[var].attrs["units"] = unit
                 pred_ds[var].attrs["description"] = desc
-        
+
         # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere
         pred_ds = pred_ds.isel(level=slice(None, None, -1))
 
@@ -110,8 +136,31 @@ class Predictions:
         pred_ds['time'] = (
             times*(timedelta64(1, 'D')/timedelta64(1, 'ns'))
         ).astype('datetime64[ns]')
-        
+
         return pred_ds
+
+
+def _model_predictions_flatten(mp):
+    """Flatten ModelPredictions for JAX pytree operations (tree_map, etc.).
+
+    Only the internal Predictions pytree is treated as array data.
+    Coords and physics are not included in aux_data so that tree_map
+    works across ModelPredictions from different Model instances.
+    """
+    children = (mp._predictions,)
+    return children, None
+
+
+def _model_predictions_unflatten(aux_data, children):
+    return ModelPredictions(children[0], None, None)
+
+
+jax.tree_util.register_pytree_node(
+    ModelPredictions,
+    _model_predictions_flatten,
+    _model_predictions_unflatten,
+)
+
 
 class DiagnosticsCollector(nnx.Module):
     data: nnx.Variable
@@ -446,32 +495,14 @@ class Model:
         return _integrate_fn
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
-    def run_from_state(self,
-                       initial_state: primitive_equations.State,
-                       forcing: ForcingData,
-                       save_interval=10.0,
-                       total_time=120.0,
-                       output_averages=False,
+    def _run_from_state(self,
+                        initial_state: primitive_equations.State,
+                        forcing: ForcingData,
+                        save_interval=10.0,
+                        total_time=120.0,
+                        output_averages=False,
     ) -> tuple[primitive_equations.State, Predictions]:
-        """Run the full simulation forward in time starting from given initial state.
-        Alternative to model.run / model.resume which does not read/write model's internal current state.
-        
-        Args:
-            initial_state:
-                dinosaur.primitive_equations.State containing initial state of the run.
-            forcing:
-                ForcingData containing forcing conditions for the run.
-            save_interval:
-                (float) interval at which to save model outputs in days (default 10.0).
-            total_time:
-                (float) total time to run the model in days (default 120.0).
-            output_averages:
-                Whether to output time-averaged quantities (default False).
-    
-        Returns:
-            A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
-
-        """
+        """JIT-compiled simulation loop. Returns raw Predictions pytree."""
         step_fn_factory = self._get_step_fn_factory(forcing)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
         step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())
@@ -490,16 +521,47 @@ class Model:
             post_process_fn=lambda state: self._post_process(state, forcing, output_averages),
             output_averages=output_averages
         )
-        
+
         final_modal_state, predictions = integrate(initial_state)
         return final_modal_state, predictions.replace(times=times)
+
+    def run_from_state(self,
+                       initial_state: primitive_equations.State,
+                       forcing: ForcingData,
+                       save_interval=10.0,
+                       total_time=120.0,
+                       output_averages=False,
+    ) -> tuple[primitive_equations.State, ModelPredictions]:
+        """Run the full simulation forward in time starting from given initial state.
+        Alternative to model.run / model.resume which does not read/write model's internal current state.
+
+        Args:
+            initial_state:
+                dinosaur.primitive_equations.State containing initial state of the run.
+            forcing:
+                ForcingData containing forcing conditions for the run.
+            save_interval:
+                (float) interval at which to save model outputs in days (default 10.0).
+            total_time:
+                (float) total time to run the model in days (default 120.0).
+            output_averages:
+                Whether to output time-averaged quantities (default False).
+
+        Returns:
+            A tuple containing (final dinosaur.primitive_equations.State, ModelPredictions object containing trajectory of post-processed model states).
+
+        """
+        final_modal_state, predictions = self._run_from_state(
+            initial_state, forcing, save_interval, total_time, output_averages
+        )
+        return final_modal_state, ModelPredictions(predictions, self.coords, self.physics)
 
     def resume(self,
                forcing: ForcingData=None,
                save_interval=10.0,
                total_time=120.0,
                output_averages=False
-    ) -> Predictions:
+    ) -> ModelPredictions:
         """Run the full simulation forward in time starting from end of previous call to model.run or model.resume.
 
         Args:
@@ -513,11 +575,11 @@ class Model:
                 Whether to output time-averaged quantities (default False).
 
         Returns:
-            A Predictions object containing the trajectory of post-processed model states.
+            A ModelPredictions object containing the trajectory of post-processed model states.
 
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
-        jax.debug.callback(logger.info, "Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s", 
+        jax.debug.callback(logger.info, "Model starting with params: forcing: %s, save_interval: %s, total_time: %s, output_averages: %s",
                                         forcing, save_interval, total_time, output_averages)
         final_modal_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
@@ -536,7 +598,7 @@ class Model:
             save_interval=10.0,
             total_time=120.0,
             output_averages=False
-    ) -> Predictions:
+    ) -> ModelPredictions:
         """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
         Args:
@@ -552,7 +614,7 @@ class Model:
                 Whether to output time-averaged quantities (default False).
 
         Returns:
-            A Predictions object containing the trajectory of post-processed model states.
+            A ModelPredictions object containing the trajectory of post-processed model states.
 
         """
         if isinstance(initial_state, primitive_equations.State):

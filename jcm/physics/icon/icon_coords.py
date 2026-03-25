@@ -32,6 +32,10 @@ class IconCoords:
     lat: jnp.ndarray
     lon: jnp.ndarray
 
+    def xarray_additional_coords(self):
+        """Return additional xarray coordinates for ICON physics fields."""
+        return {}
+
     @classmethod
     def from_coordinate_system(cls, coords: CoordinateSystem):
         """Create IconCoords from a dinosaur CoordinateSystem.

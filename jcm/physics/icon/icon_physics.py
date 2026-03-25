@@ -92,7 +92,9 @@ class IconPhysics(Physics):
     
     def cache_coords(self, coords: CoordinateSystem):
         """Cache coordinate system data needed by ICON physics."""
+        self.model_coords = coords
         self._icon_coords = IconCoords.from_coordinate_system(coords)
+        self.cached_coords = self._icon_coords
 
     def compute_tendencies(
         self,

@@ -130,6 +130,13 @@ class SpeedyCoords:
             coa=coa if coa is not None else self.coa
         )
 
+    def xarray_additional_coords(self):
+        """Return additional xarray coordinates for SPEEDY physics fields."""
+        return {
+            'wvi_id': jnp.array([1, 2]),
+            'hsg_level': jnp.arange(len(self.hsg)),
+        }
+
     @classmethod
     def single_column_coords(cls, radang=0., num_levels=8):
             """Initialize a speedy_coords instance for a single column model.
