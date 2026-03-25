@@ -2805,7 +2805,7 @@ def diagnostics(
     4. Update ice-cloud accumulators (ICNC averages, ice water content, times, burdens).
     5. Compute TOVS-style cirrus diagnostics and select sampling candidates.
     6. Accumulate icnc/liquid burdens and total cloud-fraction accumulation.
-    7. Return updated INOUT accumulators in the original Fortran order.
+    7. Return updated INOUT accumulators in the original ECHAM order.
 
     Parameters
     ----------

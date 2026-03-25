@@ -10,7 +10,7 @@ Date: 2025-01-10
 import tree_math
 
 from .convection import ConvectionParameters
-from .clouds import CloudParameters, MicrophysicsParameters
+from .clouds import CloudParameters, MicrophysicsParameters, CloudParams2M
 from .gravity_waves import GravityWaveParameters
 from .radiation import RadiationParameters
 from .vertical_diffusion.vertical_diffusion_types import VDiffParameters
@@ -37,6 +37,7 @@ class Parameters:
     surface: SurfaceParameters
     gravity_waves: GravityWaveParameters
     aerosol: AerosolParameters
+    microphysics2M: CloudParams2M
 
     @classmethod
     def default(cls):
@@ -48,7 +49,8 @@ class Parameters:
             radiation = RadiationParameters.default(),
             vertical_diffusion = VDiffParameters.default(),
             surface = SurfaceParameters.default(),
-            aerosol = AerosolParameters.default()
+            aerosol = AerosolParameters.default(),
+            microphysics2M = CloudParams2M.default()
         )
 
     def with_convection(self, **kwargs) -> 'Parameters':
@@ -65,7 +67,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_clouds(self, **kwargs) -> 'Parameters':
@@ -82,7 +85,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_microphysics(self, **kwargs) -> 'Parameters':
@@ -99,7 +103,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_gravity_waves(self, **kwargs) -> 'Parameters':
@@ -116,7 +121,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_radiation(self, **kwargs) -> 'Parameters':
@@ -133,7 +139,8 @@ class Parameters:
             radiation=rad_params,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_vertical_diffusion(self, **kwargs) -> 'Parameters':
@@ -150,7 +157,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=vdiff_params,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_surface(self, **kwargs) -> 'Parameters':
@@ -167,7 +175,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=surface_params,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=self.microphysics2M
         )
     
     def with_aerosol(self, **kwargs) -> 'Parameters':
@@ -184,7 +193,8 @@ class Parameters:
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=aerosol_params
+            aerosol=aerosol_params,
+            microphysics2M=self.microphysics2M
         )
 
     def with_timestep(self, dt_seconds: float) -> 'Parameters':
@@ -222,7 +232,10 @@ class Parameters:
             **self.microphysics.__dict__,
             'dt_sedi': jnp.array(dt_sedi)
         })
-
+        microphysics2M_params = self.microphysics2M.__class__(**{
+            **self.microphysics2M.__dict__,
+            'dt_sedi': jnp.array(dt_sedi)
+        })
         return self.__class__(
             convection=convection_params,
             clouds=self.clouds,
@@ -231,5 +244,6 @@ class Parameters:
             radiation=radiation_params,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
-            aerosol=self.aerosol
+            aerosol=self.aerosol,
+            microphysics2M=microphysics2M_params
         )

@@ -8,142 +8,316 @@ from jax import jit
 import jax.numpy as jnp
 from typing import NamedTuple
 from math import pi
+import tree_math
 
-class CloudParams2M(NamedTuple):
+@tree_math.struct
+class CloudParams2M: #(NamedTuple):
     """Cloud parameters for ECHAM6/ICON 2-m microphysical scheme"""
 
     # Constants
-    tmelt: float = 273.15         # Melting point of ice (K)
-    grav: float = 9.81            # Gravitational acceleration (m/s²)
+    tmelt: float       # Melting point of ice (K)
+    grav: float            # Gravitational acceleration (m/s²)
 
     # Default values for cloud microphysics
-    cthomi: float = tmelt - 35.0
-    cn0s: float = 3e6
-    crhoi: float = 500.0
-    crhosno: float = 100.0
-    ccsaut: float = 95.0
-    clmax: float = 0.5
-    clmin: float = 0.0
-    ceffmax: float = 150.0  # Max effective radius for ice cloud
-    lonacc: bool = True
+    cthomi: float
+    cn0s: float
+    crhoi: float
+    crhosno: float
+    ccsaut: float
+    clmax: float
+    clmin: float
+    ceffmax: float  # Max effective radius for ice cloud
+    lonacc: bool
 
-    ccsacl: float = 0.10
-    ccracl: float = 6.0
-    ccraut: float = 15.0
-    ceffmin: float = 10.0  # Min effective radius for ice cloud
-    ccwmin: float = 1e-7   # Cloud water limit for cover > 0
-    cauloc: float = 0.0
-    cqtmin: float = 1e-12  # Total water minimum for cloud to be considered present
+    ccsacl: float
+    ccracl: float
+    ccraut: float
+    ceffmin: float  # Min effective radius for ice cloud
+    ccwmin: float  # Cloud water limit for cover > 0
+    cauloc: float
+    cqtmin: float  # Total water minimum for cloud to be considered present
 
     # utility parameters
-    epsec: float = 1e-12  # Small number to avoid division by zero
-    xsec: float = 1.0 - epsec
-    qsec: float  = 1.0 - cqtmin 
-    eps: float = jnp.finfo(jnp.float32).eps
-    cri: float   = 10e-6    # to estimate the number of produced  
+    epsec: float # Small number to avoid division by zero
+    xsec: float
+    qsec: float
+    eps: float
+    cri: float              # to estimate the number of produced  
                             # cloud droplets from ice melting in  
                             # case of licnc=.FALSE. [m]=> 10 um
-    mi: float = 4.0/3.0*cri**3*pi*crhoi # assumed mass of ice crystals with 
-                                 # corresponding volume mean radius cri
-    ri_vol_mean_1: float = 2.166e-9 # vol mean ice crystal radius, range border 1
-    ri_vol_mean_2: float = 4.264e-8 # vol mean ice crystal radius, range border 2
-    alfased_1: float = 63292.4 # for ice crystal fall velocity 
-    alfased_2: float = 8.78    # for ice crystal fall velocity
-    alfased_3: float = 329.75  # for ice crystal fall velocity
-    betased_1: float = 0.5727  # for ice crystal fall velocity 
-    betased_2: float = 0.0954  # for ice crystal fall velocity
-    betased_3: float = 0.3091 
+    mi: float               # assumed mass of ice crystals with 
+                            # corresponding volume mean radius cri
+    ri_vol_mean_1: float # vol mean ice crystal radius, range border 1
+    ri_vol_mean_2: float # vol mean ice crystal radius, range border 2
+    alfased_1: float # for ice crystal fall velocity 
+    alfased_2: float # for ice crystal fall velocity
+    alfased_3: float # for ice crystal fall velocity
+    betased_1: float  # for ice crystal fall velocity 
+    betased_2: float # for ice crystal fall velocity
+    betased_3: float 
     
     # Default values for cloud cover scheme
-    cptop: float = 1000.0            # Min pressure level for condensation
-    cpbot: float = 50000.0           # Max pressure level for tropopause calculation
+    cptop: float            # Min pressure level for condensation
+    cpbot: float          # Max pressure level for tropopause calculation
 
 
     # SF #475: bounds / constants for minimum CDNC implied by max droplet size.
-    cdnc_min_upper: float = 40.0e6   # [1/m^3]
-    cdnc_min_lower: float = 1.0e6    # [1/m^3]
-    rcd_vol_max: float = 19.0e-6     # [m] maximum mean-volume droplet radius used for CDNC_min
+    cdnc_min_upper: float   # [1/m^3]
+    cdnc_min_lower: float   # [1/m^3]
+    rcd_vol_max: float  # [m] maximum mean-volume droplet radius used for CDNC_min
 
     # Ice crystal number concentration bounds
-    icemin: float = 10.0            # [1/m^3]
-    icemax: float = 1.0e7           # [1/m^3]
+    icemin: float          # [1/m^3]
+    icemax: float        # [1/m^3]
 
     # Lognormal droplet spectrum parameters (used for effective radius relations)
-    sigmaw: float = 0.28            # [-]
+    sigmaw: float           # [-]
     # `disp = exp(0.5*sigmaw^2)` is derived, but kept as a parameter in cloud_utils.
     # Keeping it here allows exact reproduction if desired.
-    disp: float = float(jnp.exp(0.5 * (0.28 ** 2)))  # [-]
+    disp: float  # [-]
     # Reference droplet radius/mass parameters
-    dw0: float = 10.0e-6 * float(jnp.exp(0.5 * (0.28 ** 2)))  # [m]
-    cdi: float = 0.6              # [-]
-    mw0: float = 4.19e-12         # [kg]
-    mi0: float = 1.0e-12          # [kg]
-    mi0_rcp: float = 1.0e12       # [1/kg]
+    dw0: float  # [m]
+    cdi: float         # [-]
+    mw0: float       # [kg]
+    mi0: float         # [kg]
+    mi0_rcp: float      # [1/kg]
 
     # Thermophysical / kinetic constants used in diffusional growth parameterizations
-    ka: float = 0.024              # [W/m/K] thermal conductivity of air (approx)
-    kb: float = 1.38e-23           # [J/K] Boltzmann constant
-    alpha: float = 0.5             # [-] accommodation coefficient
-    xmw: float = 2.992e-26         # [kg] mass of an H2O molecule
-    fall: float = 3.0              # [-] fall-speed tuning exponent/constant (scheme-specific)
+    ka: float           # [W/m/K] thermal conductivity of air (approx)
+    kb: float         # [J/K] Boltzmann constant
+    alpha: float            # [-] accommodation coefficient
+    xmw: float       # [kg] mass of an H2O molecule
+    fall: float             # [-] fall-speed tuning exponent/constant (scheme-specific)
 
     # Densities / conversion factors
-    rhoice: float = 925.0          # [kg/m^3]
-    conv_effr2mvr: float = 0.9     # [-] effective radius -> mean volume radius conversion
-    clc_min: float = 0.01          # [-] lower limit for cloud fraction in conversions
+    rhoice: float        # [kg/m^3]
+    conv_effr2mvr: float     # [-] effective radius -> mean volume radius conversion
+    clc_min: float          # [-] lower limit for cloud fraction in conversions
 
     # Exponents used by integrated sink forms (e.g., KK2000 style)
-    exm1_1: float = 2.47 - 1.0
-    exp_1: float = -1.0 / (2.47 - 1.0)
-    exm1_2: float = 4.7 - 1.0
-    exp_2: float = -1.0 / (4.7 - 1.0)
+    exm1_1: float
+    exp_1: float
+    exm1_2: float
+    exp_2: float
 
     # density parameters
-    pirho: float = pi * 1000.0  # Assuming rhoh2o = 1000 kg/m^3 (density of water)
-    pirho_rcp: float = 1.0 / pirho
-    cap: float = 2.0 / pi
-    cons4: float = 1.0 / (pi * crhosno * cn0s) ** 0.8125
-    cons5: float = 1.0 / (pi * crhosno * cn0s) ** 0.875
+    pirho: float  # Assuming rhoh2o = 1000 kg/m^3 (density of water)
+    pirho_rcp: float
+    cap: float
+    cons4: float
+    cons5: float
 
     # Snow-related collection / sedimentation tuning
-    fact_coll_eff: float = 0.09    # [-] temp-dependent collection efficiency factor
-    fact_tke: float = 0.7          # [-] turbulence factor
+    fact_coll_eff: float     # [-] temp-dependent collection efficiency factor
+    fact_tke: float          # [-] turbulence factor
 
     # Pruppacher & Klett (1997) ice mass–size relation parameters
-    fact_PK: float = 8.253e-3      # [-] (g, cm) parameter; see cloud_utils notes
-    pow_PK: float = 2.475          # [-]
+    fact_PK: float      # [-] (g, cm) parameter; see cloud_utils notes
+    pow_PK: float          # [-]
 
     # Cloud scheme logical switches (TODO make them configurable. Currrently hardcoded based in ECHAM6 defaults)
-    ldyn_cdnc_min: bool = False    # dynamic min-CDNC switch
-    cdnc_min_fixed: float = 10.0   # [cm^-3] fixed value when ldyn_cdnc_min is False
-    nic_cirrus: int = 2            # cirrus scheme selector
+    ldyn_cdnc_min: bool   # dynamic min-CDNC switch
+    cdnc_min_fixed: float   # [cm^-3] fixed value when ldyn_cdnc_min is False
+    nic_cirrus: int            # cirrus scheme selector
 
     # Resolution-dependent parameters
     # NOTE : The following parameters are normally initialized in the sucloud
     # subroutine based on model resolution. Here, default values for ICON
     # have been used as placeholders. They will be updated by calling
     # sucloud during model initialization.
-    crs: float = 0.975
-    crt: float = 0.75
-    cvtfall: float = 2.5
-    csecfrl: float = 5e-6
-    clwprat: float = 4.0
-    csatsc: float = 0.7
-    cinv: float = 0.25
+    crs: float
+    crt: float
+    cvtfall: float
+    csecfrl: float
+    clwprat: float
+    csatsc: float
+    cinv: float
 
-    nex: float = 2
-    nadd: float = 0
+    nex: float
+    nadd: float
 
     # Variables initialized in sucloud
-    ncctop: float = 13
-    nccbot: float = 35
-    jbmin: float = 40
-    jbmax: float = 45
+    ncctop: float
+    nccbot: float
+    jbmin: float
+    jbmax: float
 
     @classmethod
-    def default(cls) -> 'CloudParams2M':
+    def default(
+        cls,
+        tmelt: float = 273.15,
+        grav: float = 9.81,
+        cthomi: float = 273.15 - 35.0,
+        cn0s: float = 3e6,
+        crhoi: float = 500.0,
+        crhosno: float = 100.0,
+        ccsaut: float = 95.0,
+        clmax: float = 0.5,
+        clmin: float = 0.0,
+        ceffmax: float = 150.0,
+        lonacc: bool = True,
+        ccsacl: float = 0.10,
+        ccracl: float = 6.0,
+        ccraut: float = 15.0,
+        ceffmin: float = 10.0,
+        ccwmin: float = 1e-7,
+        cauloc: float = 0.0,
+        cqtmin: float = 1e-12,
+        epsec: float = 1e-12,
+        cri: float = 10e-6,
+        ri_vol_mean_1: float = 2.166e-9,
+        ri_vol_mean_2: float = 4.264e-8,
+        alfased_1: float = 63292.4,
+        alfased_2: float = 8.78,
+        alfased_3: float = 329.75,
+        betased_1: float = 0.5727,
+        betased_2: float = 0.0954,
+        betased_3: float = 0.3091,
+        cptop: float = 1000.0,
+        cpbot: float = 50000.0,
+        cdnc_min_upper: float = 40.0e6,
+        cdnc_min_lower: float = 1.0e6,
+        rcd_vol_max: float = 19.0e-6,
+        icemin: float = 10.0,
+        icemax: float = 1.0e7,
+        sigmaw: float = 0.28,
+        cdi: float = 0.6,
+        mw0: float = 4.19e-12,
+        mi0: float = 1.0e-12,
+        mi0_rcp: float = 1.0e12,
+        ka: float = 0.024,
+        kb: float = 1.38e-23,
+        alpha: float = 0.5,
+        xmw: float = 2.992e-26,
+        fall: float = 3.0,
+        rhoice: float = 925.0,
+        conv_effr2mvr: float = 0.9,
+        clc_min: float = 0.01,
+        exm1_1: float = 2.47 - 1.0,
+        exp_1: float = -1.0 / (2.47 - 1.0),
+        exm1_2: float = 4.7 - 1.0,
+        exp_2: float = -1.0 / (4.7 - 1.0),
+        fact_coll_eff: float = 0.09,
+        fact_tke: float = 0.7,
+        fact_PK: float = 8.253e-3,
+        pow_PK: float = 2.475,
+        ldyn_cdnc_min: bool = False,
+        cdnc_min_fixed: float = 10.0,
+        nic_cirrus: int = 2,
+        # resolution-dependent placeholders (ICON defaults)
+        crs: float = 0.975,
+        crt: float = 0.75,
+        cvtfall: float = 2.5,
+        csecfrl: float = 5e-6,
+        clwprat: float = 4.0,
+        csatsc: float = 0.7,
+        cinv: float = 0.25,
+        nex: float = 2,
+        nadd: float = 0,
+        ncctop: float = 13,
+        nccbot: float = 35,
+        jbmin: float = 40,
+        jbmax: float = 45,
+    ) -> 'CloudParams2M':
         """Return default cloud parameters for 2-m scheme"""
-        return cls()
+        # derived helpers
+        disp = float(jnp.exp(0.5 * (sigmaw ** 2)))
+        dw0 = 10e-6 * disp
+        xsec = 1.0 - epsec
+        qsec = 1.0 - cqtmin
+        eps_val = jnp.finfo(jnp.float32).eps
+        mi_val = 4.0 / 3.0 * cri ** 3 * pi * crhoi
+        pirho_val = pi * 1000.0
+        pirho_rcp_val = 1.0 / pirho_val
+        cap_val = 2.0 / pi
+        cons4_val = 1.0 / (pi * crhosno * cn0s) ** 0.8125
+        cons5_val = 1.0 / (pi * crhosno * cn0s) ** 0.875
+
+        return cls(
+            tmelt=jnp.array(tmelt),
+            grav=jnp.array(grav),
+            cthomi=jnp.array(cthomi),
+            cn0s=jnp.array(cn0s),
+            crhoi=jnp.array(crhoi),
+            crhosno=jnp.array(crhosno),
+            ccsaut=jnp.array(ccsaut),
+            clmax=jnp.array(clmax),
+            clmin=jnp.array(clmin),
+            ceffmax=jnp.array(ceffmax),
+            lonacc=jnp.array(lonacc),
+            ccsacl=jnp.array(ccsacl),
+            ccracl=jnp.array(ccracl),
+            ccraut=jnp.array(ccraut),
+            ceffmin=jnp.array(ceffmin),
+            ccwmin=jnp.array(ccwmin),
+            cauloc=jnp.array(cauloc),
+            cqtmin=jnp.array(cqtmin),
+            epsec=jnp.array(epsec),
+            xsec=jnp.array(xsec),
+            qsec=jnp.array(qsec),
+            eps=jnp.array(eps_val),
+            cri=jnp.array(cri),
+            mi=jnp.array(mi_val),
+            ri_vol_mean_1=jnp.array(ri_vol_mean_1),
+            ri_vol_mean_2=jnp.array(ri_vol_mean_2),
+            alfased_1=jnp.array(alfased_1),
+            alfased_2=jnp.array(alfased_2),
+            alfased_3=jnp.array(alfased_3),
+            betased_1=jnp.array(betased_1),
+            betased_2=jnp.array(betased_2),
+            betased_3=jnp.array(betased_3),
+            cptop=jnp.array(cptop),
+            cpbot=jnp.array(cpbot),
+            cdnc_min_upper=jnp.array(cdnc_min_upper),
+            cdnc_min_lower=jnp.array(cdnc_min_lower),
+            rcd_vol_max=jnp.array(rcd_vol_max),
+            icemin=jnp.array(icemin),
+            icemax=jnp.array(icemax),
+            sigmaw=jnp.array(sigmaw),
+            disp=jnp.array(disp),
+            dw0=jnp.array(dw0),
+            cdi=jnp.array(cdi),
+            mw0=jnp.array(mw0),
+            mi0=jnp.array(mi0),
+            mi0_rcp=jnp.array(mi0_rcp),
+            ka=jnp.array(ka),
+            kb=jnp.array(kb),
+            alpha=jnp.array(alpha),
+            xmw=jnp.array(xmw),
+            fall=jnp.array(fall),
+            rhoice=jnp.array(rhoice),
+            conv_effr2mvr=jnp.array(conv_effr2mvr),
+            clc_min=jnp.array(clc_min),
+            exm1_1=jnp.array(exm1_1),
+            exp_1=jnp.array(exp_1),
+            exm1_2=jnp.array(exm1_2),
+            exp_2=jnp.array(exp_2),
+            pirho=jnp.array(pirho_val),
+            pirho_rcp=jnp.array(pirho_rcp_val),
+            cap=jnp.array(cap_val),
+            cons4=jnp.array(cons4_val),
+            cons5=jnp.array(cons5_val),
+            fact_coll_eff=jnp.array(fact_coll_eff),
+            fact_tke=jnp.array(fact_tke),
+            fact_PK=jnp.array(fact_PK),
+            pow_PK=jnp.array(pow_PK),
+            ldyn_cdnc_min=jnp.array(ldyn_cdnc_min),
+            cdnc_min_fixed=jnp.array(cdnc_min_fixed),
+            nic_cirrus=jnp.array(nic_cirrus),
+            crs=jnp.array(crs),
+            crt=jnp.array(crt),
+            cvtfall=jnp.array(cvtfall),
+            csecfrl=jnp.array(csecfrl),
+            clwprat=jnp.array(clwprat),
+            csatsc=jnp.array(csatsc),
+            cinv=jnp.array(cinv),
+            nex=jnp.array(nex),
+            nadd=jnp.array(nadd),
+            ncctop=jnp.array(ncctop),
+            nccbot=jnp.array(nccbot),
+            jbmin=jnp.array(jbmin),
+            jbmax=jnp.array(jbmax),
+        )
 
 @jit
 def sucloud(nlev, vct, nn=None, is_icon=False):

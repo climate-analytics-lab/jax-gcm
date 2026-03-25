@@ -29,6 +29,10 @@ from .cloud_microphysics import (
     evaporation_sublimation
 )
 
+from .cloud_params_2m import (
+    CloudParams2M
+)
+
 __all__ = [
     # Shallow clouds
     "shallow_cloud_scheme",
@@ -46,5 +50,7 @@ __all__ = [
     "autoconversion_kk2000",
     "accretion_rain_cloud",
     "melting_freezing",
-    "evaporation_sublimation"
+    "evaporation_sublimation",
+    # Cloud parameters for 2m
+    "CloudParams2M"
 ]

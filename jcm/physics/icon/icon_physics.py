@@ -876,6 +876,65 @@ def apply_microphysics(
     return physics_tendencies, updated_physics_data
 
 @jit
+def apply_microphysics_2m(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    geometry: Geometry
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """Apply 2-moment cloud microphysics scheme"""
+    # TODO: create switch is apply_micropysics to apply either 1-moment or 2-moment scheme based on configuration
+
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    cloud_fraction = physics_data.clouds.cloud_fraction
+    air_density = physics_data.diagnostics.air_density
+    dz = physics_data.diagnostics.layer_thickness
+
+    # Extract fixed cloud water and ice tracers only
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    
+    # Droplet number concentration (simple profile)
+    droplet_number = jnp.ones_like(state.temperature) * 100e6  # 100 per cm³
+    
+    # Get microphysics configuration
+    micro_config = parameters.microphysics
+    
+    micro_results = jax.vmap(
+        cloud_microphysics,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
+        out_axes=(0, 0)  # Returns (MicrophysicsTendencies, MicrophysicsState) per column
+    )(state.temperature, state.specific_humidity, pressure_levels,
+        qc, qi, cloud_fraction, air_density, dz, droplet_number, dt, micro_config)
+    
+    # Unpack structured results directly
+    micro_tendencies_all, micro_states_all = micro_results
+    
+    physics_tendencies = PhysicsTendency(
+        u_wind=jnp.zeros_like(state.u_wind),
+        v_wind=jnp.zeros_like(state.v_wind),
+        temperature=micro_tendencies_all.dtedt.T,
+        specific_humidity=micro_tendencies_all.dqdt.T,
+        tracers={
+            'qc': micro_tendencies_all.dqcdt.T,
+            'qi': micro_tendencies_all.dqidt.T
+        }
+    )
+    
+    # Update physics data
+    micro_data = physics_data.clouds.copy(
+        precip_rain=micro_states_all.precip_rain,  # 1D per column
+        precip_snow=micro_states_all.precip_snow,  # 1D per column
+        droplet_number=droplet_number
+    )
+    
+    updated_physics_data = physics_data.copy(clouds=micro_data)
+    
+    return physics_tendencies, updated_physics_data
+
+@jit
 def apply_vertical_diffusion(
     state: PhysicsState,
     physics_data: PhysicsData,
