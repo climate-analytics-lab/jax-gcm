@@ -171,7 +171,7 @@ class Physics:
     cached_coords = None
 
     def cache_coords(self, coords: CoordinateSystem):
-        self.model_coords = coords
+        return None
 
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.

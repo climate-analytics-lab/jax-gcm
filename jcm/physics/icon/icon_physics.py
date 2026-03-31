@@ -73,7 +73,7 @@ class IconPhysics(Physics):
         self.parameters = params
         
         # Cached coordinate data (populated by cache_coords)
-        self._icon_coords = None
+        self.cached_coords = None
 
         # Build list of physics terms
         self.terms = [
@@ -92,9 +92,7 @@ class IconPhysics(Physics):
     
     def cache_coords(self, coords: CoordinateSystem):
         """Cache coordinate system data needed by ICON physics."""
-        self.model_coords = coords
-        self._icon_coords = IconCoords.from_coordinate_system(coords)
-        self.cached_coords = self._icon_coords
+        self.cached_coords = IconCoords.from_coordinate_system(coords)
 
     def compute_tendencies(
         self,
@@ -116,12 +114,12 @@ class IconPhysics(Physics):
             Object containing physics data (PhysicsData format)
 
         """
-        nodal_shape = self._icon_coords.nodal_shape
+        nodal_shape = self.cached_coords.nodal_shape
 
         physics_data = PhysicsData.zeros(
             (nodal_shape[1]*nodal_shape[2], ),
             nodal_shape[0],
-            icon_coords=self._icon_coords,
+            icon_coords=self.cached_coords,
             date=date
         )
 
@@ -263,7 +261,7 @@ class IconPhysics(Physics):
         if struct is None:
             return {}
 
-        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
+        nodal_shape = nodal_shape or self.cached_coords.nodal_shape
 
         # Use a simple namespace to pass nodal_shape to helper methods
         class _ShapeInfo:
@@ -476,7 +474,7 @@ class IconPhysics(Physics):
             PhysicsData with arrays reshaped to 3D nodal format
 
         """
-        nodal_shape = nodal_shape or self._icon_coords.nodal_shape
+        nodal_shape = nodal_shape or self.cached_coords.nodal_shape
         nlev, nlon, nlat = nodal_shape
         ncols = nlon * nlat
 
