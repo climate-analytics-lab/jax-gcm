@@ -307,10 +307,10 @@ def find_cloud_base(temperature: jnp.ndarray,
     valid_levels = jnp.logical_and(levels < nlev - 1, levels > 0)
     saturated_and_valid = jnp.logical_and(is_saturated, valid_levels)
     
-    # Find first saturated level (lowest index above surface)
-    saturated_levels = jnp.where(saturated_and_valid, levels, nlev)
-    cloud_base_level = jnp.min(saturated_levels)
-    cloud_base_found = cloud_base_level < nlev
+    # Find nearest-to-surface saturated level (highest index, since index 0 = TOA)
+    saturated_levels = jnp.where(saturated_and_valid, levels, -1)
+    cloud_base_level = jnp.max(saturated_levels)
+    cloud_base_found = cloud_base_level >= 0
     
     # If no cloud base found, set to surface
     cloud_base_level = jnp.where(cloud_base_found, cloud_base_level, nlev - 1)
