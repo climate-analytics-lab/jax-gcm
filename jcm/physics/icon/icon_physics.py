@@ -563,9 +563,10 @@ def _prepare_common_physics_state(
     # Calculate air density
     rho = pressure_levels / (physical_constants.rd * state.temperature)
     
-    # Calculate layer thickness
+    # Calculate layer thickness (clamp to minimum 10m for numerical stability
+    # with thin uniform sigma layers)
     dp = jnp.diff(pressure_half, axis=0)
-    dz_full = dp / (rho * physical_constants.grav)
+    dz_full = jnp.maximum(dp / (rho * physical_constants.grav), 10.0)
     
     # Calculate relative humidity
     es = 611.2 * jnp.exp(17.67 * (state.temperature - 273.15) / (state.temperature - 29.65))
@@ -1131,9 +1132,10 @@ def apply_surface(
     # Air density at surface
     rho_sfc = pressure_levels[-1, :] / (physical_constants.rd * state.temperature[-1, :])
     
-    # Layer thickness at surface (approximate)
+    # Layer thickness at surface (approximate, clamp to minimum 50m to avoid
+    # enormous tendencies from thin uniform sigma layers)
     dp_sfc = pressure_levels[-1, :] - pressure_levels[-2, :]
-    dz_sfc = dp_sfc / (rho_sfc * physical_constants.grav)
+    dz_sfc = jnp.maximum(dp_sfc / (rho_sfc * physical_constants.grav), 50.0)
     
     # Surface flux tendencies (applied to lowest level only)
     temp_tend_sfc = sensible_heat / (rho_sfc * physical_constants.cp * dz_sfc)

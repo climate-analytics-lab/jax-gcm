@@ -584,7 +584,16 @@ def tiedtke_nordeng_convection(
         apply_full_convection,
         no_convection
     )
-    
+
+    # Guard against NaN tendencies (e.g. from marginal triggering conditions
+    # where the updraft/downdraft calculations become numerically unstable)
+    tendencies = tendencies._replace(
+        dtedt=jnp.where(jnp.isnan(tendencies.dtedt), 0.0, tendencies.dtedt),
+        dqdt=jnp.where(jnp.isnan(tendencies.dqdt), 0.0, tendencies.dqdt),
+        dudt=jnp.where(jnp.isnan(tendencies.dudt), 0.0, tendencies.dudt),
+        dvdt=jnp.where(jnp.isnan(tendencies.dvdt), 0.0, tendencies.dvdt),
+    )
+
     return tendencies, updated_state
 
 
