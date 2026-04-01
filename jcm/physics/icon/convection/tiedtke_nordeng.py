@@ -28,7 +28,7 @@ from typing import NamedTuple, Tuple
 import tree_math
 
 from ..constants.physical_constants import (
-    grav, rd, cp, eps, tmelt, alhc
+    grav, rd, rv, cp, eps, tmelt, alhc
 )
 
 # Import updraft, downdraft and flux modules after they're defined
@@ -355,21 +355,44 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     # Below cloud base - dry adiabatic ascent
     parcel_temp_dry = surf_temp * (press_ratios ** (rd / cp))
     parcel_humid_dry = jnp.full_like(temperature, surf_humid)
-    
-    # Above cloud base - moist adiabatic (simplified)
-    parcel_qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
-    parcel_temp_moist = temperature  # Simplified moist adiabatic
-    parcel_humid_moist = parcel_qs
-    
-    # Use dry or moist based on level relative to cloud base
-    # Need to check pressure ordering to determine "below" cloud base
-    pressure_decreasing = pressure[0] < pressure[-1]  # True if index 0 is top
-    
-    is_below_cb = lax.cond(
-        pressure_decreasing,
-        lambda: k_levels > cloud_base,   # Standard ordering: below = higher indices
-        lambda: k_levels < cloud_base    # Reverse ordering: below = lower indices  
-    )
+
+    # Above cloud base - moist adiabatic ascent
+    # Lift parcel from cloud base toward TOA using the moist adiabatic
+    # lapse rate: dT/dp = (1/p)(rd*T + alhc*qs) / (cp + alhc²*qs/(rv*T²))
+    # Index 0 = TOA, so "upward" means decreasing index.
+    # Reverse the pressure array so lax.scan steps from cloud base to TOA.
+    pressure_rev = pressure[::-1]  # now index 0 = surface
+    cloud_base_temp = parcel_temp_dry[cloud_base]
+
+    def _moist_step(parcel_t, p_pair):
+        """One upward step of the moist adiabat."""
+        p_curr, p_next = p_pair
+        dp = p_next - p_curr  # negative (pressure decreasing)
+        qs = saturation_mixing_ratio(p_curr, parcel_t)
+        dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs) / (
+            cp + alhc**2 * qs / (rv * parcel_t**2)
+        )
+        new_t = parcel_t + dTdp * dp
+        return new_t, new_t
+
+    # Pairs (p_curr, p_next) for each step from cloud_base_rev upward
+    p_pairs = jnp.stack([pressure_rev[:-1], pressure_rev[1:]], axis=-1)
+    _, moist_temps_rev = lax.scan(_moist_step, cloud_base_temp, p_pairs)
+
+    # Prepend cloud_base_temp (the starting level) and reverse back to
+    # original ordering (index 0 = TOA)
+    moist_profile_rev = jnp.concatenate([jnp.array([cloud_base_temp]), moist_temps_rev])
+    moist_profile = moist_profile_rev[::-1]
+
+    # Only levels at and above cloud base use the moist profile;
+    # levels below are masked out by is_below_cb.
+    # For levels below cloud_base_rev in the reversed scan the temperatures
+    # are meaningless, but they'll be masked anyway.
+    parcel_temp_moist = moist_profile
+    parcel_humid_moist = jax.vmap(saturation_mixing_ratio)(pressure, parcel_temp_moist)
+
+    # Use dry below cloud base, moist at and above (index 0 = TOA)
+    is_below_cb = k_levels > cloud_base
     parcel_temp = jnp.where(is_below_cb, parcel_temp_dry, parcel_temp_moist)
     parcel_humid = jnp.where(is_below_cb, parcel_humid_dry, parcel_humid_moist)
     
