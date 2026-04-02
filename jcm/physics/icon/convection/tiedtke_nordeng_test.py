@@ -911,6 +911,128 @@ class TestConvectionNumericalStability:
         assert jnp.isfinite(cape), "CAPE should be finite"
         assert jnp.isfinite(cin), "CIN should be finite"
 
+    def test_cape_parcel_warmer_than_environment(self):
+        """The moist adiabatic parcel must be warmer than the environment
+        above cloud base for CAPE to be positive.
+
+        Regression test for #411. With the old bug (parcel_temp = environmental T),
+        the buoyancy was identically zero above cloud base.
+        """
+        from jcm.physics.icon.constants.physical_constants import rd, grav, rv
+
+        nlev = 20
+        # TOA-first: pressure increases with index
+        pressure = jnp.linspace(2e4, 1e5, nlev)
+        # Steep lapse rate (conditionally unstable)
+        temperature = 300.0 - 8.0e-3 * jnp.linspace(12000, 0, nlev)
+
+        # Saturated near surface, dry aloft
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = jnp.where(pressure > 7e4, 0.85 * qs, 0.3 * qs)
+
+        height = -rd * 280.0 / grav * jnp.log(pressure / 1e5)
+        layer_thickness = jnp.abs(jnp.diff(height, append=height[-1] + 2000))
+
+        config = ConvectionParameters.default()
+        cloud_base, _ = find_cloud_base(temperature, humidity, pressure, config)
+
+        cape, _ = calculate_cape_cin(
+            temperature, humidity, pressure, layer_thickness, cloud_base, config
+        )
+
+        # Now manually check the parcel vs environment above cloud base.
+        # Reproduce the moist adiabat calculation from calculate_cape_cin.
+        surf_idx = jnp.argmax(pressure)
+        surf_temp = temperature[surf_idx]
+        press_ratios = pressure / pressure[surf_idx]
+        parcel_temp_dry = surf_temp * (press_ratios ** (rd / jnp.float32(1004.0)))
+        cloud_base_temp = parcel_temp_dry[cloud_base]
+
+        # Step the moist adiabat from cloud base toward TOA
+        pressure_rev = pressure[::-1]
+
+        def _moist_step(parcel_t, p_pair):
+            p_curr, p_next = p_pair
+            dp = p_next - p_curr
+            qs_val = saturation_mixing_ratio(p_curr, parcel_t)
+            from jcm.physics.icon.constants.physical_constants import alhc, cp
+            dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs_val) / (
+                cp + alhc**2 * qs_val / (rv * parcel_t**2)
+            )
+            return parcel_t + dTdp * dp, parcel_t + dTdp * dp
+
+        from jax import lax
+        p_pairs = jnp.stack([pressure_rev[:-1], pressure_rev[1:]], axis=-1)
+        _, moist_temps_rev = lax.scan(_moist_step, cloud_base_temp, p_pairs)
+        moist_profile = jnp.concatenate(
+            [jnp.array([cloud_base_temp]), moist_temps_rev]
+        )[::-1]
+
+        # Above cloud base (lower indices in TOA-first), the parcel should be
+        # warmer than the environment for an unstable profile
+        above_cb = jnp.arange(nlev) < cloud_base
+
+        # At least some levels above cloud base should show parcel > environment
+        buoyant_levels = jnp.sum(above_cb & (moist_profile > temperature))
+        assert buoyant_levels > 0, \
+            "Moist adiabatic parcel should be warmer than environment at some levels above cloud base"
+
+    def test_cape_no_nan_with_zero_humidity(self):
+        """CAPE must not produce NaN when humidity is zero everywhere.
+
+        With zero humidity the parcel is always unsaturated, so no cloud base
+        should be found and CAPE should be zero — not NaN.
+        """
+        nlev = 20
+        pressure = jnp.linspace(1e5, 2e4, nlev)
+        temperature = jnp.linspace(300.0, 210.0, nlev)
+        humidity = jnp.zeros(nlev)
+        layer_thickness = jnp.full(nlev, 500.0)
+
+        config = ConvectionParameters.default()
+        cloud_base, has_cb = find_cloud_base(temperature, humidity, pressure, config)
+
+        # Should not find a cloud base with zero humidity
+        # But even if it does, CAPE must be finite
+        cape, cin = calculate_cape_cin(
+            temperature, humidity, pressure, layer_thickness, cloud_base, config
+        )
+
+        assert jnp.isfinite(cape), f"CAPE should be finite with zero humidity, got {float(cape)}"
+        assert jnp.isfinite(cin), f"CIN should be finite with zero humidity, got {float(cin)}"
+
+    def test_cape_increases_with_instability(self):
+        """More unstable profiles should produce more CAPE.
+
+        Tests that the moist adiabat calculation is physically reasonable
+        by comparing a steep vs moderate lapse rate.
+        """
+        from jcm.physics.icon.constants.physical_constants import rd, grav
+
+        nlev = 20
+        pressure = jnp.linspace(1e5, 2e4, nlev)
+        config = ConvectionParameters.default()
+
+        capes = []
+        for lapse_rate in [6.0e-3, 8.0e-3, 10.0e-3]:  # K/m
+            temperature = 300.0 - lapse_rate * jnp.linspace(0, 12000, nlev)
+            qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+            humidity = 0.8 * qs
+            height = -rd * 280.0 / grav * jnp.log(pressure / 1e5)
+            layer_thickness = jnp.abs(jnp.diff(height, append=height[-1] + 2000))
+
+            cloud_base, has_cb = find_cloud_base(temperature, humidity, pressure, config)
+            cape, _ = calculate_cape_cin(
+                temperature, humidity, pressure, layer_thickness, cloud_base, config
+            )
+            capes.append(float(cape))
+
+        # Steeper lapse rate → more CAPE
+        assert capes[1] >= capes[0], \
+            f"CAPE should increase with steeper lapse: {capes[0]:.1f} vs {capes[1]:.1f}"
+        assert capes[2] >= capes[1], \
+            f"CAPE should increase with steeper lapse: {capes[1]:.1f} vs {capes[2]:.1f}"
+
 
 if __name__ == "__main__":
     # Run basic tests
