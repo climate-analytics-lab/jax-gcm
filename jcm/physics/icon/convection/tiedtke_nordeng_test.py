@@ -668,6 +668,120 @@ class TestIdealizedConvection:
         assert isinstance(state.ktype, jnp.ndarray), "JIT compilation failed"
 
 
+class TestConvectivePrecipitation:
+    """Tests for convective precipitation production.
+
+    These verify that the convection scheme produces non-zero precipitation
+    when convection is active with sufficient liquid water in updrafts.
+    """
+
+    def _create_convective_profile(self, nlev=20):
+        """Create a profile that reliably triggers deep convection with precipitation."""
+        from jcm.physics.icon.constants.physical_constants import rd, grav
+
+        # Surface-first pressure profile
+        pressure = jnp.linspace(1e5, 1e4, nlev)
+
+        # Steep lapse rate → unstable
+        temperature = 305.0 - 7.5e-3 * jnp.linspace(0, 15000, nlev)
+        # Clamp at tropopause
+        temperature = jnp.maximum(temperature, 200.0)
+
+        # Very moist boundary layer
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = jnp.where(pressure > 7e4, 0.90 * qs, 0.4 * qs)
+
+        height = -rd * 280.0 / grav * jnp.log(pressure / 1e5)
+        layer_thickness = jnp.abs(jnp.diff(height, append=height[-1] + 2000))
+
+        rho = pressure / (rd * temperature)
+        u_wind = jnp.full(nlev, 5.0)
+        v_wind = jnp.zeros(nlev)
+
+        return {
+            'temperature': temperature,
+            'humidity': humidity,
+            'pressure': pressure,
+            'layer_thickness': layer_thickness,
+            'rho': rho,
+            'u_wind': u_wind,
+            'v_wind': v_wind,
+        }
+
+    def test_convective_precip_nonzero_when_active(self):
+        """When convection triggers with updraft liquid water, precipitation
+        must be non-zero.
+
+        This is the primary test for the inverted cloud mask bug in
+        calculate_precipitation_rate, where k_levels >= kbase selected
+        below-cloud levels (where mfu=0) instead of in-cloud levels.
+        """
+        atm = create_test_atmosphere(nlev=40, unstable=True)
+        config = ConvectionParameters.default()
+        nlev = len(atm['temperature'])
+
+        tendencies, state = tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=3600.0, config=config
+        )
+
+        # Convection should be active
+        assert state.ktype > 0, \
+            f"Convection should trigger in this unstable profile, got ktype={int(state.ktype)}"
+
+        # If there's updraft liquid water, there must be precipitation
+        has_liquid_water = jnp.max(state.lu) > 0
+        has_mass_flux = jnp.max(state.mfu) > 0
+
+        if has_liquid_water and has_mass_flux:
+            assert tendencies.precip_conv > 0, \
+                f"Precipitation should be > 0 when updraft has liquid water " \
+                f"(lu_max={float(jnp.max(state.lu)):.4e}, mfu_max={float(jnp.max(state.mfu)):.4e}), " \
+                f"got precip_conv={float(tendencies.precip_conv):.4e}"
+
+    def test_calculate_precipitation_rate_cloud_mask(self):
+        """calculate_precipitation_rate must sum liquid water flux within
+        the cloud layer, not below it.
+
+        Direct unit test for the cloud mask bug.
+        """
+        from jcm.physics.icon.convection.flux_tendencies import calculate_precipitation_rate
+        from jcm.physics.icon.convection.updraft import UpdatedraftState
+
+        nlev = 20
+        # Simulate updraft with liquid water between levels 5 (ktop) and 15 (kbase)
+        # The cloud spans levels 5-15. Precipitation should sum the liquid
+        # water flux over this entire cloud layer.
+        mfu = jnp.zeros(nlev)
+        mfu = mfu.at[5:16].set(0.1)  # Mass flux in cloud layer
+        lu = jnp.zeros(nlev)
+        lu = lu.at[5:16].set(1e-3)   # Liquid water in cloud layer
+
+        updraft = UpdatedraftState(
+            tu=jnp.full(nlev, 280.0),
+            qu=jnp.full(nlev, 0.01),
+            lu=lu, mfu=mfu,
+            entr=jnp.zeros(nlev),
+            detr=jnp.zeros(nlev),
+            buoy=jnp.zeros(nlev),
+        )
+        config = ConvectionParameters.default()
+
+        precip = calculate_precipitation_rate(updraft, kbase=15, dt=3600.0, config=config)
+
+        # The full cloud liquid water flux is sum(mfu * lu) over levels 5-15
+        total_lw_flux = jnp.sum(mfu[5:16] * lu[5:16]) * config.cprcon
+
+        # Precipitation should capture the bulk of the cloud's liquid water flux,
+        # not just the single cloud base level
+        assert precip > 0.5 * total_lw_flux, \
+            f"Precipitation ({float(precip):.6e}) should capture most of the " \
+            f"cloud liquid water flux ({float(total_lw_flux):.6e})"
+
+
 class TestConvectionNumericalStability:
     """Regression tests for numerical stability fixes.
 
