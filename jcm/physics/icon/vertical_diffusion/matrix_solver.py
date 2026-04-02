@@ -78,8 +78,9 @@ def setup_matrix_system(
     # Compute layer thickness dz at half levels (needed for prefactor)
     # dz_half[k] = height_full[k] - height_full[k+1] (distance between full levels)
     dz_half = jnp.diff(state.height_full, axis=1)  # (ncol, nlev-1)
-    # Ensure positive and avoid division by zero
-    dz_half = jnp.maximum(jnp.abs(dz_half), 1.0)
+    # Ensure positive and avoid division by zero (10m floor prevents
+    # artificial prefactor inflation with thin uniform sigma layers)
+    dz_half = jnp.maximum(jnp.abs(dz_half), 10.0)
 
     # Compute prefactor at half levels: pprfac = rho / dz = p / (Tv * Rd * dz)
     # We use pressure and virtual temperature at half levels (average of adjacent full levels)

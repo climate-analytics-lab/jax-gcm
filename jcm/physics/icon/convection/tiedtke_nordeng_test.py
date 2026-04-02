@@ -8,9 +8,14 @@ import jax
 
 from jcm.physics.icon.convection.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
+    find_cloud_base,
+    calculate_cape_cin,
     ConvectionParameters,
     saturation_mixing_ratio
 )
+from jcm.physics.icon.convection.downdraft import calculate_downdraft
+from jcm.physics.icon.convection.updraft import calculate_updraft
+from jcm.physics.icon.convection.flux_tendencies import mass_flux_closure
 
 
 def create_test_atmosphere(nlev=40, unstable=True):
@@ -661,6 +666,250 @@ class TestIdealizedConvection:
         # Should complete without error and produce valid output
         assert jnp.all(jnp.isfinite(tendencies.dtedt)), "JIT output contains non-finite values"
         assert isinstance(state.ktype, jnp.ndarray), "JIT compilation failed"
+
+
+class TestConvectionNumericalStability:
+    """Regression tests for numerical stability fixes.
+
+    These tests reproduce conditions that previously caused NaN in the
+    convection scheme — particularly when called on intermediate IMEX
+    Runge-Kutta states with marginal humidity near zero.
+    """
+
+    def _create_marginal_humidity_profile(self, nlev=40):
+        """Create profile mimicking an IMEX stage-1 state.
+
+        Starts from a near-isothermal atmosphere with tiny surface humidity
+        (as produced by one step of surface evaporation from a dry initial state).
+        This marginal humidity previously triggered convection with NaN tendencies.
+        """
+        from jcm.physics.icon.constants.physical_constants import rd, grav
+
+        # 40 uniform sigma layers — same as the ICON integration test
+        sigma_centers = jnp.linspace(0.0125, 0.9875, nlev)
+        pressure = sigma_centers * 1e5  # Pa
+
+        # Near-isothermal with slight cooling at surface from radiation
+        temperature = jnp.full(nlev, 288.0)
+        temperature = temperature.at[-1].set(287.9)  # Slight surface cooling
+
+        # Tiny humidity only in the lowest few levels (from surface evaporation)
+        humidity = jnp.zeros(nlev)
+        humidity = humidity.at[-1].set(3.4e-5)
+        humidity = humidity.at[-2].set(1.0e-5)
+
+        # Heights from hydrostatic relation
+        height = -rd * 288.0 / grav * jnp.log(pressure / 1e5)
+
+        # Layer thickness
+        layer_thickness = jnp.abs(jnp.diff(height, append=height[-1] + 500))
+        layer_thickness = jnp.maximum(layer_thickness, 10.0)
+
+        u_wind = jnp.zeros(nlev)
+        v_wind = jnp.zeros(nlev)
+        rho = pressure / (rd * temperature)
+
+        return {
+            'temperature': temperature,
+            'humidity': humidity,
+            'pressure': pressure,
+            'height': height,
+            'layer_thickness': layer_thickness,
+            'rho': rho,
+            'u_wind': u_wind,
+            'v_wind': v_wind
+        }
+
+    def test_no_nan_with_marginal_humidity(self):
+        """Convection must not produce NaN with near-zero humidity.
+
+        Regression test for the downdraft division-by-zero bug where
+        evaporation rate was divided by abs(mfd) without a safe floor.
+        """
+        atm = self._create_marginal_humidity_profile()
+        config = ConvectionParameters.default()
+        nlev = len(atm['temperature'])
+
+        tendencies, state = tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=1800.0, config=config
+        )
+
+        assert not jnp.any(jnp.isnan(tendencies.dtedt)), \
+            "Temperature tendency contains NaN with marginal humidity"
+        assert not jnp.any(jnp.isnan(tendencies.dqdt)), \
+            "Humidity tendency contains NaN with marginal humidity"
+        assert not jnp.any(jnp.isnan(tendencies.dudt)), \
+            "U-wind tendency contains NaN with marginal humidity"
+        assert not jnp.any(jnp.isnan(tendencies.dvdt)), \
+            "V-wind tendency contains NaN with marginal humidity"
+
+    def test_no_nan_with_uniform_sigma_layers(self):
+        """Convection must not produce NaN with thin uniform sigma layers.
+
+        Regression test for thin-layer instability when using
+        np.linspace(0, 1, 41) sigma boundaries (as in the ICON integration test).
+        """
+        atm = self._create_marginal_humidity_profile(nlev=40)
+        config = ConvectionParameters.default()
+        nlev = len(atm['temperature'])
+
+        # Run with JIT (as in the real model)
+        jitted_conv = jax.jit(tiedtke_nordeng_convection)
+        tendencies, state = jitted_conv(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=1800.0, config=config
+        )
+
+        assert jnp.all(jnp.isfinite(tendencies.dtedt)), \
+            "Temperature tendency not finite under JIT with uniform sigma"
+        assert jnp.all(jnp.isfinite(tendencies.dqdt)), \
+            "Humidity tendency not finite under JIT with uniform sigma"
+
+    def test_find_cloud_base_toa_first_ordering(self):
+        """find_cloud_base must return nearest-to-surface level with TOA-first arrays.
+
+        Regression test for the jnp.min bug (#412) that returned a level near
+        the tropopause instead of near the surface.
+        """
+        nlev = 20
+        # TOA-first: pressure increases with index (index 0 = TOA)
+        pressure = jnp.linspace(2e4, 1e5, nlev)
+        temperature = 300.0 - 6.5e-3 * jnp.linspace(12000, 0, nlev)
+
+        # Moderate humidity — should saturate somewhere in mid-troposphere
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = 0.8 * qs
+
+        config = ConvectionParameters.default()
+        cloud_base, has_cb = find_cloud_base(temperature, humidity, pressure, config)
+
+        assert has_cb, "Should find a cloud base"
+        # Cloud base should be near the surface (high index in TOA-first ordering)
+        assert cloud_base > nlev // 2, \
+            f"Cloud base level {cloud_base} should be in the lower half (near surface) for TOA-first ordering"
+        # Cloud base pressure should be high (near surface)
+        assert pressure[cloud_base] > 5e4, \
+            f"Cloud base pressure {pressure[cloud_base]:.0f} Pa should be > 500 hPa"
+
+    def test_find_cloud_base_surface_first_ordering(self):
+        """find_cloud_base must also work with surface-first arrays.
+
+        Ensures the argmax-on-pressure fix works for both orderings.
+        """
+        nlev = 20
+        # Surface-first: pressure decreases with index (index 0 = surface)
+        pressure = jnp.linspace(1e5, 2e4, nlev)
+        temperature = 300.0 - 6.5e-3 * jnp.linspace(0, 12000, nlev)
+
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = 0.8 * qs
+
+        config = ConvectionParameters.default()
+        cloud_base, has_cb = find_cloud_base(temperature, humidity, pressure, config)
+
+        assert has_cb, "Should find a cloud base"
+        # Cloud base should be near the surface (low index in surface-first ordering)
+        assert cloud_base < nlev // 2, \
+            f"Cloud base level {cloud_base} should be in the lower half (near surface) for surface-first ordering"
+        assert pressure[cloud_base] > 5e4, \
+            f"Cloud base pressure {pressure[cloud_base]:.0f} Pa should be > 500 hPa"
+
+    def test_downdraft_no_nan_at_lfs(self):
+        """Downdraft must not produce NaN at the level of free sinking.
+
+        Regression test for the bug where downdraft_step read td[k-1] at the
+        LFS level instead of td[k] (the initialized value), causing division
+        by zero because mfd[k-1] was 0.
+        """
+        atm = self._create_marginal_humidity_profile(nlev=20)
+        # Give it enough humidity for convection to actually trigger
+        atm['humidity'] = atm['humidity'].at[-1].set(0.015)
+        atm['humidity'] = atm['humidity'].at[-2].set(0.010)
+        atm['humidity'] = atm['humidity'].at[-3].set(0.005)
+
+        config = ConvectionParameters.default()
+
+        cloud_base, has_cb = find_cloud_base(
+            atm['temperature'], atm['humidity'], atm['pressure'], config
+        )
+
+        if has_cb:
+            cape, cin = calculate_cape_cin(
+                atm['temperature'], atm['humidity'], atm['pressure'],
+                atm['layer_thickness'], cloud_base, config
+            )
+
+            if cape > 100.0:
+                conv_type = jnp.where(cape > 1000.0, 1, 2)
+                cloud_depth = jnp.where(conv_type == 2, 3, 6)
+                ktop = jnp.maximum(cloud_base - cloud_depth, 2)
+
+                mfb = mass_flux_closure(cape, cin, jnp.array(0.0), conv_type, config)
+
+                updraft = calculate_updraft(
+                    atm['temperature'], atm['humidity'], atm['pressure'],
+                    atm['layer_thickness'], atm['rho'],
+                    cloud_base, ktop, conv_type, mfb, config
+                )
+
+                precip = jnp.sum(updraft.lu * updraft.mfu) * config.cprcon
+
+                downdraft = calculate_downdraft(
+                    atm['temperature'], atm['humidity'], atm['pressure'],
+                    atm['layer_thickness'], atm['rho'],
+                    updraft, precip, cloud_base, ktop, config
+                )
+
+                assert not jnp.any(jnp.isnan(downdraft.td)), \
+                    "Downdraft temperature contains NaN"
+                assert not jnp.any(jnp.isnan(downdraft.qd)), \
+                    "Downdraft humidity contains NaN"
+                assert not jnp.any(jnp.isnan(downdraft.mfd)), \
+                    "Downdraft mass flux contains NaN"
+
+    def test_cape_uses_moist_adiabat(self):
+        """CAPE calculation must use a moist adiabatic parcel temperature,
+        not the environmental temperature.
+
+        Regression test for #411 where parcel_temp_moist = temperature
+        (the environmental T), causing CAPE to be near zero.
+        """
+        from jcm.physics.icon.constants.physical_constants import rd, grav
+
+        nlev = 20
+        # Surface-first profile with unstable lapse rate
+        pressure = jnp.linspace(1e5, 2e4, nlev)
+        temperature = 300.0 - 8.0e-3 * jnp.linspace(0, 12000, nlev)  # Steep lapse
+
+        # High humidity near surface
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = jnp.where(pressure > 7e4, 0.85 * qs, 0.3 * qs)
+
+        height = -rd * 280.0 / grav * jnp.log(pressure / 1e5)
+        layer_thickness = jnp.abs(jnp.diff(height, append=height[-1] + 2000))
+
+        config = ConvectionParameters.default()
+        cloud_base, has_cb = find_cloud_base(temperature, humidity, pressure, config)
+
+        assert has_cb, "Should find cloud base in unstable profile"
+
+        cape, cin = calculate_cape_cin(
+            temperature, humidity, pressure, layer_thickness, cloud_base, config
+        )
+
+        # With a steep lapse rate and high humidity, CAPE should be positive.
+        # The old bug (using environmental T) would give CAPE ≈ 0
+        assert cape > 1.0, \
+            f"CAPE should be positive for unstable profile, got {float(cape):.1f} J/kg"
+        assert jnp.isfinite(cape), "CAPE should be finite"
+        assert jnp.isfinite(cin), "CIN should be finite"
 
 
 if __name__ == "__main__":

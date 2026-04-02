@@ -190,26 +190,29 @@ def downdraft_step(
     def compute_downdraft():
         # Entrainment rate for downdrafts
         entr = entrscv * 0.5  # Reduced entrainment for downdrafts
-        
-        # Safe array indexing - use current level if at top
-        prev_level = jnp.maximum(k - 1, 0)
-        
+
+        # At LFS (first active level), use the initialized values at k;
+        # for subsequent levels, use the previous level's state
+        is_lfs_level = k == carry.lfs
+        src_level = jnp.where(is_lfs_level, k, jnp.maximum(k - 1, 0))
+
         # Mass flux change due to entrainment (no detrainment in downdraft)
-        prev_mfd = carry.mfd[prev_level]
+        prev_mfd = carry.mfd[src_level]
         dmf_entr = entr * jnp.abs(prev_mfd) * dz
-        
+
         # Update mass flux (more negative)
         mfd_new = prev_mfd - dmf_entr
-        
+
         # Mix in environmental air
-        if_mfd = 1.0 / jnp.maximum(jnp.abs(mfd_new), 1e-10)
-        
+        safe_mfd_denom = jnp.maximum(jnp.abs(mfd_new), 1e-10)
+        if_mfd = 1.0 / safe_mfd_denom
+
         # Temperature after mixing
-        temp_mix = carry.td[prev_level] * jnp.abs(prev_mfd) + env_temp * dmf_entr
+        temp_mix = carry.td[src_level] * jnp.abs(prev_mfd) + env_temp * dmf_entr
         temp_mix = temp_mix * if_mfd
-        
-        # Humidity after mixing  
-        q_mix = carry.qd[prev_level] * jnp.abs(prev_mfd) + env_q * dmf_entr
+
+        # Humidity after mixing
+        q_mix = carry.qd[src_level] * jnp.abs(prev_mfd) + env_q * dmf_entr
         q_mix = q_mix * if_mfd
         
         # Evaporative cooling from precipitation
@@ -224,8 +227,10 @@ def downdraft_step(
         )
         
         # Update temperature and humidity due to evaporation
-        td_new = temp_mix - alhc * evap_rate / (cp * jnp.abs(mfd_new))
-        qd_new = q_mix + evap_rate / jnp.abs(mfd_new)
+        # Use the same safe denominator as the mixing step to avoid division by near-zero
+        safe_mfd = jnp.maximum(jnp.abs(mfd_new), 1e-10)
+        td_new = temp_mix - alhc * evap_rate / (cp * safe_mfd)
+        qd_new = q_mix + evap_rate / safe_mfd
         
         # Ensure physical bounds
         td_new = jnp.clip(td_new, 100.0, 400.0)
