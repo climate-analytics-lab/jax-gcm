@@ -41,27 +41,17 @@ def calculate_precipitation_rate(
         Surface precipitation rate (kg/m²/s)
 
     """
-    # Integrate liquid water flux through cloud
-    nlev = len(updraft_state.mfu)
-    
     # Precipitation conversion efficiency
     precip_eff = config.cprcon
-    
-    # Calculate precipitation production at each level using JAX-compatible operations
-    k_levels = jnp.arange(nlev)
-    
-    # Mask for levels at or below cloud base
-    cloud_mask = k_levels >= kbase  # Note: k >= kbase means level at or below cloud base
-    
-    # Liquid water flux for all levels
+
+    # Liquid water flux at all levels: where there is both updraft mass flux
+    # and liquid water, precipitation is produced
     lw_flux = updraft_state.mfu * updraft_state.lu
-    
-    # Convert fraction to precipitation (only below cloud base)
-    precip_prod = jnp.where(cloud_mask, precip_eff * lw_flux, 0.0)
-    
-    # Surface precipitation is integral of production
-    precip_rate = jnp.sum(precip_prod)
-    
+
+    # Surface precipitation is the column integral of liquid water flux
+    # times the precipitation conversion efficiency
+    precip_rate = jnp.sum(lw_flux) * precip_eff
+
     return precip_rate
 
 
