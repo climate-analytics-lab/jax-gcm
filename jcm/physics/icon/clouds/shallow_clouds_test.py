@@ -274,8 +274,6 @@ class TestShallowCloudScheme:
         assert jnp.max(jnp.abs(tendencies.dtedt)) < 2e-3  # < ~200 K/day max
         assert jnp.all(jnp.abs(tendencies.dqdt) < 1e-6)   # < ~0.1 g/kg/day
         assert jnp.all(state.cloud_fraction < 0.1)
-        assert tendencies.rain_flux < 1e-6
-        assert tendencies.snow_flux < 1e-6
     
     def test_cloudy_conditions(self):
         """Test scheme with existing clouds"""
@@ -337,9 +335,6 @@ class TestShallowCloudScheme:
         # Cloud water should be updated with condensation
         assert state.cloud_water[0] > 0.0, \
             "Cloud water should increase from condensation"
-        # Rain/snow flux are zero — microphysics handles precipitation
-        assert tendencies.rain_flux == 0.0
-        assert tendencies.snow_flux == 0.0
     
     def test_jax_transformations(self):
         """Test JAX transformations work correctly"""

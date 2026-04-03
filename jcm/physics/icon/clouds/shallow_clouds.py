@@ -74,16 +74,15 @@ class CloudState(NamedTuple):
     
     
 class CloudTendencies(NamedTuple):
-    """Tendencies from cloud processes"""
-    
+    """Tendencies from cloud condensation processes.
+
+    Precipitation is handled by cloud_microphysics, not here.
+    """
+
     dtedt: jnp.ndarray         # Temperature tendency (K/s)
     dqdt: jnp.ndarray          # Specific humidity tendency (kg/kg/s)
     dqcdt: jnp.ndarray         # Cloud water tendency (kg/kg/s)
     dqidt: jnp.ndarray         # Cloud ice tendency (kg/kg/s)
-    
-    # Surface precipitation fluxes
-    rain_flux: jnp.ndarray     # Surface rain flux (kg/m²/s)
-    snow_flux: jnp.ndarray     # Surface snow flux (kg/m²/s)
 
 
 def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -370,14 +369,11 @@ def shallow_cloud_scheme(
     total_cloud_cover = jnp.max(cloud_fraction)
     
     # Create output structures
-    # Precipitation is handled by microphysics (called next), not here
     tendencies = CloudTendencies(
         dtedt=dtedt,
         dqdt=dqdt,
         dqcdt=dqcdt,
         dqidt=dqidt,
-        rain_flux=jnp.array(0.0),
-        snow_flux=jnp.array(0.0)
     )
 
     state = CloudState(
