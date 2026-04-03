@@ -32,7 +32,6 @@ class CloudParameters:
     # Microphysics parameters
     ccraut: float        # Beheng autoconversion rate scaling (dimensionless, ECHAM default 4)
     ccsaut: float        # Ice autoconversion rate (1/s)
-    cdnc: float          # Cloud droplet number concentration (1/m³)
     ceffmin: float       # Minimum cloud droplet radius (microns)
     ceffmax: float       # Maximum cloud droplet radius (microns)
 
@@ -47,7 +46,7 @@ class CloudParameters:
     @classmethod
     def default(cls, crt=0.9, crs=0.7, nex=4.0,
                  csatsc=0.97, ccraut=4.0, ccsaut=0.001,
-                 cdnc=200.0e6, ceffmin=10.0,
+                 ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
         """Return default cloud parameters"""
@@ -58,7 +57,6 @@ class CloudParameters:
             csatsc=jnp.array(csatsc),
             ccraut=jnp.array(ccraut),
             ccsaut=jnp.array(ccsaut),
-            cdnc=jnp.array(cdnc),
             ceffmin=jnp.array(ceffmin),
             ceffmax=jnp.array(ceffmax),
             epsilon=jnp.array(epsilon),
@@ -322,16 +320,17 @@ def condensation_evaporation(
 
 def shallow_cloud_scheme(
     temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray, 
+    specific_humidity: jnp.ndarray,
     pressure: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
     surface_pressure: float,
+    cdnc: jnp.ndarray,
     dt: float,
     config: Optional[CloudParameters] = None
 ) -> Tuple[CloudTendencies, CloudState]:
     """Run shallow cloud scheme
-    
+
     Args:
         temperature: Temperature (K) [nlev] or scalar
         specific_humidity: Specific humidity (kg/kg) [nlev] or scalar
@@ -339,9 +338,10 @@ def shallow_cloud_scheme(
         cloud_water: Cloud liquid water (kg/kg) [nlev] or scalar
         cloud_ice: Cloud ice (kg/kg) [nlev] or scalar
         surface_pressure: Surface pressure (Pa)
+        cdnc: Cloud droplet number concentration (1/m³) [nlev]
         dt: Time step (s)
         config: Cloud configuration
-        
+
     Returns:
         Tuple of (tendencies, cloud_state)
 
@@ -386,7 +386,7 @@ def shallow_cloud_scheme(
     exm1 = 3.7  # 4.7 - 1.0
     zexp = -1.0 / exm1
     # ECHAM converts cdnc from 1/m³ to 1/cm³ (pacdnc*1e-6) for the Beheng formula
-    cdnc_cgs = config.cdnc * 1e-6  # 1/m³ → 1/cm³
+    cdnc_cgs = jnp.maximum(cdnc, 1.0) * 1e-6  # 1/m³ → 1/cm³, floor to avoid zero
     gamma = (config.ccraut * 1.2e27) / rho * cdnc_cgs**(-3.3) * (rho * 1e-3)**4.7
 
     # Convert to in-cloud values (ECHAM: zxlb = grid-mean * zclcauxi)

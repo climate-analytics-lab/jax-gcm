@@ -265,7 +265,8 @@ class TestShallowCloudScheme:
         
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
+            cloud_water, cloud_ice, surface_pressure,
+            jnp.full_like(temperature, 200e6), dt, config
         )
         
         # Should have minimal tendencies  
@@ -300,7 +301,8 @@ class TestShallowCloudScheme:
         
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
+            cloud_water, cloud_ice, surface_pressure,
+            jnp.full_like(temperature, 200e6), dt, config
         )
         
         # Should have clouds in humid layers
@@ -326,7 +328,8 @@ class TestShallowCloudScheme:
         
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
+            cloud_water, cloud_ice, surface_pressure,
+            jnp.full_like(temperature, 200e6), dt, config
         )
         
         # Should produce precipitation
@@ -351,16 +354,17 @@ class TestShallowCloudScheme:
         jitted_scheme = jax.jit(shallow_cloud_scheme)
         
         t, q, p, qc, qi = create_profile()
-        tendencies, state = jitted_scheme(t, q, p, qc, qi, 100000.0, 1800.0, config)
-        
+        cdnc = jnp.full(10, 200e6)
+        tendencies, state = jitted_scheme(t, q, p, qc, qi, 100000.0, cdnc, 1800.0, config)
+
         # Should produce valid output
         assert tendencies.dtedt.shape == t.shape
         assert state.cloud_fraction.shape == t.shape
-        
+
         # Test gradient computation
         def loss_fn(temperature):
             t, q, p, qc, qi = create_profile()
-            tend, _ = shallow_cloud_scheme(temperature, q, p, qc, qi, 100000.0, 1800.0, config)
+            tend, _ = shallow_cloud_scheme(temperature, q, p, qc, qi, 100000.0, cdnc, 1800.0, config)
             return jnp.sum(tend.dtedt ** 2)
         
         grad_fn = jax.grad(loss_fn)
@@ -402,7 +406,8 @@ class TestDiagnosticPrecipitation:
 
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 100000.0, 1800.0, config
+            cloud_water, cloud_ice, 100000.0,
+            jnp.full(nlev, 200e6), 1800.0, config
         )
 
         assert tendencies.rain_flux > 0.0, \
@@ -423,7 +428,8 @@ class TestDiagnosticPrecipitation:
 
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 100000.0, 1800.0, config
+            cloud_water, cloud_ice, 100000.0,
+            jnp.full(nlev, 200e6), 1800.0, config
         )
 
         assert tendencies.rain_flux == 0.0, \
@@ -447,7 +453,8 @@ class TestDiagnosticPrecipitation:
 
         tendencies, state = shallow_cloud_scheme(
             temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 50000.0, 1800.0, config
+            cloud_water, cloud_ice, 50000.0,
+            jnp.full(nlev, 200e6), 1800.0, config
         )
 
         assert tendencies.snow_flux > 0.0, \

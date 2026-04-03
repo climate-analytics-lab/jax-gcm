@@ -282,18 +282,22 @@ class IconPhysics(Physics):
         return self._filter_xarray_compatible_fields(result)
     
     def _get_base_struct_dict(self, struct, shape_info, sep):
-        """Get the base dictionary conversion, handling AttributeError gracefully."""
+        """Get the base dictionary conversion, handling non-array fields gracefully."""
         try:
             return super().data_struct_to_dict(struct, nodal_shape=shape_info.nodal_shape, sep=sep)
-        except AttributeError:
-            # Handle case where some fields are not arrays
+        except (AttributeError, ValueError):
+            # Handle case where some fields are not arrays (e.g. IconCoords.nodal_shape is a tuple)
             return self._manual_struct_to_dict(struct, shape_info, sep)
     
     def _manual_struct_to_dict(self, struct, shape_info, sep):
         """Manual conversion when base class fails."""
+        _skip_keys = {'icon_coords'}
+
         def _to_dict_recursive(obj, parent_key=""):
             items = {}
             for key, val in obj.__dict__.items():
+                if key in _skip_keys:
+                    continue
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
                 if hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))
@@ -447,17 +451,19 @@ class IconPhysics(Physics):
         return result
     
     def _filter_xarray_compatible_fields(self, result):
-        """Filter out non-array and scalar fields that xarray doesn't handle well."""
+        """Filter out fields that xarray/data_to_xarray doesn't handle well."""
+        nlev = self.cached_coords.nodal_shape[0]
         filtered_result = {}
         for key, value in result.items():
             if not hasattr(value, 'shape'):
-                # Skip non-array fields
                 continue
-            if hasattr(value, 'shape') and value.shape == ():
-                # Skip scalar fields - they're not needed for xarray conversion
+            if value.shape == ():
+                continue
+            if nlev + 1 in value.shape:
+                # Skip interface-level (half-level) fields
                 continue
             filtered_result[key] = value
-        
+
         return filtered_result
 
     def reshape_physics_data_to_3d(self, physics_data: PhysicsData, nodal_shape=None) -> PhysicsData:
@@ -787,16 +793,21 @@ def apply_clouds(
     surface_pressure = physics_data.diagnostics.surface_pressure
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    
+
+    # Cloud droplet number concentration from aerosol scheme (2D field)
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
+    cdnc = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
-    
+
     cloud_results = jax.vmap(
         shallow_cloud_scheme,
-        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
+        in_axes=(1, 1, 1, 1, 1, 0, 1, None, None),  # cdnc is per-column, dt and config are scalars
         out_axes=(0, 0)  # Returns (CloudTendencies, CloudState) per column
     )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, surface_pressure, dt, cloud_config)
+        qc, qi, surface_pressure, cdnc, dt, cloud_config)
     
     # Unpack structured results directly
     cloud_tendencies_all, cloud_states_all = cloud_results
