@@ -788,6 +788,25 @@ def _cloud_and_microphysics_column(
     Following ECHAM mo_cloud.f90: condensation, cloud fraction, autoconversion,
     accretion, and precipitation are all computed in a single column sweep.
     This avoids the coupling issues of splitting them into separate calls.
+
+    Tendency accounting (no double counting):
+        The cloud scheme computes condensation and applies it within the
+        timestep to produce updated cloud water (cloud_state.cloud_water).
+        Microphysics then acts on this updated cloud water.
+
+        Both schemes return SEPARATE tendencies that are additive:
+        - Cloud:  dqcdt = +condensation,  dqdt = -condensation,  dtedt = +L*condensation/cp
+        - Micro:  dqcdt = -autoconversion, dqdt = +evaporation,  dtedt = micro heating/cooling
+
+        The integrator applies: qc_new = qc_old + (cloud_dqcdt + micro_dqcdt) * dt
+        This gives: qc_new = 0 + (condensation - autoconversion) * dt
+
+        Moisture is conserved: dq + dqc + precip = 0
+        (-condensation + evap) + (condensation - autoconv) + (autoconv - evap) = 0
+
+        The within-timestep cloud water update is used ONLY to provide
+        microphysics with a physically meaningful input — it does not
+        affect the tendencies returned to the integrator.
     """
     # 1. Cloud fraction and condensation
     cloud_tendencies, cloud_state = shallow_cloud_scheme(
@@ -845,7 +864,9 @@ def apply_clouds_and_microphysics(
       qc, qi, surface_pressure, air_density, dz, droplet_number_per_kg,
       dt, cloud_config, micro_config)
 
-    # Combine tendencies: condensation (cloud) + microphysics
+    # Combine tendencies: cloud (condensation) + microphysics (autoconversion etc.)
+    # These are separate physical processes — see _cloud_and_microphysics_column
+    # docstring for the full accounting showing no double counting.
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),
         v_wind=jnp.zeros_like(state.v_wind),
