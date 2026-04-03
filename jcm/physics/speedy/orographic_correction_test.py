@@ -68,6 +68,7 @@ def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     # Create wind fields
     u_wind = jnp.zeros(shape)
     v_wind = jnp.zeros(shape)
+    w_wind = jnp.zeros(shape)
     
     # Create geopotential (increases with height)
     geopotential = jnp.zeros(shape)
@@ -78,6 +79,7 @@ def create_test_physics_state(layers=8, lon_points=96, lat_points=48):
     return PhysicsState(
         u_wind=u_wind,
         v_wind=v_wind,
+        w_wind=w_wind,
         temperature=temperature,
         specific_humidity=humidity,
         geopotential=geopotential,

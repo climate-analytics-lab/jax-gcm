@@ -278,7 +278,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
-        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        state = PhysicsState.zeros(zxy)
        
         physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
@@ -293,7 +293,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
-        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        state = PhysicsState.zeros(zxy)
         
         physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
@@ -308,7 +308,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-04-01 12:00:00'))
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
-        state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
+        state = PhysicsState.zeros(zxy)
         physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
 
         # Expected form for ozone based on the provided formula
