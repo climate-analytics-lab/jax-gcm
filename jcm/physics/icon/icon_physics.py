@@ -82,9 +82,8 @@ class IconPhysics(Physics):
             get_simple_aerosol,            # Aerosol before radiation
             apply_chemistry,               # Chemistry for ozone, methane etc.
             apply_radiation,               
-            apply_convection,              
-            apply_clouds,
-            apply_microphysics,
+            apply_convection,
+            apply_clouds_and_microphysics,
             apply_vertical_diffusion,      
             apply_surface,                 # Surface after radiation and vertical diffusion
             apply_gravity_waves
@@ -779,124 +778,102 @@ def apply_convection(
     
     return physics_tendencies, updated_physics_data
 
+def _cloud_and_microphysics_column(
+    temperature, specific_humidity, pressure, qc, qi,
+    surface_pressure, air_density, layer_thickness, droplet_number,
+    dt, cloud_config, micro_config
+):
+    """Compute cloud and microphysics for a single column.
+
+    Following ECHAM mo_cloud.f90: condensation, cloud fraction, autoconversion,
+    accretion, and precipitation are all computed in a single column sweep.
+    This avoids the coupling issues of splitting them into separate calls.
+    """
+    # 1. Cloud fraction and condensation
+    cloud_tendencies, cloud_state = shallow_cloud_scheme(
+        temperature, specific_humidity, pressure,
+        qc, qi, surface_pressure, dt, cloud_config
+    )
+
+    # 2. Microphysics acts on the condensation-updated cloud water/ice
+    micro_tendencies, micro_state = cloud_microphysics(
+        temperature, specific_humidity, pressure,
+        cloud_state.cloud_water, cloud_state.cloud_ice,
+        cloud_state.cloud_fraction, air_density, layer_thickness,
+        droplet_number, dt, micro_config
+    )
+
+    return cloud_tendencies, cloud_state, micro_tendencies, micro_state
+
+
 @jit
-def apply_clouds(
+def apply_clouds_and_microphysics(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply shallow cloud scheme"""
+    """Apply cloud scheme and microphysics in a single coupled step.
+
+    Combines condensation → cloud fraction → autoconversion → precipitation
+    in one vmapped column call, following ECHAM mo_cloud.f90.
+    """
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
     surface_pressure = physics_data.diagnostics.surface_pressure
+    air_density = physics_data.diagnostics.air_density
+    dz = physics_data.diagnostics.layer_thickness
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
 
-    # Get cloud configuration from parameters
-    cloud_config = parameters.clouds
-
-    cloud_results = jax.vmap(
-        shallow_cloud_scheme,
-        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
-        out_axes=(0, 0)  # Returns (CloudTendencies, CloudState) per column
-    )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, surface_pressure, dt, cloud_config)
-    
-    # Unpack structured results directly
-    cloud_tendencies_all, cloud_states_all = cloud_results
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),  # No wind tendencies from clouds
-        v_wind=jnp.zeros_like(state.v_wind),
-        temperature=cloud_tendencies_all.dtedt.T,
-        specific_humidity=cloud_tendencies_all.dqdt.T,
-        tracers={
-            'qc': cloud_tendencies_all.dqcdt.T,
-            'qi': cloud_tendencies_all.dqidt.T
-        }
-    )
-    
-    # Update physics data with cloud diagnostics and condensation-updated cloud water/ice
-    # Microphysics (called next) reads qc/qi from physics_data.clouds
-    cloud_data = physics_data.clouds.copy(
-        cloud_fraction=cloud_states_all.cloud_fraction.T,
-        qc=cloud_states_all.cloud_water.T,
-        qi=cloud_states_all.cloud_ice.T,
-        precip_rain=cloud_tendencies_all.rain_flux,  # Zero — microphysics handles precip
-        precip_snow=cloud_tendencies_all.snow_flux   # Zero — microphysics handles precip
-    )
-    
-    diagnostics = physics_data.diagnostics.copy(
-        relative_humidity=cloud_states_all.rel_humidity.T,
-    )
-
-    updated_physics_data = physics_data.copy(clouds=cloud_data, 
-                                             diagnostics=diagnostics)
-    
-    return physics_tendencies, updated_physics_data
-
-@jit
-def apply_microphysics(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply cloud microphysics scheme"""
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    cloud_fraction = physics_data.clouds.cloud_fraction
-    air_density = physics_data.diagnostics.air_density
-    dz = physics_data.diagnostics.layer_thickness
-
-    # Read cloud water and ice from cloud scheme (includes within-timestep condensation)
-    qc = physics_data.clouds.qc
-    qi = physics_data.clouds.qi
-    
-    # Droplet number concentration from aerosol scheme
-    # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
-    # cloud_microphysics expects droplet_number in 1/kg (not 1/m³)
-    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³ = 1e8 per m³)
+    # Droplet number concentration from aerosol scheme (1/kg for microphysics)
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
     cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     droplet_number = cdnc_m3 / air_density  # 1/m³ → 1/kg
-    
-    # Get microphysics configuration
+
+    cloud_config = parameters.clouds
     micro_config = parameters.microphysics
-    
-    micro_results = jax.vmap(
-        cloud_microphysics,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
-        out_axes=(0, 0)  # Returns (MicrophysicsTendencies, MicrophysicsState) per column
+
+    # Single vmap over columns: cloud + microphysics together
+    cloud_tend_all, cloud_state_all, micro_tend_all, micro_state_all = jax.vmap(
+        _cloud_and_microphysics_column,
+        in_axes=(1, 1, 1, 1, 1, 0, 1, 1, 1, None, None, None),
+        out_axes=(0, 0, 0, 0)
     )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, cloud_fraction, air_density, dz, droplet_number, dt, micro_config)
-    
-    # Unpack structured results directly
-    micro_tendencies_all, micro_states_all = micro_results
-    
+      qc, qi, surface_pressure, air_density, dz, droplet_number,
+      dt, cloud_config, micro_config)
+
+    # Combine tendencies: condensation (cloud) + microphysics
     physics_tendencies = PhysicsTendency(
         u_wind=jnp.zeros_like(state.u_wind),
         v_wind=jnp.zeros_like(state.v_wind),
-        temperature=micro_tendencies_all.dtedt.T,
-        specific_humidity=micro_tendencies_all.dqdt.T,
+        temperature=cloud_tend_all.dtedt.T + micro_tend_all.dtedt.T,
+        specific_humidity=cloud_tend_all.dqdt.T + micro_tend_all.dqdt.T,
         tracers={
-            'qc': micro_tendencies_all.dqcdt.T,
-            'qi': micro_tendencies_all.dqidt.T
+            'qc': cloud_tend_all.dqcdt.T + micro_tend_all.dqcdt.T,
+            'qi': cloud_tend_all.dqidt.T + micro_tend_all.dqidt.T
         }
     )
-    
-    # Update physics data with microphysics precipitation
-    micro_data = physics_data.clouds.copy(
-        precip_rain=micro_states_all.precip_rain,
-        precip_snow=micro_states_all.precip_snow,
+
+    # Update physics data with cloud and microphysics diagnostics
+    cloud_data = physics_data.clouds.copy(
+        cloud_fraction=cloud_state_all.cloud_fraction.T,
+        qc=cloud_state_all.cloud_water.T,
+        qi=cloud_state_all.cloud_ice.T,
+        precip_rain=micro_state_all.precip_rain,
+        precip_snow=micro_state_all.precip_snow,
         droplet_number=droplet_number
     )
-    
-    updated_physics_data = physics_data.copy(clouds=micro_data)
-    
+
+    diagnostics = physics_data.diagnostics.copy(
+        relative_humidity=cloud_state_all.rel_humidity.T,
+    )
+
+    updated_physics_data = physics_data.copy(clouds=cloud_data,
+                                             diagnostics=diagnostics)
+
     return physics_tendencies, updated_physics_data
 
 @jit
