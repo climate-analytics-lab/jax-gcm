@@ -141,33 +141,28 @@ class ConvectionData:
 
 @tree_math.struct
 class CloudData:
-    """Data for cloud physics"""
-    
+    """Data for cloud physics."""
+
     # Cloud fraction
     cloud_fraction: jnp.ndarray      # Cloud fraction [1] (nlev, ncols)
-    
-    # Cloud condensate
+
+    # Cloud condensate (updated by condensation within the cloud scheme)
     qc: jnp.ndarray                  # Cloud water [kg/kg] (nlev, ncols)
     qi: jnp.ndarray                  # Cloud ice [kg/kg] (nlev, ncols)
-    qr: jnp.ndarray                  # Rain water [kg/kg] (nlev, ncols)
-    qs: jnp.ndarray                  # Snow [kg/kg] (nlev, ncols)
-    
-    # Precipitation
+
+    # Surface precipitation (from microphysics autoconversion)
     precip_rain: jnp.ndarray         # Rain precipitation [kg/m²/s] (ncols,)
     precip_snow: jnp.ndarray         # Snow precipitation [kg/m²/s] (ncols,)
 
     # Cloud properties
-    # These can be used for diagnostics or further calculations
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
-        
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
             cloud_fraction=jnp.zeros((nlev,) + nodal_shape),
             qc=jnp.zeros((nlev,) + nodal_shape),
             qi=jnp.zeros((nlev,) + nodal_shape),
-            qr=jnp.zeros((nlev,) + nodal_shape),
-            qs=jnp.zeros((nlev,) + nodal_shape),
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
@@ -178,8 +173,6 @@ class CloudData:
             'cloud_fraction': self.cloud_fraction,
             'qc': self.qc,
             'qi': self.qi,
-            'qr': self.qr,
-            'qs': self.qs,
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
             'droplet_number': self.droplet_number,

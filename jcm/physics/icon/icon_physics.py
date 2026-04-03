@@ -827,11 +827,11 @@ def apply_clouds_and_microphysics(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
 
-    # Droplet number concentration from aerosol scheme (1/kg for microphysics)
-    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    # Droplet number concentration from aerosol scheme
+    base_cdnc = parameters.microphysics.base_cdnc  # Clean-air baseline CDNC (1/m³)
     cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
-    droplet_number = cdnc_m3 / air_density  # 1/m³ → 1/kg
+    droplet_number_per_kg = cdnc_m3 / air_density  # 1/m³ → 1/kg (for microphysics)
 
     cloud_config = parameters.clouds
     micro_config = parameters.microphysics
@@ -842,7 +842,7 @@ def apply_clouds_and_microphysics(
         in_axes=(1, 1, 1, 1, 1, 0, 1, 1, 1, None, None, None),
         out_axes=(0, 0, 0, 0)
     )(state.temperature, state.specific_humidity, pressure_levels,
-      qc, qi, surface_pressure, air_density, dz, droplet_number,
+      qc, qi, surface_pressure, air_density, dz, droplet_number_per_kg,
       dt, cloud_config, micro_config)
 
     # Combine tendencies: condensation (cloud) + microphysics
@@ -864,7 +864,7 @@ def apply_clouds_and_microphysics(
         qi=cloud_state_all.cloud_ice.T,
         precip_rain=micro_state_all.precip_rain,
         precip_snow=micro_state_all.precip_snow,
-        droplet_number=droplet_number
+        droplet_number=cdnc_m3  # Store in 1/m³ for diagnostics/radiation
     )
 
     diagnostics = physics_data.diagnostics.copy(

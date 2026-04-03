@@ -25,7 +25,6 @@ class Parameters:
     SpeedyPhysics.
     """
     
-    # Convection parameters
     convection: ConvectionParameters
     clouds: CloudParameters
     microphysics: MicrophysicsParameters
@@ -33,7 +32,6 @@ class Parameters:
     radiation: RadiationParameters
     vertical_diffusion: VDiffParameters
     surface: SurfaceParameters
-    gravity_waves: GravityWaveParameters
     aerosol: AerosolParameters
 
     @classmethod

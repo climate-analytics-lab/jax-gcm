@@ -197,9 +197,9 @@ def test_temporal_weights_scale_aod():
     # Total AOD should decrease compared to present-day
     assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)
 def test_aerosol_microphysics_droplet_coupling():
-    """Test that apply_microphysics uses aerosol cdnc_factor for droplet number."""
+    """Test that apply_clouds_and_microphysics uses aerosol cdnc_factor for droplet number."""
     import numpy as np
-    from jcm.physics.icon.icon_physics import apply_microphysics, _prepare_common_physics_state
+    from jcm.physics.icon.icon_physics import apply_clouds_and_microphysics, _prepare_common_physics_state
     from jcm.physics.icon.icon_physics_data import PhysicsData
     from jcm.physics.icon.icon_coords import IconCoords
     from jcm.physics.icon.parameters import Parameters
@@ -264,7 +264,7 @@ def test_aerosol_microphysics_droplet_coupling():
     )
     # cdnc_factor defaults to 1.0 from AerosolData.zeros
 
-    tend_clean, pd_out_clean = apply_microphysics(
+    tend_clean, pd_out_clean = apply_clouds_and_microphysics(
         state, pd_clean, parameters, forcing, terrain
     )
 
@@ -281,7 +281,7 @@ def test_aerosol_microphysics_droplet_coupling():
         state, pd_polluted, parameters, forcing, terrain
     )
 
-    tend_polluted, pd_out_polluted = apply_microphysics(
+    tend_polluted, pd_out_polluted = apply_clouds_and_microphysics(
         state, pd_polluted, parameters, forcing, terrain
     )
 

@@ -63,6 +63,9 @@ class MicrophysicsParameters:
     vt_rain_a: float     # Rain fall speed coefficient a
     vt_rain_b: float     # Rain fall speed exponent b
     
+    # Cloud droplet number concentration
+    base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
+
     # Numerical parameters
     epsilon: float       # Small number for numerical stability
     dt_sedi: float       # Sub-timestep for sedimentation (s)
@@ -72,7 +75,8 @@ class MicrophysicsParameters:
                  crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
                  ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
-                 vt_rain_a=386.0, vt_rain_b=0.67, epsilon=1.0e-12, dt_sedi=10.0) -> 'MicrophysicsParameters':
+                 vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
+                 epsilon=1.0e-12, dt_sedi=10.0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters"""
         return cls(
             ccraut=jnp.array(ccraut),
@@ -96,6 +100,7 @@ class MicrophysicsParameters:
             vt_snow_b=jnp.array(vt_snow_b),
             vt_rain_a=jnp.array(vt_rain_a),
             vt_rain_b=jnp.array(vt_rain_b),
+            base_cdnc=jnp.array(base_cdnc),
             epsilon=jnp.array(epsilon),
             dt_sedi=jnp.array(dt_sedi)
         )
