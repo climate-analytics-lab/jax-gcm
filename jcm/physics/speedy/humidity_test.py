@@ -47,7 +47,7 @@ class TestHumidityUnit(unittest.TestCase):
 
         forcing = ForcingData.ones(xy,sea_surface_temperature=sea_surface_temperature)
             
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy,u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)

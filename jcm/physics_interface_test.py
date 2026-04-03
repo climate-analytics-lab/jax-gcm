@@ -36,7 +36,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
             coords,
             PHYSICS_SPECS)
 
-        state = PhysicsState.zeros((kx, ix, il), u, v, temp, q, phi, sp)
+        state = PhysicsState.zeros((kx, ix, il), u_wind=u, v_wind=v, temperature=temp, specific_humidity=q, geopotential=phi, normalized_surface_pressure=sp)
 
         dynamics_state = physics_state_to_dynamics_state(state, primitive)
         physics_state_recovered = dynamics_state_to_physics_state(dynamics_state, primitive)

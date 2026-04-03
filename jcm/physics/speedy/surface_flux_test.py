@@ -46,7 +46,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -87,7 +87,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400 * jnp.ones(xy)
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
-        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         terrain = TerrainData.from_coords(coords, orography=phi0/grav, fmask=fmask, lfluxland=True)
         terrain, speedy_c = convert_to_speedy_latitudes(terrain, speedy_coords)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
@@ -133,7 +133,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -183,7 +183,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -235,7 +235,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -288,7 +288,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -340,7 +340,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         rsds = 400. * jnp.ones((ix, il)) #surface downward shortwave
         rlds = 400. * jnp.ones((ix, il)) #surface downward longwave
 
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -403,7 +403,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         soilw_am = 0.5* jnp.ones(((ix,il)))
         stl_am = 288* jnp.ones((ix,il))
         # vars = get_surface_fluxes(psa,ua,va,ta,qa,rh,phi,phi0,fmask,sea_surface_temperature,rsds,rlds,lfluxland)
-        state = PhysicsState.zeros(zxy,ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy,rlds=rlds)
         hum_data = HumidityData.zeros(xy,kx,rh=rh)
         conv_data = ConvectionData.zeros(xy,kx)
@@ -510,7 +510,7 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         rsds = 400.0 * jnp.ones((ix, il))
         rlds = 350.0 * jnp.ones((ix, il))
 
-        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
         hum_data = HumidityData.zeros(xy, kx, rh=rh)
         conv_data = ConvectionData.zeros(xy, kx)
@@ -561,7 +561,7 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         rsds = 400.0 * jnp.ones((ix, il))
         rlds = 350.0 * jnp.ones((ix, il))
 
-        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
         hum_data = HumidityData.zeros(xy, kx, rh=rh)
         conv_data = ConvectionData.zeros(xy, kx)
@@ -597,7 +597,7 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         rsds = 400.0 * jnp.ones((ix, il))
         rlds = 350.0 * jnp.ones((ix, il))
 
-        state = PhysicsState.zeros(zxy, ua, va, ta, qa, phi, psa)
+        state = PhysicsState.zeros(zxy, u_wind=ua, v_wind=va, temperature=ta, specific_humidity=qa, geopotential=phi, normalized_surface_pressure=psa)
         sflux_data = SurfaceFluxData.zeros(xy, rlds=rlds)
         hum_data = HumidityData.zeros(xy, kx, rh=rh)
         conv_data = ConvectionData.zeros(xy, kx)

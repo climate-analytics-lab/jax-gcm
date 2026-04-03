@@ -120,7 +120,7 @@ class TestLongwave(unittest.TestCase):
         tau2 = jnp.ones((kx, ix, il, 4)) + jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis, jnp.newaxis] * .1
         stratc = jnp.ones((ix, il, 2))
 
-        state = PhysicsState.zeros((ix, il), kx).copy(temperature=ta)
+        state = PhysicsState.zeros((kx, ix, il)).copy(temperature=ta)
         input_physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords).copy(
             longwave_rad=LWRadiationData.zeros((ix, il), kx).copy(dfabs=dfabs),
             mod_radcon=ModRadConData.zeros((ix, il), kx).copy(st4a=st4a, flux=flux, tau2=tau2, stratc=stratc),
