@@ -15,7 +15,7 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 from ..constants.physical_constants import (
-    tmelt, alhc, alhs, cp, eps
+    tmelt, alhc, alhs, cp, eps, grav
 )
 
 
@@ -30,10 +30,12 @@ class CloudParameters:
     csatsc: float        # Saturation factor for stratocumulus
     
     # Microphysics parameters
-    ccraut: float        # Autoconversion threshold (kg/kg)
+    ccraut: float        # Beheng autoconversion rate scaling (dimensionless, ECHAM default 4)
+    ccsaut: float        # Ice autoconversion rate (1/s)
+    cdnc: float          # Cloud droplet number concentration (1/m³)
     ceffmin: float       # Minimum cloud droplet radius (microns)
     ceffmax: float       # Maximum cloud droplet radius (microns)
-    
+
     # Numerical parameters
     epsilon: float       # Small number for numerical stability
     
@@ -44,7 +46,8 @@ class CloudParameters:
 
     @classmethod
     def default(cls, crt=0.9, crs=0.7, nex=4.0,
-                 csatsc=0.97, ccraut=0.0005, ceffmin=10.0, 
+                 csatsc=0.97, ccraut=4.0, ccsaut=0.001,
+                 cdnc=200.0e6, ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
         """Return default cloud parameters"""
@@ -54,6 +57,8 @@ class CloudParameters:
             nex=jnp.array(nex),
             csatsc=jnp.array(csatsc),
             ccraut=jnp.array(ccraut),
+            ccsaut=jnp.array(ccsaut),
+            cdnc=jnp.array(cdnc),
             ceffmin=jnp.array(ceffmin),
             ceffmax=jnp.array(ceffmax),
             epsilon=jnp.array(epsilon),
@@ -362,30 +367,55 @@ def shallow_cloud_scheme(
         cloud_fraction, pressure, dt, config
     )
     
-    # Simple precipitation formation (autoconversion)
-    # Convert cloud water to rain if it exceeds threshold
-    rain_rate = jnp.where(
-        cloud_water > config.ccraut,
-        0.001 * (cloud_water - config.ccraut) / dt,  # Simple rate
-        0.0
-    )
-    snow_rate = jnp.where(
-        cloud_ice > config.ccraut * 0.1,  # Lower threshold for ice
-        0.01 * cloud_ice / dt,  # Faster rate for ice
-        0.0
-    )
-    
-    # Update tendencies for precipitation
-    dqcdt = dqcdt - rain_rate
-    dqidt = dqidt - snow_rate
-    
-    # Calculate total cloud cover (maximum overlap assumption)
+    # --- Within-timestep condensation → autoconversion → precipitation ---
+    # Following ECHAM mo_cloud.f90: condensation updates in-cloud water
+    # (zxlb += zcnd), then autoconversion acts on the updated values.
+    # Use the condensation computed by condensation_evaporation above,
+    # applied within this timestep to get the updated cloud water.
+    updated_cloud_water = jnp.maximum(cloud_water + dqcdt * dt, 0.0)
+    updated_cloud_ice = jnp.maximum(cloud_ice + dqidt * dt, 0.0)
+
+    # Air density from ideal gas law (needed for Beheng autoconversion)
+    from ..constants.physical_constants import rd
+    rho = pressure / (rd * temperature)
+
+    # Warm-phase autoconversion: Beheng (1994), following ECHAM mo_cloud.f90 lines 834-862
+    # ECHAM operates on IN-CLOUD water (zxlb = grid-mean / cloud_fraction).
+    # Analytic solution to dqc/dt = -gamma * qc^(1 + exm1)
+    # gamma = ccraut * 1.2e27 / rho * cdnc^(-3.3) * (rho * 1e-3)^4.7
+    exm1 = 3.7  # 4.7 - 1.0
+    zexp = -1.0 / exm1
+    # ECHAM converts cdnc from 1/m³ to 1/cm³ (pacdnc*1e-6) for the Beheng formula
+    cdnc_cgs = config.cdnc * 1e-6  # 1/m³ → 1/cm³
+    gamma = (config.ccraut * 1.2e27) / rho * cdnc_cgs**(-3.3) * (rho * 1e-3)**4.7
+
+    # Convert to in-cloud values (ECHAM: zxlb = grid-mean * zclcauxi)
+    cf_safe = jnp.maximum(cloud_fraction, config.epsilon)
+    qc_incloud = jnp.maximum(updated_cloud_water / cf_safe, 0.0)
+    qi_incloud = jnp.maximum(updated_cloud_ice / cf_safe, 0.0)
+
+    denom = 1.0 + gamma * dt * exm1 * qc_incloud**exm1
+    rain_auto_incloud = qc_incloud * (1.0 - denom**zexp)
+    rain_auto_incloud = jnp.maximum(rain_auto_incloud, 0.0)
+    # Convert back to grid-mean (ECHAM: zrpr = zclcaux * zraut)
+    rain_auto = cloud_fraction * rain_auto_incloud
+
+    # Ice autoconversion: Levkov et al. (1992), following ECHAM mo_cloud.f90 lines 912-913
+    snow_auto_incloud = qi_incloud * (1.0 - 1.0 / (1.0 + config.ccsaut * dt * qi_incloud))
+    snow_auto_incloud = jnp.maximum(snow_auto_incloud, 0.0)
+    snow_auto = cloud_fraction * snow_auto_incloud
+
+    # Update cloud water/ice tendencies to include precipitation loss
+    dqcdt = dqcdt - rain_auto / dt
+    dqidt = dqidt - snow_auto / dt
+
+    # Column-integrated precipitation flux using dp/g (kg/m²/s)
+    dp = jnp.abs(jnp.diff(pressure, prepend=0.0))
+    rain_flux = jnp.sum(rain_auto * dp / dt) / grav
+    snow_flux = jnp.sum(snow_auto * dp / dt) / grav
+
+    # Total cloud cover (maximum overlap assumption)
     total_cloud_cover = jnp.max(cloud_fraction)
-    
-    # Surface precipitation fluxes (simplified - no vertical integration)
-    # In reality, would need to integrate through column accounting for evaporation
-    rain_flux = jnp.sum(rain_rate) * 1000.0  # Convert to kg/m²/s (approximate)
-    snow_flux = jnp.sum(snow_rate) * 1000.0
     
     # Create output structures
     tendencies = CloudTendencies(
