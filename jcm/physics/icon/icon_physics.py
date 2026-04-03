@@ -888,10 +888,11 @@ def apply_microphysics(
         }
     )
     
-    # Update physics data
+    # Update physics data — add microphysics precipitation to existing
+    # (cloud scheme already set precip_rain/snow from autoconversion)
     micro_data = physics_data.clouds.copy(
-        precip_rain=micro_states_all.precip_rain,  # 1D per column
-        precip_snow=micro_states_all.precip_snow,  # 1D per column
+        precip_rain=physics_data.clouds.precip_rain + micro_states_all.precip_rain,
+        precip_snow=physics_data.clouds.precip_snow + micro_states_all.precip_snow,
         droplet_number=droplet_number
     )
     
