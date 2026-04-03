@@ -92,8 +92,6 @@ Attributes:
         The mass of water vapor per unit mass of moist air.
     geopotential : jnp.ndarray
         The gravitational potential energy per unit mass at a given height.
-    vertical_velocity : jnp.ndarray
-        The vertical component of the wind.
     normalized_surface_pressure : jnp.ndarray
         Surface pressure normalized by a reference pressure p0.
 """
