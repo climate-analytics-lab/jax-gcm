@@ -794,20 +794,15 @@ def apply_clouds(
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
 
-    # Cloud droplet number concentration from aerosol scheme (2D field)
-    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
-    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
-    cdnc = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
-
     # Get cloud configuration from parameters
     cloud_config = parameters.clouds
 
     cloud_results = jax.vmap(
         shallow_cloud_scheme,
-        in_axes=(1, 1, 1, 1, 1, 0, 1, None, None),  # cdnc is per-column, dt and config are scalars
+        in_axes=(1, 1, 1, 1, 1, 0, None, None),  # dt and config are scalars
         out_axes=(0, 0)  # Returns (CloudTendencies, CloudState) per column
     )(state.temperature, state.specific_humidity, pressure_levels,
-        qc, qi, surface_pressure, cdnc, dt, cloud_config)
+        qc, qi, surface_pressure, dt, cloud_config)
     
     # Unpack structured results directly
     cloud_tendencies_all, cloud_states_all = cloud_results
@@ -823,11 +818,14 @@ def apply_clouds(
         }
     )
     
-    # Update physics data with cloud diagnostics
+    # Update physics data with cloud diagnostics and condensation-updated cloud water/ice
+    # Microphysics (called next) reads qc/qi from physics_data.clouds
     cloud_data = physics_data.clouds.copy(
         cloud_fraction=cloud_states_all.cloud_fraction.T,
-        precip_rain=cloud_tendencies_all.rain_flux,  # 1D per column
-        precip_snow=cloud_tendencies_all.snow_flux   # 1D per column
+        qc=cloud_states_all.cloud_water.T,
+        qi=cloud_states_all.cloud_ice.T,
+        precip_rain=cloud_tendencies_all.rain_flux,  # Zero — microphysics handles precip
+        precip_snow=cloud_tendencies_all.snow_flux   # Zero — microphysics handles precip
     )
     
     diagnostics = physics_data.diagnostics.copy(
@@ -854,9 +852,9 @@ def apply_microphysics(
     air_density = physics_data.diagnostics.air_density
     dz = physics_data.diagnostics.layer_thickness
 
-    # Extract fixed cloud water and ice tracers only
-    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    # Read cloud water and ice from cloud scheme (includes within-timestep condensation)
+    qc = physics_data.clouds.qc
+    qi = physics_data.clouds.qi
     
     # Droplet number concentration from aerosol scheme
     # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
@@ -888,11 +886,10 @@ def apply_microphysics(
         }
     )
     
-    # Update physics data — add microphysics precipitation to existing
-    # (cloud scheme already set precip_rain/snow from autoconversion)
+    # Update physics data with microphysics precipitation
     micro_data = physics_data.clouds.copy(
-        precip_rain=physics_data.clouds.precip_rain + micro_states_all.precip_rain,
-        precip_snow=physics_data.clouds.precip_snow + micro_states_all.precip_snow,
+        precip_rain=micro_states_all.precip_rain,
+        precip_snow=micro_states_all.precip_snow,
         droplet_number=droplet_number
     )
     
