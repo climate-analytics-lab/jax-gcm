@@ -858,9 +858,11 @@ def apply_microphysics(
     
     # Droplet number concentration from aerosol scheme
     # cdnc_factor is (ncols,) — broadcast to (nlev, ncols) for microphysics
-    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³)
+    # cloud_microphysics expects droplet_number in 1/kg (not 1/m³)
+    base_cdnc = 100e6  # Clean-air baseline CDNC (100 per cm³ = 1e8 per m³)
     cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
-    droplet_number = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+    cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+    droplet_number = cdnc_m3 / air_density  # 1/m³ → 1/kg
     
     # Get microphysics configuration
     micro_config = parameters.microphysics

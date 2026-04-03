@@ -647,15 +647,22 @@ def cloud_microphysics(
     dqrdt = dqrdt - rain_sedi
     dqsdt = dqsdt - snow_sedi
     
-    # Calculate precipitation fluxes (simplified - just from lowest level)
-    rain_flux = jnp.zeros(nlev)
-    snow_flux = jnp.zeros(nlev)
-    rain_flux = rain_flux.at[-1].set(rain_sedi[-1] * air_density[-1] * layer_thickness[-1])
-    snow_flux = snow_flux.at[-1].set(snow_sedi[-1] * air_density[-1] * layer_thickness[-1])
-    
-    # Surface precipitation
-    precip_rain = rain_flux[-1]
-    precip_snow = snow_flux[-1]
+    # Surface precipitation: column-integrated rain/snow production
+    # Following ECHAM mo_cloud.f90: zzdrr = zrpr * pmref / pdtime
+    # where pmref = air_density * layer_thickness (layer mass per unit area)
+    layer_mass = air_density * layer_thickness  # kg/m²
+
+    # Rain production per level: autoconversion + accretion + snow melting
+    rain_prod = (qc_auto + qc_accr + snow_melt) * cloud_fraction
+    # Snow production per level: ice autoconversion + aggregation + riming + rain freezing
+    snow_prod = (qi_auto + qi_aggr + qc_rime + rain_freeze) * cloud_fraction
+
+    # Column-integrated surface flux (kg/m²/s)
+    precip_rain = jnp.sum(rain_prod * layer_mass)
+    precip_snow = jnp.sum(snow_prod * layer_mass)
+
+    rain_flux = rain_prod * layer_mass
+    snow_flux = snow_prod * layer_mass
     
     # Create output structures
     tendencies = MicrophysicsTendencies(
