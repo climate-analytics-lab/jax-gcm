@@ -12,8 +12,8 @@ grav = c.grav # Gravitational acceleration (m/s/s)
 # Physical constants for thermodynamics
 p0 = c.p0 # Reference pressure (Pa)
 cp = c.cp # Specific heat at constant pressure (J/K/kg)
-akap = 2.0/7.0 # 1 - 1/gamma where gamma is the heat capacity ratio of a perfect diatomic gas (7/5)
-rgas = akap * cp # Gas constant per unit mass for dry air (J/K/kg)
+akap = c.akap # 1 - 1/gamma where gamma is the heat capacity ratio of a perfect diatomic gas (7/5)
+rgas = c.rgas # Gas constant per unit mass for dry air (J/K/kg)
 alhc = 2501.0 # Latent heat of condensation, in J/g for consistency with specific humidity in g/Kg
 alhs = 2801.0 # Latent heat of sublimation
 sbc = 5.67e-8 # Stefan-Boltzmann constant

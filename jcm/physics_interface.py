@@ -9,13 +9,14 @@ import tree_math
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.primitive_equations import compute_vertical_velocity, get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
+from jcm.constants import rgas, grav
 from typing import Tuple, Any
 from jcm.diffusion import DiffusionFilter
 import logging
@@ -26,16 +27,18 @@ logger = logging.getLogger(__name__)
 class PhysicsState:
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
+    w_wind: jnp.ndarray
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     geopotential: jnp.ndarray
     normalized_surface_pressure: jnp.ndarray # Normalized by global mean sea level pressure
 
     @classmethod
-    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
+    def zeros(cls, shape, u_wind=None, v_wind=None, w_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
+            w_wind if w_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
             geopotential if geopotential is not None else jnp.zeros(shape),
@@ -43,20 +46,22 @@ class PhysicsState:
         )
 
     @classmethod
-    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
+    def ones(cls, shape, u_wind=None, v_wind=None, w_wind=None, temperature=None, specific_humidity=None, geopotential=None, normalized_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
+            w_wind if w_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
             geopotential if geopotential is not None else jnp.ones(shape),
             normalized_surface_pressure if normalized_surface_pressure is not None else jnp.ones(shape[1:])
         )
 
-    def copy(self,u_wind=None,v_wind=None,temperature=None,specific_humidity=None,geopotential=None,normalized_surface_pressure=None):
+    def copy(self,u_wind=None,v_wind=None,w_wind=None,temperature=None,specific_humidity=None,geopotential=None,normalized_surface_pressure=None):
         return PhysicsState(
             u_wind if u_wind is not None else self.u_wind,
             v_wind if v_wind is not None else self.v_wind,
+            w_wind if w_wind is not None else self.w_wind,
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity,
             geopotential if geopotential is not None else self.geopotential,
@@ -79,12 +84,16 @@ Attributes:
         Zonal (east-west) component of wind.
     v_wind : jnp.ndarray
         Meridional (north-south) component of wind.
+    w_wind : jnp.ndarray
+        Vertical (up-down) component of wind.
     temperature : jnp.ndarray
         Atmospheric temperature.
     specific_humidity : jnp.ndarray
         The mass of water vapor per unit mass of moist air.
     geopotential : jnp.ndarray
         The gravitational potential energy per unit mass at a given height.
+    vertical_velocity : jnp.ndarray
+        The vertical component of the wind.
     normalized_surface_pressure : jnp.ndarray
         Surface pressure normalized by a reference pressure p0.
 """
@@ -237,7 +246,14 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp, axis=-3))
+    # compute vertical velocity
+    Dsigma_Dt = compute_vertical_velocity(state, dynamics.coords)
+    Dlog_sp_Dt = dynamics.nodal_log_pressure_tendency(nodal_state)
+    sigma_boundaries = dynamics.coords.vertical.boundaries
+    sigma_centers = 0.5 * (sigma_boundaries[:-1] + sigma_boundaries[1:])
+    w = - (rgas * t / grav) * (Dsigma_Dt/sigma_centers[:, jnp.newaxis, jnp.newaxis] + Dlog_sp_Dt)
+
+    return PhysicsState(u, v, w, t, q, phi, jnp.squeeze(sp, axis=-3))
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
     """Convert state variables from the physics (nodal space) back to the dynamical core (spectral space).
