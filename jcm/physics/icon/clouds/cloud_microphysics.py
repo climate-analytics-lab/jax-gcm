@@ -222,11 +222,7 @@ def autoconversion_kk2000(
     
     # Convert to grid-mean tendency
     autoconv_rate = autoconv_rate * cloud_fraction
-    
-    # Limit to available cloud water
-    max_rate = cloud_water / dt
-    autoconv_rate = jnp.minimum(autoconv_rate, max_rate)
-    
+
     return autoconv_rate
 
 

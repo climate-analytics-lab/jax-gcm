@@ -452,6 +452,65 @@ class TestCondensationToCloudWater:
             f"Cloud ice should be > 0 for cold supersaturated column, got {float(jnp.max(state.cloud_ice)):.6e}"
 
 
+class TestAerosolPrecipitationCoupling:
+    """Test that aerosol CDNC affects precipitation through autoconversion."""
+
+    def _run_column(self, cdnc_value):
+        """Run the combined cloud+microphysics column with given CDNC."""
+        from ..clouds.cloud_microphysics import MicrophysicsParameters
+        from ..icon_physics import _cloud_and_microphysics_column
+        from ..constants.physical_constants import rd
+
+        nlev = 20
+        pressure = jnp.linspace(100000, 20000, nlev)
+        temperature = jnp.linspace(290, 220, nlev)
+
+        # Supersaturated in lower troposphere to generate cloud water
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        specific_humidity = jnp.where(pressure > 60000, 1.05 * qs, 0.3 * qs)
+
+        qc = jnp.zeros(nlev)
+        qi = jnp.zeros(nlev)
+        rho = pressure / (rd * temperature)
+        dz = jnp.full(nlev, 500.0)
+        # CDNC in 1/kg as expected by microphysics
+        droplet_number = jnp.full(nlev, cdnc_value) / rho
+
+        cloud_config = CloudParameters.default()
+        micro_config = MicrophysicsParameters.default()
+
+        cloud_tend, cloud_state, micro_tend, micro_state = _cloud_and_microphysics_column(
+            temperature, specific_humidity, pressure, qc, qi,
+            100000.0, rho, dz, droplet_number,
+            1800.0, cloud_config, micro_config
+        )
+
+        return micro_state.precip_rain, micro_state.precip_snow
+
+    def test_higher_cdnc_reduces_precipitation(self):
+        """Higher CDNC should suppress autoconversion and reduce precipitation.
+
+        This is the Twomey/Albrecht second indirect effect: more droplets
+        means smaller droplets, slower coalescence, less rain.
+        """
+        precip_clean, _ = self._run_column(cdnc_value=50e6)    # 50 per cm³
+        precip_polluted, _ = self._run_column(cdnc_value=500e6)  # 500 per cm³
+
+        assert precip_clean > 0.0, \
+            f"Clean-air precipitation should be > 0, got {float(precip_clean):.6e}"
+        assert precip_polluted >= 0.0, \
+            f"Polluted precipitation should be >= 0, got {float(precip_polluted):.6e}"
+        assert precip_clean > precip_polluted, \
+            f"Higher CDNC should reduce precipitation: clean={float(precip_clean):.6e} vs polluted={float(precip_polluted):.6e}"
+
+    def test_zero_cdnc_still_produces_precipitation(self):
+        """Even with very low CDNC, precipitation should be finite (not NaN)."""
+        precip, snow = self._run_column(cdnc_value=10e6)  # Very clean air
+
+        assert jnp.isfinite(precip), f"Precipitation should be finite, got {float(precip)}"
+        assert jnp.isfinite(snow), f"Snow should be finite, got {float(snow)}"
+
+
 if __name__ == "__main__":
     # Run basic tests
     test_sat = TestSaturationFunctions()
