@@ -247,14 +247,15 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     # Compute vertical velocity (code adapted and extended from dinosaur.primitive_equations.compute_vertical_velocity)
     sigma_dot_full_boundaries = jnp.pad(
         nodal_state.sigma_dot_full,
-        [(1, 1) if i == nodal_state.sigma_dot_full.ndim - 3 else (0, 0) for i in range(nodal_state.sigma_dot_full.ndim)]
+        [(1, 1) if i == nodal_state.sigma_dot_full.ndim - 3 else (0, 0) 
+         for i in range(nodal_state.sigma_dot_full.ndim)]
     ) # pad vertical dimension with boundary conditions
     sigma_dot_full_centers, sigma_centers = (
-        (a[1:] + a[:-1])/2
-        for a in (sigma_dot_full_boundaries, dynamics.coords.vertical.boundaries)
+        (a[..., 1:, :, :] + a[..., :-1, :, :]) / 2
+        for a in (sigma_dot_full_boundaries, dynamics.coords.vertical.boundaries[:, jnp.newaxis, jnp.newaxis])
     ) # get values at layer centers
     w = - (rgas * t / grav) * (
-        sigma_dot_full_centers / sigma_centers[:, jnp.newaxis, jnp.newaxis] 
+        sigma_dot_full_centers / sigma_centers
         + dynamics.nodal_log_pressure_tendency(nodal_state)
     ) # convert from sigma_dot to vertical velocity using the hydrostatic relation and ideal gas law
 
