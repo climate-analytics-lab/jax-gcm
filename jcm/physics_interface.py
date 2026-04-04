@@ -9,7 +9,7 @@ import tree_math
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import compute_vertical_velocity, get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
@@ -248,15 +248,15 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     sigma_dot_full_boundaries = jnp.pad(
         nodal_state.sigma_dot_full,
         [(1, 1) if i == nodal_state.sigma_dot_full.ndim - 3 else (0, 0) for i in range(nodal_state.sigma_dot_full.ndim)]
-    )
+    ) # pad vertical dimension with boundary conditions
     sigma_dot_full_centers, sigma_centers = (
         (a[1:] + a[:-1])/2
         for a in (sigma_dot_full_boundaries, dynamics.coords.vertical.boundaries)
-    )
+    ) # get values at layer centers
     w = - (rgas * t / grav) * (
         sigma_dot_full_centers / sigma_centers[:, jnp.newaxis, jnp.newaxis] 
         + dynamics.nodal_log_pressure_tendency(nodal_state)
-    )
+    ) # convert from sigma_dot to vertical velocity using the hydrostatic relation and ideal gas law
 
     return PhysicsState(u, v, w, t, q, phi, jnp.squeeze(sp, axis=-3))
 
