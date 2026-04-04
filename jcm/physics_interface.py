@@ -244,12 +244,19 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    # compute vertical velocity
-    Dsigma_Dt = compute_vertical_velocity(state, dynamics.coords)
-    Dlog_sp_Dt = dynamics.nodal_log_pressure_tendency(nodal_state)
-    sigma_boundaries = dynamics.coords.vertical.boundaries
-    sigma_centers = 0.5 * (sigma_boundaries[:-1] + sigma_boundaries[1:])
-    w = - (rgas * t / grav) * (Dsigma_Dt/sigma_centers[:, jnp.newaxis, jnp.newaxis] + Dlog_sp_Dt)
+    # Compute vertical velocity (code adapted and extended from dinosaur.primitive_equations.compute_vertical_velocity)
+    sigma_dot_full_boundaries = jnp.pad(
+        nodal_state.sigma_dot_full,
+        [(1, 1) if i == nodal_state.sigma_dot_full.ndim - 3 else (0, 0) for i in range(nodal_state.sigma_dot_full.ndim)]
+    )
+    sigma_dot_full_centers, sigma_centers = (
+        (a[1:] + a[:-1])/2
+        for a in (sigma_dot_full_boundaries, dynamics.coords.vertical.boundaries)
+    )
+    w = - (rgas * t / grav) * (
+        sigma_dot_full_centers / sigma_centers[:, jnp.newaxis, jnp.newaxis] 
+        + dynamics.nodal_log_pressure_tendency(nodal_state)
+    )
 
     return PhysicsState(u, v, w, t, q, phi, jnp.squeeze(sp, axis=-3))
 
