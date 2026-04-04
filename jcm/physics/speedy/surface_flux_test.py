@@ -436,8 +436,8 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         check_vjp(f, f_vjp, args = (state_floats, physics_data_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state_floats,physics_data_floats,  parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+        check_jvp(f, f_jvp, args = (state_floats, physics_data_floats, parameters_floats, forcing_floats, terrain_floats),
+                                atol=None, rtol=1, eps=0.00001)
         
     def test_surface_fluxes_drag_test_gradient_check(self):
         phi0 = 500. * jnp.ones((ix, il)) #surface geopotential
