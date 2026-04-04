@@ -1,8 +1,18 @@
+import jax
 import jax.numpy as jnp
 import tree_math
 from jcm.date import DateData
 from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jax import tree_util
+
+
+def _safe_isnan(x):
+    """Check for NaN, handling integer and float0 dtypes that lack NaN representation."""
+    if hasattr(x, 'dtype') and (x.dtype == jax.dtypes.float0
+                                or jnp.issubdtype(x.dtype, jnp.integer)
+                                or jnp.issubdtype(x.dtype, jnp.bool_)):
+        return False
+    return jnp.isnan(x)
 
 ablco2_ref = 6.0
 
@@ -135,9 +145,7 @@ class SWRadiationData:
         )
     
     def isnan(self):
-        self.icltop = jnp.zeros_like(self.icltop, dtype=float)
-        self.compute_shortwave = jnp.zeros_like(self.compute_shortwave, dtype=float)
-        return tree_util.tree_map(jnp.isnan, self)
+        return tree_util.tree_map(_safe_isnan, self)
     
 @tree_math.struct
 class ModRadConData:
@@ -297,12 +305,8 @@ class ConvectionData:
             precnv=precnv if precnv is not None else self.precnv
         )
     
-    # Isnan function to check if any elements of ConvectionData are NaN. This function is used after getting the gradient of something with respect to
-    # a ConvectionData input object, to check if the gradient is valid. We skip the check on iptop because it is an integer and the gradient is not meaningful
-    # or intended to be used.
     def isnan(self):
-        self.iptop = jnp.zeros_like(self.iptop, dtype=float)
-        return tree_util.tree_map(jnp.isnan, self)
+        return tree_util.tree_map(_safe_isnan, self)
 
 @tree_math.struct
 class HumidityData:

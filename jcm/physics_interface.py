@@ -9,7 +9,8 @@ import tree_math
 from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
-from dinosaur.primitive_equations import get_geopotential, compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.primitive_equations import get_geopotential_diff_sigma, compute_diagnostic_state_sigma as compute_diagnostic_state, State, PrimitiveEquations
+from dinosaur.spherical_harmonic import add_constant
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
@@ -221,13 +222,12 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t = nodal_state.temperature_variation
     q = nodal_state.tracers['specific_humidity']
 
-    phi_spectral = get_geopotential(
-        state.temperature_variation,
-        dynamics.reference_temperature,
-        dynamics.orography,
-        dynamics.coords.vertical,
-        dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-        dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
+    g = dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION)
+    R = dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT)
+    surface_geopotential = dynamics.orography * g
+    temperature = add_constant(state.temperature_variation, dynamics.reference_temperature)
+    phi_spectral = surface_geopotential + get_geopotential_diff_sigma(
+        temperature, dynamics.coords.vertical, R,
     )
 
     phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
