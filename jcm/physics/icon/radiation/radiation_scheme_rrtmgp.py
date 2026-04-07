@@ -309,8 +309,8 @@ def radiation_scheme_rrtmgp_fn(
 ) -> dict:
     """Call the global RRTMGP instance with per-column solar parameters."""
     rrtmgp_instance = _ensure_rrtmgp()
-    zenith_angle = float(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0)))
-    irrad_val = float(jnp.maximum(toa_flux, 0.0))
+    zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
+    irrad_val = jnp.maximum(toa_flux, 0.0)
     return rrtmgp_instance.compute_heating_rate(
         zenith=zenith_angle, irrad=irrad_val, **rrtmgp_input
     )
