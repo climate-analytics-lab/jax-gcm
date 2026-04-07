@@ -318,12 +318,30 @@ def radiation_scheme_rrtmgp_fn(
     toa_flux: jnp.ndarray,
     cos_zenith: jnp.ndarray,
 ) -> dict:
-    """Call the global RRTMGP instance with per-column solar parameters."""
+    """Call the global RRTMGP instance with per-column solar parameters.
+
+    The RRTMGP ``AtmosphericState`` stores zenith/irrad as construction-time
+    constants.  We swap them per-column via ``dataclasses.replace`` before
+    each call so the solver sees the correct solar geometry.
+    """
+    import dataclasses
+
     rrtmgp_instance = _ensure_rrtmgp()
-    zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
-    return rrtmgp_instance.compute_heating_rate(
-        zenith=zenith_angle, irrad=toa_flux, **rrtmgp_input
+    zenith_angle = float(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0)))
+    irrad_val = float(jnp.maximum(toa_flux, 0.0))
+
+    # Replace the frozen atmospheric_state with updated solar parameters
+    original_state = rrtmgp_instance.atmospheric_state
+    updated_state = dataclasses.replace(
+        original_state, zenith=zenith_angle, irrad=irrad_val
     )
+    # Temporarily swap (not thread-safe, but JAX vmap serialises calls)
+    rrtmgp_instance.atmospheric_state = updated_state
+    try:
+        result = rrtmgp_instance.compute_heating_rate(**rrtmgp_input)
+    finally:
+        rrtmgp_instance.atmospheric_state = original_state
+    return result
 
 
 # ---------------------------------------------------------------------------

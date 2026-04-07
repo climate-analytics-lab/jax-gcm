@@ -7,6 +7,7 @@ Date: 2025-08-01
 """
 
 import pytest
+import numpy as np
 import jax.numpy as jnp
 import jax_datetime as jdt
 from datetime import datetime
@@ -126,7 +127,7 @@ class TestGreyVsRRTMGP:
         assert jnp.all(jnp.isfinite(tend_rrtm.temperature_tendency))
 
         # Loose absolute tolerance (K/s) — they don't need to match closely
-        jnp.testing.assert_allclose(
+        np.testing.assert_allclose(
             tend_grey.temperature_tendency,
             tend_rrtm.temperature_tendency,
             atol=0.1,
