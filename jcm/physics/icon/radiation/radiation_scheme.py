@@ -290,8 +290,7 @@ def radiation_scheme(
     # Solar radiation calculations
     toa_flux = radiation_flux(date, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(OrbitalTime.from_datetime(date), longitude, latitude)
-    # cos_zenith = jnp.sqrt(1.0 - sin_altitude**2)
-    cos_zenith = sin_altitude # cos(zenith) = sin(altitude) since they are complementary angles
+    cos_zenith = sin_altitude  # cos(zenith) = sin(altitude) since they are complementary
 
     # Prepare radiation state
     rad_state = prepare_radiation_state(

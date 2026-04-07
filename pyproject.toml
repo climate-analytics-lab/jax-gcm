@@ -19,6 +19,9 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 
+[project.optional-dependencies]
+rrtmgp = ["jax-rrtmgp"]
+
 [tool.setuptools]
 packages = ["jcm"]
 

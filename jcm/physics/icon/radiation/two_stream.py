@@ -12,8 +12,6 @@ Date: 2025-01-10
 import jax.numpy as jnp
 import jax
 from typing import Tuple, Optional
-# from functools import partial  # Not needed anymore
-
 from .radiation_types import OpticalProperties
 
 
@@ -474,5 +472,3 @@ def flux_to_heating_rate(
     heating = (g / cp) * (-flux_div) / dp
     
     return heating
-
-
