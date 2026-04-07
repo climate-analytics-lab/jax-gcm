@@ -35,16 +35,10 @@ from jcm.physics.icon.radiation.cloud_optics import (
 )
 from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 
-# Import rrtmgp -- guarded so the grey scheme works without it installed
-try:
-    import rrtmgp
-    from rrtmgp.config import radiative_transfer
-    from rrtmgp import stretched_grid_util
-    from rrtmgp.rrtmgp import RRTMGP
-
-    _RRTMGP_AVAILABLE = True
-except ImportError:
-    _RRTMGP_AVAILABLE = False
+import rrtmgp
+from rrtmgp.config import radiative_transfer
+from rrtmgp import stretched_grid_util
+from rrtmgp.rrtmgp import RRTMGP
 
 # ---------------------------------------------------------------------------
 # Module-level RRTMGP instance (created once at import time)
@@ -57,11 +51,6 @@ def _ensure_rrtmgp():
     global _GLOBAL_RRTMGP_INSTANCE
     if _GLOBAL_RRTMGP_INSTANCE is not None:
         return _GLOBAL_RRTMGP_INSTANCE
-    if not _RRTMGP_AVAILABLE:
-        raise ImportError(
-            "jax-rrtmgp is required for the RRTMGP radiation scheme. "
-            "Install it with: pip install jax-rrtmgp"
-        )
 
     rrtmgp_root = Path(rrtmgp.__path__[0])
     rrtmgp_data_path = rrtmgp_root / "optics" / "rrtmgp_data"

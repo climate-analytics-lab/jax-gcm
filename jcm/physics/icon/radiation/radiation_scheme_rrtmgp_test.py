@@ -12,18 +12,16 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 from datetime import datetime
 
-rrtmgp = pytest.importorskip("rrtmgp", reason="jax-rrtmgp not installed")
-
-from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme  # noqa: E402
-from jcm.physics.icon.radiation.radiation_scheme_rrtmgp import (  # noqa: E402
+from jcm.physics.icon.radiation.radiation_scheme import radiation_scheme
+from jcm.physics.icon.radiation.radiation_scheme_rrtmgp import (
     radiation_scheme_rrtmgp,
 )
-from jcm.physics.icon.radiation.radiation_types import RadiationParameters  # noqa: E402
-from jcm.physics.icon.unit_conversions import (  # noqa: E402
+from jcm.physics.icon.radiation.radiation_types import RadiationParameters
+from jcm.physics.icon.unit_conversions import (
     calculate_air_density,
     calculate_layer_thickness,
 )
-from jcm.physics.icon.radiation.radiation_scheme_test import (  # noqa: E402
+from jcm.physics.icon.radiation.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data,
 )

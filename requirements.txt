@@ -16,4 +16,5 @@ furo
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
+jax-rrtmgp @ git+https://github.com/climate-analytics-lab/jax-rrtmgp@main
 
