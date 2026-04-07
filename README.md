@@ -24,6 +24,11 @@ Easily install using pip with all the associated requirements:
 pip install jcm
 ```
 
+Or, from conda forge:
+```bash
+conda install -c conda-forge jcm
+```
+
 Or, clone the repository and install in development mode:
 
 ```bash
