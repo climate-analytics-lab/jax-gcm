@@ -18,10 +18,16 @@ JCM is a physical climate model that combines the [Dinosaur](https://github.com/
 
 ## Installation
 
-Clone the repository and install in development mode:
+Easily install using pip with all the associated requirements:
 
 ```bash
-git clone https://github.com/yourusername/jax-gcm.git
+pip install jcm
+```
+
+Or, clone the repository and install in development mode:
+
+```bash
+git clone https://github.com/climate-analytics-lab/jax-gcm.git
 cd jax-gcm
 pip install -e .
 ```
