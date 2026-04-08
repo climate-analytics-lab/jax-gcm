@@ -19,7 +19,7 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         v = jnp.ones((kx, ix, il)) * -0.5
         q = jnp.ones((kx, ix, il)) * 0.5
         phi = jnp.ones((kx, ix, il)) * 5000
-        sp = jnp.ones((kx, ix, il))
+        sp = jnp.ones((ix, il))
 
         coords = get_speedy_coords()
         _, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
