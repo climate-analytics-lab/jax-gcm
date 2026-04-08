@@ -410,8 +410,12 @@ class Model:
         from jcm.physics_interface import verify_state
         jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
+        if output_averages:
+            dynamics_fn = jax.vmap(lambda s: dynamics_state_to_physics_state(s, self.primitive))
+        else:
+            dynamics_fn = lambda s: dynamics_state_to_physics_state(s, self.primitive)
         predictions = Predictions(
-            dynamics=dynamics_state_to_physics_state(state, self.primitive),
+            dynamics=dynamics_fn(state),
             physics=None,
             times=None
         )
