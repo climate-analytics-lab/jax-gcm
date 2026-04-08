@@ -173,7 +173,7 @@ class Physics:
     def cache_coords(self, coords: CoordinateSystem):
         return None
 
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
@@ -181,6 +181,8 @@ class Physics:
             forcing: Forcing data
             terrain: Terrain data (boundary conditions)
             date: Date data
+            prev_physics_data: Previous step's physics data for caching
+                expensive computations (e.g. radiation). None on first step.
 
         Returns:
             Physical tendencies in PhysicsTendency format
@@ -447,7 +449,21 @@ def get_physical_tendencies(
     physics_state = dynamics_state_to_physics_state(state, dynamics)
 
     clamped_physics_state = verify_state(physics_state)
-    physics_tendency, physics_data = physics.compute_tendencies(clamped_physics_state, forcing, terrain, date)
+
+    # Retrieve cached physics data from the collector (if available) so
+    # that expensive terms like radiation can reuse previous results.
+    prev_physics_data = None
+    if diagnostics_collector is not None and hasattr(diagnostics_collector, 'physics_data_cache'):
+        prev_physics_data = diagnostics_collector.physics_data_cache.value
+
+    physics_tendency, physics_data = physics.compute_tendencies(
+        clamped_physics_state, forcing, terrain, date,
+        prev_physics_data=prev_physics_data,
+    )
+
+    # Update the cache so the next timestep can reuse this data.
+    if diagnostics_collector is not None and hasattr(diagnostics_collector, 'physics_data_cache'):
+        diagnostics_collector.physics_data_cache.value = physics_data
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 

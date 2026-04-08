@@ -102,6 +102,7 @@ class SpeedyPhysics(Physics):
         forcing: ForcingData,
         terrain: TerrainData,
         date: DateData,
+        prev_physics_data=None,
     ) -> Tuple[PhysicsTendency, PhysicsData]:
         """Compute the physical tendencies given the current state and data structs. Loops through the Speedy physics terms, accumulating the tendencies.
 

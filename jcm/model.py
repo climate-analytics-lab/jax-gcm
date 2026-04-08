@@ -167,12 +167,14 @@ class DiagnosticsCollector(nnx.Module):
     data: nnx.Variable
     i: nnx.Variable
     physical_step: nnx.Variable
+    physics_data_cache: nnx.Variable  # previous step's PhysicsData for caching
     steps_to_average: int
 
     def __init__(self, steps_to_average):
         """Initialize DiagnosticsCollector for accumulating physics diagnostics over multiple steps."""
         self.i = nnx.Variable(0)
         self.physical_step = nnx.Variable(True)
+        self.physics_data_cache = nnx.Variable(None)
         self.steps_to_average = steps_to_average
 
     def accumulate_if_physical_step(self, new_data):
@@ -215,6 +217,9 @@ def averaged_trajectory_from_step(
             empty_data
         )
         diagnostics_collector.data = nnx.Variable(stacked_empty_data)
+        # Seed the physics data cache so radiation caching can reuse
+        # previous-step results across timesteps.
+        diagnostics_collector.physics_data_cache = nnx.Variable(empty_data)
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 
         empty_sum = tree_map(jnp.zeros_like, x_initial)

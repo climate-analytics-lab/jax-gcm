@@ -623,3 +623,164 @@ def test_radiation_scheme_reproducibility():
             assert tendencies_1.temperature_tendency.shape == tendencies.temperature_tendency.shape
             assert tendencies_1.longwave_heating.shape == tendencies.longwave_heating.shape
             assert tendencies_1.shortwave_heating.shape == tendencies.shortwave_heating.shape
+
+
+# ------------------------------------------------------------------
+# Radiation sub-stepping / caching tests
+# ------------------------------------------------------------------
+
+class TestRadiationCaching:
+    """Test the radiation sub-stepping wrapper ``_radiation_with_caching``."""
+
+    def _make_physics_args(self, nlev=10, radiation_interval=0.0,
+                           model_step=0, dt_seconds=30.0):
+        """Build minimal args for the radiation wrapper."""
+        from jcm.physics.icon.icon_physics_data import PhysicsData, RadiationData
+        from jcm.physics.icon.parameters import Parameters
+        from jcm.physics_interface import PhysicsState
+        from jcm.date import DateData
+
+        ncols = 4
+        params = Parameters.default()
+        # Set radiation_interval on the parameters
+        rad_params = params.radiation.__class__(**{
+            **params.radiation.__dict__,
+            'radiation_interval': jnp.array(radiation_interval),
+            'dt_rad': jnp.array(dt_seconds),
+        })
+        params = params.__class__(**{**params.__dict__, 'radiation': rad_params})
+
+        date = DateData.zeros(
+            model_step=jnp.int32(model_step),
+            dt_seconds=dt_seconds,
+        )
+
+        # Minimal PhysicsData with known radiation heating rates
+        rad_data = RadiationData.zeros((ncols,), nlev)
+        # Set known cached heating rates
+        sw_rate = jnp.ones((nlev, ncols)) * 1e-5
+        lw_rate = jnp.ones((nlev, ncols)) * (-2e-5)
+        rad_data = rad_data.copy(sw_heating_rate=sw_rate, lw_heating_rate=lw_rate)
+
+        physics_data = PhysicsData.zeros(
+            (ncols,), nlev, icon_coords=None, date=date,
+        )
+        physics_data = physics_data.copy(radiation=rad_data)
+
+        state = PhysicsState(
+            u_wind=jnp.zeros((nlev, ncols)),
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.ones((nlev, ncols)) * 250.0,
+            specific_humidity=jnp.ones((nlev, ncols)) * 1e-3,
+            geopotential=jnp.zeros((nlev, ncols)),
+            normalized_surface_pressure=jnp.ones(ncols),
+            tracers={},
+        )
+
+        return state, physics_data, params
+
+    def test_no_caching_when_interval_zero(self):
+        """Default radiation_interval=0 always computes."""
+        from jcm.physics.icon.icon_physics import _radiation_with_caching
+
+        state, physics_data, params = self._make_physics_args(
+            radiation_interval=0.0, model_step=1)
+
+        # A dummy radiation function that returns a known marker value
+        marker = 42.0
+
+        def dummy_rad(s, pd, p, f, t):
+            from jcm.physics_interface import PhysicsTendency
+            nlev, ncols = s.temperature.shape
+            tend = PhysicsTendency(
+                u_wind=jnp.zeros((nlev, ncols)),
+                v_wind=jnp.zeros((nlev, ncols)),
+                temperature=jnp.ones((nlev, ncols)) * marker,
+                specific_humidity=jnp.zeros((nlev, ncols)),
+                tracers={},
+            )
+            return tend, pd
+
+        tend, _ = _radiation_with_caching(
+            dummy_rad, state, physics_data, params, None, None)
+
+        # Should have called the dummy, not the cache
+        assert jnp.allclose(tend.temperature, marker)
+
+    def test_caching_returns_cached_tendency(self):
+        """On a non-radiation step the cached sw+lw rates are returned."""
+        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics_interface import PhysicsTendency
+
+        state, physics_data, params = self._make_physics_args(
+            radiation_interval=120.0, dt_seconds=30.0,
+            model_step=1)  # step 1, interval=4 steps → should use cache
+
+        def should_not_be_called(s, pd, p, f, t):
+            # Return something obviously different so test would fail
+            nlev, ncols = s.temperature.shape
+            return PhysicsTendency(
+                u_wind=jnp.zeros((nlev, ncols)),
+                v_wind=jnp.zeros((nlev, ncols)),
+                temperature=jnp.ones((nlev, ncols)) * 999.0,
+                specific_humidity=jnp.zeros((nlev, ncols)),
+                tracers={},
+            ), pd
+
+        tend, _ = _radiation_with_caching(
+            should_not_be_called, state, physics_data, params, None, None)
+
+        # Should get sw + lw = 1e-5 + (-2e-5) = -1e-5
+        expected = jnp.ones_like(tend.temperature) * (-1e-5)
+        assert jnp.allclose(tend.temperature, expected)
+
+    def test_caching_computes_on_interval(self):
+        """Radiation computes at step 0, 4, 8, ... for 120s interval / 30s dt."""
+        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics_interface import PhysicsTendency
+
+        call_count = []
+
+        def counting_rad(s, pd, p, f, t):
+            call_count.append(1)  # side-effect (only works outside JIT)
+            nlev, ncols = s.temperature.shape
+            return PhysicsTendency(
+                u_wind=jnp.zeros((nlev, ncols)),
+                v_wind=jnp.zeros((nlev, ncols)),
+                temperature=jnp.ones((nlev, ncols)) * 7.0,
+                specific_humidity=jnp.zeros((nlev, ncols)),
+                tracers={},
+            ), pd
+
+        for step in [0, 4, 8]:
+            call_count.clear()
+            state, physics_data, params = self._make_physics_args(
+                radiation_interval=120.0, dt_seconds=30.0,
+                model_step=step)
+            tend, _ = _radiation_with_caching(
+                counting_rad, state, physics_data, params, None, None)
+            # On radiation steps the compute branch should run
+            assert jnp.allclose(tend.temperature, 7.0), f"step {step}"
+
+    def test_first_step_always_computes(self):
+        """Step 0 always triggers radiation regardless of interval."""
+        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics_interface import PhysicsTendency
+
+        state, physics_data, params = self._make_physics_args(
+            radiation_interval=7200.0, dt_seconds=30.0,
+            model_step=0)
+
+        def marker_rad(s, pd, p, f, t):
+            nlev, ncols = s.temperature.shape
+            return PhysicsTendency(
+                u_wind=jnp.zeros((nlev, ncols)),
+                v_wind=jnp.zeros((nlev, ncols)),
+                temperature=jnp.ones((nlev, ncols)) * 123.0,
+                specific_humidity=jnp.zeros((nlev, ncols)),
+                tracers={},
+            ), pd
+
+        tend, _ = _radiation_with_caching(
+            marker_rad, state, physics_data, params, None, None)
+        assert jnp.allclose(tend.temperature, 123.0)

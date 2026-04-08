@@ -17,8 +17,9 @@ class RadiationParameters:
     
     # Time stepping
     dt_rad: float            # Radiation time step (s)
-    
-    # Solar parameters  
+    radiation_interval: float  # Seconds between radiation calls (0 = every step)
+
+    # Solar parameters
     solar_constant: float    # Solar constant (W/m²)
     
     # Spectral bands
@@ -43,15 +44,17 @@ class RadiationParameters:
     cld_frac_min: float      # Minimum cloud fraction
 
     @classmethod
-    def default(cls, dt_rad=3600.0, solar_constant=1361.0, n_sw_bands=2, n_lw_bands=3,
+    def default(cls, dt_rad=3600.0, radiation_interval=0.0,
+                 solar_constant=1361.0, n_sw_bands=2, n_lw_bands=3,
                  lw_band_limits=((10, 350), (350, 500), (500, 2500)),
                  sw_band_limits=((4000, 14500), (14500, 50000)),
                  co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
-                 min_cos_zenith=0.035, flux_epsilon=1e-6, 
+                 min_cos_zenith=0.035, flux_epsilon=1e-6,
                  cld_tau_min=1e-6, cld_frac_min=1e-3) -> 'RadiationParameters':
         """Return default radiation parameters"""
         return cls(
             dt_rad=jnp.array(dt_rad),
+            radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
             n_sw_bands=jnp.asarray(n_sw_bands),
             n_lw_bands=jnp.asarray(n_lw_bands),
