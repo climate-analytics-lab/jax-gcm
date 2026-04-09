@@ -165,7 +165,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time)))
 
     @pytest.mark.slow
     def test_speedy_model_gradients_multiple_timesteps_isnan(self):
@@ -190,7 +190,7 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].temperature_variation)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].log_surface_pressure)))
         self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].tracers['specific_humidity'])))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
+        self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time)))
 
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_vjp(self):
@@ -252,7 +252,7 @@ class TestModelUnit(unittest.TestCase):
         tangent = ones_like_tangent(params)
         _, jvp_sum = jax.jvp(model_run_wrapper, (params,), (tangent,))
         state = jvp_sum.dynamics
-        # physics_data = jvp_sum.physics
+        physics_data = jvp_sum.physics
 
         # Check dynamics state
         self.assertFalse(jnp.any(jnp.isnan(state.u_wind)))
@@ -261,9 +261,8 @@ class TestModelUnit(unittest.TestCase):
         self.assertFalse(jnp.any(jnp.isnan(state.specific_humidity)))
         self.assertFalse(jnp.any(jnp.isnan(state.geopotential)))
         self.assertFalse(jnp.any(jnp.isnan(state.normalized_surface_pressure)))
-        # self.assertFalse(jnp.any(jnp.isnan(df_dstate[0].sim_time))) FIXME: this is ending up nan
         # Check Physics Data object
-        # self.assertFalse(physics_data.isnan().any_true())  FIXME: shortwave_rad has integer value somewehre
+        self.assertFalse(physics_data.isnan().any_true())
 
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):

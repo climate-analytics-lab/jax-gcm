@@ -419,6 +419,9 @@ class Model:
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def _date_from_sim_time(self, sim_time) -> DateData:
+        # Stop gradient: date/calendar computations use non-differentiable ops
+        # (floor, round, int casts) and should not be part of the AD graph.
+        sim_time = jax.lax.stop_gradient(sim_time)
         return DateData.set_date(
             model_time=self.start_date + jdt.Timedelta(
                 days=jnp.floor(sim_time / 86400).astype(jnp.int32),
