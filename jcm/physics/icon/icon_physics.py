@@ -79,15 +79,14 @@ class IconPhysics(Physics):
             params = params.with_timestep(dt_physics)
 
         # Set radiation calling interval
-        if radiation_interval > 0:
-            rad_params = params.radiation.__class__(**{
-                **params.radiation.__dict__,
-                'radiation_interval': jnp.array(radiation_interval),
-            })
-            params = params.__class__(**{
-                **params.__dict__,
-                'radiation': rad_params,
-            })
+        rad_params = params.radiation.__class__(**{
+            **params.radiation.__dict__,
+            'radiation_interval': jnp.array(radiation_interval),
+        })
+        params = params.__class__(**{
+            **params.__dict__,
+            'radiation': rad_params,
+        })
 
         self.parameters = params
 
