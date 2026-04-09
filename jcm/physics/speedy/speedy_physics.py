@@ -145,6 +145,8 @@ class SpeedyPhysics(Physics):
         # but we need a completely zeroed one (including fields like model_year) for accumulating averages
         # Compute speedy_coords for the empty data (it's a constant cache, not zeroed)
         speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        # Convert coords to JAX arrays so dtypes match traced output (e.g. float64→float32)
+        speedy_coords = tree_map(jnp.asarray, speedy_coords)
         empty_data = PhysicsData.zeros(coords.horizontal.nodal_shape, coords.nodal_shape[0], speedy_coords=speedy_coords)
         # Zero out everything except speedy_coords (which should remain constant)
-        return tree_map(lambda x: 0*x, empty_data).copy(speedy_coords=speedy_coords)
+        return tree_map(jnp.zeros_like, empty_data).copy(speedy_coords=speedy_coords)

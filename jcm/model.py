@@ -425,7 +425,7 @@ class Model:
                 seconds=jnp.round(sim_time % 86400).astype(jnp.int32)
             ),
             model_step=jnp.int32(sim_time / self.dt_si.m),
-            dt_seconds=self.dt_si.m
+            dt_seconds=float(self.dt_si.m)
         )
 
     def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:

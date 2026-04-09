@@ -35,7 +35,7 @@ from jcm.physics.icon.forcing import apply_forcing_data
 
 class IconPhysics(Physics):
     """ICON atmospheric physics implementation for JAX-GCM
-    
+
     This class implements the ICON physics suite including:
     - Radiation (shortwave and longwave)
     - Convection (Tiedtke-Nordeng scheme)
@@ -45,7 +45,7 @@ class IconPhysics(Physics):
     - Gravity wave drag
     - Simple chemistry schemes
     """
-    
+
     def __init__(self,
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
@@ -132,7 +132,7 @@ class IconPhysics(Physics):
             nodal_shape[0],
             icon_coords=self.cached_coords,
         )
-        return tree_map(lambda x: 0 * x, empty).copy(
+        return tree_map(jnp.zeros_like, empty).copy(
             icon_coords=self.cached_coords
         )
 
