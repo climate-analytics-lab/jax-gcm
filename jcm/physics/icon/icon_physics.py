@@ -50,45 +50,23 @@ class IconPhysics(Physics):
                  write_output: bool = True,
                  checkpoint_terms: bool = True,
                  parameters: Optional[Parameters] = None,
-                 dt_physics: Optional[float] = None,
-                 radiation_scheme: str = "grey",
-                 radiation_interval: float = 0.0):
+                 radiation_scheme: str = "grey"):
         """Initialize the ICON physics.
 
         Args:
             write_output: Whether to write physics output to predictions
             checkpoint_terms: Whether to checkpoint physics terms
-            parameters: Optional physics parameters (uses defaults if None)
-            dt_physics: Physics timestep in seconds. If provided, overrides
-                all internal physics timesteps (dt_conv, dt_rad, etc.) to match
-                the model integration timestep. This is important since we don't
-                have sub-timestepping - all physics must use the same timestep.
+            parameters: Optional physics parameters (uses defaults if None).
+                Set ``radiation_interval`` on the radiation parameters to
+                control sub-stepping (e.g. 7200 s for 2-hourly radiation).
             radiation_scheme: Which radiation scheme to use. Either "grey"
                 (default simplified multi-band scheme) or "rrtmgp" (requires
                 jax-rrtmgp package).
-            radiation_interval: Seconds between radiation calls (0 = every
-                step). E.g. 7200.0 for 2-hourly radiation like ECHAM6.
 
         """
         self.write_output = write_output
         self.checkpoint_terms = checkpoint_terms
-
-        # Store parameters, optionally updating timesteps
-        params = parameters or Parameters.default()
-        if dt_physics is not None:
-            params = params.with_timestep(dt_physics)
-
-        # Set radiation calling interval
-        rad_params = params.radiation.__class__(**{
-            **params.radiation.__dict__,
-            'radiation_interval': jnp.array(radiation_interval),
-        })
-        params = params.__class__(**{
-            **params.__dict__,
-            'radiation': rad_params,
-        })
-
-        self.parameters = params
+        self.parameters = parameters or Parameters.default()
 
         # Cached coordinate data (populated by cache_coords)
         self.cached_coords = None
