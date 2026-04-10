@@ -480,20 +480,17 @@ class TestRadiationIntegration:
             surface_emissivity, surface_planck, self.n_lw_bands
         )
         
-        # Check results (hardcoded max_bands=10)
-        assert flux_up.shape == (self.nlev + 1, 10)
-        assert flux_down.shape == (self.nlev + 1, 10)
-        
-        # Only first n_lw_bands should have values, rest should be zero
-        assert jnp.all(flux_up[:, self.n_lw_bands:] == 0)
-        assert jnp.all(flux_down[:, self.n_lw_bands:] == 0)
-        
-        # Surface should emit upward (only check bands with non-zero values)
-        # Due to bug in band_fraction, only first 2 bands have values
+        # Output has one column per active band (``n_bands`` is now a static
+        # argument so the flux shape matches the requested band count).
+        assert flux_up.shape == (self.nlev + 1, self.n_lw_bands)
+        assert flux_down.shape == (self.nlev + 1, self.n_lw_bands)
+
+        # Surface should emit upward (only check bands with non-zero values).
+        # Due to a pre-existing bug in band_fraction, only the first two bands
+        # have values.
         assert jnp.all(flux_up[-1, :2] > 0)
-        
+
         # TOA should have net upward flux (OLR) for bands with non-zero values
-        # Due to bug in band_fraction, only first 2 bands have values
         olr = flux_up[0, :2] - flux_down[0, :2]
         assert jnp.all(olr > 0)
     
@@ -507,27 +504,21 @@ class TestRadiationIntegration:
             self.sw_optics, cos_zenith, toa_flux, surface_albedo, self.n_sw_bands
         )
         
-        # Check shapes (hardcoded max_bands=10)
-        assert flux_up.shape == (self.nlev + 1, 10)
-        assert flux_down.shape == (self.nlev + 1, 10)
-        assert flux_dir.shape == (self.nlev + 1, 10)
-        assert flux_dif.shape == (self.nlev + 1, 10)
-        
-        # Only first n_sw_bands should have values, rest should be zero
-        assert jnp.all(flux_up[:, self.n_sw_bands:] == 0)
-        assert jnp.all(flux_down[:, self.n_sw_bands:] == 0)
-        assert jnp.all(flux_dir[:, self.n_sw_bands:] == 0)
-        assert jnp.all(flux_dif[:, self.n_sw_bands:] == 0)
-        
-        # TOA boundary condition - direct flux at TOA equals incident flux (only first n_sw_bands)
-        assert jnp.allclose(flux_down[0, :self.n_sw_bands], toa_flux)
-        
-        # Surface reflection (only check first n_sw_bands)
-        assert jnp.all(flux_up[-1, :self.n_sw_bands] > 0)
-        
-        # Energy conservation: net flux should decrease downward (only first n_sw_bands)
+        # Output has one column per active band.
+        assert flux_up.shape == (self.nlev + 1, self.n_sw_bands)
+        assert flux_down.shape == (self.nlev + 1, self.n_sw_bands)
+        assert flux_dir.shape == (self.nlev + 1, self.n_sw_bands)
+        assert flux_dif.shape == (self.nlev + 1, self.n_sw_bands)
+
+        # TOA boundary condition - direct flux at TOA equals incident flux.
+        assert jnp.allclose(flux_down[0, :], toa_flux)
+
+        # Surface reflection.
+        assert jnp.all(flux_up[-1, :] > 0)
+
+        # Energy conservation: net flux should decrease downward.
         net_flux = flux_down - flux_up
-        assert jnp.all(net_flux[0, :self.n_sw_bands] >= net_flux[-1, :self.n_sw_bands])
+        assert jnp.all(net_flux[0, :] >= net_flux[-1, :])
     
     def test_heating_rates(self):
         """Test heating rate calculation"""

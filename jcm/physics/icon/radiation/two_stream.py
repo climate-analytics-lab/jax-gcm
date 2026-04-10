@@ -9,6 +9,8 @@ adding method for combining layers.
 Date: 2025-01-10
 """
 
+import functools
+
 import jax.numpy as jnp
 import jax
 from typing import Tuple, Optional
@@ -233,7 +235,7 @@ def longwave_fluxes_single_band(
     return flux_up, flux_down
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=('n_bands',))
 def longwave_fluxes(
     optical_properties: OpticalProperties,
     planck_layers: jnp.ndarray,
@@ -243,15 +245,15 @@ def longwave_fluxes(
     n_bands: int = 3
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate longwave fluxes using two-stream method.
-    
+
     Args:
         optical_properties: Layer optical properties
         planck_layers: Planck function at layer centers [nlev, n_bands]
         planck_interfaces: Planck function at interfaces [nlev+1, n_bands]
         surface_emissivity: Surface emissivity
         surface_planck: Surface Planck emission [n_bands]
-        n_bands: Number of spectral bands
-        
+        n_bands: Number of spectral bands (static for shape-polymorphic jit)
+
     Returns:
         Tuple of (upward_flux, downward_flux) at interfaces [nlev+1, n_bands]
 
@@ -268,24 +270,22 @@ def longwave_fluxes(
             surface_planck[band_idx]
         )
         return flux_up_band, flux_down_band
-    
-    # Apply to all bands - use fixed size for JAX compatibility
-    max_bands = 10
-    band_indices = jnp.arange(max_bands)
-    band_mask = band_indices < n_bands
+
+    # Run only over the bands we actually use (``n_bands`` is a static int).
+    # Previously this vmap ran over a fixed ``max_bands = 10`` buffer and then
+    # masked out unused bands, which wasted ~70 % of the two-stream work in
+    # the grey scheme (3 LW bands used out of 10).
+    band_indices = jnp.arange(n_bands)
     flux_up_all, flux_down_all = jax.vmap(process_band)(band_indices)
-    # Mask inactive bands (keep full size)
-    flux_up = jnp.where(band_mask[:, None], flux_up_all, 0.0)
-    flux_down = jnp.where(band_mask[:, None], flux_down_all, 0.0)
-    
+
     # Transpose to get [nlev+1, n_bands] shape
-    flux_up = flux_up.T
-    flux_down = flux_down.T
-    
+    flux_up = flux_up_all.T
+    flux_down = flux_down_all.T
+
     # Convert from radiance to flux (multiply by π)
     flux_up *= jnp.pi
     flux_down *= jnp.pi
-    
+
     return flux_up, flux_down
 
 
@@ -383,7 +383,7 @@ def shortwave_fluxes_single_band(
     return flux_up_total, flux_down_total, flux_direct, flux_down_dif
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=('n_bands',))
 def shortwave_fluxes(
     optical_properties: OpticalProperties,
     cos_zenith: float,
@@ -392,14 +392,14 @@ def shortwave_fluxes(
     n_bands: int = 2
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate shortwave fluxes using two-stream method.
-    
+
     Args:
         optical_properties: Layer optical properties
         cos_zenith: Cosine of solar zenith angle
         toa_flux: TOA incident flux [n_bands]
         surface_albedo: Surface albedo [n_bands]
-        n_bands: Number of spectral bands
-        
+        n_bands: Number of spectral bands (static for shape-polymorphic jit)
+
     Returns:
         Tuple of (up_flux, down_flux, down_direct, down_diffuse)
         All at interfaces [nlev+1, n_bands]
@@ -416,24 +416,19 @@ def shortwave_fluxes(
             surface_albedo[band_idx]
         )
         return flux_up, flux_down, flux_dir, flux_dif
-    
-    # Apply to all bands - use fixed size for JAX compatibility
-    max_bands = 10
-    band_indices = jnp.arange(max_bands)
-    band_mask = band_indices < n_bands
-    flux_up_all, flux_down_all, flux_direct_all, flux_diffuse_all = jax.vmap(process_band)(band_indices)
-    # Mask inactive bands (keep full size)
-    flux_up = jnp.where(band_mask[:, None], flux_up_all, 0.0)
-    flux_down = jnp.where(band_mask[:, None], flux_down_all, 0.0)
-    flux_direct = jnp.where(band_mask[:, None], flux_direct_all, 0.0)
-    flux_diffuse = jnp.where(band_mask[:, None], flux_diffuse_all, 0.0)
-    
+
+    # Run only over the bands we actually use (``n_bands`` is a static int).
+    band_indices = jnp.arange(n_bands)
+    flux_up_all, flux_down_all, flux_direct_all, flux_diffuse_all = jax.vmap(
+        process_band
+    )(band_indices)
+
     # Transpose to get [nlev+1, n_bands] shape
-    flux_up = flux_up.T
-    flux_down = flux_down.T
-    flux_direct = flux_direct.T
-    flux_diffuse = flux_diffuse.T
-    
+    flux_up = flux_up_all.T
+    flux_down = flux_down_all.T
+    flux_direct = flux_direct_all.T
+    flux_diffuse = flux_diffuse_all.T
+
     return flux_up, flux_down, flux_direct, flux_diffuse
 
 

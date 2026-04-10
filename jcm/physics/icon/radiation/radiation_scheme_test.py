@@ -203,11 +203,12 @@ def test_radiation_scheme_basic():
     assert tendencies.longwave_heating.shape == (nlev,)
     assert tendencies.shortwave_heating.shape == (nlev,)
     
-    # Check diagnostic shapes - hardcoded to max_bands=10
-    assert diagnostics.sw_flux_up.shape == (nlev + 1, 10)  # max_bands hardcoded
-    assert diagnostics.sw_flux_down.shape == (nlev + 1, 10)
-    assert diagnostics.lw_flux_up.shape == (nlev + 1, 10)  # max_bands hardcoded
-    assert diagnostics.lw_flux_down.shape == (nlev + 1, 10)
+    # Check diagnostic shapes: one column per active band in the grey scheme
+    # (2 SW, 3 LW).
+    assert diagnostics.sw_flux_up.shape == (nlev + 1, 2)
+    assert diagnostics.sw_flux_down.shape == (nlev + 1, 2)
+    assert diagnostics.lw_flux_up.shape == (nlev + 1, 3)
+    assert diagnostics.lw_flux_down.shape == (nlev + 1, 3)
     
     # Check scalar diagnostics
     assert jnp.isscalar(diagnostics.toa_sw_down)
@@ -330,9 +331,11 @@ def test_radiation_scheme_custom_parameters():
         surface_temperature=jnp.array([288.0])
     )
 
-    # Check output shapes - hardcoded to max_bands=10
-    assert diagnostics.sw_flux_up.shape == (7, 10)  # max_bands hardcoded
-    assert diagnostics.lw_flux_up.shape == (7, 10)  # max_bands hardcoded
+    # The grey scheme hardcodes 2 SW / 3 LW bands internally regardless of
+    # what ``n_sw_bands`` / ``n_lw_bands`` are in the parameters, so diagnostic
+    # fluxes always have that many columns.
+    assert diagnostics.sw_flux_up.shape == (7, 2)
+    assert diagnostics.lw_flux_up.shape == (7, 3)
     
     # Should still produce valid results
     assert not jnp.any(jnp.isnan(tendencies.temperature_tendency))

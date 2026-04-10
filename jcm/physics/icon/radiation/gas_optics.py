@@ -10,10 +10,6 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from typing import Tuple
-# from functools import partial  # Not needed anymore
-
-from .radiation_types import OpticalProperties
 
 
 @jax.jit
@@ -311,32 +307,30 @@ def gas_optical_depth_lw(
         Optical depth [nlev, n_bands]
 
     """
-    nlev = temperature.shape[0]
-    
     # Calculate absorption for all bands using vmap
     def single_band_absorption(band):
         # Water vapor absorption
         k_h2o = water_vapor_continuum(temperature, pressure, h2o_vmr, band)
-        
+
         # CO2 absorption
         k_co2 = co2_absorption(temperature, pressure, co2_vmr, band)
-        
+
         # Ozone absorption
         k_o3 = ozone_absorption_lw(temperature, o3_vmr, band)
-        
+
         # Total absorption coefficient
         k_total = k_h2o + k_co2 + k_o3
-        
+
         # Optical depth = absorption * density * path length
         return k_total * air_density * layer_thickness
-    
-    # Apply to all LW bands - use fixed shape
+
+    # Apply to all LW bands via vmap (was a Python ``for band in range(N_LW_BANDS)``
+    # loop that staged N_LW_BANDS separate ``.at[:, band].set(...)`` updates into
+    # XLA, producing a long unrolled dependency chain).
     from .constants import N_LW_BANDS
-    tau = jnp.zeros((nlev, N_LW_BANDS))
-    for band in range(N_LW_BANDS):
-        tau = tau.at[:, band].set(single_band_absorption(band))
-    
-    return tau
+    bands = jnp.arange(N_LW_BANDS)
+    tau_per_band = jax.vmap(single_band_absorption)(bands)  # (N_LW_BANDS, nlev)
+    return tau_per_band.T  # (nlev, N_LW_BANDS)
 
 
 @jax.jit
@@ -364,11 +358,9 @@ def gas_optical_depth_sw(
         Optical depth [nlev, n_bands]
 
     """
-    nlev = pressure.shape[0]
-    
     # Path length correction for solar angle
     sec_zenith = 1.0 / jnp.maximum(cos_zenith, 0.01)
-    
+
     # Calculate absorption for all bands
     def single_band_absorption(band):
         # Water vapor absorption (simplified - mainly NIR)
@@ -378,23 +370,21 @@ def gas_optical_depth_sw(
             0.01 * h2o_mmr,  # Very simplified
             0.0
         )
-        
+
         # Ozone absorption with temperature dependence
         k_o3 = ozone_absorption_sw(o3_vmr, temperature, band)
-        
+
         # Total absorption
         k_total = k_h2o + k_o3
-        
+
         # Optical depth with slant path correction
         return k_total * air_density * layer_thickness * sec_zenith
-    
-    # Apply to all SW bands - use fixed shape
+
+    # Apply to all SW bands via vmap (same motivation as ``gas_optical_depth_lw``).
     from .constants import N_SW_BANDS
-    tau = jnp.zeros((nlev, N_SW_BANDS))
-    for band in range(N_SW_BANDS):
-        tau = tau.at[:, band].set(single_band_absorption(band))
-    
-    return tau
+    bands = jnp.arange(N_SW_BANDS)
+    tau_per_band = jax.vmap(single_band_absorption)(bands)  # (N_SW_BANDS, nlev)
+    return tau_per_band.T  # (nlev, N_SW_BANDS)
 
 
 @jax.jit
@@ -429,121 +419,3 @@ def rayleigh_optical_depth(
     return tau
 
 
-def create_gas_optics(
-    temperature: jnp.ndarray,
-    pressure: jnp.ndarray,
-    h2o_vmr: jnp.ndarray,
-    o3_vmr: jnp.ndarray,
-    layer_thickness: jnp.ndarray,
-    air_density: jnp.ndarray,
-    cos_zenith,
-    config,
-) -> Tuple[OpticalProperties, OpticalProperties]:
-    """Create gas optical properties for SW and LW.
-    
-    Args:
-        temperature: Temperature (K) [nlev]
-        pressure: Pressure (Pa) [nlev]
-        h2o_vmr: Water vapor volume mixing ratio [nlev]
-        o3_vmr: Ozone volume mixing ratio [nlev]
-        layer_thickness: Layer thickness (m) [nlev]
-        air_density: Air density (kg/m³) [nlev]
-        cos_zenith: Cosine solar zenith angle
-        config: Radiation configuration
-        
-    Returns:
-        Tuple of (sw_optics, lw_optics)
-
-    """
-    # Longwave optical depths
-    tau_lw = gas_optical_depth_lw(
-        temperature,
-        pressure,
-        h2o_vmr,
-        o3_vmr,
-        config.co2_vmr,
-        layer_thickness,
-        air_density,
-    )
-    
-    # Shortwave optical depths
-    tau_sw = gas_optical_depth_sw(
-        pressure,
-        temperature,
-        h2o_vmr,
-        o3_vmr,
-        layer_thickness,
-        air_density,
-        cos_zenith
-    )
-    
-    # Add Rayleigh scattering to visible band
-    tau_rayleigh = rayleigh_optical_depth(
-        pressure,
-        layer_thickness,
-        0.55  # Visible wavelength
-    )
-    tau_sw = tau_sw.at[:, 0].add(tau_rayleigh)
-    
-    # Gas absorption has no scattering (ssa=0) except Rayleigh
-    nlev = temperature.shape[0]
-    
-    # Longwave: pure absorption
-    # Create fixed-size arrays for JAX compatibility
-    max_bands = 10
-    lw_band_mask = jnp.arange(max_bands) < config.n_lw_bands
-    lw_ssa_all = jnp.zeros((nlev, max_bands))
-    lw_g_all = jnp.zeros((nlev, max_bands))
-    
-    lw_optics = OpticalProperties(
-        optical_depth=tau_lw,
-        single_scatter_albedo=jnp.where(lw_band_mask[jnp.newaxis], lw_ssa_all, 0.0),
-        asymmetry_factor=jnp.where(lw_band_mask[jnp.newaxis], lw_g_all, 0.0)
-    )
-    
-    # Shortwave: Rayleigh scattering in visible
-    sw_band_mask = jnp.arange(max_bands) < config.n_sw_bands
-    sw_ssa_all = jnp.zeros((nlev, max_bands))
-    sw_ssa_all = sw_ssa_all.at[:, 0].set(
-        tau_rayleigh / jnp.maximum(tau_sw[:, 0], 1e-10)
-    )
-    sw_g_all = jnp.zeros((nlev, max_bands))
-    
-    sw_optics = OpticalProperties(
-        optical_depth=tau_sw,
-        single_scatter_albedo=jnp.where(sw_band_mask[jnp.newaxis], sw_ssa_all, 0.0),
-        asymmetry_factor=jnp.where(sw_band_mask[jnp.newaxis], sw_g_all, 0.0)  # Rayleigh: g=0
-    )
-    
-    return sw_optics, lw_optics
-
-
-# Test function
-def test_gas_optics():
-    """Test gas optics calculations"""
-    nlev = 20
-    
-    # Create test atmosphere
-    pressure = jnp.linspace(100000, 10000, nlev)
-    temperature = jnp.linspace(288, 220, nlev)
-    h2o_vmr = jnp.linspace(0.01, 1e-6, nlev)
-    o3_vmr = jnp.ones(nlev) * 5e-6
-    thickness = jnp.ones(nlev) * 500.0
-    density = pressure / (287.0 * temperature)
-    
-    # Test LW optical depth
-    tau_lw = gas_optical_depth_lw(
-        temperature, pressure, h2o_vmr, o3_vmr,
-        400e-6, thickness, density
-    )
-    
-    from .constants import N_LW_BANDS
-    assert tau_lw.shape == (nlev, N_LW_BANDS)
-    assert jnp.all(tau_lw >= 0)
-    assert jnp.all(jnp.isfinite(tau_lw))
-    
-    print("Gas optics tests passed!")
-
-
-if __name__ == "__main__":
-    test_gas_optics()

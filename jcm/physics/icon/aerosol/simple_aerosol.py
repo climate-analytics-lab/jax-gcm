@@ -52,15 +52,19 @@ def get_simple_aerosol(
     year_weight = forcing.aerosol_year_weight
     ann_cycle = forcing.aerosol_ann_cycle
 
+    # Compute the plume spatial distribution once; ``get_anthropogenic_aod`` /
+    # ``get_background_aod`` used to recompute it internally so the Gaussian
+    # evaluation ran three times per step. Pass it through instead.
+    spatial_dist = get_plume_spatial_distribution(lats, lons, aerosol_params)
+
     # Calculate anthropogenic and background AOD using vectorized operations
-    aod_anthropogenic = get_anthropogenic_aod(lats, lons, aerosol_params, year_weight, ann_cycle)
-    aod_background = get_background_aod(lats, lons, aerosol_params, ann_cycle)
-    
+    aod_anthropogenic = get_anthropogenic_aod(
+        aerosol_params, year_weight, ann_cycle, spatial_dist
+    )
+    aod_background = get_background_aod(aerosol_params, ann_cycle, spatial_dist)
+
     # Calculate vertical profiles for each plume using vectorized operations
     plume_profiles = get_vertical_profiles(height_full, aerosol_params)
-    
-    # Calculate spatial distribution for all plumes
-    spatial_dist = get_plume_spatial_distribution(lats, lons, aerosol_params)
     
     # Combine plume contributions using vectorized operations
     # plume_profiles: (nplumes, nlev, ncols)
@@ -180,22 +184,19 @@ def get_plume_spatial_distribution(lats, lons, parameters):
     return jnp.sum(weighted_gaussian, axis=0)  # (nplumes, ncols)
 
 
-def get_background_aod(lats, lons, parameters, ann_cycle, constant_background=0.02):
-    """Calculate background (pre-industrial) aerosol optical depth
+def get_background_aod(parameters, ann_cycle, spatial_dist, constant_background=0.02):
+    """Calculate background (pre-industrial) aerosol optical depth.
 
     Args:
-        lats: Array of latitudes [degrees]
-        lons: Array of longitudes [degrees]
         parameters: AerosolParameters object
         ann_cycle: Annual cycle weights (nplumes,) from forcing data
+        spatial_dist: Precomputed plume Gaussian distribution (nplumes, ncols)
         constant_background: Constant background AOD value
 
     Returns:
         Background AOD array of shape (ncols,)
 
     """
-    # Multiply the Gaussians through the grid
-    spatial_dist = get_plume_spatial_distribution(lats, lons, parameters)
     cw_bg = ann_cycle[:, jnp.newaxis] * parameters.aod_fmbg[:, jnp.newaxis] * spatial_dist
 
     # calculate contribution to plume from its different features, to get a column weight for the anthropogenic
@@ -205,15 +206,14 @@ def get_background_aod(lats, lons, parameters, ann_cycle, constant_background=0.
     return aod_PI
 
 
-def get_anthropogenic_aod(lats, lons, parameters, year_weight, ann_cycle):
-    """Calculate anthropogenic aerosol optical depth
+def get_anthropogenic_aod(parameters, year_weight, ann_cycle, spatial_dist):
+    """Calculate anthropogenic aerosol optical depth.
 
     Args:
-        lats: Array of latitudes [degrees]
-        lons: Array of longitudes [degrees]
         parameters: AerosolParameters object
         year_weight: Year-specific emission weights (nplumes,) from forcing data
         ann_cycle: Annual cycle weights (nplumes,) from forcing data
+        spatial_dist: Precomputed plume Gaussian distribution (nplumes, ncols)
 
     Returns:
         Anthropogenic AOD array of shape (ncols,)
@@ -221,9 +221,6 @@ def get_anthropogenic_aod(lats, lons, parameters, year_weight, ann_cycle):
     """
     # Use time weights for anthropogenic emissions
     time_weight = year_weight * ann_cycle
-
-    # Multiply the Gaussians through the grid
-    spatial_dist = get_plume_spatial_distribution(lats, lons, parameters)
     cw_an = time_weight[:, jnp.newaxis] * parameters.aod_spmx[:, jnp.newaxis] * spatial_dist
 
     aod_anth = jnp.sum(cw_an, axis=0)

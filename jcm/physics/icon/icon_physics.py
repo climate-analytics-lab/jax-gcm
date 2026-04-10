@@ -28,7 +28,7 @@ from jcm.physics.icon.parameters import Parameters
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
 from jcm.physics.icon.surface.surface_types import AtmosphericForcing
 from jcm.physics.icon.gravity_waves import gravity_wave_drag
-from jcm.physics.icon.chemistry import simple_chemistry, initialize_chemistry_tracers
+from jcm.physics.icon.chemistry import simple_chemistry
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.forcing import apply_forcing_data
@@ -618,33 +618,11 @@ def _prepare_common_physics_state(
         layer_thickness=dz_full,
     )
 
-    # Initialize chemistry tracers if not already done
-    # Check if chemistry is initialized by checking if ozone maximum is reasonable
-    ozone_max = jnp.max(physics_data.chemistry.ozone_vmr)
-    should_initialize = ozone_max < 100.0  # If max ozone < 100 ppbv, initialize
-    
-    # Initialize chemistry tracers with reasonable distributions
-    chemistry_state = initialize_chemistry_tracers(
-        pressure_levels,
-        surface_pressure,
-        state.temperature,
-        config=None  # Use defaults
-    )
-    
-    # Use JAX where to conditionally update chemistry
-    chemistry_data = physics_data.chemistry.copy(
-        ozone_vmr=jnp.where(should_initialize, chemistry_state.ozone_vmr, physics_data.chemistry.ozone_vmr),
-        methane_vmr=jnp.where(should_initialize, chemistry_state.methane_vmr, physics_data.chemistry.methane_vmr),
-        co2_vmr=jnp.where(should_initialize, chemistry_state.co2_vmr, physics_data.chemistry.co2_vmr),
-        ozone_production=jnp.where(should_initialize, chemistry_state.ozone_production, physics_data.chemistry.ozone_production),
-        ozone_loss=jnp.where(should_initialize, chemistry_state.ozone_loss, physics_data.chemistry.ozone_loss),
-        methane_loss=jnp.where(should_initialize, chemistry_state.methane_loss, physics_data.chemistry.methane_loss)
-    )
-    
-    updated_physics_data = physics_data.copy(
-        diagnostics=diagnostic_data,
-        chemistry=chemistry_data
-    )
+    # Note: chemistry is intentionally not initialized here. ``apply_forcing_data``
+    # (the next term in the physics sequence) unconditionally overwrites
+    # ``physics_data.chemistry`` with constant GHG concentrations every step,
+    # so any initialization work done here would be immediately discarded.
+    updated_physics_data = physics_data.copy(diagnostics=diagnostic_data)
 
     zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
     return zero_tendencies, updated_physics_data
@@ -1113,97 +1091,77 @@ def apply_vertical_diffusion(
     forcing: ForcingData,
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply vertical diffusion and boundary layer physics"""
-    from jcm.physics.icon.vertical_diffusion import prepare_vertical_diffusion_state, vertical_diffusion_column
-    
+    """Apply vertical diffusion and boundary layer physics.
+
+    The underlying ``vertical_diffusion_column`` routine already accepts
+    batched ``(ncols, nlev)`` arrays, so we call it once directly instead of
+    wrapping a fake single-column vmap around it. Inputs to physics terms are
+    ``(nlev, ncols)``; we transpose to ``(ncols, nlev)`` at the boundary.
+    """
+    from jcm.physics.icon.vertical_diffusion import (
+        prepare_vertical_diffusion_state,
+        vertical_diffusion_column,
+    )
+
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
+    pressure_full = physics_data.diagnostics.pressure_full
     pressure_half = physics_data.diagnostics.pressure_half
-    height_levels = physics_data.diagnostics.height_full
+    height_full = physics_data.diagnostics.height_full
     height_half = physics_data.diagnostics.height_half
-    
-    # Initialize prognostic variables if not present (ensure proper column format)
-    if hasattr(physics_data.vertical_diffusion, 'tke'):
-        tke = physics_data.vertical_diffusion.tke
-        # Reshape TKE if it's in grid format [nlev, nlat, nlon] -> [nlev, ncols]
-        if tke.ndim == 3:
-            tke = tke.reshape(nlev, ncols)
-    else:
-        tke = jnp.ones((nlev, ncols)) * 0.1
-        
-    if hasattr(physics_data.vertical_diffusion, 'thv_variance'):
-        thv_variance = physics_data.vertical_diffusion.thv_variance
-        # Reshape if needed
-        if thv_variance.ndim == 3:
-            thv_variance = thv_variance.reshape(nlev, ncols)
-    else:
-        thv_variance = jnp.zeros((nlev, ncols))
-    
+
+    # Prognostic TKE (reshape grid format to column format if needed).
+    # ``thv_variance`` is not a stored diagnostic, so just zero it out each call.
+    tke = physics_data.vertical_diffusion.tke
+    if tke.ndim == 3:
+        tke = tke.reshape(nlev, ncols)
+    thv_variance = jnp.zeros((nlev, ncols))
+
     # Surface properties (simplified - should come from boundaries)
     nsfc_type = 3  # water, ice, land
     surface_fraction = jnp.zeros((ncols, nsfc_type))
     surface_fraction = surface_fraction.at[:, 2].set(1.0)  # All land for now
-    
-    # Get surface properties from forcing
-    # Reshape boundary fields to column format
-    surface_temp = physics_data.surface.surface_temperature.reshape(ncols)
-    roughness_length = physics_data.surface.roughness_length.reshape(ncols)
 
-    surface_temperature = jnp.repeat(surface_temp[:, jnp.newaxis], nsfc_type, axis=1)
-    roughness = jnp.repeat(roughness_length[:, jnp.newaxis], nsfc_type, axis=1)
-    
+    # Get surface properties from boundaries
+    surface_temp_col = physics_data.surface.surface_temperature.reshape(ncols)
+    roughness_length_col = physics_data.surface.roughness_length.reshape(ncols)
+    surface_temperature = jnp.repeat(surface_temp_col[:, jnp.newaxis], nsfc_type, axis=1)
+    roughness = jnp.repeat(roughness_length_col[:, jnp.newaxis], nsfc_type, axis=1)
+
     # Ocean currents (zero for now)
     ocean_u = jnp.zeros(ncols)
     ocean_v = jnp.zeros(ncols)
-    
-    # Extract fixed qc/qi tracers for vertical diffusion
+
+    # Extract fixed qc/qi tracers
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    
-    def apply_vdiff_to_column(u_col, v_col, temp_col, qv_col, qc_col, qi_col,
-                             pressure_full_col, pressure_half_col, geopot_col,
-                             height_full_col, height_half_col, surface_temp_col,
-                             surface_frac_col, roughness_col, ocean_u_scalar, ocean_v_scalar,
-                             tke_col, thv_var_col):
-        """Apply vertical diffusion to a single column with structured output"""
-        # Prepare state for this column - reshape to expected 2D format (1, nlev) or (1, nlev+1)
-        vdiff_state = prepare_vertical_diffusion_state(
-            u=u_col[None, :], v=v_col[None, :], temperature=temp_col[None, :], 
-            qv=qv_col[None, :], qc=qc_col[None, :], qi=qi_col[None, :],
-            pressure_full=pressure_full_col[None, :], pressure_half=pressure_half_col[None, :],
-            geopotential=geopot_col[None, :], height_full=height_full_col[None, :], 
-            height_half=height_half_col[None, :],
-            surface_temperature=surface_temp_col[None, :], surface_fraction=surface_frac_col[None, :],
-            roughness_length=roughness_col[None, :], ocean_u=ocean_u_scalar[None], ocean_v=ocean_v_scalar[None],
-            tke=tke_col[None, :], thv_variance=thv_var_col[None, :]
-        )
-        
-        # Compute vertical diffusion
-        tendencies, diagnostics = vertical_diffusion_column(
-            vdiff_state, parameters.vertical_diffusion, dt
-        )
-        
-        # Squeeze outputs to remove the dummy column dimension (1, nlev) -> (nlev)
-        def squeeze_first_dim(x):
-            return jnp.squeeze(x, axis=0) if x.ndim > 1 else x
-        
-        tendencies = jax.tree_util.tree_map(squeeze_first_dim, tendencies)
-        diagnostics = jax.tree_util.tree_map(squeeze_first_dim, diagnostics)
-        
-        # Return structured data directly
-        return tendencies, diagnostics
-    
-    vdiff_results = jax.vmap(
-        apply_vdiff_to_column, # FIXME: this should call vertical_diffusion_scheme
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1),  # Fix surface properties to axis 0 (column mapped)
-        out_axes=(0, 0)  # Returns (VDiffTendencies, VDiffDiagnostics) per column
-    )(state.u_wind, state.v_wind, state.temperature, state.specific_humidity, qc, qi,
-      pressure_levels, pressure_half, state.geopotential, height_levels, height_half,
-      surface_temperature, surface_fraction, roughness, ocean_u, ocean_v, tke, thv_variance)
-    
-    # Unpack structured results from vmap
-    vdiff_tendencies, vdiff_diagnostics = vdiff_results
+
+    # Transpose column-first fields from (nlev, ncols) to (ncols, nlev) for the
+    # batched vertical diffusion routines.
+    vdiff_state = prepare_vertical_diffusion_state(
+        u=state.u_wind.T,
+        v=state.v_wind.T,
+        temperature=state.temperature.T,
+        qv=state.specific_humidity.T,
+        qc=qc.T,
+        qi=qi.T,
+        pressure_full=pressure_full.T,
+        pressure_half=pressure_half.T,
+        geopotential=state.geopotential.T,
+        height_full=height_full.T,
+        height_half=height_half.T,
+        surface_temperature=surface_temperature,
+        surface_fraction=surface_fraction,
+        roughness_length=roughness,
+        ocean_u=ocean_u,
+        ocean_v=ocean_v,
+        tke=tke.T,
+        thv_variance=thv_variance.T,
+    )
+
+    vdiff_tendencies, vdiff_diagnostics = vertical_diffusion_column(
+        vdiff_state, parameters.vertical_diffusion, dt
+    )
     
     # Extract tendencies (already in correct shape [ncols, nlev] from vmap)
     u_tend = vdiff_tendencies.u_tendency.T  # Transpose to [nlev, ncols]

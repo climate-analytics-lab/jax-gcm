@@ -12,6 +12,7 @@ from jcm.physics.icon.radiation.cloud_optics import effective_radius_liquid
 from jcm.physics.icon.aerosol.simple_aerosol import (
     get_optical_properties,
     get_anthropogenic_aod,
+    get_plume_spatial_distribution,
 )
 from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
 
@@ -173,18 +174,20 @@ def test_temporal_weights_scale_aod():
     lats = jnp.linspace(-90, 90, ncols)
     lons = jnp.linspace(-180, 180, ncols)
 
+    spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+
     # Present-day: weights = 1
     year_weight_pd = jnp.ones(params.nplumes)
     ann_cycle = jnp.ones(params.nplumes)
-    aod_pd = get_anthropogenic_aod(lats, lons, params, year_weight_pd, ann_cycle)
+    aod_pd = get_anthropogenic_aod(params, year_weight_pd, ann_cycle, spatial_dist)
 
     # Pre-industrial: weights = 0
     year_weight_pi = jnp.zeros(params.nplumes)
-    aod_pi = get_anthropogenic_aod(lats, lons, params, year_weight_pi, ann_cycle)
+    aod_pi = get_anthropogenic_aod(params, year_weight_pi, ann_cycle, spatial_dist)
 
     # Half emissions
     year_weight_half = jnp.ones(params.nplumes) * 0.5
-    aod_half = get_anthropogenic_aod(lats, lons, params, year_weight_half, ann_cycle)
+    aod_half = get_anthropogenic_aod(params, year_weight_half, ann_cycle, spatial_dist)
 
     assert jnp.all(aod_pi == 0), "Pre-industrial AOD should be zero"
     assert jnp.allclose(aod_half, aod_pd * 0.5, rtol=1e-6), "Half weights should give half AOD"
@@ -192,7 +195,7 @@ def test_temporal_weights_scale_aod():
     # Seasonal cycle: reduce one plume
     ann_cycle_reduced = jnp.ones(params.nplumes)
     ann_cycle_reduced = ann_cycle_reduced.at[0].set(0.5)
-    aod_seasonal = get_anthropogenic_aod(lats, lons, params, year_weight_pd, ann_cycle_reduced)
+    aod_seasonal = get_anthropogenic_aod(params, year_weight_pd, ann_cycle_reduced, spatial_dist)
 
     # Total AOD should decrease compared to present-day
     assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)

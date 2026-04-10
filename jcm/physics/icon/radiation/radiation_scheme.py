@@ -376,14 +376,15 @@ def radiation_scheme(
     emissivity_val = surface_emissivity if surface_emissivity.ndim == 0 else surface_emissivity[0]
     flux_up_lw, flux_down_lw = longwave_fluxes(
         lw_optics, planck_layers, planck_interfaces,
-        emissivity_val, surface_planck
+        emissivity_val, surface_planck, default_n_lw_bands
     )
 
-    # Calculate shortwave fluxes
-    max_sw_bands = 10
-    toa_flux_bands_all = jnp.ones(max_sw_bands) * toa_flux / jnp.maximum(default_n_sw_bands, 1.0)
-    sw_band_mask = jnp.arange(max_sw_bands) < default_n_sw_bands
-    toa_flux_bands = jnp.where(sw_band_mask, toa_flux_bands_all, 0.0)
+    # Calculate shortwave fluxes.  ``default_n_sw_bands`` is a Python int, so
+    # this allocation has a statically-known shape and does not need a
+    # ``max_bands`` buffer + mask.
+    toa_flux_bands = jnp.full(
+        (default_n_sw_bands,), toa_flux / max(default_n_sw_bands, 1)
+    )
 
     # Note: When vmapped, albedos are scalars; otherwise extract first element
     albedo_vis_val = surface_albedo_vis if surface_albedo_vis.ndim == 0 else surface_albedo_vis[0]

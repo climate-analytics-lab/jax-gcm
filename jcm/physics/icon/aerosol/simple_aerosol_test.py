@@ -209,45 +209,51 @@ class TestAODCalculations:
         """Test anthropogenic AOD calculation shape"""
         params = AerosolParameters.default()
         ncols = 500
-        
+
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
-        
-        aod_anth = get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes))
-        
+
+        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+        aod_anth = get_anthropogenic_aod(
+            params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
+        )
+
         assert aod_anth.shape == (ncols,)
         assert jnp.all(aod_anth >= 0)
-    
+
     def test_background_aod_shape(self):
         """Test background AOD calculation shape"""
         params = AerosolParameters.default()
         ncols = 500
-        
+
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
-        
-        aod_bg = get_background_aod(lats, lons, params, jnp.ones(params.nplumes))
-        
+
+        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+        aod_bg = get_background_aod(params, jnp.ones(params.nplumes), spatial_dist)
+
         assert aod_bg.shape == (ncols,)
         assert jnp.all(aod_bg >= 0)
-    
+
     def test_aod_plume_regions(self):
         """Test that AOD is higher in plume regions"""
         params = AerosolParameters.default()
-        
+
         # Test coordinates at plume centers vs remote regions
         plume_lats = params.plume_lat[:3]  # First 3 plumes
         plume_lons = params.plume_lon[:3]
-        
+
         # Remote regions (ocean)
         remote_lats = jnp.array([0.0, 0.0, 0.0])
         remote_lons = jnp.array([0.0, 90.0, 180.0])
-        
+
         year_weight = jnp.ones(params.nplumes)
         ann_cycle = jnp.ones(params.nplumes)
-        aod_plume = get_anthropogenic_aod(plume_lats, plume_lons, params, year_weight, ann_cycle)
-        aod_remote = get_anthropogenic_aod(remote_lats, remote_lons, params, year_weight, ann_cycle)
-        
+        plume_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
+        remote_dist = get_plume_spatial_distribution(remote_lats, remote_lons, params)
+        aod_plume = get_anthropogenic_aod(params, year_weight, ann_cycle, plume_dist)
+        aod_remote = get_anthropogenic_aod(params, year_weight, ann_cycle, remote_dist)
+
         # AOD should be higher at plume centers
         assert jnp.all(aod_plume > aod_remote)
 
@@ -378,16 +384,19 @@ class TestJAXCompatibility:
         params = AerosolParameters.default()
         
         def aod_sum(lats, lons):
-            return jnp.sum(get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes)))
-        
+            spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+            return jnp.sum(get_anthropogenic_aod(
+                params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
+            ))
+
         ncols = 20
         lats = jnp.linspace(-90, 90, ncols)
         lons = jnp.linspace(-180, 180, ncols)
-        
+
         # Compute gradients
         grad_fn = jax.grad(aod_sum, argnums=(0, 1))
         grads = grad_fn(lats, lons)
-        
+
         assert len(grads) == 2
         assert grads[0].shape == (ncols,)
         assert grads[1].shape == (ncols,)
@@ -411,22 +420,24 @@ class TestIntegration:
         height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
         height_full = jnp.repeat(height_full, ncols, axis=1)
         
+        # Test spatial distribution (needed by AOD calculations)
+        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+        assert spatial_dist.shape == (params.nplumes, ncols)
+
         # Test individual functions work together
-        aod_anth = get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes))
-        aod_bg = get_background_aod(lats, lons, params, jnp.ones(params.nplumes))
-        
+        aod_anth = get_anthropogenic_aod(
+            params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
+        )
+        aod_bg = get_background_aod(params, jnp.ones(params.nplumes), spatial_dist)
+
         assert aod_anth.shape == (ncols,)
         assert aod_bg.shape == (ncols,)
         assert jnp.all(aod_anth >= 0)
         assert jnp.all(aod_bg >= 0)
-        
+
         # Test vertical profiles
         profiles = get_vertical_profiles(height_full, params)
         assert profiles.shape == (params.nplumes, nlev, ncols)
-        
-        # Test spatial distribution
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        assert spatial_dist.shape == (params.nplumes, ncols)
         
         # Test optical properties
         aod_profile = jnp.ones((nlev, ncols)) * 0.1
@@ -456,8 +467,8 @@ class TestIntegration:
 
         # All should compile and run without errors
         spatial_dist = jit_spatial(lats, lons, params)
-        aod_anth = jit_aod_anth(lats, lons, params, year_weight, ann_cycle)
-        aod_bg = jit_aod_bg(lats, lons, params, ann_cycle)
+        aod_anth = jit_aod_anth(params, year_weight, ann_cycle, spatial_dist)
+        aod_bg = jit_aod_bg(params, ann_cycle, spatial_dist)
 
         assert spatial_dist.shape == (params.nplumes, ncols)
         assert aod_anth.shape == (ncols,)
@@ -465,13 +476,16 @@ class TestIntegration:
         assert jnp.all(jnp.isfinite(spatial_dist))
         assert jnp.all(jnp.isfinite(aod_anth))
         assert jnp.all(jnp.isfinite(aod_bg))
-    
+
     def test_gradient_computation(self):
         """Test gradient computation for differentiability"""
         params = AerosolParameters.default()
-        
+
         def total_aod(lats, lons):
-            return jnp.sum(get_anthropogenic_aod(lats, lons, params, jnp.ones(params.nplumes), jnp.ones(params.nplumes)))
+            spatial_dist = get_plume_spatial_distribution(lats, lons, params)
+            return jnp.sum(get_anthropogenic_aod(
+                params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
+            ))
         
         ncols = 20
         lats = jnp.linspace(-90, 90, ncols)
