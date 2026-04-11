@@ -7,41 +7,46 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 import tree_math
 
 
 @tree_math.struct
 class RadiationParameters:
     """Configuration parameters for radiation scheme"""
-    
+
     # Time stepping
     dt_rad: float            # Radiation time step (s)
     radiation_interval: float  # Seconds between radiation calls (0 = every step)
 
     # Solar parameters
     solar_constant: float    # Solar constant (W/m²)
-    
+
     # Spectral bands
     n_sw_bands: int          # Number of shortwave bands
     n_lw_bands: int          # Number of longwave bands
-    
+
     # Band limits (wavenumber in cm⁻¹)
     lw_band_limits: tuple    # LW bands
     sw_band_limits: tuple    # SW bands
-    
+
     # Gas concentrations (volume mixing ratios)
     co2_vmr: float           # CO2 volume mixing ratio
     ch4_vmr: float           # CH4 volume mixing ratio
     n2o_vmr: float           # N2O volume mixing ratio
-    
+
     # Numerical parameters
     min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
     flux_epsilon: float      # Small value for flux calculations
-    
+
     # Cloud optics parameters
     cld_tau_min: float       # Minimum cloud optical depth
     cld_frac_min: float      # Minimum cloud fraction
+
+    # Neural-network emulator (only used when radiation_scheme="emulated")
+    emulator_weights: Optional[object] = None  # EmulatorWeights pytree
+    sw_scaling: Optional[object] = None        # InputScaling for SW network
+    lw_scaling: Optional[object] = None        # InputScaling for LW network
 
     @classmethod
     def default(cls, dt_rad=3600.0, radiation_interval=0.0,
@@ -50,7 +55,9 @@ class RadiationParameters:
                  sw_band_limits=((4000, 14500), (14500, 50000)),
                  co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
                  min_cos_zenith=0.035, flux_epsilon=1e-6,
-                 cld_tau_min=1e-6, cld_frac_min=1e-3) -> 'RadiationParameters':
+                 cld_tau_min=1e-6, cld_frac_min=1e-3,
+                 emulator_weights=None, sw_scaling=None,
+                 lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
         return cls(
             dt_rad=jnp.array(dt_rad),
@@ -66,7 +73,10 @@ class RadiationParameters:
             min_cos_zenith=jnp.array(min_cos_zenith),
             flux_epsilon=jnp.array(flux_epsilon),
             cld_tau_min=jnp.array(cld_tau_min),
-            cld_frac_min=jnp.array(cld_frac_min)
+            cld_frac_min=jnp.array(cld_frac_min),
+            emulator_weights=emulator_weights,
+            sw_scaling=sw_scaling,
+            lw_scaling=lw_scaling,
         )
 
 
