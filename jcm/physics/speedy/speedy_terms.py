@@ -228,7 +228,7 @@ class SpeedyConvection(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = _params_with(convection=self.params.get_value())
 
-        from jcm.physics.speedy.convection import get_convection_tendencies
+        from jcm.physics.convection.speedy_convection import get_convection_tendencies
         tend, data = get_convection_tendencies(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
