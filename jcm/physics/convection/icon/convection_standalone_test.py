@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jax
 
 # Import convection modules directly
-from jcm.physics.icon.convection.tiedtke_nordeng import (
+from jcm.physics.convection.icon.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
     ConvectionParameters,
     saturation_mixing_ratio,

@@ -27,7 +27,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 import tree_math
 
-from ..constants.physical_constants import (
+from jcm.physics.icon.constants.physical_constants import (
     grav, rd, rv, cp, eps, tmelt, alhc
 )
 

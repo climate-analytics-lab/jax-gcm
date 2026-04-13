@@ -15,7 +15,7 @@ import jax.numpy as jnp
 from jax import lax
 from typing import Tuple
 
-from ..constants.physical_constants import (
+from jcm.physics.icon.constants.physical_constants import (
     grav, cp, alhc, tmelt
 )
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies

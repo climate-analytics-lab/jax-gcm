@@ -6,16 +6,16 @@ Date: 2025-01-09
 import jax.numpy as jnp
 import jax
 
-from jcm.physics.icon.convection.tiedtke_nordeng import (
+from jcm.physics.convection.icon.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
     find_cloud_base,
     calculate_cape_cin,
     ConvectionParameters,
     saturation_mixing_ratio
 )
-from jcm.physics.icon.convection.downdraft import calculate_downdraft
-from jcm.physics.icon.convection.updraft import calculate_updraft
-from jcm.physics.icon.convection.flux_tendencies import mass_flux_closure
+from jcm.physics.convection.icon.downdraft import calculate_downdraft
+from jcm.physics.convection.icon.updraft import calculate_updraft
+from jcm.physics.convection.icon.flux_tendencies import mass_flux_closure
 
 
 def create_test_atmosphere(nlev=40, unstable=True):
@@ -221,7 +221,7 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from ..constants.physical_constants import cp, alhc
+            from jcm.physics.icon.constants.physical_constants import cp, alhc
             
             # Sensible heat change
             dH_sensible = jnp.sum(tendencies.dtedt * cp)
@@ -343,7 +343,7 @@ class TestIdealizedConvection:
         temperature = jnp.full(nlev, 288.0)  # K
 
         # Hydrostatic height from pressure
-        from ..constants.physical_constants import rd, grav
+        from jcm.physics.icon.constants.physical_constants import rd, grav
         height = -rd * 288.0 / grav * jnp.log(pressure / 1e5)
 
         # Very dry conditions - no moisture
@@ -381,7 +381,7 @@ class TestIdealizedConvection:
         sigma_levels = jnp.array([0.95, 0.835, 0.685, 0.51, 0.34, 0.2, 0.095, 0.025])
         pressure = sigma_levels * 1e5  # Pa
 
-        from ..constants.physical_constants import rd, grav
+        from jcm.physics.icon.constants.physical_constants import rd, grav
 
         # Temperature profile following approximate moist adiabat
         # Starting from warm, moist surface
@@ -747,8 +747,8 @@ class TestConvectivePrecipitation:
 
         Direct unit test for the cloud mask bug.
         """
-        from jcm.physics.icon.convection.flux_tendencies import calculate_precipitation_rate
-        from jcm.physics.icon.convection.updraft import UpdatedraftState
+        from jcm.physics.convection.icon.flux_tendencies import calculate_precipitation_rate
+        from jcm.physics.convection.icon.updraft import UpdatedraftState
 
         nlev = 20
         # Simulate updraft with liquid water between levels 5 (ktop) and 15 (kbase)

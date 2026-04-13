@@ -17,7 +17,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 from functools import partial
 
-from ..constants.physical_constants import (
+from jcm.physics.icon.constants.physical_constants import (
     cp, alhc
 )
 from .tiedtke_nordeng import (
