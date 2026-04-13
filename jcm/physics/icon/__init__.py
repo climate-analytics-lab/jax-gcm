@@ -24,7 +24,7 @@ implemented as a separate JAX function that can be composed together.
 from jcm.physics.icon.constants import physical_constants
 from jcm.physics.icon.icon_physics import IconPhysics
 from jcm.physics.icon.parameters import Parameters
-from jcm.physics.icon.diagnostics import wmo_tropopause
+from jcm.physics.diagnostics.icon import wmo_tropopause
 
 __all__ = [
     'physical_constants',

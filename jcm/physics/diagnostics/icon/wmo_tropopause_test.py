@@ -4,7 +4,7 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
-from jcm.physics.icon.diagnostics.wmo_tropopause import (
+from jcm.physics.diagnostics.icon.wmo_tropopause import (
     wmo_tropopause, 
     compute_geopotential_height,
     compute_lapse_rate,
