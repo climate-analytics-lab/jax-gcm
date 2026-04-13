@@ -26,7 +26,7 @@ from jcm.physics.icon.radiation.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data,
 )
-from jcm.physics.icon.clouds.shallow_clouds import (
+from jcm.physics.clouds.icon.shallow_clouds import (
     saturation_specific_humidity,
 )
 

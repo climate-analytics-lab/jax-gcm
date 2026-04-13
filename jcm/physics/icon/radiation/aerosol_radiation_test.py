@@ -312,7 +312,7 @@ def test_aerosol_microphysics_droplet_coupling():
 
 def test_higher_cdnc_reduces_autoconversion():
     """Test physical effect: more droplets → smaller drops → less autoconversion"""
-    from jcm.physics.icon.clouds.cloud_microphysics import (
+    from jcm.physics.clouds.icon.cloud_microphysics import (
         autoconversion_kk2000, MicrophysicsParameters
     )
 

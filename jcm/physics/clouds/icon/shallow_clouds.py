@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
-from ..constants.physical_constants import (
+from jcm.physics.icon.constants.physical_constants import (
     tmelt, alhc, alhs, cp, eps
 )
 

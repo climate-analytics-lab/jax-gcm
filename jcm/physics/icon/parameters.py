@@ -9,7 +9,7 @@ Date: 2025-01-10
 import tree_math
 
 from jcm.physics.convection.icon import ConvectionParameters
-from .clouds import CloudParameters, MicrophysicsParameters
+from jcm.physics.clouds.icon import CloudParameters, MicrophysicsParameters
 from jcm.physics.gravity_waves.icon import GravityWaveParameters
 from .radiation import RadiationParameters
 from .vertical_diffusion.vertical_diffusion_types import VDiffParameters

@@ -10,7 +10,7 @@ from .cloud_microphysics import (
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
-from ..constants.physical_constants import tmelt
+from jcm.physics.icon.constants.physical_constants import tmelt
 
 
 class TestCloudDropletRadius:

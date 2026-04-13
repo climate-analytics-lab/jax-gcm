@@ -11,7 +11,7 @@ from .shallow_clouds import (
     partition_cloud_phase, condensation_evaporation,
     shallow_cloud_scheme
 )
-from ..constants.physical_constants import tmelt, eps
+from jcm.physics.icon.constants.physical_constants import tmelt, eps
 
 
 class TestSaturationFunctions:
@@ -457,9 +457,9 @@ class TestAerosolPrecipitationCoupling:
 
     def _run_column(self, cdnc_value):
         """Run the combined cloud+microphysics column with given CDNC."""
-        from ..clouds.cloud_microphysics import MicrophysicsParameters
-        from ..icon_physics import _cloud_and_microphysics_column
-        from ..constants.physical_constants import rd
+        from jcm.physics.clouds.icon.cloud_microphysics import MicrophysicsParameters
+        from jcm.physics.icon.icon_physics import _cloud_and_microphysics_column
+        from jcm.physics.icon.constants.physical_constants import rd
 
         nlev = 20
         pressure = jnp.linspace(100000, 20000, nlev)
