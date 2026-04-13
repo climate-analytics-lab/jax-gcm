@@ -43,6 +43,7 @@ class ComposablePhysics(nnx.Module, Physics):
             terms: Ordered list of PhysicsTerm instances.
             checkpoint_terms: Whether to checkpoint each term for memory
                 efficiency during backpropagation (default True).
+
         """
         self.terms = nnx.List(terms)
         self.checkpoint_terms = checkpoint_terms
@@ -78,6 +79,7 @@ class ComposablePhysics(nnx.Module, Physics):
 
         Returns:
             Summed tendencies and the final diagnostics dict.
+
         """
         diagnostics: dict[str, jnp.ndarray] = {}
         if prev_physics_data is not None:
@@ -174,6 +176,7 @@ class ComposablePhysics(nnx.Module, Physics):
         )
 
     def __radd__(self, other):
+        """Support sum() by handling 0 + ComposablePhysics."""
         if other == 0:
             return self
         return NotImplemented

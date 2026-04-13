@@ -35,6 +35,7 @@ class LinearHeating(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("heating_rate",)
 
     def __init__(self, alpha: float = 1.0):
+        """Initialize LinearHeating."""
         self.alpha = nnx.Param(jnp.array(alpha))
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -55,6 +56,7 @@ class QuadraticMoistening(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("moisture_source",)
 
     def __init__(self, beta: float = 0.5):
+        """Initialize QuadraticMoistening."""
         self.beta = nnx.Param(jnp.array(beta))
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -75,6 +77,7 @@ class DiagnosticConsumer(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("surface_flux",)
 
     def __init__(self, gamma: float = 0.1):
+        """Initialize DiagnosticConsumer."""
         self.gamma = nnx.Param(jnp.array(gamma))
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -396,6 +399,7 @@ class TestDifferentiabilityGate(unittest.TestCase):
             category: ClassVar[str] = "test"
 
             def __init__(self, scale: float = 1.0):
+                """Initialize CoordsAwareTerm."""
                 self.scale = nnx.Param(jnp.array(scale))
                 # Initialize with a placeholder; cache_coords will overwrite
                 self.cached_value = nnx.Variable(jnp.array(0.0))

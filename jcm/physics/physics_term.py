@@ -66,6 +66,7 @@ class PhysicsTerm(nnx.Module):
 
         Returns:
             A tuple of (tendencies, updated_diagnostics).
+
         """
         raise NotImplementedError
 
@@ -88,6 +89,7 @@ class PhysicsTerm(nnx.Module):
         return ComposablePhysics(terms=self_terms + other_terms)
 
     def __radd__(self, other):
+        """Support sum() by handling 0 + PhysicsTerm."""
         if other == 0:
             # Support sum([term1, term2, ...]) which starts with 0 + term1
             from jcm.physics.composable_physics import ComposablePhysics

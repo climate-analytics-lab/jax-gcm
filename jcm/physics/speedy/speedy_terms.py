@@ -117,6 +117,7 @@ class SpeedyTermBase(PhysicsTerm):
     """
 
     def __init__(self):
+        """Initialize SpeedyTermBase."""
         # Placeholder — populated by cache_coords
         self._coords_cached = False
 
@@ -163,6 +164,7 @@ class SpeedyForcing(SpeedyTermBase):
     category: ClassVar[str] = "forcing"
 
     def __init__(self, forcing_params=None, mod_radcon_params=None):
+        """Initialize SpeedyForcing."""
         super().__init__()
         # ForcingParameters contains bools/ints — not differentiable, use Variable
         self.forcing_params = nnx.Variable(
@@ -218,6 +220,7 @@ class SpeedyConvection(SpeedyTermBase):
     category: ClassVar[str] = "convection"
 
     def __init__(self, convection_params=None):
+        """Initialize SpeedyConvection."""
         super().__init__()
         self.params = nnx.Param(convection_params or ConvectionParameters.default())
 
@@ -239,6 +242,7 @@ class SpeedyLargeScaleCondensation(SpeedyTermBase):
     category: ClassVar[str] = "condensation"
 
     def __init__(self, condensation_params=None):
+        """Initialize SpeedyLargeScaleCondensation."""
         super().__init__()
         self.params = nnx.Param(condensation_params or CondensationParameters.default())
 
@@ -264,6 +268,7 @@ class SpeedyClouds(SpeedyTermBase):
     category: ClassVar[str] = "clouds"
 
     def __init__(self, sw_params=None):
+        """Initialize SpeedyClouds."""
         super().__init__()
         self.params = nnx.Param(sw_params or ShortwaveRadiationParameters.default())
 
@@ -285,6 +290,7 @@ class SpeedyShortwaveRadiation(SpeedyTermBase):
     category: ClassVar[str] = "radiation_sw"
 
     def __init__(self, sw_params=None, mod_radcon_params=None):
+        """Initialize SpeedyShortwaveRadiation."""
         super().__init__()
         self.sw_params = nnx.Param(
             sw_params or ShortwaveRadiationParameters.default()
@@ -316,6 +322,7 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
     category: ClassVar[str] = "radiation_lw_down"
 
     def __init__(self, mod_radcon_params=None):
+        """Initialize SpeedyDownwardLongwaveRadiation."""
         super().__init__()
         self.mod_radcon_params = nnx.Param(
             mod_radcon_params or ModRadConParameters.default()
@@ -345,6 +352,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
     category: ClassVar[str] = "surface"
 
     def __init__(self, surface_params=None, mod_radcon_params=None):
+        """Initialize SpeedySurfaceFlux."""
         super().__init__()
         # SurfaceFluxParameters contains bools — use Variable
         # for non-differentiable parts.
@@ -379,6 +387,7 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
     category: ClassVar[str] = "radiation_lw_up"
 
     def __init__(self, mod_radcon_params=None):
+        """Initialize SpeedyUpwardLongwaveRadiation."""
         super().__init__()
         self.mod_radcon_params = nnx.Param(
             mod_radcon_params or ModRadConParameters.default()
@@ -408,6 +417,7 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
     category: ClassVar[str] = "vertical_diffusion"
 
     def __init__(self, vdiff_params=None):
+        """Initialize SpeedyVerticalDiffusion."""
         super().__init__()
         self.params = nnx.Param(vdiff_params or VerticalDiffusionParameters.default())
 
@@ -435,6 +445,7 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
 
     Returns:
         A ComposablePhysics instance with all SPEEDY terms.
+
     """
     from jcm.physics.composable_physics import ComposablePhysics
 
