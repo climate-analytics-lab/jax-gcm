@@ -3,12 +3,12 @@
 import pytest
 import jax.numpy as jnp
 
-from jcm.physics.icon.surface.ocean import (
+from jcm.physics.surface.icon.ocean import (
     compute_ocean_albedo, compute_ocean_roughness, mixed_layer_ocean_step,
     compute_ocean_surface_fluxes, ocean_surface_temperature_step,
     ocean_physics_step, compute_ocean_coupling_fluxes
 )
-from jcm.physics.icon.surface.surface_types import (
+from jcm.physics.surface.icon.surface_types import (
     SurfaceParameters, AtmosphericForcing, SurfaceFluxes
 )
 

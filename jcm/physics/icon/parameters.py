@@ -13,7 +13,7 @@ from jcm.physics.clouds.icon import CloudParameters, MicrophysicsParameters
 from jcm.physics.gravity_waves.icon import GravityWaveParameters
 from .radiation import RadiationParameters
 from .vertical_diffusion.vertical_diffusion_types import VDiffParameters
-from .surface import SurfaceParameters
+from jcm.physics.surface.icon import SurfaceParameters
 from jcm.physics.aerosol.icon.aerosol_params import AerosolParameters
 
 @tree_math.struct

@@ -3,12 +3,12 @@
 import pytest
 import jax.numpy as jnp
 
-from jcm.physics.icon.surface.turbulent_fluxes import (
+from jcm.physics.surface.icon.turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
     compute_exchange_coefficients, compute_surface_humidity,
     compute_turbulent_fluxes
 )
-from jcm.physics.icon.surface.surface_types import (
+from jcm.physics.surface.icon.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes
 )

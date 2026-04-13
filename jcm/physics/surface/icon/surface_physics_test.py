@@ -3,11 +3,11 @@
 import pytest
 import jax.numpy as jnp
 
-from jcm.physics.icon.surface.surface_physics import (
+from jcm.physics.surface.icon.surface_physics import (
     initialize_surface_state, surface_physics_step,
     combine_surface_fluxes, update_surface_state
 )
-from jcm.physics.icon.surface.surface_types import (
+from jcm.physics.surface.icon.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
 )

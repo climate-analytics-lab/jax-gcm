@@ -3,7 +3,7 @@
 import pytest
 import jax.numpy as jnp
 
-from jcm.physics.icon.surface.surface_types import (
+from jcm.physics.surface.icon.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing, 
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics, SurfaceResistances
 )
