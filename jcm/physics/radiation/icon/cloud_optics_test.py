@@ -7,7 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from jcm.physics.icon.radiation.cloud_optics import (
+from jcm.physics.radiation.icon.cloud_optics import (
     cloud_optics,
     effective_radius_liquid,
     effective_radius_ice
@@ -80,7 +80,7 @@ def test_cloud_optics_integration():
     )
     
     # Check output shapes - now using fixed bands
-    from jcm.physics.icon.radiation.constants import N_SW_BANDS, N_LW_BANDS
+    from jcm.physics.radiation.icon.constants import N_SW_BANDS, N_LW_BANDS
     assert sw_optics.optical_depth.shape == (nlev, N_SW_BANDS)
     assert sw_optics.single_scatter_albedo.shape == (nlev, N_SW_BANDS)
     assert sw_optics.asymmetry_factor.shape == (nlev, N_SW_BANDS)

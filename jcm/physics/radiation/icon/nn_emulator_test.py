@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jcm.physics.icon.radiation.nn_emulator import (
+from jcm.physics.radiation.icon.nn_emulator import (
     gru_cell,
     gru_forward_sequence,
     gru_backward_sequence,

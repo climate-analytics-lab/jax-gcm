@@ -184,7 +184,7 @@ class TestGasOptics:
             self.temperature, self.pressure, self.h2o_vmr, self.o3_vmr,
             400e-6, self.thickness, self.density
         )
-        from jcm.physics.icon.radiation.constants import N_LW_BANDS
+        from jcm.physics.radiation.icon.constants import N_LW_BANDS
         assert tau_lw.shape == (self.nlev, N_LW_BANDS)
         assert jnp.all(tau_lw >= 0)
         assert jnp.all(jnp.isfinite(tau_lw))
@@ -194,7 +194,7 @@ class TestGasOptics:
             self.pressure, self.temperature, self.h2o_vmr, self.o3_vmr,
             self.thickness, self.density, cos_zenith=0.5
         )
-        from jcm.physics.icon.radiation.constants import N_SW_BANDS
+        from jcm.physics.radiation.icon.constants import N_SW_BANDS
         assert tau_sw.shape == (self.nlev, N_SW_BANDS)
         assert jnp.all(tau_sw >= 0)
     
@@ -264,7 +264,7 @@ class TestPlanckFunctions:
         bands = ((10, 350), (350, 500), (500, 2500))
         fracs = band_fraction(T, bands, is_lw=True)
         
-        from jcm.physics.icon.radiation.constants import N_LW_BANDS
+        from jcm.physics.radiation.icon.constants import N_LW_BANDS
         assert fracs.shape == (N_LW_BANDS,)
         assert jnp.all(fracs >= 0) and jnp.all(fracs <= 1)
         # These bands (10-2500 cm^-1) cover MOST of the thermal infrared spectrum
@@ -326,7 +326,7 @@ class TestCloudOptics:
         )
         
         # Check shapes
-        from jcm.physics.icon.radiation.constants import N_SW_BANDS, N_LW_BANDS
+        from jcm.physics.radiation.icon.constants import N_SW_BANDS, N_LW_BANDS
         assert sw_optics.optical_depth.shape == (self.nlev, N_SW_BANDS)
         assert lw_optics.optical_depth.shape == (self.nlev, N_LW_BANDS)
         

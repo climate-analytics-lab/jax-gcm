@@ -14,12 +14,12 @@ from typing import Tuple, Optional
 
 import jax.numpy as jnp
 
-from jcm.physics.icon.radiation.radiation_types import (
+from jcm.physics.radiation.icon.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
 )
 from jcm.physics.icon.icon_physics_data import RadiationData
-from jcm.physics.icon.radiation.nn_emulator import (
+from jcm.physics.radiation.icon.nn_emulator import (
     EmulatorWeights,
     InputScaling,
     preprocess_sw_inputs,

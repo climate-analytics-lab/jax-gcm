@@ -7,11 +7,11 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from jcm.physics.icon.radiation.radiation_scheme import (
+from jcm.physics.radiation.icon.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
 )
-from jcm.physics.icon.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.icon.radiation_types import RadiationParameters
 from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
 from jcm.physics.icon.icon_physics_data import AerosolData
 import jax_datetime as jdt

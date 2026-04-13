@@ -15,7 +15,7 @@ from .radiation_types import (
     RadiationTendencies,
     OpticalProperties
 )
-from ..icon_physics_data import RadiationData
+from jcm.physics.icon.icon_physics_data import RadiationData
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jax_datetime import Datetime

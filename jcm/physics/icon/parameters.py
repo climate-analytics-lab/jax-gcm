@@ -11,7 +11,7 @@ import tree_math
 from jcm.physics.convection.icon import ConvectionParameters
 from jcm.physics.clouds.icon import CloudParameters, MicrophysicsParameters
 from jcm.physics.gravity_waves.icon import GravityWaveParameters
-from .radiation import RadiationParameters
+from jcm.physics.radiation.icon import RadiationParameters
 from jcm.physics.vertical_diffusion.icon.vertical_diffusion_types import VDiffParameters
 from jcm.physics.surface.icon import SurfaceParameters
 from jcm.physics.aerosol.icon.aerosol_params import AerosolParameters

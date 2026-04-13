@@ -7,7 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from jcm.physics.icon.radiation.planck import (
+from jcm.physics.radiation.icon.planck import (
     planck_bands_lw,
     planck_function_wavenumber,
     planck_derivative,
@@ -86,7 +86,7 @@ def test_planck_bands():
     planck_integrated = planck_bands_lw(temperatures, band_limits)
     
     # Check output shape
-    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    from jcm.physics.radiation.icon.constants import N_LW_BANDS
     assert planck_integrated.shape == (nlev, N_LW_BANDS)
     
     # First 3 bands should have values (only 3 band_limits provided)
@@ -96,7 +96,7 @@ def test_planck_bands():
     assert not jnp.any(jnp.isnan(planck_integrated))
     
     # Higher temperatures should give higher Planck values
-    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    from jcm.physics.radiation.icon.constants import N_LW_BANDS
     for band in range(N_LW_BANDS):
         assert jnp.all(planck_integrated[1:, band] >= planck_integrated[:-1, band])
 
@@ -109,7 +109,7 @@ def test_planck_bands_single_temperature():
     band_limits = ((100, 500), (500, 1500), (1500, 3000))
     planck_vals = planck_bands_lw(temperature, band_limits)
     
-    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    from jcm.physics.radiation.icon.constants import N_LW_BANDS
     assert planck_vals.shape == (N_LW_BANDS,)
     # First 3 bands should have values (only 3 band_limits provided)
     assert jnp.all(planck_vals[:3] > 0)
@@ -122,7 +122,7 @@ def test_planck_bands_array_input():
     
     planck_vals = planck_bands_lw(temperatures, band_limits)
     
-    from jcm.physics.icon.radiation.constants import N_LW_BANDS
+    from jcm.physics.radiation.icon.constants import N_LW_BANDS
     assert planck_vals.shape == (3, N_LW_BANDS)  # (n_temp, n_bands)
     # First 3 bands should have values (only 3 band_limits provided)
     assert jnp.all(planck_vals[:, :3] > 0)

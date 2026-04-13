@@ -23,13 +23,13 @@ import jax.numpy as jnp
 from jax import lax
 
 from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
-from jcm.physics.icon.radiation.radiation_types import (
+from jcm.physics.radiation.icon.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
 )
 from jcm.physics.icon.icon_physics_data import RadiationData
-from jcm.physics.icon.radiation.radiation_scheme import prepare_radiation_state
-from jcm.physics.icon.radiation.cloud_optics import (
+from jcm.physics.radiation.icon.radiation_scheme import prepare_radiation_state
+from jcm.physics.radiation.icon.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice,
 )
