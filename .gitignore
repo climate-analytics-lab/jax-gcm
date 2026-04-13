@@ -171,3 +171,4 @@ startup.sh
 
 docs/build
 docs/source/generated
+.claude/worktrees/
