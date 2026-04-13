@@ -409,7 +409,7 @@ def compute_surface_fluxes(
         Tuple of (momentum_flux_u, momentum_flux_v, heat_flux, moisture_flux)
 
     """
-    from ..constants.physical_constants import grav, cp, karman_const
+    from jcm.physics.icon.constants.physical_constants import grav, cp, karman_const
     
     # Surface wind speed
     wind_u = state.u[:, -1]

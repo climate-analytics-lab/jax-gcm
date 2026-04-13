@@ -1235,7 +1235,7 @@ def apply_vertical_diffusion(
     wrapping a fake single-column vmap around it. Inputs to physics terms are
     ``(nlev, ncols)``; we transpose to ``(ncols, nlev)`` at the boundary.
     """
-    from jcm.physics.icon.vertical_diffusion import (
+    from jcm.physics.vertical_diffusion.icon import (
         prepare_vertical_diffusion_state,
         vertical_diffusion_column,
     )
