@@ -233,6 +233,30 @@ class IconRadiationRRTMGP(IconTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
+class IconRadiationEmulated(IconTermBase):
+    """Neural network radiation emulator (bidirectional GRU).
+
+    Uses a pre-trained neural network to emulate radiative transfer,
+    providing a fast, differentiable alternative to RRTMGP.
+    See ``jcm.physics.icon.radiation.nn_emulator`` for details.
+    """
+
+    name: ClassVar[str] = "icon_radiation_emulated"
+    category: ClassVar[str] = "radiation"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute NN-emulated radiative heating rates."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import (
+            apply_radiation_emulated,
+        )
+        tend, data = apply_radiation_emulated(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
 class IconConvection(IconTermBase):
     """Tiedtke-Nordeng convection scheme."""
 
@@ -556,7 +580,7 @@ def icon_physics(
     Args:
         parameters: Optional ICON Parameters. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms.
-        radiation_scheme: "grey" (default) or "rrtmgp".
+        radiation_scheme: "grey" (default), "rrtmgp", or "emulated".
 
     Returns:
         A ComposableIconPhysics instance with all ICON terms.
@@ -568,10 +592,12 @@ def icon_physics(
         rad_term = IconRadiationRRTMGP()
     elif radiation_scheme == "grey":
         rad_term = IconRadiation()
+    elif radiation_scheme == "emulated":
+        rad_term = IconRadiationEmulated()
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
-            "Choose 'grey' or 'rrtmgp'."
+            "Choose 'grey', 'rrtmgp', or 'emulated'."
         )
 
     return ComposableIconPhysics(
