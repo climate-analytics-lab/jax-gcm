@@ -27,7 +27,7 @@ from jcm.physics.icon.clouds import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics.icon.surface import surface_physics_step, initialize_surface_state
 from jcm.physics.icon.surface.surface_types import AtmosphericForcing
-from jcm.physics.icon.gravity_waves import gravity_wave_drag
+from jcm.physics.gravity_waves.icon import gravity_wave_drag
 from jcm.physics.icon.chemistry import simple_chemistry
 from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
 from jcm.physics.icon.icon_physics_data import PhysicsData
