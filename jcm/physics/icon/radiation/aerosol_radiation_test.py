@@ -9,12 +9,12 @@ from jcm.physics.icon.radiation.radiation_scheme import (
 )
 from jcm.physics.icon.radiation.radiation_types import RadiationParameters, OpticalProperties
 from jcm.physics.icon.radiation.cloud_optics import effective_radius_liquid
-from jcm.physics.icon.aerosol.simple_aerosol import (
+from jcm.physics.aerosol.icon.simple_aerosol import (
     get_optical_properties,
     get_anthropogenic_aod,
     get_plume_spatial_distribution,
 )
-from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
+from jcm.physics.aerosol.icon.aerosol_params import AerosolParameters
 
 def test_aerosol_cloud_interaction():
     """Test that aerosols modify cloud effective radius"""

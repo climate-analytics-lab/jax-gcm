@@ -29,7 +29,7 @@ from jcm.physics.icon.surface import surface_physics_step, initialize_surface_st
 from jcm.physics.icon.surface.surface_types import AtmosphericForcing
 from jcm.physics.gravity_waves.icon import gravity_wave_drag
 from jcm.physics.chemistry.icon import simple_chemistry
-from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
+from jcm.physics.aerosol.icon.simple_aerosol import get_simple_aerosol
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.forcing import apply_forcing_data
 

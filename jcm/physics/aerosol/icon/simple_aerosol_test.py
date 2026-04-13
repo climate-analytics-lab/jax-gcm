@@ -7,7 +7,7 @@ with proper JAX compatibility and vectorization.
 import jax.numpy as jnp
 import jax
 import pytest
-from jcm.physics.icon.aerosol.simple_aerosol import (
+from jcm.physics.aerosol.icon.simple_aerosol import (
     get_plume_spatial_distribution,
     get_anthropogenic_aod,
     get_background_aod,
@@ -16,7 +16,7 @@ from jcm.physics.icon.aerosol.simple_aerosol import (
     get_optical_properties,
     get_CDNC,
 )
-from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
+from jcm.physics.aerosol.icon.aerosol_params import AerosolParameters
 
 
 class TestAerosolParameters:
