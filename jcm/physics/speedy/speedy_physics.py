@@ -62,8 +62,8 @@ class SpeedyPhysics(Physics):
         from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
         from jcm.physics.speedy.convection import get_convection_tendencies
         from jcm.physics.speedy.large_scale_condensation import get_large_scale_condensation_tendencies
-        from jcm.physics.speedy.shortwave_radiation import get_shortwave_rad_fluxes, get_clouds
-        from jcm.physics.speedy.longwave_radiation import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
+        from jcm.physics.radiation.speedy_shortwave import get_shortwave_rad_fluxes, get_clouds
+        from jcm.physics.radiation.speedy_longwave import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics.speedy.surface_flux import get_surface_fluxes
         from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
         from jcm.physics.speedy.forcing import set_forcing

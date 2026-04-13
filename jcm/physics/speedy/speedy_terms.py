@@ -276,7 +276,7 @@ class SpeedyClouds(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = _params_with(shortwave_radiation=self.params.get_value())
 
-        from jcm.physics.speedy.shortwave_radiation import get_clouds
+        from jcm.physics.radiation.speedy_shortwave import get_clouds
         tend, data = get_clouds(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
@@ -306,7 +306,7 @@ class SpeedyShortwaveRadiation(SpeedyTermBase):
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
-        from jcm.physics.speedy.shortwave_radiation import (
+        from jcm.physics.radiation.speedy_shortwave import (
             get_shortwave_rad_fluxes,
         )
         tend, data = get_shortwave_rad_fluxes(state, data, params, forcing, terrain)
@@ -334,7 +334,7 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
-        from jcm.physics.speedy.longwave_radiation import (
+        from jcm.physics.radiation.speedy_longwave import (
             get_downward_longwave_rad_fluxes,
         )
         tend, data = get_downward_longwave_rad_fluxes(
@@ -399,7 +399,7 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
-        from jcm.physics.speedy.longwave_radiation import (
+        from jcm.physics.radiation.speedy_longwave import (
             get_upward_longwave_rad_fluxes,
         )
         tend, data = get_upward_longwave_rad_fluxes(
