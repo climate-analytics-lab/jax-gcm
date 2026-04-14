@@ -24,18 +24,46 @@ jcm/                          # Main package
 ├── diffusion.py              # Diffusion filter
 ├── config/                   # Hydra configuration files
 ├── physics/
-│   ├── speedy/               # SPEEDY physics parameterizations
-│   │   ├── speedy_physics.py # Main SPEEDY orchestrator
-│   │   ├── speedy_coords.py  # SPEEDY coordinate caching (vertical/horizontal)
+│   ├── physics_term.py       # PhysicsTerm base class (composable physics)
+│   ├── composable_physics.py # ComposablePhysics container
+│   ├── speedy/               # SPEEDY infrastructure (params, coords, orchestrators)
+│   │   ├── speedy_physics.py # Main SPEEDY orchestrator (legacy interface)
+│   │   ├── speedy_terms.py   # Composable SPEEDY term wrappers + factory
+│   │   ├── speedy_coords.py  # SPEEDY coordinate caching
 │   │   ├── params.py         # Tunable parameter structs
-│   │   ├── convection.py     # Convection scheme
-│   │   ├── humidity.py       # Moisture processes
-│   │   ├── large_scale_condensation.py
-│   │   ├── shortwave_radiation.py
-│   │   ├── longwave_radiation.py
-│   │   ├── surface_flux.py   # Surface exchange
-│   │   ├── vertical_diffusion.py
-│   │   └── *_test.py         # Co-located unit tests
+│   │   ├── physics_data.py   # SPEEDY PhysicsData struct
+│   │   └── physical_constants.py
+│   ├── icon/                 # ICON infrastructure (params, coords, orchestrators)
+│   │   ├── icon_physics.py   # Main ICON orchestrator (legacy interface)
+│   │   ├── icon_terms.py     # Composable ICON term wrappers + factory
+│   │   ├── icon_coords.py    # ICON coordinate caching
+│   │   ├── parameters.py     # ICON parameter structs
+│   │   ├── icon_physics_data.py
+│   │   └── constants/        # ICON physical constants
+│   ├── radiation/            # Radiation schemes (organized by process)
+│   │   ├── speedy_shortwave.py, speedy_longwave.py
+│   │   └── icon/             # ICON radiation sub-package
+│   ├── convection/           # Convection schemes
+│   │   ├── speedy_convection.py
+│   │   └── icon/             # ICON Tiedtke-Nordeng
+│   ├── clouds/               # Cloud and moisture schemes
+│   │   ├── speedy_humidity.py, speedy_condensation.py
+│   │   └── icon/             # ICON cloud microphysics
+│   ├── surface/              # Surface flux schemes
+│   │   ├── speedy_surface_flux.py
+│   │   └── icon/             # ICON multi-surface tile scheme
+│   ├── vertical_diffusion/   # Vertical mixing schemes
+│   │   ├── speedy_vdiff.py
+│   │   └── icon/             # ICON TKE-based diffusion
+│   ├── gravity_waves/icon/   # ICON gravity wave drag
+│   ├── aerosol/icon/         # ICON MACv2-SP aerosol
+│   ├── chemistry/icon/       # ICON simple chemistry
+│   ├── diagnostics/icon/     # ICON diagnostics (tropopause, etc.)
+│   ├── forcing/speedy_forcing.py
+│   ├── orographic_correction/speedy_orographic.py
+│   ├── packages/             # Pre-built physics factories
+│   │   ├── speedy.py         # speedy_physics() factory
+│   │   └── icon.py           # icon_physics() factory
 │   └── held_suarez/          # Simplified Held-Suarez physics
 │       ├── held_suarez_physics.py
 │       └── utils.py          # Coordinate helpers for Held-Suarez
@@ -150,9 +178,11 @@ Auto-generated physics variable translation docs come from `jcm/physics/speedy/u
 ## Architecture Notes
 
 - **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core)
-- **Physics** parameterizations are modular — SPEEDY is the main implementation, Held-Suarez is a simpler alternative
+- **Physics** parameterizations are modular — SPEEDY and ICON are the main implementations, Held-Suarez is a simpler alternative
+- **Composable physics**: `PhysicsTerm` (flax.nnx.Module) base class enables mix-and-match of individual parameterizations across packages. `ComposablePhysics` aggregates terms with `replace()`, `remove()`, and `__add__()` operators.
 - **physics_interface.py** bridges dynamics (spectral space) and physics (gridpoint space) with `PhysicsState` and `PhysicsTendency` structs
 - **model.py** orchestrates time-stepping, combining dynamics and physics
+- **Physics directory** is organized by-process (radiation/, convection/, etc.) with SPEEDY and ICON implementations co-located. Infrastructure (params, coords, orchestrators) stays in `speedy/` and `icon/`.
 - Configuration is managed via **Hydra** (see `jcm/config/`)
 - Supports multiple resolutions: T21 to T425 spectral truncations
 - SPMD sharding support for multi-device execution

@@ -587,8 +587,74 @@ To customize physics parameters:
    # Ensure all physics timesteps match model dt
    params = params.with_timestep(dt_seconds=1800.0)
 
-   # Create physics with custom parameters
+   # Create physics with custom parameters (legacy interface)
    physics = IconPhysics(parameters=params)
+
+
+Composable Physics API
+-----------------------
+
+The ICON physics is also available as composable ``PhysicsTerm`` instances,
+enabling mix-and-match with other physics packages:
+
+.. code-block:: python
+
+   from jcm.physics.icon.icon_terms import icon_physics
+
+   # Create composable ICON physics with all standard terms
+   physics = icon_physics(parameters=params)
+
+   # Use neural network radiation emulator instead of grey radiation
+   physics = icon_physics(radiation_scheme="emulated")
+
+   # Remove gravity waves for a simplified configuration
+   physics = icon_physics().remove("gravity_waves")
+
+   # Replace a single term
+   from jcm.physics.icon.icon_terms import IconRadiationRRTMGP
+   physics = icon_physics().replace("radiation", IconRadiationRRTMGP())
+
+Each ICON term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
+imports — the underlying ICON physics functions are imported at call time,
+keeping startup fast and avoiding circular dependencies.
+
+The ``ComposableIconPhysics`` subclass automatically handles ICON's column
+vectorization: it reshapes the 3D state to ``(nlev, ncols)`` format before
+iterating terms, and reshapes accumulated tendencies back to 3D afterward.
+
+Module Locations
+^^^^^^^^^^^^^^^^
+
+After the directory reorganization, ICON process modules live under their
+respective process directories:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Process
+     - Module path
+   * - Radiation
+     - ``jcm.physics.radiation.icon``
+   * - Convection
+     - ``jcm.physics.convection.icon``
+   * - Clouds / Microphysics
+     - ``jcm.physics.clouds.icon``
+   * - Surface
+     - ``jcm.physics.surface.icon``
+   * - Vertical Diffusion
+     - ``jcm.physics.vertical_diffusion.icon``
+   * - Gravity Waves
+     - ``jcm.physics.gravity_waves.icon``
+   * - Aerosol
+     - ``jcm.physics.aerosol.icon``
+   * - Chemistry
+     - ``jcm.physics.chemistry.icon``
+   * - Diagnostics
+     - ``jcm.physics.diagnostics.icon``
+
+ICON infrastructure (parameters, coordinates, orchestrators) remains at
+``jcm.physics.icon``.
 
 
 Scientific References

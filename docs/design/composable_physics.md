@@ -1,8 +1,8 @@
 # Composable Physics Design
 
-**Status:** Proposal
+**Status:** Implemented (Phases 1–4 complete)
 **Issue:** [#206 — Make physics composable](https://github.com/climate-analytics-lab/jax-gcm/issues/206)
-**Target branch:** `feature/icon-physics-v1`
+**Branch:** `feature/composable-physics-206`
 **Related issues:** #10, #230, #293, #315, #355
 
 ## Motivation
@@ -353,57 +353,76 @@ metadata lets `_validate_ordering` catch many invalid configurations at
 construction time (e.g., a term that requires a key no upstream term
 provides).
 
-### Phase 4 — reorganize directories
+### Phase 4 — reorganize directories (implemented)
 
-After Phases 1–3 are proven with real mixed-package runs, reorganize the
-`jcm/physics/` directory from organization-by-package to organization-by-process,
-as proposed by AndrewILWilliams on #206:
+The `jcm/physics/` directory has been reorganized from organization-by-package
+to organization-by-process. SPEEDY and ICON implementations of the same physical
+process now live side-by-side:
 
 ```
 jcm/physics/
-├── physics_term.py              # PhysicsTerm protocol
-├── composable_physics.py        # ComposablePhysics class
+├── physics_term.py              # PhysicsTerm base class
+├── composable_physics.py        # ComposablePhysics container
+├── speedy/                      # SPEEDY infrastructure only
+│   ├── speedy_physics.py        # Legacy orchestrator
+│   ├── speedy_terms.py          # Composable wrappers + speedy_physics() factory
+│   ├── params.py, speedy_coords.py, physics_data.py, physical_constants.py
+├── icon/                        # ICON infrastructure only
+│   ├── icon_physics.py          # Legacy orchestrator
+│   ├── icon_terms.py            # Composable wrappers + icon_physics() factory
+│   ├── parameters.py, icon_coords.py, icon_physics_data.py, constants/
 ├── radiation/
-│   ├── speedy_radiation.py
-│   ├── grey_radiation.py
-│   └── rrtmgp_radiation.py
+│   ├── speedy_shortwave.py      # SPEEDY shortwave radiation
+│   ├── speedy_longwave.py       # SPEEDY longwave radiation
+│   └── icon/                    # ICON radiation sub-package (grey, RRTMGP, NN emulator)
 ├── convection/
 │   ├── speedy_convection.py
-│   ├── tiedtke_nordeng.py
-│   └── betts_miller.py
+│   └── icon/                    # ICON Tiedtke-Nordeng convection
 ├── clouds/
-│   ├── speedy_clouds.py
-│   └── cloud_microphysics.py
+│   ├── speedy_humidity.py       # SPEEDY moisture conversion
+│   ├── speedy_condensation.py   # SPEEDY large-scale condensation
+│   └── icon/                    # ICON cloud diagnostics + microphysics
 ├── surface/
-│   ├── speedy_surface.py
-│   └── icon_surface/
+│   ├── speedy_surface_flux.py
+│   └── icon/                    # ICON multi-surface tile scheme
 ├── vertical_diffusion/
 │   ├── speedy_vdiff.py
-│   └── icon_vdiff/
-├── packages/                    # Pre-built sensible defaults
-│   ├── speedy.py
-│   ├── icon.py
-│   └── speedy_rrtmgp.py
+│   └── icon/                    # ICON TKE-based diffusion
+├── gravity_waves/icon/          # ICON gravity wave drag
+├── aerosol/icon/                # ICON MACv2-SP aerosol
+├── chemistry/icon/              # ICON simple chemistry
+├── diagnostics/icon/            # ICON diagnostics (WMO tropopause)
+├── forcing/speedy_forcing.py    # SPEEDY forcing/boundary conditions
+├── orographic_correction/speedy_orographic.py
+├── packages/                    # Pre-built physics factories
+│   ├── speedy.py                # Re-exports speedy_physics()
+│   └── icon.py                  # Re-exports icon_physics()
 └── held_suarez/                 # Stays as-is (intentionally simple)
 ```
 
-This phase is a large diff with many import changes and should land after the
-ICON branch has merged to `main`.
+**Key design decisions for the reorganization:**
+
+1. **Infrastructure stays in place.** `speedy/` and `icon/` retain params, coords,
+   data structs, constants, and orchestrators. This preserves ~60 external references
+   to `get_speedy_coords`, `SpeedyPhysics`, `Parameters`, etc.
+2. **ICON sub-packages move as directories** (e.g., `icon/radiation/` → `radiation/icon/`),
+   preserving internal same-directory relative imports.
+3. **SPEEDY modules move as individual files** with renaming
+   (e.g., `speedy/convection.py` → `convection/speedy_convection.py`).
+4. **All ICON `from ..` relative imports converted to absolute** to avoid breakage
+   when parent directories change.
+5. **`icon/__init__.py` uses lazy `__getattr__`** to break circular import chains
+   that arise from the reorganization.
 
 ## Phase Table
 
-| Phase | Target branch | Depends on | Risk |
-|---|---|---|---|
-| 1. `PhysicsTerm` as `nnx.Module`, `diagnostics` dict convention | `feature/icon-physics-v1` | — | Low — additive |
-| 2. `ComposablePhysics` with `__add__` / `replace` / `remove` | `feature/icon-physics-v1` | Phase 1 | Low |
-| 2b. **Differentiability gate** — verify `nnx.grad` flows through all terms; bit-identical gradient check against current `SpeedyPhysics` on a toy configuration | `feature/icon-physics-v1` | Phase 2 | **Gating** |
-| 3. Wrap existing SPEEDY and ICON terms | `feature/icon-physics-v1` | Phase 2b | Medium — must preserve numerical equivalence |
-| 4. Reorganize directories by process | After ICON merges to `main` | Phase 3 | High — large diff |
-
-Phase 2b is explicitly gating: no term-wrapping work begins until a toy
-`ComposablePhysics` demonstrates bit-identical gradients to an equivalent
-monolithic physics object. This catches pytree-registration bugs before they
-are baked into a large migration.
+| Phase | Status | Notes |
+|---|---|---|
+| 1. `PhysicsTerm` as `nnx.Module`, `diagnostics` dict convention | **Complete** | `physics_term.py` |
+| 2. `ComposablePhysics` with `__add__` / `replace` / `remove` | **Complete** | `composable_physics.py` |
+| 2b. **Differentiability gate** — bit-identical gradient check | **Complete** | `composable_physics_test.py` |
+| 3. Wrap existing SPEEDY and ICON terms | **Complete** | `speedy_terms.py`, `icon_terms.py` |
+| 4. Reorganize directories by process | **Complete** | 18 commits, 603 tests pass |
 
 ## What stays the same
 
@@ -421,18 +440,99 @@ are baked into a large migration.
 - `held_suarez/` stays as a hand-written simple physics package — the
   composable machinery is not forced on physics that do not need it.
 
-## Open questions
+## Composability Considerations
 
-1. **Parameter grouping.** Should a single `PhysicsTerm` subclass own one
-   typed `nnx.Param` block, or should it be free to hold several named
-   `nnx.Param` attributes? The examples above use one block; experience with
-   real terms may argue for finer granularity so that users can optimize a
-   sub-scalar in isolation.
-2. **Validation strictness.** How strict should `_validate_ordering` be? A
-   hard error on missing `requires` is clear, but tolerating optional keys
-   (e.g., a term that can run with or without aerosol optical depth) may be
-   worth supporting.
-3. **Back-compat shim.** Should `SpeedyPhysics(parameters=...)` remain a class
-   for one release after Phase 3, constructing a `ComposablePhysics` under the
-   hood and exposing `self.parameters` as a view over the term params? This
-   would keep existing notebooks running unmodified.
+### Ordering dependencies
+
+Physics parameterizations have implicit ordering dependencies — downstream
+terms read diagnostic fields produced by upstream terms. For example, in SPEEDY
+the surface flux scheme reads radiation fluxes, so radiation must run first.
+
+The composable design encodes these dependencies in two ways:
+
+1. **Pre-built factories** (`speedy_physics()`, `icon_physics()`) encode
+   validated orderings as their default term lists. Users who don't need
+   custom configurations get correct orderings for free.
+
+2. **`requires` / `provides` metadata** on `PhysicsTerm` allows
+   `ComposablePhysics._validate_ordering()` to catch many invalid
+   configurations at construction time (e.g., a term that requires a key
+   no upstream term provides).
+
+When users `replace()` a term, the category-based replacement preserves the
+original position in the list, maintaining ordering. When users compose from
+scratch (e.g., `term_a + term_b + term_c`), they accept responsibility for
+ordering correctness.
+
+### Cross-package compatibility
+
+SPEEDY and ICON terms use different intermediate data representations
+(`PhysicsData` structs). The composable design handles this through the
+`diagnostics` dict — a flexible `dict[str, jnp.ndarray]` that replaces
+the typed structs for inter-term communication. Each term's wrapper
+translates between its package's typed structs and the dict:
+
+- SPEEDY wrappers (`speedy_terms.py`) store SPEEDY `PhysicsData` sub-structs
+  under keys like `"_shortwave_rad"`, `"_convection"`, etc.
+- ICON wrappers (`icon_terms.py`) store ICON `PhysicsData` sub-structs
+  under keys like `"_radiation"`, `"_convection"`, etc.
+
+This means mixing a SPEEDY and ICON term that need to share data
+(e.g., radiation fluxes) requires either:
+- A translation layer that maps between the key conventions, or
+- The replacement term independently computing what it needs from
+  the atmospheric state.
+
+In practice, most cross-package use cases replace an entire process category
+(e.g., swapping SPEEDY radiation for ICON RRTMGP), where the replacement
+term produces everything downstream terms need from the state alone.
+
+### Differentiability
+
+Each `PhysicsTerm` stores tunable parameters as `nnx.Param` attributes and
+coordinate caches as `nnx.Variable`. This enables:
+
+- **Per-scheme gradients**: Optimize one scheme's parameters while freezing
+  others, using `nnx.grad` with path-based filtering.
+- **Neural network replacement**: An `nnx.Module`-based ML term slots into
+  the composable list and automatically participates in gradient computation.
+- **End-to-end differentiability**: Gradients flow through the `diagnostics`
+  dict since all values are JAX arrays.
+
+The gradient path through `diagnostics` is exercised by the differentiability
+tests in `composable_physics_test.py`, which verify bit-identical gradients
+between the composable and legacy physics implementations.
+
+### ICON column vectorization
+
+ICON terms operate in column-vectorized format `(nlev, ncols)` rather than
+3D grid format `(nlev, nlon, nlat)`. The `ComposableIconPhysics` subclass
+handles this reshaping transparently — it reshapes the state to columns before
+iterating terms and reshapes accumulated tendencies back to 3D afterward.
+This matches the optimized pattern from the original `IconPhysics` class.
+
+### Backward compatibility
+
+The legacy `SpeedyPhysics` and `IconPhysics` classes remain functional and
+unchanged. Existing code that uses `SpeedyPhysics(parameters=...)` or
+`IconPhysics(parameters=...)` continues to work. The composable API is
+opt-in via `speedy_physics()` and `icon_physics()` factory functions.
+
+The directory reorganization moved process-specific modules but kept all
+infrastructure (params, coords, orchestrators) in their original locations.
+All external imports from `jcm.physics.speedy.*` and `jcm.physics.icon.*`
+infrastructure modules are unchanged.
+
+## Resolved questions
+
+1. **Parameter grouping.** Terms hold multiple named `nnx.Param` attributes
+   (e.g., `SpeedyShortwaveRadiation` has `sw_params` and `mod_radcon_params`).
+   This gives users fine-grained control over which parameters to optimize.
+
+2. **Validation strictness.** `_validate_ordering` currently performs a
+   soft check. Terms with empty `requires`/`provides` are always accepted.
+   Strict validation is opt-in and may be tightened in future.
+
+3. **Back-compat shim.** Both `SpeedyPhysics` and `IconPhysics` remain
+   as standalone classes (not shims). The composable path is a parallel API,
+   not a replacement.

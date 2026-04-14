@@ -13,23 +13,26 @@ The :py:class:`jcm.model.Model` class serves as the central orchestrator, linkin
 
 .. code-block:: text
 
-   ┌─────────────────────────────────────────┐
-   │             Model                       │
-   │  ┌───────────────────────────────────┐  │
-   │  │   Dinosaur Dynamical Core         │  │
-   │  │   (Spectral, Primitive Equations) │  │
-   │  └───────────────────────────────────┘  │
-   │                  ↕                      │
-   │  ┌───────────────────────────────────┐  │
-   │  │   Physics Interface               │  │
-   │  └───────────────────────────────────┘  │
-   │                  ↕                      │
-   │  ┌───────────────────────────────────┐  │
-   │  │   Physics Implementations         │  │
-   │  │   • SpeedyPhysics                 │  │
-   │  │   • (Future: ICON, custom, ...)   │  │
-   │  └───────────────────────────────────┘  │
-   └─────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────┐
+   │             Model                            │
+   │  ┌────────────────────────────────────────┐  │
+   │  │   Dinosaur Dynamical Core              │  │
+   │  │   (Spectral, Primitive Equations)      │  │
+   │  └────────────────────────────────────────┘  │
+   │                  ↕                           │
+   │  ┌────────────────────────────────────────┐  │
+   │  │   Physics Interface                    │  │
+   │  │   (PhysicsState ↔ PhysicsTendency)     │  │
+   │  └────────────────────────────────────────┘  │
+   │                  ↕                           │
+   │  ┌────────────────────────────────────────┐  │
+   │  │   Physics Implementations              │  │
+   │  │   • SpeedyPhysics (legacy)             │  │
+   │  │   • IconPhysics (legacy)               │  │
+   │  │   • ComposablePhysics (mix-and-match)  │  │
+   │  │   • HeldSuarezPhysics (simple)         │  │
+   │  └────────────────────────────────────────┘  │
+   └──────────────────────────────────────────────┘
 
 The Physics Interface
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -117,20 +120,38 @@ This design makes it easy to:
 Composability
 ^^^^^^^^^^^^^
 
-The model is designed to be composable at multiple levels:
+The model is composable at multiple levels through the ``ComposablePhysics`` framework.
 
-**Physics Packages**: Different physics implementations can be easily swapped:
+**Composable Physics**: Individual parameterizations (``PhysicsTerm`` instances) can be mixed across packages:
 
 .. code-block:: python
 
-   # Use SPEEDY physics
-   model = Model(coords=get_speedy_coords(),physics=SpeedyPhysics())
+   from jcm.physics.speedy.speedy_terms import speedy_physics
+   from jcm.physics.icon.icon_terms import icon_physics, IconRadiationRRTMGP
 
-   # Use custom physics (future), this could use any existing or custom coords that are compatible with the physics implementation
-   model = Model(coords,physics=CustomPhysics())
+   # Use pre-built SPEEDY defaults
+   physics = speedy_physics()
 
-   # Combine multiple physics packages (future)
-   model = Model(coords,physics=HybridPhysics([speedy_radiation, ml_convection]))
+   # Use ICON with NN radiation emulator
+   physics = icon_physics(radiation_scheme="emulated")
+
+   # Replace SPEEDY's shortwave radiation with an ICON scheme
+   physics = speedy_physics().replace("radiation_sw", IconRadiationRRTMGP())
+
+   # Remove a term
+   physics = icon_physics().remove("gravity_waves")
+
+Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parameters as ``nnx.Param`` attributes and coordinate caches as ``nnx.Variable``. Terms communicate through a ``diagnostics`` dict that flows through the term list.
+
+**Physics Packages**: Legacy interfaces also work:
+
+.. code-block:: python
+
+   from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+   from jcm.physics.icon.icon_physics import IconPhysics
+
+   model = Model(coords=coords, physics=SpeedyPhysics())
+   model = Model(coords=coords, physics=IconPhysics())
 
 **Configurations**: Model components can be configured independently:
 
@@ -139,7 +160,7 @@ The model is designed to be composable at multiple levels:
    coords = get_speedy_coords(nodal_shape=(256, 128), layers=8, spectral_truncation=85)
    terrain = TerrainData.from_coords(coords)
    physics = SpeedyPhysics(parameters=custom_params)
-   
+
    model = Model(
        coords,
        terrain=terrain,
@@ -155,15 +176,35 @@ A core design goal is full differentiability through the model. This enables:
 
 .. code-block:: python
 
+   # Legacy interface
    def loss(params):
        physics = SpeedyPhysics(parameters=params)
-       model = Model(coords=get_speedy_coords(),physics=physics)
+       model = Model(coords=get_speedy_coords(), physics=physics)
        predictions = model.run(...)
        return compute_loss(predictions, observations)
 
-   # Compute gradients with respect to physics parameters
    grad_fn = jax.grad(loss)
    gradients = grad_fn(initial_params)
+
+**Per-Scheme Optimization** (composable interface):
+
+.. code-block:: python
+
+   from flax import nnx
+
+   physics = speedy_physics()
+   physics.cache_coords(coords)
+
+   def loss_fn(physics):
+       model = Model(coords=coords, terrain=terrain, physics=physics)
+       return compute_loss(model.run(total_time=...))
+
+   # Gradient w.r.t. all physics parameters
+   grads = nnx.grad(loss_fn)(physics)
+
+   # Gradient w.r.t. convection parameters only
+   convection_filter = nnx.PathContains("convection")
+   grads = nnx.grad(loss_fn, wrt=convection_filter)(physics)
 
 **Sensitivity Analysis**: Understand how initial conditions affect outcomes:
 
@@ -248,9 +289,10 @@ The codebase maintains high standards to support future complexity:
 
 .. code-block:: bash
 
-   # Tests for each physics module
-   pytest jcm/physics/speedy/convection_test.py
-   pytest jcm/physics/speedy/radiation_test.py
+   # Tests are co-located with source in process directories
+   pytest jcm/physics/convection/speedy_convection_test.py
+   pytest jcm/physics/radiation/speedy_shortwave_test.py
+   pytest jcm/physics/radiation/icon/radiation_test.py
    # ... etc
 
 **Documentation**: All public APIs are documented with clear docstrings.
@@ -259,16 +301,40 @@ The codebase maintains high standards to support future complexity:
 
 **Continuous Integration**: Automated testing ensures changes don't break existing functionality.
 
+Physics Directory Organization
+-------------------------------
+
+Physics code is organized by physical process rather than by package:
+
+.. code-block:: text
+
+   jcm/physics/
+   ├── radiation/          # All radiation schemes (SPEEDY + ICON)
+   ├── convection/         # All convection schemes
+   ├── clouds/             # Cloud and moisture schemes
+   ├── surface/            # Surface flux schemes
+   ├── vertical_diffusion/ # Vertical mixing schemes
+   ├── gravity_waves/      # Gravity wave drag
+   ├── aerosol/            # Aerosol schemes
+   ├── chemistry/          # Chemistry schemes
+   ├── speedy/             # SPEEDY infrastructure (params, coords)
+   ├── icon/               # ICON infrastructure (params, coords)
+   └── packages/           # Pre-built factory functions
+
+Each process directory contains both SPEEDY and ICON implementations side-by-side.
+Infrastructure code (parameters, coordinate systems, orchestrators) remains in
+the ``speedy/`` and ``icon/`` directories.
+
 Future Directions
 -----------------
 
-The architecture is designed to support:
+The composable architecture is designed to support:
 
-- **Multiple Physics Packages**: ICON physics, custom ML-based physics
-- **Hybrid Models**: Combine traditional physics with machine learning
+- **Hybrid Models**: Combine traditional physics with machine learning — a neural network ``PhysicsTerm`` slots into the composable term list and automatically participates in gradient computation
 - **Multi-Component Coupling**: Ocean, land surface, chemistry models
-- **Ensemble Workflows**: Efficient parallel ensemble generation
-- **Adjoint Sensitivity**: Large-scale sensitivity studies
-- **Optimization**: Parameter estimation, model calibration
+- **Ensemble Workflows**: Efficient parallel ensemble generation with ``vmap``
+- **Adjoint Sensitivity**: Large-scale sensitivity studies through end-to-end differentiability
+- **Parameter Estimation**: Per-scheme gradient-based calibration using ``nnx.grad``
+- **New Parameterizations**: Add new schemes (e.g., Betts-Miller convection) as ``PhysicsTerm`` subclasses that drop into existing workflows
 
 The modular, functional design with clean interfaces makes these extensions straightforward while maintaining the core simplicity of the base model.

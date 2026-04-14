@@ -472,7 +472,7 @@ To customize physics parameters:
        )
    )
 
-   # Create physics with custom parameters
+   # Create physics with custom parameters (legacy interface)
    physics = SpeedyPhysics(parameters=params)
 
    # Use in model
@@ -489,6 +489,63 @@ To see all parameter values:
 
    params = Parameters.default()
    print(params)
+
+
+Composable Physics API
+-----------------------
+
+The SPEEDY physics is also available as composable ``PhysicsTerm`` instances:
+
+.. code-block:: python
+
+   from jcm.physics.speedy.speedy_terms import speedy_physics
+
+   # Create composable SPEEDY physics with all standard terms
+   physics = speedy_physics(parameters=params)
+
+   # Replace radiation with a different scheme
+   from jcm.physics.icon.icon_terms import IconRadiationRRTMGP
+   physics = speedy_physics().replace("radiation_sw", IconRadiationRRTMGP())
+
+   # Remove a term
+   physics = speedy_physics().remove("vertical_diffusion")
+
+Each SPEEDY term stores its own tunable parameters as ``nnx.Param`` attributes,
+enabling per-scheme gradient-based optimization via ``flax.nnx``.
+
+Module Locations
+^^^^^^^^^^^^^^^^
+
+After the directory reorganization, SPEEDY process modules live under their
+respective process directories:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Process
+     - Module path
+   * - Shortwave Radiation
+     - ``jcm.physics.radiation.speedy_shortwave``
+   * - Longwave Radiation
+     - ``jcm.physics.radiation.speedy_longwave``
+   * - Convection
+     - ``jcm.physics.convection.speedy_convection``
+   * - Humidity
+     - ``jcm.physics.clouds.speedy_humidity``
+   * - Large-Scale Condensation
+     - ``jcm.physics.clouds.speedy_condensation``
+   * - Surface Fluxes
+     - ``jcm.physics.surface.speedy_surface_flux``
+   * - Vertical Diffusion
+     - ``jcm.physics.vertical_diffusion.speedy_vdiff``
+   * - Forcing
+     - ``jcm.physics.forcing.speedy_forcing``
+   * - Orographic Correction
+     - ``jcm.physics.orographic_correction.speedy_orographic``
+
+SPEEDY infrastructure (parameters, coordinates, physics data, orchestrators)
+remains at ``jcm.physics.speedy``.
 
 Scientific References
 ---------------------
@@ -568,7 +625,7 @@ Comparison with Other Physics Packages
 
    * - Feature
      - SPEEDY
-     - ICON (future)
+     - ICON
      - Comprehensive GCMs
    * - Complexity
      - Intermediate
