@@ -65,7 +65,7 @@ class SpeedyPhysics(Physics):
         from jcm.physics.radiation.speedy_shortwave import get_shortwave_rad_fluxes, get_clouds
         from jcm.physics.radiation.speedy_longwave import get_downward_longwave_rad_fluxes, get_upward_longwave_rad_fluxes
         from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
-        from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
+        from jcm.physics.vertical_diffusion.speedy_vdiff import get_vertical_diffusion_tend
         from jcm.physics.speedy.forcing import set_forcing
         # from jcm.physics.speedy.orographic_correction import get_orographic_correction_tendencies
 

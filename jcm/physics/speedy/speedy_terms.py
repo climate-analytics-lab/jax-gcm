@@ -425,7 +425,7 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = _params_with(vertical_diffusion=self.params.get_value())
 
-        from jcm.physics.speedy.vertical_diffusion import get_vertical_diffusion_tend
+        from jcm.physics.vertical_diffusion.speedy_vdiff import get_vertical_diffusion_tend
         tend, data = get_vertical_diffusion_tend(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
