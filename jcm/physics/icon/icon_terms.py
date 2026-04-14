@@ -5,9 +5,9 @@ the composable ``diagnostics`` dict and the legacy typed ``PhysicsData``
 struct. The numerical implementation is untouched.
 
 The ICON physics operates in column-vectorized format (nlev, ncols) rather
-than 3D grid format (nlev, nlon, nlat). The column reshape is handled by
-the ``icon_physics()`` factory's ``ComposablePhysics`` subclass, so
-individual term wrappers work in column format throughout.
+than 3D grid format (nlev, nlon, nlat). Column vectorization is handled by
+``ComposablePhysics(vectorize_columns=True)``, so individual term wrappers
+work in column format throughout.
 
 Date: 2026-04-13
 """
@@ -368,16 +368,15 @@ def _icon_params_with(**overrides) -> Parameters:
 
 
 # ------------------------------------------------------------------
-# ComposableIconPhysics — handles column vectorization
+# ComposableIconPhysics — ICON parameter management
 # ------------------------------------------------------------------
 
 class ComposableIconPhysics(ComposablePhysics):
-    """ComposablePhysics with ICON column-vectorization.
+    """ComposablePhysics with ICON shared parameter management.
 
-    ICON terms operate in column format (nlev, ncols) rather than 3D
-    (nlev, nlon, nlat). This subclass reshapes the state before the
-    term loop and reshapes tendencies back after, matching the
-    optimized pattern from the original ``IconPhysics``.
+    Column vectorization is handled by the parent class via
+    ``vectorize_columns=True``. This subclass adds ICON-specific
+    parameter storage and timestep management.
 
     The full ICON ``Parameters`` is stored and injected into the
     diagnostics dict as ``_icon_params`` so all terms share it.
@@ -385,7 +384,9 @@ class ComposableIconPhysics(ComposablePhysics):
 
     def __init__(self, terms, checkpoint_terms=True, parameters=None):
         """Initialize with ICON-specific parameter storage."""
-        super().__init__(terms, checkpoint_terms)
+        super().__init__(
+            terms, checkpoint_terms, vectorize_columns=True,
+        )
         self._icon_parameters = nnx.Variable(
             parameters or Parameters.default(),
         )
@@ -432,41 +433,33 @@ class ComposableIconPhysics(ComposablePhysics):
             p.with_timestep(dt_seconds),
         )
 
-    def compute_tendencies(
+    def _compute_tendencies_columns(
         self, state, forcing, terrain, date,
         prev_physics_data=None,
     ):
-        """Compute tendencies with column-vectorized state.
-
-        Reshapes state 3D → columns before iterating terms, then
-        reshapes accumulated tendencies columns → 3D at the end.
-
-        """
+        """Override to inject ICON parameters into diagnostics."""
         import jax
         import jax.numpy as jnp
+        from jcm.physics.composable_physics import (
+            _reshape_state_to_columns,
+            _accumulate,
+            _reshape_tendencies_to_3d,
+        )
 
         nlev, nlon, nlat = state.temperature.shape
         ncols = nlat * nlon
 
-        # Reshape state to column format
         vectorized_state = _reshape_state_to_columns(
             state, nlev, ncols,
         )
 
-        # Carry forward radiation data
         diagnostics: dict = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
-            # Carry forward radiation for sub-stepping
-            if "_radiation" in diagnostics:
-                diagnostics["_radiation"] = (
-                    prev_physics_data["_radiation"]
-                )
 
         diagnostics["_date"] = date
         diagnostics["_icon_params"] = self._icon_parameters.get_value()
 
-        # Initialize column-format tendency accumulators
         tracer_tends = {
             name: jnp.zeros((nlev, ncols))
             for name in state.tracers
@@ -490,80 +483,8 @@ class ComposableIconPhysics(ComposablePhysics):
             )
             acc = _accumulate(acc, tend)
 
-        # Reshape back to 3D
-        tendencies = _reshape_tendencies_to_3d(
-            acc, nlev, nlat, nlon,
-        )
-
+        tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
         return tendencies, diagnostics
-
-
-def _reshape_state_to_columns(state, nlev, ncols):
-    """Reshape PhysicsState fields from 3D to column format."""
-    import jax
-    from jcm.physics_interface import PhysicsState
-
-    def reshape_field(field):
-        if field.ndim == 3:
-            return field.reshape(nlev, ncols)
-        elif field.ndim == 2:
-            return field.reshape(ncols)
-        return field
-
-    reshaped = jax.tree_util.tree_map(reshape_field, {
-        "u_wind": state.u_wind,
-        "v_wind": state.v_wind,
-        "temperature": state.temperature,
-        "specific_humidity": state.specific_humidity,
-        "geopotential": state.geopotential,
-        "normalized_surface_pressure": (
-            state.normalized_surface_pressure
-        ),
-    })
-    tracers = {
-        name: tracer.reshape(nlev, ncols)
-        for name, tracer in state.tracers.items()
-    }
-    return PhysicsState(**reshaped, tracers=tracers)
-
-
-def _accumulate(acc, tend):
-    """Accumulate column-format tendencies."""
-    return {
-        "u_wind": acc["u_wind"] + tend.u_wind,
-        "v_wind": acc["v_wind"] + tend.v_wind,
-        "temperature": acc["temperature"] + tend.temperature,
-        "specific_humidity": (
-            acc["specific_humidity"] + tend.specific_humidity
-        ),
-        "tracers": {
-            name: acc["tracers"][name] + tend.tracers.get(name, 0.0)
-            for name in acc["tracers"]
-        },
-    }
-
-
-def _reshape_tendencies_to_3d(tendencies, nlev, nlat, nlon):
-    """Reshape column tendencies back to 3D."""
-    from jcm.physics_interface import PhysicsTendency  # noqa: F811
-
-    def reshape_to_3d(field):
-        if field.ndim == 2:
-            return field.reshape(nlev, nlon, nlat)
-        return field
-
-    return PhysicsTendency(
-        u_wind=reshape_to_3d(tendencies["u_wind"]),
-        v_wind=reshape_to_3d(tendencies["v_wind"]),
-        temperature=reshape_to_3d(tendencies["temperature"]),
-        specific_humidity=reshape_to_3d(
-            tendencies["specific_humidity"],
-        ),
-        tracers={
-            name: field.reshape(nlev, nlon, nlat)
-            for name, field in tendencies["tracers"].items()
-        },
-    )
 
 
 # ------------------------------------------------------------------

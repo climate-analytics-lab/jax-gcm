@@ -32,21 +32,37 @@ class ComposablePhysics(nnx.Module, Physics):
     Terms are called in order; each receives the diagnostics dict produced by
     all preceding terms. Tendencies are summed.
 
+    When ``vectorize_columns=True``, the 3D state ``(nlev, nlon, nlat)`` is
+    reshaped to column format ``(nlev, ncols)`` before iterating terms, and
+    accumulated tendencies are reshaped back to 3D afterward. This is the
+    standard pattern for column-based physics schemes (ICON, and most
+    comprehensive physics packages). SPEEDY operates directly on 3D arrays
+    because its low resolution makes the reshape overhead not worthwhile.
+
     Composition operators (``__add__``, ``replace``, ``remove``) return new
     ``ComposablePhysics`` instances.
     """
 
-    def __init__(self, terms: list[PhysicsTerm], checkpoint_terms: bool = True):
+    def __init__(
+        self,
+        terms: list[PhysicsTerm],
+        checkpoint_terms: bool = True,
+        vectorize_columns: bool = False,
+    ):
         """Initialize ComposablePhysics.
 
         Args:
             terms: Ordered list of PhysicsTerm instances.
             checkpoint_terms: Whether to checkpoint each term for memory
                 efficiency during backpropagation (default True).
+            vectorize_columns: Whether to reshape state from 3D to column
+                format before iterating terms. Use True for column-based
+                physics (ICON, etc.), False for grid-based (SPEEDY).
 
         """
         self.terms = nnx.List(terms)
         self.checkpoint_terms = checkpoint_terms
+        self.vectorize_columns = vectorize_columns
         self._validate_ordering()
 
     # ------------------------------------------------------------------
@@ -81,12 +97,22 @@ class ComposablePhysics(nnx.Module, Physics):
             Summed tendencies and the final diagnostics dict.
 
         """
+        if self.vectorize_columns:
+            return self._compute_tendencies_columns(
+                state, forcing, terrain, date, prev_physics_data,
+            )
+        return self._compute_tendencies_3d(
+            state, forcing, terrain, date, prev_physics_data,
+        )
+
+    def _compute_tendencies_3d(
+        self, state, forcing, terrain, date, prev_physics_data=None,
+    ):
+        """Iterate terms on the full 3D grid (e.g. SPEEDY)."""
         diagnostics: dict[str, jnp.ndarray] = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
 
-        # Inject date into diagnostics so terms can read it without a
-        # separate argument (keeps the PhysicsTerm.__call__ signature clean).
         diagnostics["_date"] = date
 
         tendencies = PhysicsTendency.zeros(state.temperature.shape)
@@ -96,6 +122,52 @@ class ComposablePhysics(nnx.Module, Physics):
             tend, diagnostics = call_fn(state, diagnostics, forcing, terrain)
             tendencies += tend
 
+        return tendencies, diagnostics
+
+    def _compute_tendencies_columns(
+        self, state, forcing, terrain, date, prev_physics_data=None,
+    ):
+        """Column-vectorized term iteration.
+
+        Reshapes state from 3D (nlev, nlon, nlat) to columns (nlev, ncols)
+        before iterating terms, then reshapes accumulated tendencies back
+        to 3D. This is the standard pattern for column-based physics schemes.
+        """
+        nlev, nlon, nlat = state.temperature.shape
+        ncols = nlat * nlon
+
+        vectorized_state = _reshape_state_to_columns(state, nlev, ncols)
+
+        diagnostics: dict = {}
+        if prev_physics_data is not None:
+            diagnostics = {**prev_physics_data}
+
+        diagnostics["_date"] = date
+
+        tracer_tends = {
+            name: jnp.zeros((nlev, ncols))
+            for name in state.tracers
+        }
+        acc = {
+            "u_wind": jnp.zeros((nlev, ncols)),
+            "v_wind": jnp.zeros((nlev, ncols)),
+            "temperature": jnp.zeros((nlev, ncols)),
+            "specific_humidity": jnp.zeros((nlev, ncols)),
+            "tracers": tracer_tends,
+        }
+
+        for term in self.terms:
+            call_fn = (
+                jax.checkpoint(term)
+                if self.checkpoint_terms
+                else term
+            )
+            tend, diagnostics = call_fn(
+                vectorized_state, diagnostics, forcing, terrain,
+            )
+            acc = _accumulate(acc, tend)
+
+        tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
         return tendencies, diagnostics
 
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
@@ -173,6 +245,7 @@ class ComposablePhysics(nnx.Module, Physics):
         return ComposablePhysics(
             terms=list(self.terms) + other_terms,
             checkpoint_terms=self.checkpoint_terms,
+            vectorize_columns=self.vectorize_columns,
         )
 
     def __radd__(self, other):
@@ -204,6 +277,7 @@ class ComposablePhysics(nnx.Module, Physics):
         return ComposablePhysics(
             terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
+            vectorize_columns=self.vectorize_columns,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
@@ -211,6 +285,7 @@ class ComposablePhysics(nnx.Module, Physics):
         return ComposablePhysics(
             terms=[t for t in self.terms if t.category != category],
             checkpoint_terms=self.checkpoint_terms,
+            vectorize_columns=self.vectorize_columns,
         )
 
     # ------------------------------------------------------------------
@@ -233,3 +308,72 @@ class ComposablePhysics(nnx.Module, Physics):
                     f"Available at this point: {available}"
                 )
             available.update(term.provides)
+
+
+# ------------------------------------------------------------------
+# Column vectorization helpers
+# ------------------------------------------------------------------
+
+def _reshape_state_to_columns(state, nlev, ncols):
+    """Reshape PhysicsState fields from 3D (nlev, nlon, nlat) to columns (nlev, ncols)."""
+    from jcm.physics_interface import PhysicsState as PS
+
+    def reshape_field(field):
+        if field.ndim == 3:
+            return field.reshape(nlev, ncols)
+        elif field.ndim == 2:
+            return field.reshape(ncols)
+        return field
+
+    reshaped = jax.tree_util.tree_map(reshape_field, {
+        "u_wind": state.u_wind,
+        "v_wind": state.v_wind,
+        "temperature": state.temperature,
+        "specific_humidity": state.specific_humidity,
+        "geopotential": state.geopotential,
+        "normalized_surface_pressure": state.normalized_surface_pressure,
+    })
+    tracers = {
+        name: tracer.reshape(nlev, ncols)
+        for name, tracer in state.tracers.items()
+    }
+    return PS(**reshaped, tracers=tracers)
+
+
+def _accumulate(acc, tend):
+    """Accumulate column-format tendencies."""
+    return {
+        "u_wind": acc["u_wind"] + tend.u_wind,
+        "v_wind": acc["v_wind"] + tend.v_wind,
+        "temperature": acc["temperature"] + tend.temperature,
+        "specific_humidity": (
+            acc["specific_humidity"] + tend.specific_humidity
+        ),
+        "tracers": {
+            name: acc["tracers"][name] + tend.tracers.get(name, 0.0)
+            for name in acc["tracers"]
+        },
+    }
+
+
+def _reshape_tendencies_to_3d(tendencies, nlev, nlat, nlon):
+    """Reshape column tendencies back to 3D (nlev, nlon, nlat)."""
+    from jcm.physics_interface import PhysicsTendency as PT
+
+    def reshape_to_3d(field):
+        if field.ndim == 2:
+            return field.reshape(nlev, nlon, nlat)
+        return field
+
+    return PT(
+        u_wind=reshape_to_3d(tendencies["u_wind"]),
+        v_wind=reshape_to_3d(tendencies["v_wind"]),
+        temperature=reshape_to_3d(tendencies["temperature"]),
+        specific_humidity=reshape_to_3d(
+            tendencies["specific_humidity"],
+        ),
+        tracers={
+            name: field.reshape(nlev, nlon, nlat)
+            for name, field in tendencies["tracers"].items()
+        },
+    )
