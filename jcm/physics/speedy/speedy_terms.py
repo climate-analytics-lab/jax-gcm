@@ -373,7 +373,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         # Use the day-sliced forcing computed by SpeedyForcing
         forcing_2d = diagnostics.get("_forcing_2d", forcing)
 
-        from jcm.physics.speedy.surface_flux import get_surface_fluxes
+        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
         tend, data = get_surface_fluxes(state, data, params, forcing_2d, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)

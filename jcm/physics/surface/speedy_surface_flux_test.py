@@ -26,7 +26,7 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         from jcm.constants import grav
         parameters = Parameters.default()
         
-        from jcm.physics.speedy.surface_flux import get_surface_fluxes, get_orog_land_sfc_drag
+        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes, get_orog_land_sfc_drag
 
     def test_grad_surface_flux(self):
         xy = (ix, il)
@@ -484,7 +484,7 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         terrain, speedy_coords = convert_to_speedy_latitudes(terrain, speedy_coords)
         parameters = Parameters.default()
 
-        from jcm.physics.speedy.surface_flux import get_surface_fluxes
+        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
 
     def test_aquaplanet_ocean_evaporation_nonzero(self):
         """Test that ocean evaporation is computed when lfluxland=False.
