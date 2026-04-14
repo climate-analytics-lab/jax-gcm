@@ -53,6 +53,7 @@ from ..constants.physical_constants import (
 )
 
 from .cloud_params_2m import (
+    CloudParams2M,
     cqtmin, cvtfall, crhosno, cn0s, ccwmin,
     cthomi,  clmax, clmin, jbmin, jbmax, lonacc,
     ccraut, ceffmin, ceffmax, crhoi, ccsaut, epsec, xsec, qsec, eps, mi,
@@ -215,11 +216,6 @@ def microphysics_dt_constants(dt: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray
     zcons3 = 1.0 / ( pi*crhosno*cn0s*cvtfall**(1.0/1.16) )**0.25
     
     return ztmst, ztmst_rcp, zcons1, zcons2, zcons3
-
-def cloud_micro_interface():
-    """Placeholder for cloud microphysics interface function. 
-    Link between microphysics and aerosol scheme via activation TODO"""
-    pass
 
 def melting_snow_and_ice(
     melt_mask: jnp.ndarray,
@@ -1574,7 +1570,7 @@ def precip_formation_warm(
     droplet_number: jnp.ndarray,
     cloud_water: jnp.ndarray,
     dt: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Warm-rain precipitation formation for the 2-moment microphysics scheme.
 
@@ -1647,10 +1643,10 @@ def precip_formation_warm(
     autoconversion_rate_in_cloud = jnp.zeros_like(cloud_water)  # For in-cloud scavenging
     autoconversion_rate = jnp.zeros_like(cloud_water)      # Rain formation rate [kg/kg]
     droplet_number_removal_rate = jnp.zeros_like(cloud_water)     # Number formation rate proxy [1/m^3]
+    accretion_rate_from_above = jnp.zeros_like(cloud_water)      # zrac1: accretion with rain from above [kg/kg]
+    accretion_rate_in_cloud = jnp.zeros_like(cloud_water)        # zrac2: accretion with newly formed rain [kg/kg]
 
     # Local process rates (mass increments) [kg/kg]
-    zrac1 = jnp.zeros_like(cloud_water)     # accretion with rain from above
-    zrac2 = jnp.zeros_like(cloud_water)     # accretion with newly formed rain
     zraut = jnp.zeros_like(cloud_water)     # autoconversion
     # zrautself not used yet (present in Fortran); kept for completeness
     # zrautself = jnp.zeros_like(cloud_water)
@@ -1691,6 +1687,7 @@ def precip_formation_warm(
     ztmp1 = jnp.exp(-3.7 * dt * rain_water)
     ztmp1 = cloud_water * (1.0 - ztmp1)
     zrac1 = jnp.where(warm_precip_mask, ztmp1, 0.0)
+    accretion_rate_from_above = zrac1  # output: zrac1 [kg/kg]
 
     # Remove accreted cloud water
     cloud_water = cloud_water - zrac1
@@ -1704,6 +1701,7 @@ def precip_formation_warm(
     ztmp1 = jnp.where(warm_precip_mask, ztmp1, 0.0)  # MERGE
     ztmp1 = cloud_water * (1.0 - jnp.exp(ztmp1))
     zrac2 = jnp.where(warm_precip_mask, ztmp1, 0.0)
+    accretion_rate_in_cloud = zrac2  # output: zrac2 [kg/kg]
 
     # Remove further accreted cloud water
     cloud_water = cloud_water - zrac2
@@ -1749,7 +1747,7 @@ def precip_formation_warm(
     droplet_number_new = jnp.maximum(droplet_number - droplet_number_removal_rate, cqtmin)
     droplet_number = jnp.where(warm_precip_mask, droplet_number_new, droplet_number)
 
-    return droplet_number, cloud_water, autoconversion_rate_in_cloud, autoconversion_rate, droplet_number_removal_rate
+    return droplet_number, cloud_water, autoconversion_rate_in_cloud, autoconversion_rate, droplet_number_removal_rate, accretion_rate_from_above, accretion_rate_in_cloud
 
 def precip_formation_cold(
     cloud_mask: jnp.ndarray,                      # ld_cc
@@ -3004,3 +3002,626 @@ def diagnostics(
         eff_radius_ct_m,
         cloud_fraction_acc,
     )
+
+def cloud_microphysics_2m(
+    temperature: jnp.ndarray,           # Temperature [K] (nlev, ncols)
+    specific_humidity: jnp.ndarray,     # Specific humidity [kg/kg] (nlev, ncols)
+    pressure: jnp.ndarray,              # Pressure at full levels [Pa] (nlev, ncols)
+    cloud_water: jnp.ndarray,           # Cloud water mixing ratio [kg/kg] (nlev, ncols)
+    cloud_ice: jnp.ndarray,             # Cloud ice mixing ratio [kg/kg] (nlev, ncols)
+    cloud_fraction: jnp.ndarray,        # Cloud fraction [1] (nlev, ncols)
+    air_density: jnp.ndarray,           # Air density [kg/m³] (nlev, ncols)
+    layer_thickness: jnp.ndarray,       # Layer thickness [m] (nlev, ncols)
+    droplet_number: jnp.ndarray,        # Droplet number concentration [1/m³] (nlev, ncols)
+    tke: jnp.ndarray,                   # Turbulent kinetic energy [m²/s²] (nlev, ncols)
+    vertical_velocity: jnp.ndarray,     # Vertical velocity [m/s] (nlev, ncols)
+    params: CloudParams2M,              # Cloud parameters structure
+    dt: jnp.ndarray,                    # Microphysics timestep [s]
+    ktdia: int = 1,                     # Top diagnostic level
+) -> tuple[MicrophysicsTendencies_2M, MicrophysicsState_2M]:
+    """
+    Main entry point for the two-moment cloud microphysics scheme.
+
+    Based on ECHAM6's cloud_micro_interface subroutine. Orchestrates the sequence of
+    microphysical processes and returns tendencies and state diagnostics.
+
+    Args:
+        temperature: Temperature at full levels [K]
+        specific_humidity: Specific humidity at full levels [kg/kg]
+        pressure: Pressure at full levels [Pa]
+        cloud_water: Cloud water mixing ratio [kg/kg]
+        cloud_ice: Cloud ice mixing ratio [kg/kg]
+        cloud_fraction: Cloud fraction [1]
+        air_density: Air density [kg/m³] (nlev, ncols)
+        layer_thickness: Layer thickness [m] (nlev, ncols)
+        droplet_number: Droplet number concentration [1/m³] (nlev, ncols)
+        tke: Turbulent kinetic energy [m²/s²] (nlev, ncols). Used to compute
+            updraft velocity for deposition and WBF parameterizations.
+        vertical_velocity: Vertical velocity [m/s] (nlev, ncols). Combined with
+            TKE to compute representative updraft velocity for microphysics.
+        params: CloudParams2M structure with tunable parameters
+        dt: Microphysics timestep [s]
+        ktdia: Top level for diagnostics (default 1)
+
+    Returns:
+        tuple of (MicrophysicsTendencies_2M, MicrophysicsState_2M)
+
+    Notes:
+        - Skips ARG activation (uses cdnc_factor from aerosol scheme instead)
+        - Handles ice crystal number via nic_cirrus parameter:
+          * nic_cirrus=1: Constant ice crystal number
+          * nic_cirrus=2: Prognostic ice crystal number (xfrzmstr)
+        - Processes are applied in sequence following ECHAM6 order
+    """
+    nlev, ncols = temperature.shape
+
+    # Get timestep constants
+    ztmst, ztmst_rcp, zcons1, zcons2, zcons3 = microphysics_dt_constants(dt)
+
+    # Initialize working arrays
+    zeps = params.eps
+    tmelt = params.tmelt
+    cthomi = params.cthomi
+    cdnc = droplet_number
+
+    # Latent heat / cpd ratios (from ECHAM6/ICON physical constants)
+    # als = latent heat of sublimation, alv = latent heat of vaporization, cpd = 1004.64 J/kg/K
+    # ECHAM uses q-correction: lsdcp = als / (cpd + zcons1*pqm1) where zcons1 = rd/cp
+    # This accounts for the temperature dependence of the saturation specific humidity.
+    # Compute reference qsat_water (for latent heat ratio correction) at a representative T.
+    # Use T = tmelt as reference (the latent heat correction is fairly insensitive to T).
+    esat_water_ref = es0 * jnp.exp(c1 * (tmelt - t0_sat) / (tmelt - t2))
+    qsat_water_ref = eps * esat_water_ref / jnp.maximum(pressure[0] - (1.0 - eps) * esat_water_ref, zeps)
+    lsdcp = als / (cpd + rd * qsat_water_ref)  # [K] (lsdcp used for ice-related terms)
+    lvdcp = alv / (cpd + rd * qsat_water_ref)  # [K] (lvdcp used for liquid-related terms)
+
+    # Teten's formula saturation vapor pressure helpers (Magnus formula)
+    # esat_water(T)  = p0s1_bg * exp(c1*(T-t0)/(T-t2))   for T >= t0
+    # esat_water(T)  = p0s1_bg * exp(c3*(T-t0)/(T-t4))   for T <  t0
+    # esat_ice(T)    = p0s1_bg * exp(c3*(T-t0)/(T-t4))   (pure ice, T < t0)
+    # Constants (ICON/ECHAM6 values):
+    #   c1=17.502, t2=32.19  (water, T >= 273.16 K)
+    #   c3=22.587, t4=-0.7   (water T < 273.16 K, and pure ice)
+    t0_sat = t0                           # 273.15 K
+    es0 = p0s1_bg                         # 611.21 Pa
+    c1, t2 = 17.502, 32.19               # water above freezing
+    c3, t4 = 22.587, -0.7                # water below freezing / pure ice
+
+    def sat_vap_pressure_water(T: jnp.ndarray) -> jnp.ndarray:
+        """Saturation vapor pressure over liquid water [Pa] using Teten's formula."""
+        above = T >= t0_sat
+        es_above = es0 * jnp.exp(c1 * (T - t0_sat) / (T - t2))
+        es_below = es0 * jnp.exp(c3 * (T - t0_sat) / (T - t4))
+        return jnp.where(above, es_above, es_below)
+
+    def sat_vap_pressure_ice(T: jnp.ndarray) -> jnp.ndarray:
+        """Saturation vapor pressure over ice [Pa] using Teten's formula."""
+        return es0 * jnp.exp(c3 * (T - t0_sat) / (T - t4))
+
+    def qsat_from_esat(esat: jnp.ndarray, p: jnp.ndarray) -> jnp.ndarray:
+        """Specific humidity at saturation [kg/kg] from esat [Pa] and pressure [Pa]."""
+        return eps * esat / jnp.maximum(p - (1.0 - eps) * esat, zeps)
+
+    # Initialize prognostic ice crystal number (xfrzmstr) if nic_cirrus=2
+    # For nic_cirrus=1, use prescribed constant value
+    # Use lax.cond for JAX compatibility with static parameter
+    def prognostic_icnc(_):
+        return jnp.where(
+            cloud_ice > params.epsec,
+            cloud_ice * params.mi0_rcp,
+            0.0
+        )
+
+    def prescribed_icnc(_):
+        return jnp.where(
+            temperature < cthomi,
+            params.cn0s * 1e-6,  # Convert from 1/m³ to 1/kg equivalent
+            0.0
+        )
+
+    icnc = lax.cond(
+        int(params.nic_cirrus) == 2,
+        prognostic_icnc,
+        prescribed_icnc,
+        None
+    )
+
+    # Initialize flux arrays (column-integrated, surface boundary conditions)
+    rain_flux = jnp.zeros((nlev, ncols))
+    snow_flux = jnp.zeros((nlev, ncols))
+
+    # Initialize tendency accumulators
+    specific_humidity_tendency = jnp.zeros((nlev, ncols))
+    temp_tendency = jnp.zeros((nlev, ncols))
+    ice_tendency = jnp.zeros((nlev, ncols))
+    liq_tendency = jnp.zeros((nlev, ncols))
+    tracer_tendency_cdnc = jnp.zeros((nlev, ncols))
+    tracer_tendency_icnc = jnp.zeros((nlev, ncols))
+
+    # Initialize diagnostic accumulators
+    incloud_liq_before_rain = jnp.zeros((nlev, ncols))
+    incloud_ice_before_snow = jnp.zeros((nlev, ncols))
+
+    # Initialize process rate diagnostics
+    autoconv_rate = jnp.zeros((nlev, ncols))
+    accretion_rate = jnp.zeros((nlev, ncols))
+    melting_rate = jnp.zeros((nlev, ncols))
+    freezing_rate = jnp.zeros((nlev, ncols))
+
+    # Temperature-dependent dynamic viscosity of air [kg/m/s]
+    # From ECHAM6: zkair = 4.1867e-3 * (5.69 + 0.017*(T - tmelt))
+    # Note: factor of 4.1867e-3 converts cal/(cm·s·K) to J/(m·s·K)
+    dynamic_viscosity = 4.1867e-3 * (5.69 + 0.017 * (temperature - tmelt))
+
+    # Updraft velocity for mixed-phase deposition and WBF [cm/s]
+    # ECHAM6: zverv = fact_tke * sqrt(max(2*TKE, 0)) * 100 [cm/s]
+    #               + abs(vertical_velocity) * 100 [cm/s]
+    # where fact_tke = 0.7. The sqrt(2*TKE) represents the turbulent
+    # contribution; the second term is the resolved vertical velocity.
+    updraft_velocity = (
+        params.fact_tke * jnp.sqrt(jnp.maximum(2.0 * tke, 0.0)) * 100.0
+        + jnp.abs(vertical_velocity) * 100.0
+    )
+
+    # Initialize in-cloud values
+    cloud_liquid_in_cloud = jnp.where(
+        cloud_fraction > zeps,
+        cloud_water / jnp.maximum(cloud_fraction, zeps),
+        0.0
+    )
+    cloud_ice_in_cloud = jnp.where(
+        cloud_fraction > zeps,
+        cloud_ice / jnp.maximum(cloud_fraction, zeps),
+        0.0
+    )
+
+    # Initialize number concentrations in cloud
+    droplet_number = jnp.where(
+        cloud_fraction > zeps,
+        cdnc,
+        0.0
+    )
+    ice_number = icnc.copy()
+
+    # Initialize precip_cover (precipitation-covered fraction)
+    precip_cover = jnp.zeros((nlev, ncols))
+
+    # Initialize snow melt diagnostic
+    snow_melt = jnp.zeros((nlev, ncols))
+
+    # Pressure thickness for flux calculations
+    pressure_thickness = layer_thickness * air_density * params.grav  # Approximate
+
+    # --- Process sequence following ECHAM6 cloud_micro_interface ---
+
+    # Step 1: Warm rain processes (autoconversion and accretion)
+    # Only active where temperature > 273.15 K
+    warm_mask = temperature > tmelt
+
+    # Compute warm rain processes - use correct argument names matching function signature
+    warm_results = precip_formation_warm(
+        warm_precip_mask=warm_mask,
+        autoconversion_factor=jnp.ones_like(temperature),  # pauloc - full participation
+        cloud_fraction=cloud_fraction,
+        minimum_cloud_precip_fraction=jnp.zeros_like(temperature),  # pclcstar - no rain from above initially
+        air_density=air_density,
+        rain_water=jnp.zeros_like(temperature),  # pxrp1 - no rain initially
+        minimum_droplet_number=jnp.zeros_like(temperature),  # pcdnc_min - will be computed if needed
+        droplet_number=droplet_number,
+        cloud_water=cloud_liquid_in_cloud,
+        dt=dt,
+    )
+
+    (
+        droplet_number_updated,
+        cloud_water_updated,
+        autoconv_rate_in_cloud,
+        autoconv_rate_gridmean,
+        droplet_number_removal_rate,
+        zrac1,
+        zrac2,
+    ) = warm_results
+
+    rain_formation_warm = autoconv_rate_gridmean
+    # Accretion: Beheng (1994) accretion rates from precip_formation_warm outputs.
+    # zrac1 = accretion with rain from above (weighted by pclcstar = min(cloud_frac, precip_cover))
+    # zrac2 = accretion with newly formed rain in grid-box (weighted by cloud_fraction)
+    # Gridbox-mean accretion: cloud_fraction * zrac2 + pclcstar * zrac1
+    pclcstar = jnp.minimum(cloud_fraction, precip_cover)
+    accretion_warm = cloud_fraction * zrac2 + pclcstar * zrac1
+
+    # Update accumulators and in-cloud values from warm processes
+    autoconv_rate = autoconv_rate + rain_formation_warm
+    accretion_rate = accretion_rate + accretion_warm
+    cloud_liquid_in_cloud = cloud_water_updated
+    droplet_number = droplet_number_updated
+
+    # Step 2: Cold rain/ice processes (deposition, Bergeron-Findeisen, freezing)
+
+    # Mixed-phase deposition and corrections
+    # Use actual function signature from line 1257
+    # Compute saturation vapor pressures (Teten's formula) and saturation q
+    esat_water = sat_vap_pressure_water(temperature)
+    esat_ice = sat_vap_pressure_ice(temperature)
+    qsat_ice = qsat_from_esat(esat_ice, pressure)
+    qsat_water = qsat_from_esat(esat_water, pressure)
+    # qsat_prev: use the saturation q at current state as the "previous" estimate
+    qsat_prev = jnp.where(temperature < tmelt, qsat_ice, qsat_water)
+
+    # Bergeron variable: ratio of supersaturation over ice vs water
+    # peta = (q - qsat_ice) / (qsat_water - qsat_ice) when mixed-phase
+    # In pure liquid: peta = 0; in pure ice: peta = 1
+    bergeron_variable = jnp.clip(
+        (specific_humidity - qsat_ice) / jnp.maximum(qsat_water - qsat_ice, zeps),
+        0.0, 1.0
+    )
+
+    mixed_results = mixed_phase_deposition_and_corrections(
+        pressure=pressure,
+        icnc=ice_number,
+        specific_humidity_prev=specific_humidity,
+        cloud_fraction=cloud_fraction,
+        sat_vap_pres_ice=esat_ice,
+        sat_vap_pres_water=esat_water,
+        bergeron_variable=bergeron_variable,
+        tompkins_genti=jnp.zeros_like(temperature),  # pgenti (not used in base scheme)
+        lsdcp=lsdcp,
+        lvdcp=lvdcp,
+        specific_humidity=specific_humidity,
+        qsat_prev=qsat_prev,
+        air_density=air_density,
+        temperature=temperature,
+        ice_evaporation=jnp.zeros_like(temperature),  # pxievap (updated by sublimation)
+        ice_mmr_gridmean=cloud_ice_in_cloud,
+        ice_detrainment_tendency=jnp.zeros_like(temperature),  # pxite (no detrainment here)
+        updraft_velocity=updraft_velocity,  # pvervx [cm/s] (computed from TKE + vertical velocity)
+        condensation_rate=jnp.zeros_like(temperature),  # pcnd (INOUT)
+        deposition_rate=jnp.zeros_like(temperature),  # pdep (INOUT)
+        dt=dt,
+    )
+
+    (
+        condensation_rate,
+        deposition_rate,
+        temperature_tmp,
+        specific_humidity_tmp,
+        qsat_tmp,
+    ) = mixed_results
+
+    # Diagnostic correction terms for Tompkins cloud scheme (not used in base scheme = 0)
+    tompkins_ice = jnp.zeros((nlev, ncols))
+    tompkins_liq = jnp.zeros((nlev, ncols))
+    # Ice sublimation / evaporation (from sublimation_snow_and_ice step)
+    cloud_ice_evap = snow_sub  # [kg/kg] grid-mean ice evaporation/sublimation rate
+    # Tendency corrections: in the full ECHAM scheme these come from subcolumns
+    # In the base single-column scheme they are zero
+    pxitec = jnp.zeros((nlev, ncols))  # ice tendency correction
+    pxltec = jnp.zeros((nlev, ncols))  # liquid tendency correction
+    pxisub = jnp.zeros((nlev, ncols))  # ice sublimation correction
+    pxlevap = rain_evap  # Rain evaporation rate used for cloud cover correction
+
+    # Freezing processes (below 238K)
+    freezing_results = freezing_below_238K(
+        temperature=temperature,
+        cloud_liquid=cloud_liquid_in_cloud,
+        cloud_ice=cloud_ice_in_cloud,
+        droplet_number=droplet_number,
+        params=params,
+        dt=dt,
+    )
+
+    (
+        freezing_rate_col,
+        cloud_ice_after_freezing,
+        cloud_liquid_after_freezing,
+    ) = freezing_results
+
+    freezing_rate = freezing_rate + freezing_rate_col
+
+    # Heterogeneous mixed-phase freezing
+    het_freezing_results = het_mxphase_freezing(
+        temperature=temperature,
+        cloud_liquid=cloud_liquid_after_freezing,
+        cloud_ice=cloud_ice_after_freezing,
+        droplet_number=droplet_number,
+        ice_number=ice_number,
+        params=params,
+    )
+
+    (
+        ice_number_het,
+        cloud_ice_het,
+        cloud_liquid_het,
+    ) = het_freezing_results
+
+    ice_number = ice_number_het
+    cloud_ice_in_cloud = cloud_ice_het
+    cloud_liquid_in_cloud = cloud_liquid_het
+
+    # WBF (Bergeron-Findeisen) process
+    # WBF activates in mixed-phase conditions: T < tmelt, both liquid and ice present
+    wbf_mask = (temperature < tmelt) & (cloud_liquid_in_cloud > zeps) & (cloud_ice_in_cloud > zeps)
+
+    wbf_results = WBF_process(
+        wbf_mask=wbf_mask,
+        cloud_fraction=cloud_fraction,
+        lsdcp=lsdcp,
+        lvdcp=lvdcp,
+        cdnc=droplet_number,
+        cloud_liquid_in_cloud=cloud_liquid_in_cloud,
+        cloud_ice_in_cloud=cloud_ice_in_cloud,
+        cloud_liquid_tendency=liq_tendency,
+        cloud_ice_tendency=ice_tendency,
+        temp_tendency=temp_tendency,
+        dt=dt,
+    )
+
+    (
+        wbf_rate,
+        cloud_ice_wbf,
+        cloud_liquid_wbf,
+        droplet_number_wbf,
+        liq_tendency_wbf,
+        ice_tendency_wbf,
+    ) = wbf_results
+
+    cloud_ice_in_cloud = cloud_ice_wbf
+    cloud_liquid_in_cloud = cloud_liquid_wbf
+    droplet_number = droplet_number_wbf
+    liq_tendency = liq_tendency_wbf
+    ice_tendency = ice_tendency_wbf
+
+    # Cold precipitation formation (snow autoconversion, aggregation)
+    # Only active below freezing where ice cloud is present
+    cold_mask = (temperature <= tmelt) & (cloud_ice_in_cloud > zeps)
+
+    cold_precip_results = precip_formation_cold(
+        cloud_mask=cold_mask,
+        autoconversion_factor=jnp.ones_like(temperature),  # pauloc - full participation
+        cloud_fraction=cloud_fraction,
+        minimum_cloud_precip_fraction=jnp.zeros_like(temperature),  # pclcstar
+        inverse_air_density=1.0 / jnp.maximum(air_density, zeps),
+        inverse_air_density_rcp=jnp.maximum(air_density, zeps),  # already 1/rho, but keep for API
+        temperature=temperature,
+        dynamic_viscosity=dynamic_viscosity,  # pvko [kg/m/s], temperature-dependent from ECHAM
+        snow_mass_mmr_from_above=jnp.zeros((nlev, ncols)),  # pxsp1 - no snow from above
+        air_density=air_density,
+        minimum_droplet_number=jnp.zeros_like(temperature),  # pcdnc_min
+        ice_number=ice_number,
+        droplet_number=droplet_number,
+        snow_rate_in_cloud=jnp.zeros((nlev, ncols)),  # pmrateps (INOUT)
+        in_cloud_ice=cloud_ice_in_cloud,
+        in_cloud_liquid=cloud_liquid_in_cloud,
+        dt=dt,
+    )
+
+    (
+        ice_number_cold,
+        droplet_number_cold,
+        snow_rate_in_cloud,
+        cloud_ice_cold,
+        cloud_liquid_cold,
+        ice_number_formation,
+        snow_accretion_mass,
+        snow_accretion_number,
+        snow_accretion_mass_scav,
+        snow_formation_gridmean,
+    ) = cold_precip_results
+
+    snow_formation = snow_formation_gridmean
+    snow_accretion = snow_accretion_mass
+    aggregation_rate = ice_number_formation  # Ice number loss by aggregation -> snow number
+    snow_sublimation = jnp.zeros((nlev, ncols))  # Sublimation handled in step 5
+
+    ice_number = ice_number_cold
+    cloud_ice_in_cloud = cloud_ice_cold
+    cloud_liquid_in_cloud = cloud_liquid_cold
+    droplet_number = droplet_number_cold
+
+    # Update ice tendency from cold processes
+    ice_tendency = ice_tendency - snow_formation + aggregation_rate
+
+    # Step 3: Sedimentation of ice crystals
+    sedi_results = sedimentation_ice(
+        cloud_ice=cloud_ice_in_cloud,
+        ice_number=ice_number,
+        pressure=pressure,
+        temperature=temperature,
+        cloud_fraction=cloud_fraction,
+        params=params,
+    )
+
+    (
+        ice_flux,
+        ice_sedi_source,
+    ) = sedi_results
+
+    # Step 4: Melting of snow and ice (through melting level)
+    melt_mask = temperature > tmelt
+
+    melt_results = melting_snow_and_ice(
+        melt_mask=melt_mask,
+        temperature_previous=temperature,
+        ice_cloud_previous=cloud_ice_in_cloud,
+        pressure_thickness=pressure_thickness,
+        icncq=ice_number,
+        lsdcp=lsdcp,
+        lvdcp=lvdcp,
+        icnc=ice_number,
+        qmel=jnp.zeros((nlev, ncols)),  # Initialize
+        cdnc=cdnc,
+        rain_flux=rain_flux,
+        snow_flux=snow_flux,
+        ice_flux=ice_flux,
+        ice_flux_n=jnp.zeros((nlev, ncols)),  # Initialize
+        ice_tendency=ice_tendency,
+        dt=dt,
+    )
+
+    (
+        ice_number_melt,
+        cdnc_melt,
+        rain_flux_melt,
+        snow_flux_melt,
+        ice_flux_melt,
+        melting_diag,
+        ice_tendency_melt,
+    ) = melt_results
+
+    rain_flux = rain_flux_melt
+    snow_flux = snow_flux_melt
+    melting_rate = melting_rate + melting_diag
+    ice_tendency = ice_tendency + ice_tendency_melt
+
+    # Step 5: Sublimation of snow and evaporation of rain
+    sub_evap_results = sublimation_snow_and_ice_evaporation_rain(
+        rain_flux=rain_flux,
+        snow_flux=snow_flux,
+        temperature=temperature,
+        pressure=pressure,
+        specific_humidity=specific_humidity,
+        cloud_fraction=cloud_fraction,
+        params=params,
+        dt=dt,
+    )
+
+    (
+        rain_evap,
+        snow_sub,
+        rain_flux_sub,
+        snow_flux_sub,
+    ) = sub_evap_results
+
+    rain_flux = rain_flux_sub
+    snow_flux = snow_flux_sub
+
+    # Step 6: Update precipitation fluxes through column
+    precip_update_results = update_precip_fluxes(
+        cloud_fraction=cloud_fraction,
+        pressure_thickness=pressure_thickness,
+        rain_evap_mmr=rain_evap,
+        lsdcp=lsdcp,
+        lvdcp=lvdcp,
+        rain_formation=rain_formation_warm,
+        snow_accretion=snow_accretion,
+        snow_formation=snow_formation,
+        snow_sublimation_mmr=snow_sub,
+        temp_tmp=temperature,
+        ice_flux_from_above=ice_flux,
+        precip_cover=precip_cover,
+        rain_flux=rain_flux,
+        snow_flux=snow_flux,
+        snow_melt=snow_melt,
+        dt=dt,
+    )
+
+    (
+        precip_cover_upd,
+        rain_flux_final,
+        snow_flux_final,
+        snow_melt_upd,
+        pfevapr,
+        pfrain,
+        pfsnow,
+        pfsubls,
+    ) = precip_update_results
+
+    precip_cover = precip_cover_upd
+    rain_flux = rain_flux_final
+    snow_flux = snow_flux_final
+    snow_melt = snow_melt_upd
+
+    # Step 7: Update tendencies and compute important diagnostics
+    update_results = update_tendencies_and_important_vars(
+        icnc=ice_number,
+        cdnc=cdnc,
+        ice_mmr_prev=cloud_ice_in_cloud,
+        liq_mmr_prev=cloud_liquid_in_cloud,
+        tracer_tm1_cdnc=cdnc,  # Previous timestep CDNC
+        tracer_tm1_icnc=ice_number,  # Previous timestep ICNC
+        condensation_rate=condensation_rate,
+        deposition_rate=deposition_rate,
+        rain_evap_mmr=rain_evap,
+        freezing_rate=freezing_rate,
+        tompkins_ice=tompkins_ice,
+        tompkins_liq=tompkins_liq,
+        incloud_ice_melt=jnp.zeros((nlev, ncols)),  # Diagnostic
+        lsdcp=lsdcp,
+        lvdcp=lvdcp,
+        air_density=air_density,
+        inv_air_density=1.0 / jnp.maximum(air_density, zeps),
+        rain_formation=rain_formation_warm,
+        snow_accretion=snow_accretion,
+        snow_formation=snow_formation,
+        cloud_ice_evap=cloud_ice_evap,
+        ice_flux_melt=jnp.zeros((nlev, ncols)),  # Diagnostic
+        pxitec=pxitec,
+        pxlevap=pxlevap,
+        pxltec=pxltec,
+        pxisub=pxisub,
+        snow_sublimation_mmr=snow_sub,
+        snow_melt=snow_melt,
+        cloud_ice_in_cloud=cloud_ice_in_cloud,
+        cloud_liquid_in_cloud=cloud_liquid_in_cloud,
+        temp_tmp=temperature,
+        liquid_cloud_flag=temperature > tmelt,
+        ice_cloud_flag=temperature <= tmelt,
+        cloud_fraction=cloud_fraction,
+        specific_humidity_tendency=specific_humidity_tendency,
+        temp_tendency=temp_tendency,
+        ice_tendency=ice_tendency,
+        liq_tendency=liq_tendency,
+        tracer_tendency_cdnc=tracer_tendency_cdnc,
+        tracer_tendency_icnc=tracer_tendency_icnc,
+        incloud_liq_before_rain=incloud_liq_before_rain,
+        incloud_ice_before_snow=incloud_ice_before_snow,
+        dt=dt,
+    )
+
+    (
+        cloud_fraction_final,
+        specific_humidity_tendency_final,
+        temp_tendency_final,
+        ice_tendency_final,
+        liq_tendency_final,
+        tracer_tendency_cdnc_final,
+        tracer_tendency_icnc_final,
+        incloud_liq_final,
+        incloud_ice_final,
+        liq_eff_radius,
+        ice_eff_radius,
+    ) = update_results
+
+    # Surface precipitation (last level)
+    precip_rain = rain_flux_final[-1, :] if nlev > 1 else rain_flux_final[0, :]
+    precip_snow = snow_flux_final[-1, :] if nlev > 1 else snow_flux_final[0, :]
+
+    # Build tendency result
+    tendencies = MicrophysicsTendencies_2M(
+        dtedt=temp_tendency_final,
+        dqdt=specific_humidity_tendency_final,
+        dqcdt=liq_tendency_final,
+        dqidt=ice_tendency_final,
+        dqncdt=tracer_tendency_cdnc_final,
+        dqnidt=tracer_tendency_icnc_final,
+        dqrdt=jnp.zeros((nlev, ncols)),  # Rain tendency (diagnostic)
+        dqsdt=jnp.zeros((nlev, ncols)),  # Snow tendency (diagnostic)
+    )
+
+    # Build state result
+    state = MicrophysicsState_2M(
+        rain_flux=rain_flux_final,
+        snow_flux=snow_flux_final,
+        qc_in_cloud=cloud_liquid_in_cloud,
+        qi_in_cloud=cloud_ice_in_cloud,
+        qnc_in_cloud=droplet_number,
+        qni_in_cloud=ice_number,
+        autoconv_rate=autoconv_rate,
+        accretion_rate=accretion_rate,
+        melting_rate=melting_rate,
+        freezing_rate=freezing_rate,
+        precip_rain=precip_rain,
+        precip_snow=precip_snow,
+    )
+
+    return tendencies, state

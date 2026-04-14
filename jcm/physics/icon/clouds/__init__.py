@@ -28,8 +28,14 @@ from .cloud_microphysics import (
     evaporation_sublimation
 )
 
-from .cloud_params_2m import (
+from .cloud_params_2m import ( #TODO move to cloud_microphysics_2m.py
     CloudParams2M
+)
+
+from .cloud_microphysics_2m import (
+    cloud_microphysics_2m,
+    MicrophysicsState_2M,
+    MicrophysicsTendencies_2M,
 )
 
 __all__ = [
@@ -51,5 +57,9 @@ __all__ = [
     "melting_freezing",
     "evaporation_sublimation",
     # Cloud parameters for 2m
-    "CloudParams2M"
+    "CloudParams2M",
+    # Cloud microphysics for 2m
+    "cloud_microphysics_2m",
+    "MicrophysicsState_2M",
+    "MicrophysicsTendencies_2M"
 ]

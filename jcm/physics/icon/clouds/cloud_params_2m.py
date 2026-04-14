@@ -221,7 +221,7 @@ class CloudParams2M: #(NamedTuple):
     ) -> 'CloudParams2M':
         """Return default cloud parameters for 2-m scheme"""
         # derived helpers
-        disp = float(jnp.exp(0.5 * (sigmaw ** 2)))
+        disp = jnp.exp(0.5 * (sigmaw ** 2))
         dw0 = 10e-6 * disp
         xsec = 1.0 - epsec
         qsec = 1.0 - cqtmin

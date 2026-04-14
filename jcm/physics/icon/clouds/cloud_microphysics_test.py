@@ -6,6 +6,7 @@ print("name:", __name__)
 print("package:", __package__)
 import jax.numpy as jnp
 import jax
+import pytest
 from .cloud_microphysics import (
     MicrophysicsParameters, cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
     ice_autoconversion, snow_accretion, melting_freezing,
@@ -2739,6 +2740,6 @@ if __name__ == "__main__":
     test_diagnostics = TestDiagnostics()
     test_diagnostics.test_accumulators_liquid_and_ice()
     test_diagnostics.test_tovs_tau_update_for_ice()
-    
+
     print("All tests passed!")
         
