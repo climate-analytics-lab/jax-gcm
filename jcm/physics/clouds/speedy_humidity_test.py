@@ -14,7 +14,7 @@ class TestHumidityUnit(unittest.TestCase):
         SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData, parameters, ForcingData, coords, speedy_coords, terrain
         from jcm.physics.speedy.physics_data import ConvectionData, PhysicsData, SurfaceFluxData, HumidityData, SWRadiationData, LWRadiationData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
-        from jcm.physics.speedy.humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
+        from jcm.physics.clouds.speedy_humidity import get_qsat, spec_hum_to_rel_hum, rel_hum_to_spec_hum
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.params import Parameters
         from jcm.terrain import TerrainData

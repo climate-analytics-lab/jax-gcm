@@ -206,7 +206,7 @@ class SpeedyHumidity(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = Parameters.default()
 
-        from jcm.physics.speedy.humidity import spec_hum_to_rel_hum
+        from jcm.physics.clouds.speedy_humidity import spec_hum_to_rel_hum
         tend, data = spec_hum_to_rel_hum(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
@@ -250,7 +250,7 @@ class SpeedyLargeScaleCondensation(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = _params_with(condensation=self.params.get_value())
 
-        from jcm.physics.speedy.large_scale_condensation import (
+        from jcm.physics.clouds.speedy_condensation import (
             get_large_scale_condensation_tendencies,
         )
         tend, data = get_large_scale_condensation_tendencies(

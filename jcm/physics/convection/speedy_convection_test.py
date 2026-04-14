@@ -30,7 +30,7 @@ class TestConvectionUnit(unittest.TestCase):
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.convection.speedy_convection import diagnose_convection, get_convection_tendencies
         from jcm.physics.speedy.physical_constants import rgas, cp
-        from jcm.physics.speedy.humidity import get_qsat
+        from jcm.physics.clouds.speedy_humidity import get_qsat
 
     def test_diagnose_convection_varying(self):
         ps = jnp.ones((ix, il))

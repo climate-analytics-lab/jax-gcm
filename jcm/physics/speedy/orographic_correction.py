@@ -139,7 +139,7 @@ def compute_humidity_correction_horizontal(
         Horizontal correction array of shape (lon, lat)
 
     """
-    from jcm.physics.speedy.humidity import get_qsat
+    from jcm.physics.clouds.speedy_humidity import get_qsat
     
     # 1. Calculate surface temperature (land/sea mixture)
     tsfc = fmask * land_temperature + (1.0 - fmask) * forcing.sea_surface_temperature
