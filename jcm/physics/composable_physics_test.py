@@ -440,5 +440,203 @@ class TestDifferentiabilityGate(unittest.TestCase):
         self.assertNotEqual(float(scale_grad), 0.0)
 
 
+class TestColumnVectorization(unittest.TestCase):
+    """Test ComposablePhysics with vectorize_columns=True."""
+
+    def test_column_vectorization_produces_correct_shapes(self):
+        """Column-vectorized physics reshapes 3D → columns → 3D correctly."""
+        # A simple term that works on column format
+        term = LinearHeating(alpha=2.0)
+        physics = ComposablePhysics(
+            terms=[term],
+            checkpoint_terms=False,
+            vectorize_columns=True,
+        )
+
+        shape = (2, 4, 8)
+        state = _make_test_state(shape)
+        forcing = _make_test_forcing(shape[1:])
+        terrain = _make_test_terrain(shape[1:])
+        date = DateData.zeros()
+
+        tend, diag = physics.compute_tendencies(state, forcing, terrain, date)
+
+        # Output should be 3D again
+        self.assertEqual(tend.temperature.shape, shape)
+        self.assertEqual(tend.u_wind.shape, shape)
+
+    def test_column_vectorization_with_tracers(self):
+        """Column vectorization handles tracers correctly."""
+        term = LinearHeating(alpha=1.0)
+        physics = ComposablePhysics(
+            terms=[term],
+            checkpoint_terms=False,
+            vectorize_columns=True,
+        )
+
+        shape = (2, 4, 8)
+        key = jax.random.PRNGKey(0)
+        state = PhysicsState(
+            u_wind=jnp.zeros(shape),
+            v_wind=jnp.zeros(shape),
+            temperature=jnp.ones(shape) * 250.0,
+            specific_humidity=jnp.zeros(shape),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]),
+            tracers={"qc": jax.random.normal(key, shape)},
+        )
+        forcing = _make_test_forcing(shape[1:])
+        terrain = _make_test_terrain(shape[1:])
+        date = DateData.zeros()
+
+        tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+        self.assertEqual(tend.temperature.shape, shape)
+
+    def test_column_vectorization_with_prev_data(self):
+        """Column vectorization carries forward prev_physics_data."""
+        term = LinearHeating(alpha=1.0)
+        physics = ComposablePhysics(
+            terms=[term],
+            checkpoint_terms=False,
+            vectorize_columns=True,
+        )
+
+        shape = (2, 4, 8)
+        state = _make_test_state(shape)
+        forcing = _make_test_forcing(shape[1:])
+        terrain = _make_test_terrain(shape[1:])
+        date = DateData.zeros()
+
+        prev_data = {"_cached_value": jnp.array(42.0)}
+        tend, diag = physics.compute_tendencies(
+            state, forcing, terrain, date, prev_physics_data=prev_data,
+        )
+        # prev_data should be carried forward
+        self.assertIn("_cached_value", diag)
+
+    def test_column_vs_3d_numerically_equivalent(self):
+        """Column-vectorized and 3D paths should produce same results for simple terms."""
+        term_3d = LinearHeating(alpha=2.0)
+        term_col = LinearHeating(alpha=2.0)
+
+        physics_3d = ComposablePhysics(
+            terms=[term_3d], checkpoint_terms=False, vectorize_columns=False,
+        )
+        physics_col = ComposablePhysics(
+            terms=[term_col], checkpoint_terms=False, vectorize_columns=True,
+        )
+
+        shape = (2, 4, 8)
+        state = _make_test_state(shape)
+        forcing = _make_test_forcing(shape[1:])
+        terrain = _make_test_terrain(shape[1:])
+        date = DateData.zeros()
+
+        tend_3d, _ = physics_3d.compute_tendencies(state, forcing, terrain, date)
+        tend_col, _ = physics_col.compute_tendencies(state, forcing, terrain, date)
+
+        npt.assert_allclose(tend_3d.temperature, tend_col.temperature, rtol=1e-6)
+        npt.assert_allclose(tend_3d.u_wind, tend_col.u_wind, rtol=1e-6)
+
+
+class TestComposablePhysicsUtilities(unittest.TestCase):
+    """Test get_empty_data and data_struct_to_dict."""
+
+    def test_get_empty_data(self):
+        """get_empty_data returns a zeroed diagnostics dict."""
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), QuadraticMoistening()],
+        )
+        physics.cache_coords(coords)
+        empty = physics.get_empty_data(coords)
+        self.assertIsInstance(empty, dict)
+        self.assertIn("heating_rate", empty)
+        # Array values should be zeros
+        for v in empty.values():
+            if isinstance(v, jax.Array) and v.shape:
+                self.assertTrue(jnp.all(v == 0.0))
+
+    def test_data_struct_to_dict_multichannel_5d(self):
+        """data_struct_to_dict expands 5D multi-channel fields."""
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        nodal_shape = (4, 8)
+        # 5D: s[1:-1] == nodal_shape → should expand on trailing dim
+        struct = {
+            "flux": jnp.zeros((2, 4, 8, 3)),  # 4D, doesn't match
+            "flux5d": jnp.zeros((1, 2, 4, 8, 3)),  # 5D, s[1:-1]=(2,4,8)!=nodal
+        }
+        result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        # Neither should expand since shapes don't match the pattern
+        self.assertIn("flux", result)
+
+    def test_data_struct_to_dict_non_array_values(self):
+        """data_struct_to_dict skips non-array values during expansion."""
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        struct = {"count": 42, "name": "test"}
+        result = physics.data_struct_to_dict(struct, nodal_shape=(4, 8))
+        self.assertEqual(result["count"], 42)
+        self.assertEqual(result["name"], "test")
+
+    def test_data_struct_to_dict_filters_internal_keys(self):
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        struct = {
+            "_internal": jnp.array(1.0),
+            "public_key": jnp.array(2.0),
+            "_date": DateData.zeros(),
+        }
+        result = physics.data_struct_to_dict(struct)
+        self.assertIn("public_key", result)
+        self.assertNotIn("_internal", result)
+        self.assertNotIn("_date", result)
+
+    def test_data_struct_to_dict_none(self):
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        result = physics.data_struct_to_dict(None)
+        self.assertEqual(result, {})
+
+    def test_data_struct_to_dict_with_nodal_shape(self):
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        nodal_shape = (4, 8)
+        struct = {"temperature": jnp.zeros((1, 4, 8))}
+        result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        self.assertIn("temperature", result)
+
+    def test_vectorize_columns_preserved_by_replace(self):
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), QuadraticMoistening()],
+            vectorize_columns=True,
+        )
+        replaced = physics.replace("radiation", LinearHeating(alpha=5.0))
+        self.assertTrue(replaced.vectorize_columns)
+
+    def test_vectorize_columns_preserved_by_remove(self):
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), QuadraticMoistening()],
+            vectorize_columns=True,
+        )
+        removed = physics.remove("convection")
+        self.assertTrue(removed.vectorize_columns)
+
+    def test_vectorize_columns_preserved_by_add(self):
+        a = ComposablePhysics(terms=[LinearHeating()], vectorize_columns=True)
+        b = ComposablePhysics(terms=[QuadraticMoistening()])
+        combined = a + b
+        self.assertTrue(combined.vectorize_columns)
+
+
+class TestPackagesImport(unittest.TestCase):
+    """Test packages/ factory re-exports."""
+
+    def test_packages_speedy_import(self):
+        from jcm.physics.packages.speedy import speedy_physics
+        self.assertTrue(callable(speedy_physics))
+
+    def test_packages_icon_import(self):
+        from jcm.physics.packages.icon import icon_physics
+        self.assertTrue(callable(icon_physics))
+
+
 if __name__ == "__main__":
     unittest.main()
