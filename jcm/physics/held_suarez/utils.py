@@ -22,7 +22,9 @@ def get_held_suarez_coords(layers=8, spectral_truncation=31, nodal_shape=None, s
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
         sigma_boundaries: Optional array of sigma boundaries. If None, uses DEFAULT_SIGMA_BOUNDARIES.
-        spmd_mesh: Optional SPMD mesh for parallelization
+        spmd_mesh: Optional ``(x, y, z)`` tuple giving the SPMD device mesh over
+            (longitude, latitude, vertical). The product must equal ``len(jax.devices())``.
+            Pass this here (not to ``Model``) to enable multi-device sharding.
 
     Returns:
         CoordinateSystem object

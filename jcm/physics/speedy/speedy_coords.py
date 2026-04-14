@@ -15,7 +15,9 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
         layers: Number of vertical levels (7 or 8)
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
-        spmd_mesh: Optional SPMD mesh for parallelization
+        spmd_mesh: Optional ``(x, y, z)`` tuple giving the SPMD device mesh over
+            (longitude, latitude, vertical). The product must equal ``len(jax.devices())``.
+            Pass this here (not to ``Model``) to enable multi-device sharding.
 
     Returns:
         CoordinateSystem object with SPEEDY sigma levels

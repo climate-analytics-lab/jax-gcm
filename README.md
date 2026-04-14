@@ -53,12 +53,15 @@ Run a simple aquaplanet simulation:
 
 ```python
 from jcm.model import Model
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+# Build coords (pass spmd_mesh=(x, y, z) here to enable multi-device sharding)
+coords = get_speedy_coords(layers=8, spectral_truncation=31)
 
 # Create a model with default configuration
 model = Model(
-    time_step=30.0,          # minutes
-    layers=8,                 # vertical levels
-    horizontal_resolution=31  # T31 spectral grid
+    coords=coords,
+    time_step=30.0,  # minutes
 )
 
 # Run a 120-day simulation
