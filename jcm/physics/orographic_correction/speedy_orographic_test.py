@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import functools
 from jax.test_util import check_vjp, check_jvp
-from jcm.physics.speedy.orographic_correction import (
+from jcm.physics.orographic_correction.speedy_orographic import (
     compute_temperature_correction_vertical_profile,
     compute_humidity_correction_vertical_profile,
     compute_temperature_correction_horizontal,

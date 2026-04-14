@@ -186,7 +186,7 @@ class SpeedyForcing(SpeedyTermBase):
         model_day_of_year = date.model_day()
         forcing_2d = tree_index_3d(forcing, model_day_of_year)
 
-        from jcm.physics.speedy.forcing import set_forcing
+        from jcm.physics.forcing.speedy_forcing import set_forcing
         tend, data = set_forcing(state, data, params, forcing_2d, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
