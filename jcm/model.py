@@ -203,13 +203,14 @@ class Model:
     """Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet."""
 
     def __init__(self, coords: CoordinateSystem, time_step=30.0, terrain: TerrainData=None,
-                 physics: Physics=None, diffusion: DiffusionFilter=None, spmd_mesh: tuple[int, ...]=None,
+                 physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'), log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
 
         Args:
             coords:
-                CoordinateSystem object describing the model coordinates
+                CoordinateSystem object describing the model coordinates. To enable SPMD
+                parallelization, pass ``spmd_mesh`` to the coords helper (e.g. ``get_speedy_coords``).
             time_step:
                 Model time step in minutes
             terrain:
@@ -218,8 +219,6 @@ class Model:
                 Physics object describing the model physics
             diffusion:
                 DiffusionFilter object describing horizontal diffusion filter params
-            spmd_mesh:
-                Optional tuple describing the SPMD mesh for parallelization
             start_date:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
             log_level:

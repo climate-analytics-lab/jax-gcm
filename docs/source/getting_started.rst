@@ -165,7 +165,7 @@ Multi-Device Parallelization
 
 JCM supports multi-device parallelization using JAX's SPMD (Single Program Multiple Data) sharding. This allows you to split computation across multiple GPUs or TPUs for faster execution, especially useful for higher resolution simulations.
 
-If you don't specify ``spmd_mesh``, JCM runs on a single device by default. This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
+If you don't specify ``spmd_mesh`` when building your coords, JCM runs on a single device by default. This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
 
 Basic Concepts
 ^^^^^^^^^^^^^^
@@ -179,7 +179,8 @@ Future implementations may allow for more flexible sharding strategies.
 Enabling Parallelization
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-To enable multi-device parallelization, simply pass an ``spmd_mesh`` when creating your Model:
+To enable multi-device parallelization, pass ``spmd_mesh`` to the coords helper
+(e.g. ``get_speedy_coords`` or ``get_coords``) and build the ``Model`` with those coords:
 
 .. code-block:: python
 
@@ -196,8 +197,8 @@ To enable multi-device parallelization, simply pass an ``spmd_mesh`` when creati
    #   - Split longitude dimension across 4 devices
    #   - Don't split latitude (1)
    #   - Don't split vertical (1)
-   # Otherwise, create and run model as usual
-   model = Model(coords=get_speedy_coords(), spmd_mesh=(4, 1, 1))
+   coords = get_speedy_coords(spmd_mesh=(4, 1, 1))
+   model = Model(coords=coords)
    predictions = model.run(save_interval=5.0, total_time=30.0)
 
 Mesh Configuration Guidelines
