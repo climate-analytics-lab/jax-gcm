@@ -25,7 +25,7 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
         raise ValueError(f"SPEEDY physics supports {list(SIGMA_LAYER_BOUNDARIES.keys())} layers, got {layers}")
 
     return get_coords(
-        sigma_boundaries=SIGMA_LAYER_BOUNDARIES[layers],
+        vertical_coords=SIGMA_LAYER_BOUNDARIES[layers],
         spectral_truncation=spectral_truncation,
         nodal_shape=nodal_shape,
         spmd_mesh=spmd_mesh

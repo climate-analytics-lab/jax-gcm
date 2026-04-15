@@ -34,7 +34,7 @@ def get_held_suarez_coords(layers=8, spectral_truncation=31, nodal_shape=None, s
         sigma_boundaries = DEFAULT_SIGMA_BOUNDARIES
 
     return _get_coords(
-        sigma_boundaries=sigma_boundaries,
+        vertical_coords=sigma_boundaries,
         spectral_truncation=spectral_truncation,
         nodal_shape=nodal_shape,
         spmd_mesh=spmd_mesh
