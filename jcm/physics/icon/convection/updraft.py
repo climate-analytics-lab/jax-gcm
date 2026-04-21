@@ -291,22 +291,34 @@ def calculate_updraft(
             mfu_threshold = 1e-6  # kg/m²/s - below this, updraft is negligible
 
             def compute_updraft_properties():
-                # Mass-weighted mixing of the updraft air and the entrained
-                # environmental air. Detrainment removes mass at *updraft*
-                # properties, so the correct denominator here is the pre-
-                # detrainment mass (mfu_below + dmf_entr), NOT mfu_new.
-                # Using mfu_new blows up q_u and T_u whenever detrainment
-                # is significant.
+                # Mass-weighted mixing of the updraft air (lifted adiabatically
+                # from the level below) and entrained environmental air.
+                #
+                # Dry static energy (DSE = cp·T + g·z) is conserved during
+                # adiabatic ascent. Equivalently, a parcel rising by dz
+                # cools by g·dz/cp (~9.8 K/km). The previous implementation
+                # mixed T directly without this adiabatic cooling — the
+                # parcel arrived at each level ~10 K too warm, so the
+                # saturation adjustment never saw supersaturation, no liquid
+                # formed, and no precipitation was produced.
+                #
+                # Detrainment removes mass at *updraft* properties, so the
+                # correct denominator for mixing is the pre-detrainment mass
+                # (mfu_below + dmf_entr), NOT mfu_new.
                 mfu_mix = jnp.maximum(
                     carry.mfu[next_level] + dmf_entr, 1e-10
                 )
+                # Adiabatic cooling of the updraft air as it rises by dz
+                adiabatic_cooling = grav * dz / cp
+                tu_lifted = carry.tu[next_level] - adiabatic_cooling
+
                 total_water = (
                     (carry.qu[next_level] + carry.lu[next_level])
                     * carry.mfu[next_level]
                     + env_q * dmf_entr
                 ) / mfu_mix
                 temp_mix = (
-                    carry.tu[next_level] * carry.mfu[next_level]
+                    tu_lifted * carry.mfu[next_level]
                     + env_temp * dmf_entr
                 ) / mfu_mix
 
