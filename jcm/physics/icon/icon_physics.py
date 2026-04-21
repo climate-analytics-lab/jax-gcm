@@ -565,14 +565,11 @@ def _prepare_common_physics_state(
     """
     p0 = physical_constants.p0
     
-    # Calculate pressure levels from surface pressure and sigma coordinates
+    # Calculate pressure levels from surface pressure and hybrid (a, b) coefficients.
+    # Works for pure sigma (a=0, b=sigma) and ICON hybrid (a + b*P_s).
     surface_pressure = state.normalized_surface_pressure * p0  # Convert to Pa
-    sigma_levels = physics_data.icon_coords.fsg  # sigma coordinates at level centers
-    pressure_levels = sigma_levels[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
-
-    # Calculate pressure at interfaces (half levels)
-    sigma_half = physics_data.icon_coords.hsg
-    pressure_half = sigma_half[:, jnp.newaxis] * surface_pressure[jnp.newaxis, :]
+    pressure_levels = physics_data.icon_coords.calculate_pressure_full(surface_pressure)
+    pressure_half = physics_data.icon_coords.calculate_pressure_half(surface_pressure)
     
     # Convert geopotential to height
     height_levels = state.geopotential / physical_constants.grav
@@ -605,10 +602,14 @@ def _prepare_common_physics_state(
     dp = jnp.diff(pressure_half, axis=0)
     dz_full = jnp.maximum(dp / (rho * physical_constants.grav), 10.0)
     
-    # Calculate relative humidity
-    es = 611.2 * jnp.exp(17.67 * (state.temperature - 273.15) / (state.temperature - 29.65))
-    e = state.specific_humidity * pressure_levels / (0.622 + 0.378 * state.specific_humidity)
-    rel_humidity = e / es
+    # Calculate relative humidity (Tetens formula; clip T only enough to avoid
+    # divide-by-zero at T=29.65K and exp overflow)
+    # Wide math-safety clip; NOT a physical-range bound
+    T_clip = jnp.clip(state.temperature, 50.0, 500.0)
+    q_clip = jnp.maximum(state.specific_humidity, 0.0)
+    es = 611.2 * jnp.exp(17.67 * (T_clip - 273.15) / (T_clip - 29.65))
+    e = q_clip * pressure_levels / (0.622 + 0.378 * q_clip)
+    rel_humidity = e / jnp.maximum(es, 1e-3)
 
     diagnostic_data = physics_data.diagnostics.copy(
         pressure_full=pressure_levels,

@@ -127,10 +127,12 @@ def compute_exchange_coefficients(
     """    
     # Ensure minimum wind speed
     wind_speed_safe = jnp.maximum(wind_speed, min_wind_speed)
-    
-    # Logarithmic terms
-    ln_z_z0m = jnp.log(reference_height / roughness_momentum)
-    ln_z_z0h = jnp.log(reference_height / roughness_heat)
+
+    # Logarithmic terms — guard against non-positive arguments
+    ln_z_z0m = jnp.log(jnp.maximum(reference_height, 0.1)
+                       / jnp.maximum(roughness_momentum, 1e-5))
+    ln_z_z0h = jnp.log(jnp.maximum(reference_height, 0.1)
+                       / jnp.maximum(roughness_heat, 1e-5))
     
     # Exchange coefficients with stability correction
     cd = (von_karman**2 / 
@@ -169,16 +171,21 @@ def compute_surface_humidity(
     L_over_Rv = PHYS_CONST.alhc / PHYS_CONST.rv  # K
     T0 = PHYS_CONST.t0  # K
     
-    exponent = L_over_Rv * (1.0/T0 - 1.0/temperature_surface)
+    # Wide math-safety clip only — prevents divide-by-zero and exp overflow,
+    # NOT a physical-range bound
+    T_safe = jnp.clip(temperature_surface, 50.0, 500.0)
+    exponent = jnp.clip(L_over_Rv * (1.0/T0 - 1.0/T_safe), -50.0, 50.0)
     e_sat = e0 * jnp.exp(exponent)
-    
-    # Saturation mixing ratio
+
+    # Saturation mixing ratio — cap e_sat < 0.99 * pressure
     epsilon = PHYS_CONST.eps
-    q_sat = epsilon * e_sat / (pressure[:, None] - (1.0 - epsilon) * e_sat)
-    
+    p_safe = jnp.maximum(pressure[:, None], 1.0)
+    e_sat = jnp.minimum(e_sat, 0.99 * p_safe)
+    q_sat = epsilon * e_sat / jnp.maximum(p_safe - (1.0 - epsilon) * e_sat, 1.0)
+
     # Ensure reasonable bounds
     q_sat = jnp.clip(q_sat, 0.0, 0.1)  # Max 100 g/kg
-    
+
     return q_sat
 
 

@@ -146,18 +146,18 @@ def prepare_physics_state_2d(state, icon_coords):
     # Convert surface pressure to Pascal
     surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
 
-    # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, icon_coords.fsg)
-    
+    # Calculate pressure levels (hybrid-correct: p = a + b*P_s, works for sigma too)
+    pressure_levels = icon_coords.calculate_pressure_full(surface_pressure_pa)
+
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)
-    
+
     # Calculate air density
     air_density = calculate_air_density(pressure_levels, state.temperature)
-    
+
     # Calculate layer thickness
     layer_thickness = calculate_layer_thickness(pressure_levels, state.temperature)
-    
+
     return {
         'surface_pressure_pa': surface_pressure_pa,
         'pressure_levels': pressure_levels,
@@ -185,8 +185,8 @@ def prepare_physics_state_3d(state, icon_coords):
     # Convert surface pressure to Pascal
     surface_pressure_pa = convert_surface_pressure(state.normalized_surface_pressure)
 
-    # Calculate pressure levels
-    pressure_levels = calculate_pressure_levels(state.normalized_surface_pressure, icon_coords.fsg)
+    # Calculate pressure levels (hybrid-correct)
+    pressure_levels = icon_coords.calculate_pressure_full(surface_pressure_pa)
     
     # Convert geopotential to height
     height_levels = geopotential_to_height(state.geopotential)

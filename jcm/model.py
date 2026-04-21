@@ -315,12 +315,27 @@ class Model:
         # TODO: make the truncation number a parameter consistent with the grid shape
         self.truncated_orography = primitive_equations.truncated_modal_orography(self.terrain.orog, self.coords, wavenumbers_to_clip=2)
 
-        self.primitive = primitive_equations.PrimitiveEquations(
-            reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
-            orography=self.truncated_orography,
-            coords=self.coords,
-            physics_specs=self.physics_specs,
-        )
+        # Dispatch to sigma vs hybrid primitive-equations class based on the
+        # vertical coordinate type (`PrimitiveEquations` defaults to sigma).
+        # ICON-style hybrid coords store `a_boundaries` in Pa, so we override
+        # `hpa_quantity` so dinosaur's internal nondimensionalization treats
+        # them as Pa (not hPa which is the dinosaur default).
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+        if isinstance(self.coords.vertical, HybridCoordinates):
+            self.primitive = primitive_equations.PrimitiveEquationsHybrid(
+                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                orography=self.truncated_orography,
+                coords=self.coords,
+                physics_specs=self.physics_specs,
+                hpa_quantity=units.pascal,
+            )
+        else:
+            self.primitive = primitive_equations.PrimitiveEquations(
+                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                orography=self.truncated_orography,
+                coords=self.coords,
+                physics_specs=self.physics_specs,
+            )
         
         def conserve_global_mean_surface_pressure(u, u_next):
             return u_next.replace(
@@ -406,11 +421,16 @@ class Model:
             state = physics_state_to_dynamics_state(physics_state, self.primitive)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
-            # default state returns log surface pressure, we want it to be log(normalized_surface_pressure)
-            # there are several ways to do this operation (in modal vs nodal space, with log vs absolute pressure), this one has the least error
-            state.log_surface_pressure = self.coords.horizontal.to_modal(
-                self.coords.horizontal.to_nodal(state.log_surface_pressure) - jnp.log(self.physics_specs.nondimensionalize(p0 * units.pascal)) # Makes this robust to different physics_specs, which will change default_state_fn behavior
-            )
+            # For sigma coords, we want log(P_s / p0) so that `exp(log_sp)` gives
+            # the normalized surface pressure ≈ 1. For hybrid coords, the dynamics
+            # combines a_boundaries (in Pa) with exp(log_sp), so log_sp must be
+            # `log(P_s_actual_in_Pa)` — no normalization by p0.
+            from dinosaur.hybrid_coordinates import HybridCoordinates
+            if not isinstance(self.coords.vertical, HybridCoordinates):
+                state.log_surface_pressure = self.coords.horizontal.to_modal(
+                    self.coords.horizontal.to_nodal(state.log_surface_pressure)
+                    - jnp.log(self.physics_specs.nondimensionalize(p0 * units.pascal))
+                )
 
             # need to add specific humidity as a tracer
             state.tracers = {

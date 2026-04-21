@@ -119,13 +119,14 @@ def layer_reflectance_transmittance(
     T_dif = jnp.clip(T_dif, 0.0, 1.0)
     
     if mu0 is not None:
-        # Direct beam transmittance (Beer's law)
-        T_dir = jnp.exp(-tau / mu0)
-        T_dir = jnp.where(tau / mu0 > 100, 0.0, T_dir)
-        
-        # Direct to diffuse reflectance
-        # From single scattering of direct beam
-        R_dir = ssa * gamma3 * (1.0 - T_dir) / (1.0 - ssa * gamma4)
+        # Direct beam transmittance (Beer's law); guard tau/mu0 from overflow
+        mu0_safe = jnp.maximum(mu0, 0.01)
+        tau_over_mu = jnp.clip(tau / mu0_safe, 0.0, 100.0)
+        T_dir = jnp.exp(-tau_over_mu)
+
+        # Direct to diffuse reflectance (guard denom from zero when ssa*gamma4 ≈ 1)
+        denom_dir = jnp.maximum(1.0 - ssa * gamma4, 1e-8)
+        R_dir = ssa * gamma3 * (1.0 - T_dir) / denom_dir
         R_dir = jnp.clip(R_dir, 0.0, 1.0)
     else:
         # Longwave - no direct beam
@@ -456,14 +457,15 @@ def flux_to_heating_rate(
     """
     # Net flux at interfaces
     net_flux_down = flux_down - flux_up
-    
+
     # Flux divergence in layers
     flux_div = jnp.diff(net_flux_down, axis=0)
-    
-    # Pressure thickness
+
+    # Pressure thickness — guard against |dp|<1 Pa to avoid div-by-zero
     dp = jnp.diff(pressure_interfaces, axis=0)
-    
+    dp_safe = jnp.where(jnp.abs(dp) < 1.0, jnp.sign(dp) * 1.0 + 1e-6, dp)
+
     # Heating rate
-    heating = (g / cp) * (-flux_div) / dp
-    
+    heating = (g / cp) * (-flux_div) / dp_safe
+
     return heating

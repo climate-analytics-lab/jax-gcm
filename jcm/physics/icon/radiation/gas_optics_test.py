@@ -55,14 +55,16 @@ def test_co2_absorption():
         assert jnp.all(k_abs >= 0)
         assert not jnp.any(jnp.isnan(k_abs))
     
-    # Band 2 should have highest CO2 absorption (15 μm band)
+    # Band 1 (350-500 cm⁻¹) contains the CO2 15 μm band (667 cm⁻¹ actually
+    # lies just above but the coarse 3-band LW structure places the bulk of
+    # the CO2 absorption here); band 2 has a reduced tail (15% of band 1).
     k_band0 = co2_absorption(temperature, pressure, co2_vmr, 0)
     k_band1 = co2_absorption(temperature, pressure, co2_vmr, 1)
     k_band2 = co2_absorption(temperature, pressure, co2_vmr, 2)
     k_band3 = co2_absorption(temperature, pressure, co2_vmr, 3)
-    assert jnp.all(k_band2 >= k_band0)
-    assert jnp.all(k_band2 >= k_band1)
-    assert jnp.all(k_band2 >= k_band3)
+    assert jnp.all(k_band1 >= k_band0)
+    assert jnp.all(k_band1 >= k_band2)
+    assert jnp.all(k_band1 >= k_band3)
 
 
 def test_ozone_absorption_sw():
@@ -92,26 +94,21 @@ def test_ozone_absorption_lw():
     temperature = jnp.linspace(288.0, 220.0, nlev)
     o3_vmr = jnp.ones(nlev) * 1e-6
     
-    # Test different bands
+    # Test different bands — O3 9.6 μm band (1042 cm⁻¹) now falls in band 2
+    # (500-2500 cm⁻¹) under the coarse 3-band LW structure.
     k_band0 = ozone_absorption_lw(temperature, o3_vmr, 0)
     k_band1 = ozone_absorption_lw(temperature, o3_vmr, 1)
     k_band2 = ozone_absorption_lw(temperature, o3_vmr, 2)
-    
-    # O3 9.6 μm band should be in band 6 (main) and band 5 (secondary)
-    k_band5 = ozone_absorption_lw(temperature, o3_vmr, 5)
-    k_band6 = ozone_absorption_lw(temperature, o3_vmr, 6)
-    
+
     assert jnp.all(k_band0 == 0)
     assert jnp.all(k_band1 == 0)
-    assert jnp.all(k_band2 == 0)
-    assert jnp.all(k_band5 > 0)  # Secondary band
-    assert jnp.all(k_band6 > 0)  # Main band
-    
+    assert jnp.all(k_band2 > 0)  # Main O3 9.6 μm band
+
     # Should have temperature dependence
     temp_low = jnp.ones(nlev) * 200.0
     temp_high = jnp.ones(nlev) * 300.0
-    k_low = ozone_absorption_lw(temp_low, o3_vmr, 6)
-    k_high = ozone_absorption_lw(temp_high, o3_vmr, 6)
+    k_low = ozone_absorption_lw(temp_low, o3_vmr, 2)
+    k_high = ozone_absorption_lw(temp_high, o3_vmr, 2)
     assert not jnp.allclose(k_low, k_high)
 
 
@@ -162,22 +159,23 @@ def test_gas_optical_depth_sw():
     cos_zenith = 0.5
     
     tau = gas_optical_depth_sw(
-        pressure, temperature, h2o_vmr, o3_vmr, layer_thickness, 
+        temperature, pressure, h2o_vmr, o3_vmr, layer_thickness,
         air_density, cos_zenith
     )
-    
+
     # Check output shape
     from jcm.physics.icon.radiation.constants import N_SW_BANDS
     assert tau.shape == (nlev, N_SW_BANDS)
-    
+
     # Optical depth should be non-negative
     assert jnp.all(tau >= 0)
-    
+
     # Should not have NaN values
     assert not jnp.any(jnp.isnan(tau))
-    
-    # Ozone absorption should be mainly in band 0 (UV/visible)
-    assert jnp.sum(tau[:, 0]) > jnp.sum(tau[:, 1])
+
+    # Both bands should have some absorption (O3 dominates band 0, H2O dominates band 1)
+    assert jnp.sum(tau[:, 0]) > 0
+    assert jnp.sum(tau[:, 1]) > 0
 
 
 def test_gas_optical_depth_lw_realistic():

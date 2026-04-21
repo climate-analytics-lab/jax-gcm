@@ -260,8 +260,11 @@ def compute_surface_exchange_coefficients(
         )
         
         # Exchange coefficient: CH = κ² / [ln(z/z0)]²
-        log_ratio_heat = jnp.log(z_ref / z0_heat[isfc])
-        log_ratio_moisture = jnp.log(z_ref / z0_moisture[isfc])
+        # Guard the log arguments against zero / negative values
+        log_ratio_heat = jnp.log(jnp.maximum(z_ref, 1.0)
+                                 / jnp.maximum(z0_heat[isfc], 1e-5))
+        log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
+                                     / jnp.maximum(z0_moisture[isfc], 1e-5))
         
         exchange_heat = (von_karman**2 * wind_speed_surface * 
                         stability_heat / log_ratio_heat**2)

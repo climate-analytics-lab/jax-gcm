@@ -217,12 +217,21 @@ def _infer_dims_shape_and_coords(
     
     lon_k, lat_k = coords.horizontal.modal_axes  # k stands for wavenumbers
     lon, sin_lat = coords.horizontal.nodal_axes
+
+    # HybridCoordinates uses `get_sigma_centers(p_ref)` and doesn't expose
+    # a .centers attribute; fall back to that for xarray's level axis.
+    vertical = coords.vertical
+    if hasattr(vertical, 'centers'):
+        level_coords = vertical.centers
+    else:
+        level_coords = np.asarray(vertical.get_sigma_centers(101325.0))
+
     all_xr_coords = {
         XR_LON_NAME: lon * 180 / np.pi,
         XR_LAT_NAME: np.arcsin(sin_lat) * 180 / np.pi,
         XR_LON_MODE_NAME: lon_k,
         XR_LAT_MODE_NAME: lat_k,
-        XR_LEVEL_NAME: coords.vertical.centers,
+        XR_LEVEL_NAME: level_coords,
         **additional_coords,
     }
     if times is not None:
