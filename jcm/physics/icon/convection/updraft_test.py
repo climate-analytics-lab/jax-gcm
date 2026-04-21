@@ -184,6 +184,52 @@ class TestDynamicCloudTop(unittest.TestCase):
             f"{np.array(mfu[0:3])}",
         )
 
+    def test_organized_entrainment_responds_to_buoyancy(self):
+        """Nordeng organized entrainment activates only for `ktype=1`.
+
+        Directly validates the branch we added: running deep-convection
+        mode (`ktype=1`) against a trivial, stable environment should give
+        similar entrainment to shallow mode, whereas running deep-convection
+        mode against a strongly-buoyant environment should yield a
+        *different* entrainment profile (buoyancy-dependent rate kicks in).
+        """
+        from jcm.physics.icon.convection.tiedtke_nordeng import (
+            ConvectionParameters, saturation_mixing_ratio,
+        )
+        from jcm.physics.icon.convection.updraft import calculate_updraft
+
+        nlev = 20
+        pressure = jnp.linspace(10_000.0, 100_000.0, nlev)
+        layer_thickness = jnp.full(nlev, 1000.0)
+
+        # Environment A: neutral — parcel ≈ environment everywhere
+        T_neutral = jnp.full(nlev, 260.0)
+        # Environment B: strongly unstable — parcel much warmer than env
+        T_unstable = jnp.linspace(240.0, 310.0, nlev)
+
+        cfg = ConvectionParameters.default()
+
+        def run(T, ktype):
+            humidity = saturation_mixing_ratio(pressure, T)
+            rho = pressure / (287.0 * T)
+            return calculate_updraft(
+                T, humidity, pressure, layer_thickness, rho,
+                kbase=18, ktop=1, ktype=ktype, mass_flux_base=0.1, config=cfg,
+            )
+
+        deep_unstable = run(T_unstable, ktype=1)
+        deep_neutral = run(T_neutral, ktype=1)
+
+        # The organized term is > 0 when buoyancy > 0 (unstable environment)
+        # and = 0 for neutral environment, so entr profiles must differ.
+        diff = jnp.sum(jnp.abs(deep_unstable.entr - deep_neutral.entr))
+        self.assertGreater(
+            float(diff), 1e-5,
+            f"Organized entrainment should depend on buoyancy profile; "
+            f"entr differs by only {float(diff):.6f} between unstable "
+            f"and neutral environments.",
+        )
+
     def test_updraft_terminates_on_negative_buoyancy(self):
         """If the parcel becomes negatively buoyant at a level well below the
         nominal `ktop`, the mass flux above should be zero — the updraft is

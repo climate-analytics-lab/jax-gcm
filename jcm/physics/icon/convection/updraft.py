@@ -175,28 +175,32 @@ def calculate_updraft(
 
     """
     nlev = len(temperature)
-    
+
     # Initialize updraft state at cloud base
     tu_init = jnp.zeros(nlev)
     qu_init = jnp.zeros(nlev)
-    lu_init = jnp.zeros(nlev) 
+    lu_init = jnp.zeros(nlev)
     mfu_init = jnp.zeros(nlev)
     entr_init = jnp.zeros(nlev)
     detr_init = jnp.zeros(nlev)
     buoy_init = jnp.zeros(nlev)
-    
+
     # Set cloud base values
     tu_init = tu_init.at[kbase].set(temperature[kbase])
     qu_init = qu_init.at[kbase].set(humidity[kbase])
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
-    
+
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
-    
-    initial_state = UpdatedraftState(
+
+    updraft_init = UpdatedraftState(
         tu=tu_init, qu=qu_init, lu=lu_init,
         mfu=mfu_init, entr=entr_init, detr=detr_init,
-        buoy=buoy_init
+        buoy=buoy_init,
     )
+    # Carry = (updraft_state, integrated_buoyancy). The integrated
+    # buoyancy drives Nordeng (1994) organized entrainment and is kept
+    # *outside* UpdatedraftState so external callers see the same type.
+    initial_state = (updraft_init, jnp.zeros(()))
     
     # Prepare inputs for scan (extract config parameters to avoid passing object)
     k_levels = jnp.arange(nlev)
@@ -209,7 +213,8 @@ def calculate_updraft(
     )
 
     # Create specialized step function with config parameters
-    def updraft_step_with_config(carry, inputs):
+    def updraft_step_with_config(carry_tuple, inputs):
+        carry, zbuoy_accum = carry_tuple
         k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, entrpen, entrscv, entrmid = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
@@ -222,16 +227,34 @@ def calculate_updraft(
         skip = jnp.logical_not(should_compute)
 
         def compute_updraft():
-            # Base entrainment rate by convection type
+            # Base turbulent entrainment rate by convection type
             entr_base = jnp.where(ktype == 1, entrpen,
                                   jnp.where(ktype == 2, entrscv, entrmid))
 
-            # Humidity-dependent entrainment: drier environment entrains more
+            # Humidity-dependent turbulent entrainment: drier environment
+            # entrains more
             qs_env = saturation_mixing_ratio(pressure, env_temp)
             rh = jnp.clip(env_q / jnp.maximum(qs_env, 1e-10), 0.0, 1.0)
             humidity_factor = 1.0 + 2.0 * (1.0 - rh) ** 2
 
-            entr = jnp.clip(entr_base * humidity_factor, 0.0, 0.01)
+            entr_turb = jnp.clip(entr_base * humidity_factor, 0.0, 0.01)
+
+            # Nordeng (1994) organized entrainment for deep convection:
+            # rate ∝ local buoyancy, suppressed by the running integral of
+            # buoyancy below. See ECHAM/ICON `mo_cuascent.f90` lines 511-523.
+            # Use previous-level updraft buoyancy as proxy for "local zbuoyz"
+            # (computed bottom-up via scan, so one step behind).
+            next_level_for_buoy = jnp.minimum(k + 1, nlev - 1)
+            prev_buoy = carry.buoy[next_level_for_buoy]
+            # Only positive buoyancy drives organized entrainment
+            zbuoyz = jnp.maximum(prev_buoy, 0.0)
+            # Active only for deep convection (ktype=1)
+            entr_org = jnp.where(
+                ktype == 1,
+                zbuoyz * 0.5 / (1.0 + zbuoy_accum),
+                0.0,
+            )
+            entr = jnp.clip(entr_turb + entr_org, 0.0, 0.01)
 
             # Turbulent detrainment: fraction of entrainment
             detr_turb = 0.5 * entr
@@ -327,22 +350,28 @@ def calculate_updraft(
                 mfu=carry.mfu.at[k].set(mfu_new),
                 entr=carry.entr.at[k].set(entr),
                 detr=carry.detr.at[k].set(detr),
-                buoy=carry.buoy.at[k].set(buoy_new)
+                buoy=carry.buoy.at[k].set(buoy_new),
             )
-            
-            return new_state
-        
-        # Skip calculation if below cloud base
-        updated_state = lax.cond(skip, lambda: carry, compute_updraft)
-        
-        return updated_state, updated_state
+            # Accumulate integrated positive buoyancy for the next step's
+            # organized-entrainment denominator (matches ECHAM `zbuoy`).
+            new_accum = zbuoy_accum + zbuoyz * dz
+            return (new_state, new_accum)
+
+        # Skip calculation if below cloud base: state and accumulator unchanged
+        updated_tuple = lax.cond(
+            skip,
+            lambda: (carry, zbuoy_accum),
+            compute_updraft,
+        )
+        return updated_tuple, updated_tuple[0]
     
-    # Use scan to compute updraft from bottom to top
-    final_state, all_states = lax.scan(
+    # Use scan to compute updraft from bottom to top. The scan carry is
+    # (UpdatedraftState, integrated_buoyancy); we return only the state.
+    final_carry, _ = lax.scan(
         updraft_step_with_config,
         initial_state,
         level_inputs,
-        reverse=True  # Go from bottom to top
+        reverse=True,  # Go from bottom to top
     )
-    
+    final_state, _zbuoy_total = final_carry
     return final_state
