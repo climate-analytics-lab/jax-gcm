@@ -117,5 +117,97 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
         self.assertTrue(jnp.all(liquid >= 0))
 
 
+class TestDynamicCloudTop(unittest.TestCase):
+    """The updraft must terminate at the LNB, not at a hard-coded ktop.
+
+    We build two environments with identical cloud-base forcing but
+    different upper-atmosphere stability; the effective cloud top should
+    be set by the point at which the parcel becomes negatively buoyant,
+    not by the `ktop` argument.
+    """
+
+    def _run_updraft(self, temperature, ktop_override=None):
+        """Run the updraft for a specified T(z) profile.
+
+        Convention: index 0 = TOA (low pressure, cold), index nlev-1 = surface
+        (high pressure, warm). The caller supplies temperature in this order.
+
+        Parcel starts at the bottom level with T=surface and
+        q=q_sat(surface) (saturated cloud base).
+        """
+        from jcm.physics.icon.convection.tiedtke_nordeng import (
+            ConvectionParameters, saturation_mixing_ratio
+        )
+        from jcm.physics.icon.convection.updraft import calculate_updraft
+
+        nlev = temperature.shape[0]
+        # Pressure: TOA (low) → surface (high) to match index convention
+        pressure = jnp.linspace(10_000.0, 100_000.0, nlev)
+
+        humidity = saturation_mixing_ratio(pressure, temperature)
+        layer_thickness = jnp.full(nlev, 1000.0)
+        rho = pressure / (287.0 * temperature)
+
+        cfg = ConvectionParameters.default()
+        kbase = nlev - 2  # 1 level above surface
+        ktop = 1 if ktop_override is None else ktop_override  # Near TOA
+
+        state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            kbase=kbase, ktop=ktop, ktype=1, mass_flux_base=0.1, config=cfg,
+        )
+        return state, pressure
+
+    def test_dry_stable_upper_atmosphere_limits_cloud_top(self):
+        """With a strongly stable inversion above the PBL, mass flux must
+        vanish above the inversion regardless of the `ktop` argument.
+        """
+        # Build a 20-level profile: adiabatic below, isothermal above (stable)
+        nlev = 20
+        # Index 0 = TOA (cold); index 19 = surface (warm)
+        #   [0..4]   stratosphere (220 K)
+        #   [5..14]  isothermal inversion (260 K) — strongly stable
+        #   [15..19] PBL, conditionally unstable
+        T_profile = jnp.concatenate([
+            jnp.full(5, 220.0),
+            jnp.full(10, 260.0),
+            jnp.linspace(270.0, 300.0, 5),
+        ])
+        state, pressure = self._run_updraft(T_profile, ktop_override=1)
+
+        mfu = state.mfu
+        # Mass flux must vanish in the stratosphere (k < 5) even though
+        # we passed a generous ktop=1 (allowing ascent to near TOA).
+        self.assertTrue(
+            jnp.all(mfu[0:3] < 1e-3),
+            f"Expected mfu≈0 in top 3 levels (stratosphere), got "
+            f"{np.array(mfu[0:3])}",
+        )
+
+    def test_updraft_terminates_on_negative_buoyancy(self):
+        """If the parcel becomes negatively buoyant at a level well below the
+        nominal `ktop`, the mass flux above should be zero — the updraft is
+        terminated dynamically rather than pushed to `ktop` regardless.
+        """
+        nlev = 20
+        # Very strong capping inversion at k=10: stratospheric temperatures
+        # above. Regardless of how high we pass `ktop`, the updraft shouldn't
+        # support mass flux in the cap.
+        T_profile = jnp.concatenate([
+            jnp.full(10, 200.0),         # Extremely cold cap (highly stable)
+            jnp.linspace(290.0, 300.0, 10),  # PBL
+        ])
+        # Pass ktop_override=1 — updraft is *asked* to go all the way to
+        # near TOA, but buoyancy termination should stop it at the cap.
+        state, _ = self._run_updraft(T_profile, ktop_override=1)
+        mfu = state.mfu
+        # No mass flux should persist above the inversion
+        self.assertTrue(
+            jnp.all(mfu[0:9] < 1e-3),
+            f"Updraft should terminate at capping inversion; got mfu[0:9]="
+            f"{np.array(mfu[0:9]).round(4)}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

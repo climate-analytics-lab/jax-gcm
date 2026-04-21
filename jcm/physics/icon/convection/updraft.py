@@ -268,18 +268,26 @@ def calculate_updraft(
             mfu_threshold = 1e-6  # kg/m²/s - below this, updraft is negligible
 
             def compute_updraft_properties():
-                # Avoid division by zero
-                if_mfu = 1.0 / jnp.maximum(mfu_new, 1e-10)
+                # Mass-weighted mixing of the updraft air and the entrained
+                # environmental air. Detrainment removes mass at *updraft*
+                # properties, so the correct denominator here is the pre-
+                # detrainment mass (mfu_below + dmf_entr), NOT mfu_new.
+                # Using mfu_new blows up q_u and T_u whenever detrainment
+                # is significant.
+                mfu_mix = jnp.maximum(
+                    carry.mfu[next_level] + dmf_entr, 1e-10
+                )
+                total_water = (
+                    (carry.qu[next_level] + carry.lu[next_level])
+                    * carry.mfu[next_level]
+                    + env_q * dmf_entr
+                ) / mfu_mix
+                temp_mix = (
+                    carry.tu[next_level] * carry.mfu[next_level]
+                    + env_temp * dmf_entr
+                ) / mfu_mix
 
-                # Total water and energy after mixing
-                total_water = (carry.qu[next_level] + carry.lu[next_level]) * carry.mfu[next_level] + env_q * dmf_entr
-                total_water = total_water * if_mfu
-
-                # Temperature after mixing (dry static energy conservation)
-                temp_mix = carry.tu[next_level] * carry.mfu[next_level] + env_temp * dmf_entr
-                temp_mix = temp_mix * if_mfu
-
-                # Saturation adjustment
+                # Saturation adjustment (iterative Newton; cuadjtq kcall=1)
                 return saturation_adjustment(temp_mix, total_water, pressure)
 
             def use_environmental_values():
@@ -297,7 +305,20 @@ def calculate_updraft(
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
             buoy_new = grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
-            
+
+            # Dynamic cloud-top termination: once above cloud base the parcel
+            # becomes negatively buoyant (or the mass flux has already dropped
+            # below 1% of the base value — ECHAM's termination criterion in
+            # `mo_cuascent.f90`), terminate the updraft here. This replaces the
+            # previous fixed `ktop` which ignored the environment.
+            above_cloud_base = k < kbase
+            mfu_too_small = carry.mfu[next_level] < 0.01 * mass_flux_base
+            terminate = jnp.logical_and(
+                above_cloud_base,
+                jnp.logical_or(buoy_new < 0.0, mfu_too_small),
+            )
+            mfu_new = jnp.where(terminate, 0.0, mfu_new)
+
             # Update state
             new_state = carry._replace(
                 tu=carry.tu.at[k].set(tu_new),
