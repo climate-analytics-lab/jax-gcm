@@ -572,14 +572,21 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         self.assertIn("flux", result)
 
     def test_data_struct_to_dict_non_array_values(self):
-        """data_struct_to_dict skips non-array values during expansion."""
+        """Plain Python values (ints, strings) drop out of the user dict.
+
+        Only jax.Array leaves and flattenable sub-structs make it into the
+        xarray output — everything else is silently skipped.
+        """
         physics = ComposablePhysics(terms=[LinearHeating()])
-        struct = {"count": 42, "name": "test"}
+        struct = {"count": 42, "name": "test", "field": jnp.array([1.0, 2.0])}
         result = physics.data_struct_to_dict(struct, nodal_shape=(4, 8))
-        self.assertEqual(result["count"], 42)
-        self.assertEqual(result["name"], "test")
+        self.assertNotIn("count", result)
+        self.assertNotIn("name", result)
+        self.assertIn("field", result)
 
     def test_data_struct_to_dict_filters_internal_keys(self):
+        """Underscore-prefixed array keys are exposed without the underscore;
+        underscore-prefixed plumbing keys (`_date`, etc.) stay hidden."""
         physics = ComposablePhysics(terms=[LinearHeating()])
         struct = {
             "_internal": jnp.array(1.0),
@@ -588,8 +595,13 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         }
         result = physics.data_struct_to_dict(struct)
         self.assertIn("public_key", result)
-        self.assertNotIn("_internal", result)
+        # Underscore-prefixed array key surfaces as the key without underscore.
+        self.assertIn("internal", result)
+        # `_date` is plumbing — stays hidden.
         self.assertNotIn("_date", result)
+        self.assertNotIn("date", result)
+        # Original underscore key is not preserved.
+        self.assertNotIn("_internal", result)
 
     def test_data_struct_to_dict_none(self):
         physics = ComposablePhysics(terms=[LinearHeating()])

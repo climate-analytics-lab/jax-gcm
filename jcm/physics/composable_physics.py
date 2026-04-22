@@ -20,7 +20,7 @@ See docs/design/composable_physics.md for the full design.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -106,12 +106,24 @@ class ComposablePhysics(nnx.Module, Physics):
 
         """
         if self.vectorize_columns:
-            return self._compute_tendencies_columns(
+            tendencies, diagnostics = self._compute_tendencies_columns(
                 state, forcing, terrain, date, prev_physics_data,
             )
-        return self._compute_tendencies_3d(
-            state, forcing, terrain, date, prev_physics_data,
-        )
+        else:
+            tendencies, diagnostics = self._compute_tendencies_3d(
+                state, forcing, terrain, date, prev_physics_data,
+            )
+        # Strip pure-plumbing keys (date snapshot, sliced forcing, parameter
+        # snapshot) before returning. These are re-injected at the top of the
+        # next compute_tendencies call from authoritative sources, so they
+        # don't need to ride in the saved trajectory and would otherwise bloat
+        # the prediction dict and break tree_map averaging tests against
+        # legacy ``PhysicsData``-shaped output.
+        diagnostics = {
+            k: v for k, v in diagnostics.items()
+            if k not in self._INTERNAL_DIAGNOSTIC_KEYS
+        }
+        return tendencies, diagnostics
 
     def _compute_tendencies_3d(
         self, state, forcing, terrain, date, prev_physics_data=None,
@@ -201,21 +213,57 @@ class ComposablePhysics(nnx.Module, Physics):
         )
         return tree_map(jnp.zeros_like, diagnostics)
 
+    # Underscore-prefixed keys that are pure plumbing (date stamps, sliced
+    # forcing snapshots, parameter snapshots) and must NOT be flattened into
+    # the user-facing xarray output.
+    _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "_date",
+        "_forcing_2d",
+        "_icon_params",
+        "_icon_coords",
+        "_speedy_coords",
+    })
+
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
     ) -> dict[str, Any]:
         """Convert diagnostics to a flat dict for xarray output.
 
-        Since ComposablePhysics already uses a dict, this is mostly a
-        pass-through, filtering out internal keys (prefixed with ``_``)
-        and handling multi-channel fields.
+        The threaded diagnostics dict mixes three kinds of values:
+
+        - Top-level array diagnostics (no leading underscore) — kept as-is.
+        - Typed sub-structs of arrays stashed under ``_<name>`` for inter-term
+          communication (``_radiation``, ``_humidity``, ...) — flattened into
+          ``<name>.<field>`` user-facing keys (matches the legacy SPEEDY /
+          ICON ``PhysicsData`` xarray layout).
+        - Infrastructure objects (``_date``, ``_icon_params``, ...) that are
+          listed in :attr:`_INTERNAL_DIAGNOSTIC_KEYS` or that fail array-only
+          flattening — silently dropped from user output.
         """
         if struct is None:
             return {}
         if not isinstance(struct, dict):
             return super().data_struct_to_dict(struct, nodal_shape, sep)
 
-        items = {k: v for k, v in struct.items() if not k.startswith("_")}
+        items: dict[str, Any] = {}
+        for k, v in struct.items():
+            if k in self._INTERNAL_DIAGNOSTIC_KEYS:
+                continue
+            out_key = k.lstrip("_") if k.startswith("_") else k
+            if not out_key:
+                continue
+            if isinstance(v, jax.Array):
+                items[out_key] = v
+            elif hasattr(v, "__dict__") and v.__dict__:
+                # Typed sub-struct (e.g. PhysicsData.radiation). Flatten via
+                # the parent recursive helper; skip if it raises (sub-structs
+                # that contain non-array fields).
+                try:
+                    sub = super().data_struct_to_dict(v, nodal_shape, sep)
+                except (ValueError, AttributeError):
+                    continue
+                for sk, sv in sub.items():
+                    items[f"{out_key}{sep}{sk}"] = sv
 
         # Expand multi-channel fields (trailing dim beyond nodal_shape)
         if nodal_shape is not None:
