@@ -4,7 +4,7 @@ Verifies that:
 1. IconCoords.from_coordinate_system builds correctly for both coord types
 2. calculate_pressure_full/half return correct pressure for both
 3. For pure sigma coords, a=0 and b=sigma_boundaries, recovering p = sigma * P_s
-4. For hybrid coords, p = a + b * P_s exactly (not the approximate p = fsg * P_s)
+4. For hybrid coords, p = a + b * P_s exactly (not the old sigma approximation)
 """
 
 import unittest
@@ -25,12 +25,10 @@ class TestIconCoordsSigma(unittest.TestCase):
 
     def test_from_coordinate_system_sigma(self):
         ic = IconCoords.from_coordinate_system(self.coords)
-        # fsg should match sigma centers, hsg the boundaries
+        # Sigma coords are stored as a=0, b=sigma.
+        np.testing.assert_allclose(ic.a_half, 0.0, atol=1e-6)
         np.testing.assert_allclose(
-            ic.fsg, self.sigma_vertical.centers, atol=1e-6
-        )
-        np.testing.assert_allclose(
-            ic.hsg, self.sigma_vertical.boundaries, atol=1e-6
+            ic.b_half, self.sigma_vertical.boundaries, atol=1e-6
         )
 
     def test_pressure_at_reference_surface(self):
@@ -83,8 +81,8 @@ class TestIconCoordsHybrid(unittest.TestCase):
         """A hybrid model must give different p_full for different P_s columns
         following p = a + b*P_s, NOT p = (a/P_s_ref + b) * P_s.
 
-        This is the bug that breaks the hybrid runs: the old IconCoords stored
-        only fsg = (a + b*P_s_ref)/P_s_ref, which is only correct at P_s_ref.
+        This is the bug that broke the hybrid runs: the old IconCoords stored
+        only sigma = (a + b*P_s_ref)/P_s_ref, which is only correct at P_s_ref.
         """
         ic = IconCoords.from_coordinate_system(self.coords)
         p_s_ref = 101325.0

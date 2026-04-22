@@ -10,18 +10,12 @@ hybrid-coordinate pressure relation
     p(k, col) = a(k) + b(k) * P_s(col)
 
 can be evaluated exactly at every column. Pure sigma coordinates are a
-special case with a = 0 and b = sigma. `fsg`/`hsg` are kept as convenience
-attributes equal to the sigma-equivalent at a reference surface pressure,
-for existing call sites that only need a rough sigma profile.
+special case with a = 0 and b = sigma.
 """
 
 import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem
-
-
-# Reference surface pressure used to compute sigma-equivalent for hybrid coords.
-_P_S_REF_PA = 101325.0
 
 
 @tree_math.struct
@@ -36,8 +30,6 @@ class IconCoords:
         b_full: Hybrid 'b' coefficient at level centers [-] [nlev]
         a_half: Hybrid 'a' coefficient at half levels (Pa) [nlev+1]
         b_half: Hybrid 'b' coefficient at half levels [-] [nlev+1]
-        fsg: Sigma-equivalent at level centers (a_full/P_s_ref + b_full) [nlev]
-        hsg: Sigma-equivalent at half levels (a_half/P_s_ref + b_half) [nlev+1]
         lat: Latitude in radians
         lon: Longitude in radians
 
@@ -48,8 +40,6 @@ class IconCoords:
     b_full: jnp.ndarray
     a_half: jnp.ndarray
     b_half: jnp.ndarray
-    fsg: jnp.ndarray
-    hsg: jnp.ndarray
     lat: jnp.ndarray
     lon: jnp.ndarray
 
@@ -127,18 +117,12 @@ class IconCoords:
         a_full = 0.5 * (a_half[:-1] + a_half[1:])
         b_full = 0.5 * (b_half[:-1] + b_half[1:])
 
-        # Sigma-equivalent at reference P_s for backwards-compatible fsg/hsg
-        fsg = a_full / _P_S_REF_PA + b_full
-        hsg = a_half / _P_S_REF_PA + b_half
-
         return cls(
             nodal_shape=coords.nodal_shape,
             a_full=a_full,
             b_full=b_full,
             a_half=a_half,
             b_half=b_half,
-            fsg=fsg,
-            hsg=hsg,
             lat=jnp.asarray(coords.horizontal.latitudes),
             lon=jnp.asarray(coords.horizontal.longitudes),
         )

@@ -1,20 +1,11 @@
 """Constants for ICON radiation scheme.
 
-This module contains physical and numerical constants used throughout
-the ICON radiation implementation.
-
-The band counts here MUST match the defaults in RadiationParameters
-(n_sw_bands=2, n_lw_bands=3) and the band limits used by the
-gas-optics routines.  A previous version defined 6 SW and 8 LW
-fine-resolution bands, but the absorption coefficients in gas_optics.py
-were tuned for the coarser 2 SW / 3 LW structure, causing a shape
-mismatch and dramatically underestimated greenhouse effect.
+The band definitions here are the single source of truth used by both
+``gas_optics``/``planck``/``cloud_optics`` (which need Python ints at
+trace time for static shapes / loop unrolls) and by
+``RadiationParameters.default()`` (which converts them to jnp arrays
+for runtime use). Keep both in sync by editing only this file.
 """
-
-# Spectral bands — must match RadiationParameters.default()
-N_SW_BANDS = 2  # Shortwave bands
-N_LW_BANDS = 3  # Longwave bands
-N_BANDS_TOTAL = N_SW_BANDS + N_LW_BANDS
 
 # Shortwave bands (wavenumber in cm⁻¹)
 SW_BAND_LIMITS = (
@@ -28,3 +19,7 @@ LW_BAND_LIMITS = (
     (350, 500),    # CO2 + H2O window
     (500, 2500),   # H2O continuum + O3
 )
+
+N_SW_BANDS = len(SW_BAND_LIMITS)
+N_LW_BANDS = len(LW_BAND_LIMITS)
+N_BANDS_TOTAL = N_SW_BANDS + N_LW_BANDS
