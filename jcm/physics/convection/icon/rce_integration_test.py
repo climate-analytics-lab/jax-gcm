@@ -12,7 +12,7 @@ These are the RCE signatures that were missing / wrong before the fixes.
 import unittest
 import jax.numpy as jnp
 
-from jcm.physics.icon.convection.tiedtke_nordeng import (
+from jcm.physics.convection.icon.tiedtke_nordeng import (
     ConvectionParameters,
     tiedtke_nordeng_convection,
     saturation_mixing_ratio,
