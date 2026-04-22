@@ -10,6 +10,7 @@ Regression tests covering the bugs we hit when switching from sigma to hybrid:
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.utils import get_coords
 from jcm.physics.icon.icon_levels import get_icon_levels
@@ -71,8 +72,15 @@ class TestHybridInitialGeopotential(unittest.TestCase):
                         f"<< TOA phi {toa_mean:.3g}")
 
 
+@pytest.mark.slow
 class TestHybridDynamicsPhysicsInterface(unittest.TestCase):
-    """The dynamics→physics→dynamics round trip should preserve validity."""
+    """The dynamics→physics→dynamics round trip should preserve validity.
+
+    Marked slow: runs a full 1-day T31 ICON physics integration, which
+    includes JIT-compiling the complete physics pipeline (radiation,
+    convection, cloud microphysics, turbulence). Too heavy for the
+    push / fast-tests CI budget.
+    """
 
     def test_one_step_no_nan(self):
         """After one model step from the default isothermal state, no NaN."""
@@ -87,12 +95,16 @@ class TestHybridDynamicsPhysicsInterface(unittest.TestCase):
         self.assertTrue(jnp.all(T < 400), "T above 400 K after 1 day")
 
 
+@pytest.mark.slow
 class TestHybridAtT85(unittest.TestCase):
     """At T85 the dynamics are more energetic; hybrid must still be stable.
 
     Regression test for the log_surface_pressure normalization bug: sigma
     coords need log(P_s/p0), hybrid needs log(P_s_in_Pa), and mixing the
     two caused all fields to go NaN within a single model step at T85.
+
+    Marked slow: a 3-day T85 physics integration runs for several minutes
+    on CPU and won't fit the push CI budget.
     """
 
     def test_multi_day_no_nan_at_t85(self):
