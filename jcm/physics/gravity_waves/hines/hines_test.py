@@ -5,7 +5,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from .gravity_wave_drag import (
+from .hines import (
     GravityWaveParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
     gravity_wave_drag
 )

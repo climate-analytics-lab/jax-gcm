@@ -645,7 +645,7 @@ respective process directories:
    * - Vertical Diffusion
      - ``jcm.physics.vertical_diffusion.tte_tke``
    * - Gravity Waves
-     - ``jcm.physics.gravity_waves.icon``
+     - ``jcm.physics.gravity_waves.hines``
    * - Aerosol
      - ``jcm.physics.aerosol.icon``
    * - Chemistry

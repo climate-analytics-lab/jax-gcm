@@ -4,7 +4,7 @@ This module contains gravity wave parameterizations including orographic
 and non-orographic gravity wave drag schemes.
 """
 
-from .gravity_wave_drag import (
+from .hines import (
     gravity_wave_drag,
     GravityWaveParameters,
     GravityWaveState,
