@@ -152,29 +152,29 @@ class TestGasOptics:
         assert k_h2o[0] > k_h2o[-1]
     
     def test_co2_absorption(self):
-        """Test CO2 absorption"""
+        """Test CO2 absorption in the coarse 3-band LW structure."""
         co2_vmr = 400e-6
-        
-        # Band 2 should have main CO2 absorption (667 cm⁻¹)
+
+        # Band 1 (350-500 cm⁻¹) contains the bulk of the CO2 15 μm absorption
+        k_co2_b1 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=1)
+        assert jnp.any(k_co2_b1 > 0)
+
+        # Band 2 has secondary (reduced) CO2 absorption
         k_co2_b2 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=2)
         assert jnp.any(k_co2_b2 > 0)
-        
-        # Band 3 should have secondary CO2 absorption
-        k_co2_b3 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=3)
-        assert jnp.any(k_co2_b3 > 0)
-        
-        # Other bands should be zero
+
+        # Band 0 should be zero
         k_co2_b0 = co2_absorption(self.temperature, self.pressure, co2_vmr, band=0)
         assert jnp.all(k_co2_b0 == 0)
-    
+
     def test_ozone_absorption(self):
         """Test O3 absorption"""
         # SW absorption (UV/vis) - now requires temperature
         k_o3_sw = ozone_absorption_sw(self.o3_vmr, self.temperature, band=0)
         assert jnp.all(k_o3_sw > 0)
-        
-        # LW absorption (9.6 micron) - now in band 6
-        k_o3_lw = ozone_absorption_lw(self.temperature, self.o3_vmr, band=6)
+
+        # LW absorption (9.6 μm, 1042 cm⁻¹) falls in band 2 (500-2500 cm⁻¹)
+        k_o3_lw = ozone_absorption_lw(self.temperature, self.o3_vmr, band=2)
         assert jnp.all(k_o3_lw > 0)
     
     def test_gas_optical_depth(self):

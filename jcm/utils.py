@@ -7,10 +7,12 @@ from importlib import resources
 import dinosaur
 import functools
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
+from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import PrimitiveEquationsSpecs
 from dinosaur.scales import SI_SCALE
+from dinosaur.sigma_coordinates import SigmaCoordinates
 from dinosaur import typing
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, Union
 from dinosaur.xarray_utils import _maybe_update_shape_and_dim_with_realization_time_sample
 import xarray
 
@@ -32,15 +34,26 @@ TRUNCATION_FOR_NODAL_SHAPE = {
 VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
 
-def get_coords(sigma_boundaries, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
-    """Return a CoordinateSystem object for the given sigma boundaries and horizontal resolution.
+def get_coords(
+    vertical_coords: Union[typing.Array, SigmaCoordinates, HybridCoordinates],
+    spectral_truncation=31,
+    nodal_shape=None,
+    spmd_mesh=None,
+) -> CoordinateSystem:
+    """Return a CoordinateSystem object for the given vertical and horizontal resolution.
 
-    This is a physics-agnostic function. Use physics-specific helpers for default sigma boundaries:
+    This is a physics-agnostic function. Use physics-specific helpers for default
+    vertical coordinates:
     - jcm.physics.speedy.utils.get_speedy_coords()
     - jcm.physics.held_suarez.utils.get_held_suarez_coords()
+    - jcm.physics.icon.icon_levels.get_icon_levels()
 
     Args:
-        sigma_boundaries: Array of sigma layer boundaries (required)
+        vertical_coords: Vertical coordinate specification. Can be one of:
+            - An array of sigma layer boundaries (wrapped in SigmaCoordinates).
+            - A SigmaCoordinates instance (passed through).
+            - A HybridCoordinates instance (passed through), e.g. from
+              jcm.physics.icon.icon_levels.get_icon_levels().
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
         spmd_mesh: Optional tuple ``(x, y, z)`` describing the SPMD device mesh
@@ -51,7 +64,7 @@ def get_coords(sigma_boundaries, spectral_truncation=31, nodal_shape=None, spmd_
 
     Returns:
         CoordinateSystem object
-        
+
     """
     from dinosaur.spherical_harmonic import FastSphericalHarmonics, RealSphericalHarmonics
 
@@ -71,10 +84,15 @@ def get_coords(sigma_boundaries, spectral_truncation=31, nodal_shape=None, spmd_
     else:
         spherical_harmonics_impl = RealSphericalHarmonics
 
+    if isinstance(vertical_coords, (SigmaCoordinates, HybridCoordinates)):
+        vertical = vertical_coords
+    else:
+        vertical = SigmaCoordinates(vertical_coords)
+
     return CoordinateSystem(
         horizontal=horizontal_grid(radius=physics_specs.radius,
                                    spherical_harmonics_impl=spherical_harmonics_impl),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates(sigma_boundaries),
+        vertical=vertical,
         spmd_mesh=spmd_mesh
     )
 
@@ -203,12 +221,22 @@ def _infer_dims_shape_and_coords(
     
     lon_k, lat_k = coords.horizontal.modal_axes  # k stands for wavenumbers
     lon, sin_lat = coords.horizontal.nodal_axes
+
+    # HybridCoordinates uses `get_sigma_centers(p_ref)` and doesn't expose
+    # a .centers attribute; fall back to that for xarray's level axis.
+    vertical = coords.vertical
+    if hasattr(vertical, 'centers'):
+        level_coords = vertical.centers
+    else:
+        from jcm.physics.icon.constants.physical_constants import p0
+        level_coords = np.asarray(vertical.get_sigma_centers(p0))
+
     all_xr_coords = {
         XR_LON_NAME: lon * 180 / np.pi,
         XR_LAT_NAME: np.arcsin(sin_lat) * 180 / np.pi,
         XR_LON_MODE_NAME: lon_k,
         XR_LAT_MODE_NAME: lat_k,
-        XR_LEVEL_NAME: coords.vertical.centers,
+        XR_LEVEL_NAME: level_coords,
         **additional_coords,
     }
     if times is not None:

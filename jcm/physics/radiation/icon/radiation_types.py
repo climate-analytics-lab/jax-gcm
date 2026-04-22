@@ -10,6 +10,10 @@ import jax.numpy as jnp
 from typing import NamedTuple, Optional
 import tree_math
 
+from .constants import (
+    N_SW_BANDS, N_LW_BANDS, SW_BAND_LIMITS, LW_BAND_LIMITS,
+)
+
 
 @tree_math.struct
 class RadiationParameters:
@@ -50,9 +54,10 @@ class RadiationParameters:
 
     @classmethod
     def default(cls, dt_rad=3600.0, radiation_interval=0.0,
-                 solar_constant=1361.0, n_sw_bands=2, n_lw_bands=3,
-                 lw_band_limits=((10, 350), (350, 500), (500, 2500)),
-                 sw_band_limits=((4000, 14500), (14500, 50000)),
+                 solar_constant=1361.0,
+                 n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
+                 lw_band_limits=LW_BAND_LIMITS,
+                 sw_band_limits=SW_BAND_LIMITS,
                  co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
                  min_cos_zenith=0.035, flux_epsilon=1e-6,
                  cld_tau_min=1e-6, cld_frac_min=1e-3,

@@ -36,65 +36,49 @@ def water_vapor_continuum(
     # Reference temperature and pressure
     T_ref = 296.0  # K
     P_ref = 101325.0  # Pa
-    
+
+    # Clip to physical range so CFL violations (T<<100 or T>>400) cannot
+    # produce NaN via division or exp overflow
+    # Wide safety clip — prevents exp overflow in T_factor calculations at
+    # pathological values, not a physical-range bound
+    temperature = jnp.clip(temperature, 50.0, 500.0)
+    pressure = jnp.maximum(pressure, 1.0)
+    h2o_vmr = jnp.clip(h2o_vmr, 0.0, 0.99)
+
     # Convert VMR to mass mixing ratio
     # q = vmr * (M_h2o / M_air) ≈ vmr * 0.622
     h2o_mmr = h2o_vmr * 0.622
-    
-    # Temperature dependence
-    T_factor = jnp.exp(1800.0 * (1.0/temperature - 1.0/T_ref))
-    
+
+    # Temperature dependence (cap exponent to avoid overflow in AD)
+    T_factor = jnp.exp(jnp.clip(1800.0 * (1.0/temperature - 1.0/T_ref), -50.0, 50.0))
+
     # Pressure scaling
     P_factor = pressure / P_ref
     
-    # Enhanced band-dependent coefficients based on MT_CKD continuum model
-    # Updated for 8 longwave bands with improved spectral resolution
-    
+    # Band-dependent coefficients for 3-band LW structure:
+    #   Band 0: 10-350 cm⁻¹  (far-IR + H2O rotation)
+    #   Band 1: 350-500 cm⁻¹ (CO2 15μm + H2O window)
+    #   Band 2: 500-2500 cm⁻¹ (H2O continuum + O3 9.6μm)
+
     # Self-broadening coefficients (H2O-H2O interactions)
+    # 2x scaling on the continuum bands (far-IR + window + bands) to bring
+    # SFC LW down closer to Earth's ~340 W/m² (was 185 W/m² at 1x). Combined
+    # with hybrid coords + 0.5x diffusion + dt=3min for stability under the
+    # stronger surface forcing that this implies.
     k_self = jnp.where(
-        band == 0, 0.005,  # Far-IR window (10-200 cm⁻¹)
+        band == 0, 0.20,   # Far-IR + rotation: strong H2O absorption
         jnp.where(
-            band == 1, 0.15,   # H2O rotation band (200-280 cm⁻¹)
-            jnp.where(
-                band == 2, 0.08,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 0.12,   # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 0.25,   # H2O continuum (540-800 cm⁻¹)
-                        jnp.where(
-                            band == 5, 0.18,   # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 0.22,   # O3 + H2O (1000-1200 cm⁻¹)
-                                0.35                # H2O bands (1200-2600 cm⁻¹)
-                            )
-                        )
-                    )
-                )
-            )
+            band == 1, 0.20,   # CO2 + H2O window: moderate
+            0.60               # H2O continuum + bands: strongest
         )
     )
-    
-    # Foreign-broadening coefficients (H2O-N2, H2O-O2 interactions)
+
+    # Foreign-broadening coefficients (H2O-N2/O2 interactions)
     k_foreign = jnp.where(
-        band == 0, 0.001,  # Far-IR window
+        band == 0, 0.040,  # Far-IR + rotation
         jnp.where(
-            band == 1, 0.035,  # H2O rotation band
-            jnp.where(
-                band == 2, 0.018,  # CO2 bending + H2O
-                jnp.where(
-                    band == 3, 0.028,  # CO2 v2 + H2O
-                    jnp.where(
-                        band == 4, 0.055,  # H2O continuum
-                        jnp.where(
-                            band == 5, 0.042,  # H2O + O3
-                            jnp.where(
-                                band == 6, 0.048,  # O3 + H2O
-                                0.08                # H2O bands
-                            )
-                        )
-                    )
-                )
-            )
+            band == 1, 0.050,  # CO2 window
+            0.130              # H2O continuum + bands
         )
     )
     
@@ -134,15 +118,14 @@ def co2_absorption(
         Absorption coefficient (m²/kg)
 
     """
-    # CO2 absorption in multiple bands
-    # Main CO2 band (667 cm⁻¹) is in band 2 (280-400 cm⁻¹)
-    # Some absorption also in band 3 (400-540 cm⁻¹)
+    # CO2 15μm band (667 cm⁻¹) falls in band 1 (350-500 cm⁻¹).
+    # Some weak CO2 absorption extends into band 2 (500-2500 cm⁻¹).
     return jnp.where(
-        band == 2,
-        _calculate_co2_band1(temperature, pressure, co2_vmr),  # Main CO2 band
+        band == 1,
+        _calculate_co2_band1(temperature, pressure, co2_vmr),
         jnp.where(
-            band == 3,
-            _calculate_co2_band1(temperature, pressure, co2_vmr) * 0.3,  # Secondary CO2 band
+            band == 2,
+            _calculate_co2_band1(temperature, pressure, co2_vmr) * 0.15,
             jnp.zeros_like(temperature)
         )
     )
@@ -156,14 +139,22 @@ def _calculate_co2_band1(temperature, pressure, co2_vmr):
     # Reference conditions
     T_ref = 296.0
     P_ref = 101325.0
-    
+
+    # Clip to physical range
+    # Wide safety clip — prevents exp overflow in T_factor calculations at
+    # pathological values, not a physical-range bound
+    temperature = jnp.clip(temperature, 50.0, 500.0)
+    pressure = jnp.maximum(pressure, 1.0)
+
     # Enhanced temperature dependence for CO2 line strength
     # Based on HITRAN formula: S(T) = S_ref * (T_ref/T) * exp(-E_low/k*(1/T - 1/T_ref))
     # where E_low is the lower state energy
     E_low_k = 960.0  # Lower state energy / Boltzmann constant (K) for 15 μm band
-    
-    T_factor = (T_ref / temperature) * jnp.exp(-E_low_k * (1.0/temperature - 1.0/T_ref))
-    
+
+    T_factor = (T_ref / temperature) * jnp.exp(
+        jnp.clip(-E_low_k * (1.0/temperature - 1.0/T_ref), -50.0, 50.0)
+    )
+
     # Improved pressure broadening with temperature dependence
     # γ(T,P) = γ_ref * (T_ref/T)^n * P/P_ref
     n_temp = 0.69  # Temperature exponent for CO2 line widths
@@ -171,7 +162,8 @@ def _calculate_co2_band1(temperature, pressure, co2_vmr):
     
     # Enhanced absorption coefficient based on spectroscopic data
     # Includes both line absorption and continuum effects
-    k_ref = 0.15  # Increased from 0.1 to better match observations
+    # 2x scaling — see comment on k_self above
+    k_ref = 0.30
     
     # CO2 mass mixing ratio
     co2_mmr = co2_vmr * (44.0 / 29.0)  # M_CO2 / M_air
@@ -204,10 +196,16 @@ def ozone_absorption_sw(
     """
     # Reference temperature
     T_ref = 273.15
-    
+
+    # Clip to physical range
+    # Wide safety clip — prevents exp overflow in T_factor calculations at
+    # pathological values, not a physical-range bound
+    temperature = jnp.clip(temperature, 50.0, 500.0)
+    o3_vmr = jnp.clip(o3_vmr, 0.0, 1.0)
+
     # Enhanced band-dependent absorption cross-sections using JAX-compatible conditionals
     # Based on UV-visible spectroscopy data
-    
+
     # Constants
     N_A = 6.022e23  # molecules/mol
     M_O3 = 48.0e-3  # kg/mol
@@ -226,13 +224,10 @@ def ozone_absorption_sw(
     temp_factor_nir = 1.0 + 1.5e-4 * (temperature - T_ref)
     k_o3_nir = sigma_ref_nir * N_A / M_O3 * temp_factor_nir * 1e-4
 
+    # 2 SW bands: 0 = UV+visible (4000-14500 cm⁻¹), 1 = near-IR (14500-50000 cm⁻¹)
     k_o3_by_band = jnp.array([
-        k_o3_uv_vis * 1.5,  # UV-C/B - highest O3 absorption
-        k_o3_uv_vis,        # UV-A - strong O3 absorption
-        k_o3_uv_vis * 0.8,  # Blue - moderate O3 absorption
-        k_o3_uv_vis * 0.3,  # Green-Red - weak O3 absorption
-        k_o3_nir,           # Near-IR 1 - very weak
-        k_o3_nir * 0.5      # Near-IR 2 - minimal
+        k_o3_uv_vis,        # UV + visible: strong O3 (Hartley-Huggins-Chappuis)
+        k_o3_nir * 0.5,     # Near-IR: very weak
     ])
 
     k_o3 = k_o3_by_band[band]
@@ -262,22 +257,19 @@ def ozone_absorption_lw(
         Absorption coefficient (m²/kg)
 
     """
-    # Ozone 9.6 micron band (around 1042 cm⁻¹) - mainly in band 6 (1000-1200 cm⁻¹)
-    # Some contribution also in band 5 (800-1000 cm⁻¹)
+    # Ozone 9.6μm band (1042 cm⁻¹) falls entirely in band 2 (500-2500 cm⁻¹)
     T_ref = 296.0
+    # Wide safety clip — prevents exp overflow in T_factor calculations at
+    # pathological values, not a physical-range bound
+    temperature = jnp.clip(temperature, 50.0, 500.0)
     T_factor = jnp.sqrt(T_ref / temperature)
-    k_o3_main = 50.0  # Main 9.6 μm band
-    k_o3_secondary = 15.0  # Secondary bands
-    o3_mmr = o3_vmr * (48.0 / 29.0)
-    
+    k_o3_main = 50.0
+    o3_mmr = jnp.clip(o3_vmr, 0.0, 1.0) * (48.0 / 29.0)
+
     return jnp.where(
-        band == 6,
-        k_o3_main * T_factor * o3_mmr,      # Main 9.6 μm band
-        jnp.where(
-            band == 5,
-            k_o3_secondary * T_factor * o3_mmr,  # Secondary band
-            jnp.zeros_like(temperature)
-        )
+        band == 2,
+        k_o3_main * T_factor * o3_mmr,
+        jnp.zeros_like(temperature)
     )
 
 

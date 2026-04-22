@@ -139,12 +139,14 @@ def prepare_radiation_state(
     """
     # Convert specific humidity to volume mixing ratio
     # q/(1-q) * Md/Mv where Md/Mv = 29/18 = 1.608
-    h2o_vmr = specific_humidity / (1 - specific_humidity) * 1.608
+    # Clip to physical range — dynamics can produce q > 1 transiently
+    q_clipped = jnp.clip(specific_humidity, 0.0, 0.99)
+    h2o_vmr = q_clipped / (1 - q_clipped) * 1.608
 
     # Default ozone profile if not provided (simplified)
     if ozone_vmr is None:
         # Simple ozone profile peaking in stratosphere
-        p_mb = pressure_levels / 100.0  # Convert to mb
+        p_mb = jnp.maximum(pressure_levels / 100.0, 1e-3)  # Convert to mb, guard log
         ozone_vmr = jnp.where(
             p_mb < 100,  # Stratosphere
             5e-6 * jnp.exp(-((jnp.log(p_mb) - jnp.log(30)) ** 2) / 2),
@@ -153,8 +155,9 @@ def prepare_radiation_state(
 
     # Convert cloud water/ice from kg/kg to kg/m²
     # cloud_path = mixing_ratio * air_density * layer_thickness
-    cloud_water_path = cloud_water * air_density * layer_thickness
-    cloud_ice_path = cloud_ice * air_density * layer_thickness
+    # Clip cloud fields to non-negative (dynamics can produce small negatives)
+    cloud_water_path = jnp.maximum(cloud_water, 0.0) * air_density * layer_thickness
+    cloud_ice_path = jnp.maximum(cloud_ice, 0.0) * air_density * layer_thickness
 
     # Use the model's pressure interfaces directly (already computed from sigma/hybrid levels)
     # pressure_interfaces should be [nlev+1] with TOA at index 0 and surface at index -1
@@ -229,6 +232,19 @@ def radiation_scheme(
     """
     nlev = temperature.shape[0]
 
+    # Minimal math-safety guards only: positivity for fields used in
+    # divisions, logs, or sqrt, and q < 1 for the `q / (1 - q)` conversion.
+    # We intentionally do NOT clip T or q to physical ranges here — that
+    # masks bugs in convection / cloud physics instead of surfacing them.
+    pressure_levels = jnp.maximum(pressure_levels, 1.0)
+    pressure_interfaces = jnp.maximum(pressure_interfaces, 1.0)
+    layer_thickness = jnp.maximum(layer_thickness, 1.0)
+    air_density = jnp.maximum(air_density, 1e-6)
+    specific_humidity = jnp.clip(specific_humidity, 0.0, 0.99)
+    cloud_water = jnp.maximum(cloud_water, 0.0)
+    cloud_ice = jnp.maximum(cloud_ice, 0.0)
+    cloud_fraction = jnp.clip(cloud_fraction, 0.0, 1.0)
+
     # Expand aerosol profiles to radiation bands with Angstrom spectral scaling
     # AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
     # Handle both 1D (single column from vmap) and 2D (full grid) aerosol data
@@ -291,6 +307,10 @@ def radiation_scheme(
     toa_flux = radiation_flux(date, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(OrbitalTime.from_datetime(date), longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude) since they are complementary
+
+    # Clip pressure to positive so downstream log / divisions don't produce NaN
+    pressure_levels = jnp.maximum(pressure_levels, 1.0)
+    pressure_interfaces = jnp.maximum(pressure_interfaces, 1.0)
 
     # Prepare radiation state
     rad_state = prepare_radiation_state(

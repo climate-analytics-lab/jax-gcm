@@ -61,3 +61,65 @@ class TestPhysicsInterfaceUnit(unittest.TestCase):
         state = PhysicsState.zeros((kx,ix,il), specific_humidity=qa)
 
         updated_state = verify_state(state)
+
+
+class TestVerifyState(unittest.TestCase):
+    """verify_state only enforces q >= 0; no upper cap (by design)."""
+
+    def test_negative_q_clipped_to_zero(self):
+        from jcm.physics_interface import verify_state
+        kx, ix, il = 4, 8, 8
+        q = jnp.array([-0.5, -1e-5, 0.005, 0.0])[:, None, None] * jnp.ones((kx, ix, il))
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=q)
+        out = verify_state(state)
+        self.assertTrue(jnp.all(out.specific_humidity >= 0.0))
+        self.assertTrue(jnp.allclose(out.specific_humidity[2], 0.005))
+
+    def test_unphysically_high_q_not_capped(self):
+        """Unphysically high q should NOT be silently clamped — we want the
+        model to surface the bug, not hide it with a cap.
+        """
+        from jcm.physics_interface import verify_state
+        kx, ix, il = 4, 8, 8
+        q = jnp.full((kx, ix, il), 0.5)  # 500 g/kg — unphysical but uncapped
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=q)
+        out = verify_state(state)
+        self.assertTrue(jnp.allclose(out.specific_humidity, 0.5))
+
+
+class TestVerifyTendencies(unittest.TestCase):
+    """verify_tendencies only enforces q_next >= 0; no upper cap (by design)."""
+
+    def _make_state_and_tendency(self, q_init, dqdt):
+        from jcm.physics_interface import PhysicsTendency
+        shape = (8, 4, 4)
+        state = PhysicsState.zeros(shape, specific_humidity=jnp.full(shape, q_init))
+        tendency = PhysicsTendency.zeros(
+            shape, specific_humidity=jnp.full(shape, dqdt)
+        )
+        return state, tendency
+
+    def test_positive_tendency_within_bounds(self):
+        """Normal positive tendency should pass through unchanged."""
+        from jcm.physics_interface import verify_tendencies
+        state, tend = self._make_state_and_tendency(q_init=0.005, dqdt=1e-5)
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        self.assertTrue(jnp.allclose(result.specific_humidity, tend.specific_humidity))
+
+    def test_negative_tendency_clipped_at_zero(self):
+        """Tendency that would make q negative is clipped to exactly drain q."""
+        from jcm.physics_interface import verify_tendencies
+        state, tend = self._make_state_and_tendency(q_init=0.001, dqdt=-0.01)
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        q_next = 0.001 + 1800.0 * result.specific_humidity
+        self.assertTrue(jnp.all(q_next >= 0))
+
+    def test_large_positive_tendency_not_capped(self):
+        """A tendency that would drive q very high is NOT silently clamped
+        (by design — masking would hide upstream bugs).
+        """
+        from jcm.physics_interface import verify_tendencies
+        state, tend = self._make_state_and_tendency(q_init=0.001, dqdt=1.0)
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        # Unchanged tendency passes through
+        self.assertTrue(jnp.allclose(result.specific_humidity, tend.specific_humidity))

@@ -137,8 +137,10 @@ def saturation_specific_humidity(
     es = weight * es_water + (1.0 - weight) * es_ice
     
     # Convert to saturation specific humidity
-    qs = eps * es / (pressure - es * (1.0 - eps))
-    return jnp.maximum(qs, 0.0)
+    # Cap es < pressure so denominator stays positive under extreme T
+    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
+    qs = eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - eps), 1.0)
+    return jnp.clip(qs, 0.0, 0.5)
 
 
 def calculate_cloud_fraction(
@@ -186,8 +188,8 @@ def calculate_cloud_fraction(
     b0 = (rel_humidity - rhc) / (1.0 - rhc + config.epsilon)
     b0 = jnp.clip(b0, 0.0, 1.0)
     
-    # Cloud fraction: cc = 1 - sqrt(1 - b0)
-    cloud_fraction = 1.0 - jnp.sqrt(1.0 - b0)
+    # Cloud fraction: cc = 1 - sqrt(1 - b0); guard sqrt against b0 > 1 due to FP error
+    cloud_fraction = 1.0 - jnp.sqrt(jnp.maximum(1.0 - b0, 0.0))
     
     # Apply minimum cloud fraction threshold
     cloud_fraction = jnp.where(cloud_fraction < 0.01, 0.0, cloud_fraction)

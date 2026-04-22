@@ -10,8 +10,9 @@ from dinosaur import scales
 from dinosaur.scales import units
 from dinosaur.spherical_harmonic import vor_div_to_uv_nodal, uv_nodal_to_vor_div_modal
 from dinosaur.primitive_equations import (
-    compute_diagnostic_state, State, PrimitiveEquations,
-    get_geopotential_on_sigma, get_geopotential_diff_hybrid,
+    compute_diagnostic_state, compute_diagnostic_state_hybrid,
+    State, PrimitiveEquations,
+    get_geopotential_on_sigma, get_geopotential_on_hybrid,
 )
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
@@ -249,27 +250,38 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     # Calculate u and v from vorticity and divergence
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
-    # Z, X, Y
-    nodal_state = compute_diagnostic_state(state, dynamics.coords)
+    # Z, X, Y — dispatch to the hybrid variant when the vertical coord is hybrid
+    if isinstance(dynamics.coords.vertical, HybridCoordinates):
+        nodal_state = compute_diagnostic_state_hybrid(state, dynamics.coords)
+    else:
+        nodal_state = compute_diagnostic_state(state, dynamics.coords)
     t = nodal_state.temperature_variation
     q = nodal_state.tracers['specific_humidity']
 
     # Compute geopotential - different approaches for sigma vs hybrid coordinates
     nodal_orography = dynamics.coords.horizontal.to_nodal(dynamics.orography)
+    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
+    sp = jnp.exp(log_sp)
 
     if isinstance(dynamics.coords.vertical, HybridCoordinates):
-        # For hybrid coordinates, compute geopotential difference then add orography
-        spectral_temperature_variation = dynamics.coords.horizontal.to_modal(nodal_state.temperature_variation)
-        phi_spectral_diff = get_geopotential_diff_hybrid(
-            temperature=spectral_temperature_variation,
-            coordinates=dynamics.coords.vertical,
+        # For hybrid coordinates, the state's `log_surface_pressure` already
+        # stores log(P_s in nondim Pa); `sp = exp(log_sp)` is therefore the
+        # actual surface pressure in the same units as the `a_boundaries`.
+        #
+        # `get_geopotential_on_hybrid` internally uses method='sparse' which
+        # requires surface_pressure with a leading vertical dim (shape
+        # (1, lon, lat)); keep `sp` un-squeezed to match.
+        full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
+        phi = get_geopotential_on_hybrid(
+            temperature=full_temperature,
+            surface_pressure=sp,
+            specific_humidity=None,
+            nodal_orography=nodal_orography,
+            coordinates=dynamics.nondim_levels,
+            gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
             ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
-            p_surface=dynamics.p_s_ref,
-            method='dense',
-            sharding=None
+            sharding=None,
         )
-        phi_spectral = phi_spectral_diff + dynamics.orography[jnp.newaxis, :, :] * dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION)
-        phi = dynamics.coords.horizontal.to_nodal(phi_spectral)
     else:
         # For sigma coordinates, use the full geopotential calculation in nodal space
         full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
@@ -283,9 +295,6 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
             sharding=None
         )
 
-    log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
-    sp = jnp.exp(log_sp)
-
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
@@ -295,7 +304,18 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
         if tracer_name != 'specific_humidity':
             all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(tracer_value, units.gram / units.kilogram).m
 
-    return PhysicsState(u, v, t, q, phi, jnp.squeeze(sp, axis=-3), all_tracers)
+    # Produce a PhysicsState with `normalized_surface_pressure = P_s / p0`.
+    # For sigma coords state stores log(P_s / p0) already, so sp = P_s/p0.
+    # For hybrid coords state stores log(P_s_in_Pa), so we divide by p0 here
+    # to put PhysicsState on a common scale the physics routines expect.
+    if isinstance(dynamics.coords.vertical, HybridCoordinates):
+        from jcm.constants import p0 as P0_PA
+        p0_nondim = dynamics.physics_specs.nondimensionalize(P0_PA * units.pascal)
+        nsp = jnp.squeeze(sp, axis=-3) / p0_nondim
+    else:
+        nsp = jnp.squeeze(sp, axis=-3)
+
+    return PhysicsState(u, v, t, q, phi, nsp, all_tracers)
 
 def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
     """Convert state variables from the physics (nodal space) back to the dynamical core (spectral space).
@@ -382,18 +402,23 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 
 def verify_state(state: PhysicsState) -> PhysicsState:
     """Ensure the physical validity of the state variables.
-    
+
+    Only enforces `specific_humidity >= 0` — we deliberately do NOT clip to
+    an upper bound. Aggressive caps hide bugs in the physics (particularly
+    convection) that should surface as unphysical q values rather than be
+    silently masked. Individual physics routines apply local NaN-avoidance
+    guards on their own narrow scopes (e.g. the `q / (1-q)` conversion in
+    radiation).
+
     Args:
         state: The `PhysicsState` object.
-    
+
     Returns:
         The verified and potentially corrected `PhysicsState` object.
 
     """
-    # set specific humidity to 0.0 if it became negative during the dynamics evaluation
-    qa = jnp.where(state.specific_humidity < 0.0, 0.0, state.specific_humidity)
+    qa = jnp.maximum(state.specific_humidity, 0.0)
     updated_state = state.copy(specific_humidity=qa)
-
     return updated_state
 
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
@@ -408,16 +433,17 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         The verified and potentially corrected `PhysicsTendency` object.
 
     """
-    # set specific humidity tendency such that the resulting specific humidity is non-negative
-    updated_tendencies = tendencies.copy(
-        specific_humidity=jnp.where(
-            state.specific_humidity + time_step * tendencies.specific_humidity >= 0,
-            tendencies.specific_humidity,
-            - state.specific_humidity / time_step
-        )
+    # Only enforce `q_next >= 0` — we don't cap q at any upper bound because
+    # doing so masks convection/cloud scheme bugs (see audit of
+    # Tiedtke-Nordeng vs. ECHAM reference). If q wants to go unphysically
+    # high the model should tell us.
+    q_next = state.specific_humidity + time_step * tendencies.specific_humidity
+    clipped_dqdt = jnp.where(
+        q_next < 0,
+        -state.specific_humidity / time_step,
+        tendencies.specific_humidity,
     )
-
-    return updated_tendencies
+    return tendencies.copy(specific_humidity=clipped_dqdt)
 
 def get_physical_tendencies(
     state: State,

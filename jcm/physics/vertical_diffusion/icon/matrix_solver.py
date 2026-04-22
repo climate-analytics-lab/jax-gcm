@@ -426,19 +426,23 @@ def solve_tridiagonal_single(
     ncol, nlev = b.shape
     
     # Forward sweep (elimination)
+    # Guard pivots from underflow to prevent NaN with ill-conditioned matrices
+    def _safe(x):
+        return jnp.where(jnp.abs(x) > 1e-20, x, jnp.sign(x) * 1e-20 + 1e-20)
+
     # Initialize first row
-    cp_0 = c[:, 0] / b[:, 0]
-    dp_0 = d[:, 0] / b[:, 0]
-    
+    cp_0 = c[:, 0] / _safe(b[:, 0])
+    dp_0 = d[:, 0] / _safe(b[:, 0])
+
     # Remaining rows
     def forward_step(carry, inputs):
         cp_prev, dp_prev = carry
         a_i, b_i, c_i, d_i = inputs
 
-        denom_i = b_i - a_i * cp_prev
+        denom_i = _safe(b_i - a_i * cp_prev)
         cp_i = c_i / denom_i
         dp_i = (d_i - a_i * dp_prev) / denom_i
-        
+
         return (cp_i, dp_i), (cp_i, dp_i)
     
     _, forward_outputs = jax.lax.scan(

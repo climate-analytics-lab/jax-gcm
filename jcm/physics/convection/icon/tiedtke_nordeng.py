@@ -159,18 +159,22 @@ def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     # Tetens formula coefficients
     a = 17.27
     b = 35.86
-    
+
+    # Wide math-safety clip — Tetens denominators t+237.3 and t+265.5 hit
+    # zero at T≈36K and T≈8K. Use a loose bound that only catches truly
+    # pathological values and doesn't mask upstream physics bugs.
+    temperature = jnp.clip(temperature, 50.0, 500.0)
     t_celsius = temperature - tmelt
-    
-    # Over water (T > 0°C)
+
+    # Over water (T > 0°C) — denominator always > 150+237.3-273.15 > 114 when T clipped
     es_water = 610.78 * jnp.exp(a * t_celsius / (t_celsius + 237.3))
-    
-    # Over ice (T <= 0°C) 
+
+    # Over ice (T <= 0°C)
     es_ice = 610.78 * jnp.exp(b * t_celsius / (t_celsius + 265.5))
-    
+
     # Use water or ice formula depending on temperature
     es = jnp.where(temperature > tmelt, es_water, es_ice)
-    
+
     return es
 
 
@@ -187,8 +191,10 @@ def saturation_mixing_ratio(pressure: jnp.ndarray,
 
     """
     es = saturation_vapor_pressure(temperature)
-    qs = eps * es / (pressure - es * (1.0 - eps))
-    return jnp.maximum(qs, 0.0)
+    # Cap es < 0.99*pressure so denominator can't approach zero at low P / high T
+    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
+    qs = eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - eps), 1.0)
+    return jnp.clip(qs, 0.0, 0.5)
 
 
 def moist_static_energy(temperature: jnp.ndarray,
@@ -495,6 +501,7 @@ def tiedtke_nordeng_convection(
     from .flux_tendencies import (
         calculate_tendencies, mass_flux_closure
     )
+    from .adjustment import convective_adjustment
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
@@ -563,17 +570,35 @@ def tiedtke_nordeng_convection(
             updraft_state.lu * 0.05, 0.0
         )
         
-        # Create enhanced tendencies with fixed qc/qi transport
+        # Final saturation adjustment: apply the convective tendencies,
+        # remove any residual supersaturation via iterative saturation
+        # adjustment (matches the post-convection `cuadjtq` call in the
+        # ECHAM reference), then re-derive the tendencies that produce
+        # the adjusted state. Previously this step was missing — the
+        # `convective_adjustment` helper existed but was never called,
+        # leaving the post-convection state supersaturated.
+        t_adj, q_adj, qc_adj, qi_adj = convective_adjustment(
+            temperature, humidity, pressure, qc, qi,
+            tendencies.dtedt, tendencies.dqdt, dqc_dt, dqi_dt, dt,
+        )
+        inv_dt = 1.0 / jnp.maximum(dt, 1e-6)
+        dtedt_adj = (t_adj - temperature) * inv_dt
+        dqdt_adj = (q_adj - humidity) * inv_dt
+        dqc_dt_adj = (qc_adj - qc) * inv_dt
+        dqi_dt_adj = (qi_adj - qi) * inv_dt
+
+        # Create enhanced tendencies with fixed qc/qi transport and the
+        # adjusted saturation state.
         enhanced_tendencies = ConvectionTendencies(
-            dtedt=tendencies.dtedt,
-            dqdt=tendencies.dqdt,
+            dtedt=dtedt_adj,
+            dqdt=dqdt_adj,
             dudt=tendencies.dudt,
             dvdt=tendencies.dvdt,
             qc_conv=qc_conv,
             qi_conv=qi_conv,
             precip_conv=tendencies.precip_conv,
-            dqc_dt=dqc_dt,
-            dqi_dt=dqi_dt
+            dqc_dt=dqc_dt_adj,
+            dqi_dt=dqi_dt_adj,
         )
         
         # Update state

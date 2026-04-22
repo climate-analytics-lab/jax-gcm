@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr
+from dinosaur.hybrid_coordinates import HybridCoordinates
+from dinosaur.sigma_coordinates import SigmaCoordinates
 from jcm.utils import (
     get_coords,
     spectral_truncation,
@@ -75,6 +77,40 @@ class TestGetCoords(unittest.TestCase):
         coords = get_coords(sigma_boundaries, spectral_truncation=31, nodal_shape=(64, 32))
 
         # Should use T21 from nodal_shape
+        self.assertEqual(coords.horizontal.nodal_shape, (64, 32))
+
+    def test_get_coords_with_sigma_coordinates_instance(self):
+        """get_coords should accept a SigmaCoordinates instance directly."""
+        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_coords = SigmaCoordinates(sigma_boundaries)
+        coords = get_coords(sigma_coords, spectral_truncation=21)
+
+        self.assertIsInstance(coords.vertical, SigmaCoordinates)
+        self.assertEqual(coords.vertical.layers, 8)
+
+    def test_get_coords_with_hybrid_coordinates(self):
+        """get_coords should accept a HybridCoordinates instance."""
+        # Simple hybrid coords: 4 layers, a + b*ps
+        a_boundaries = np.array([0.0, 100.0, 200.0, 300.0, 0.0])
+        b_boundaries = np.array([0.0, 0.1, 0.3, 0.7, 1.0])
+        hybrid = HybridCoordinates(a_boundaries, b_boundaries)
+
+        coords = get_coords(hybrid, spectral_truncation=21)
+
+        self.assertIsInstance(coords.vertical, HybridCoordinates)
+        self.assertEqual(coords.vertical.layers, 4)
+        self.assertIs(coords.vertical, hybrid)
+        self.assertEqual(coords.horizontal.nodal_shape, (64, 32))
+
+    def test_get_coords_hybrid_with_nodal_shape(self):
+        """get_coords should accept HybridCoordinates with nodal_shape arg."""
+        a_boundaries = np.array([0.0, 100.0, 200.0, 300.0, 0.0])
+        b_boundaries = np.array([0.0, 0.1, 0.3, 0.7, 1.0])
+        hybrid = HybridCoordinates(a_boundaries, b_boundaries)
+
+        coords = get_coords(hybrid, nodal_shape=(64, 32))
+
+        self.assertIsInstance(coords.vertical, HybridCoordinates)
         self.assertEqual(coords.horizontal.nodal_shape, (64, 32))
 
 

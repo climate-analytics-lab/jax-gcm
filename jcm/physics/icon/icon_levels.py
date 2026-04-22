@@ -2,6 +2,12 @@
 
 This module provides ICON's vertical coordinate tables for various numbers
 of atmospheric levels, parsed from the official ICON vertical_coord_tables.
+
+The `a_boundaries` values stored here are in **Pascals** (Pa) — the native
+ICON convention. `dinosaur.primitive_equations.PrimitiveEquationsHybrid`
+expects `a` values to be nondimensionalized by its `hpa_quantity` unit
+(defaulting to hPa); the Model class overrides this to `units.pascal` when
+constructed with `HybridCoordinates` from this module.
 """
 
 import jax.numpy as jnp
@@ -10,16 +16,18 @@ from dinosaur.hybrid_coordinates import HybridCoordinates
 
 def get_icon_levels(nlevels: int) -> 'HybridCoordinates':
     """Get ICON hybrid levels for specified number of levels.
-    
+
+    Returns `a_boundaries` in Pa (ICON native convention).
+
     Args:
         nlevels: Number of vertical levels (must be available in ICON tables)
 
     Returns:
-        HybridLevels object with coefficients
+        HybridCoordinates with a_boundaries in Pa and dimensionless b_boundaries.
 
-    """        
+    """
     if nlevels == 47:
-        # ICON 47-level standard configuration
+        # ICON 47-level standard configuration (a values in Pa)
         a_boundaries = jnp.array([
             0.00000000000, 1.98918528294, 6.57208964360, 15.67390258170,
             30.62427876410, 54.54572041260, 92.55883043370, 150.50469698200,
@@ -52,11 +60,11 @@ def get_icon_levels(nlevels: int) -> 'HybridCoordinates':
         
         return HybridCoordinates(
             a_boundaries=a_boundaries,
-            b_boundaries=b_boundaries
+            b_boundaries=b_boundaries,
         )
-        
+
     elif nlevels == 40:
-        # ICON 40-level configuration
+        # ICON 40-level configuration (a values in Pa)
         a_boundaries = jnp.array([
             27381.9054049070, 26991.9442204250, 26590.5390359760, 26177.4403857780,
             25752.3948782790, 25315.1451483130, 24865.4298087160, 24402.9834013950,
@@ -87,9 +95,9 @@ def get_icon_levels(nlevels: int) -> 'HybridCoordinates':
         
         return HybridCoordinates(
             a_boundaries=a_boundaries,
-            b_boundaries=b_boundaries
+            b_boundaries=b_boundaries,
         )
-        
+
     else:
         raise ValueError(f"No built-in level definition for {nlevels} levels. "
                         f"Available: 40, 47")
