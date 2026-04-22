@@ -643,7 +643,7 @@ respective process directories:
    * - Surface
      - ``jcm.physics.surface.icon``
    * - Vertical Diffusion
-     - ``jcm.physics.vertical_diffusion.icon``
+     - ``jcm.physics.vertical_diffusion.tte_tke``
    * - Gravity Waves
      - ``jcm.physics.gravity_waves.icon``
    * - Aerosol
