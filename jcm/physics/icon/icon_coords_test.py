@@ -11,7 +11,6 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 from dinosaur.sigma_coordinates import SigmaCoordinates
-from dinosaur.hybrid_coordinates import HybridCoordinates
 
 from jcm.physics.icon.icon_coords import IconCoords
 
@@ -20,9 +19,6 @@ class TestIconCoordsSigma(unittest.TestCase):
     """IconCoords built from pure sigma coordinates."""
 
     def setUp(self):
-        import dinosaur
-        from dinosaur import primitive_equations
-        from dinosaur.scales import SI_SCALE
         from jcm.utils import get_coords
         self.sigma_vertical = SigmaCoordinates.equidistant(8)
         self.coords = get_coords(self.sigma_vertical, spectral_truncation=21)

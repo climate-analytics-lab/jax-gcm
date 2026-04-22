@@ -77,7 +77,8 @@ class TestVerifyState(unittest.TestCase):
 
     def test_unphysically_high_q_not_capped(self):
         """Unphysically high q should NOT be silently clamped — we want the
-        model to surface the bug, not hide it with a cap."""
+        model to surface the bug, not hide it with a cap.
+        """
         from jcm.physics_interface import verify_state
         kx, ix, il = 4, 8, 8
         q = jnp.full((kx, ix, il), 0.5)  # 500 g/kg — unphysical but uncapped
@@ -115,7 +116,8 @@ class TestVerifyTendencies(unittest.TestCase):
 
     def test_large_positive_tendency_not_capped(self):
         """A tendency that would drive q very high is NOT silently clamped
-        (by design — masking would hide upstream bugs)."""
+        (by design — masking would hide upstream bugs).
+        """
         from jcm.physics_interface import verify_tendencies
         state, tend = self._make_state_and_tendency(q_init=0.001, dqdt=1.0)
         result = verify_tendencies(state, tend, time_step=1800.0)

@@ -16,7 +16,6 @@ for existing call sites that only need a rough sigma profile.
 """
 
 import jax.numpy as jnp
-import numpy as np
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem
 

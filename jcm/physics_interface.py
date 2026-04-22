@@ -13,7 +13,6 @@ from dinosaur.primitive_equations import (
     compute_diagnostic_state, compute_diagnostic_state_hybrid,
     State, PrimitiveEquations,
     get_geopotential_on_sigma, get_geopotential_on_hybrid,
-    get_geopotential_diff_hybrid,
 )
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
