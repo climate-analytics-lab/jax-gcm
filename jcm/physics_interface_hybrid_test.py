@@ -5,12 +5,16 @@ Regression tests covering the bugs we hit when switching from sigma to hybrid:
 - geopotential computation using the actual (spatially varying) surface
   pressure in Pa, not a ratio / reference scalar
 - Initial-state geopotential monotonically decreasing from TOA to surface
+
+Full model-run smoke tests (multi-day T31 / T85) live in the manual
+validation scripts — they're too heavy for CI. ``TestIconPhysicsIntegration``
+in ``jcm/physics/icon/icon_physics_test.py`` already covers the "full
+pipeline doesn't blow up" question at T31+sigma.
 """
 
 import unittest
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from jcm.utils import get_coords
 from jcm.physics.icon.icon_levels import get_icon_levels
@@ -70,62 +74,6 @@ class TestHybridInitialGeopotential(unittest.TestCase):
         self.assertLess(surface_mean, 0.01 * toa_mean,
                         f"Aquaplanet surface phi {surface_mean:.3g} should be "
                         f"<< TOA phi {toa_mean:.3g}")
-
-
-@pytest.mark.slow
-class TestHybridDynamicsPhysicsInterface(unittest.TestCase):
-    """The dynamics→physics→dynamics round trip should preserve validity.
-
-    Marked slow: runs a full 1-day T31 ICON physics integration, which
-    includes JIT-compiling the complete physics pipeline (radiation,
-    convection, cloud microphysics, turbulence). Too heavy for the
-    push / fast-tests CI budget.
-    """
-
-    def test_one_step_no_nan(self):
-        """After one model step from the default isothermal state, no NaN."""
-        model = _build_test_model(use_hybrid=True)
-        # Single day via the same path the CLI uses
-        preds = model.run(save_interval=1.0, total_time=1.0)
-        T = preds.dynamics.temperature
-        nan_frac = float(jnp.isnan(T).mean())
-        self.assertEqual(nan_frac, 0.0,
-                         f"NaN fraction {nan_frac:.1%} after 1 day hybrid run")
-        self.assertTrue(jnp.all(T > 100), "T below 100 K after 1 day")
-        self.assertTrue(jnp.all(T < 400), "T above 400 K after 1 day")
-
-
-@pytest.mark.slow
-class TestHybridAtT85(unittest.TestCase):
-    """At T85 the dynamics are more energetic; hybrid must still be stable.
-
-    Regression test for the log_surface_pressure normalization bug: sigma
-    coords need log(P_s/p0), hybrid needs log(P_s_in_Pa), and mixing the
-    two caused all fields to go NaN within a single model step at T85.
-
-    Marked slow: a 3-day T85 physics integration runs for several minutes
-    on CPU and won't fit the push CI budget.
-    """
-
-    def test_multi_day_no_nan_at_t85(self):
-        """3-day T85 hybrid run with default physics should not blow up."""
-        import logging
-        from jcm.model import Model
-        from jcm.physics.icon.icon_physics import IconPhysics
-        vertical = get_icon_levels(47)
-        coords = get_coords(vertical, spectral_truncation=85)
-        physics = IconPhysics(radiation_scheme="grey", checkpoint_terms=False)
-        model = Model(coords=coords, physics=physics, time_step=3.0,
-                      log_level=logging.CRITICAL)
-        preds = model.run(save_interval=1.0, total_time=3.0)
-        T = preds.dynamics.temperature
-        nan_frac = float(jnp.isnan(T).mean())
-        self.assertEqual(nan_frac, 0.0,
-                         f"NaN fraction {nan_frac:.1%} after 3 days T85 hybrid")
-        # Wind should have spun up a bit but stay within CFL bounds
-        u = preds.dynamics.u_wind
-        self.assertLess(float(jnp.max(jnp.abs(u))), 100.0,
-                        "Wind speed grew to > 100 m/s (CFL/numerical instability)")
 
 
 if __name__ == "__main__":
