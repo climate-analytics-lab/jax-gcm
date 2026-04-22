@@ -1,16 +1,13 @@
 """Tests for composable SPEEDY physics (speedy_terms.py).
 
-Verifies numerical equivalence between the composable speedy_physics()
-factory and the original SpeedyPhysics class.
-
-Date: 2026-04-12
+Smoke tests: build via the speedy_physics() factory, run through Model,
+exercise nnx.grad and the replace() composition operator.
 """
 
 import unittest
 
 import jax
 import jax.numpy as jnp
-import numpy.testing as npt
 from flax import nnx
 
 from jcm.physics.speedy.speedy_terms import speedy_physics
@@ -46,7 +43,7 @@ def _make_test_state(coords):
 
 
 class TestSpeedyNumericalEquivalence(unittest.TestCase):
-    """Verify composable SPEEDY produces identical results to original SpeedyPhysics."""
+    """Smoke tests for composable SPEEDY physics."""
 
     def setUp(self):
         self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
@@ -55,51 +52,6 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         self.forcing = ForcingData.zeros(self.coords.horizontal.nodal_shape)
         self.terrain = TerrainData.aquaplanet(self.coords)
         self.date = DateData.zeros()
-
-    def test_tendency_equivalence(self):
-        """ComposablePhysics tendencies must match SpeedyPhysics tendencies."""
-        # Import fresh to avoid conftest module-cleaning issues
-        from jcm.physics.speedy.speedy_physics import SpeedyPhysics as _SpeedyPhysics
-        from jcm.physics.speedy.speedy_terms import speedy_physics as _speedy_physics
-        from jcm.physics.speedy.params import Parameters as _Params
-
-        params = _Params.default()
-
-        # Original SpeedyPhysics
-        original = _SpeedyPhysics(parameters=params, checkpoint_terms=False)
-        original.cache_coords(self.coords)
-        orig_tend, _ = original.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
-
-        # Composable version
-        composable = _speedy_physics(parameters=params, checkpoint_terms=False)
-        composable.cache_coords(self.coords)
-        comp_tend, _ = composable.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
-
-        # Compare all tendency fields
-        npt.assert_allclose(
-            comp_tend.temperature, orig_tend.temperature,
-            rtol=1e-5, atol=1e-8,
-            err_msg="Temperature tendencies differ",
-        )
-        npt.assert_allclose(
-            comp_tend.specific_humidity, orig_tend.specific_humidity,
-            rtol=1e-5, atol=1e-8,
-            err_msg="Specific humidity tendencies differ",
-        )
-        npt.assert_allclose(
-            comp_tend.u_wind, orig_tend.u_wind,
-            rtol=1e-5, atol=1e-8,
-            err_msg="U-wind tendencies differ",
-        )
-        npt.assert_allclose(
-            comp_tend.v_wind, orig_tend.v_wind,
-            rtol=1e-5, atol=1e-8,
-            err_msg="V-wind tendencies differ",
-        )
 
     def test_composable_with_model(self):
         """ComposablePhysics can be passed to Model and run."""

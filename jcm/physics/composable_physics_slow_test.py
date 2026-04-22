@@ -51,35 +51,6 @@ class TestComposableSpeedyIntegration(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     @pytest.mark.slow
-    def test_speedy_composable_equivalence(self):
-        """Composable SPEEDY tendencies match legacy SpeedyPhysics."""
-        from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-        from jcm.physics.speedy.params import Parameters
-        import numpy.testing as npt
-
-        params = Parameters.default()
-        state = self._make_state()
-        date = DateData.zeros()
-
-        original = SpeedyPhysics(parameters=params, checkpoint_terms=False)
-        original.cache_coords(self.coords)
-        orig_tend, _ = original.compute_tendencies(
-            state, self.forcing, self.terrain, date,
-        )
-
-        composable = speedy_physics(parameters=params, checkpoint_terms=False)
-        composable.cache_coords(self.coords)
-        comp_tend, _ = composable.compute_tendencies(
-            state, self.forcing, self.terrain, date,
-        )
-
-        npt.assert_allclose(
-            comp_tend.temperature, orig_tend.temperature,
-            rtol=1e-5, atol=1e-8,
-        )
-
-    @pytest.mark.slow
     def test_speedy_composable_replace_and_run(self):
         """Replace a SPEEDY term and run through Model."""
         from jcm.model import Model

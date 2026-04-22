@@ -19,7 +19,7 @@ from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
-from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.diffusion import DiffusionFilter
 import pandas as pd
@@ -301,7 +301,7 @@ class Model:
             p1=0.01*p0*units.pascal,
         )
         
-        self.physics = physics or SpeedyPhysics()
+        self.physics = physics or speedy_physics()
         self.physics.cache_coords(self.coords)
 
         # Ensure ComposableIconPhysics uses the correct timestep for all parameterizations

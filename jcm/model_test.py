@@ -8,8 +8,8 @@ import functools
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
-        global SpeedyPhysics, Parameters
-        from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+        global speedy_physics, Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
         from jcm.physics.speedy.params import Parameters
 
     def test_held_suarez_model(self):
@@ -210,7 +210,7 @@ class TestModelUnit(unittest.TestCase):
         create_model = lambda params=Parameters.default(): Model(
             coords=coords,
             terrain=terrain,
-            physics=SpeedyPhysics(parameters=params),
+            physics=speedy_physics(parameters=params),
         )
 
         fn = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)
@@ -242,7 +242,7 @@ class TestModelUnit(unittest.TestCase):
         create_model = lambda params=Parameters.default(): Model(
             coords=coords,
             terrain=terrain,
-            physics=SpeedyPhysics(parameters=params),
+            physics=speedy_physics(parameters=params),
         )
 
         model_run_wrapper = lambda params: create_model(params).run(save_interval=1/24., total_time=2./24., forcing=forcing)

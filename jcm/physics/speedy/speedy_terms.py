@@ -31,6 +31,35 @@ from jcm.physics.speedy.params import (
 )
 from jcm.utils import tree_index_3d
 
+import jax.numpy as jnp
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.forcing import ForcingData
+from jcm.terrain import TerrainData
+
+
+def set_physics_flags(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData = None,
+    terrain: TerrainData = None,
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """Set per-step compute flags for SPEEDY parameterizations.
+
+    Currently only toggles the shortwave-radiation flag every ``nstrad`` steps
+    so that the costly clouds + shortwave fluxes only recompute on radiation
+    sub-steps.
+    """
+    from jcm.physics.speedy.physical_constants import nstrad
+    model_step = physics_data.date.model_step
+    compute_shortwave = (jnp.mod(model_step, nstrad) == 0)
+    shortwave_data = physics_data.shortwave_rad.copy(
+        compute_shortwave=compute_shortwave,
+    )
+    physics_data = physics_data.copy(shortwave_rad=shortwave_data)
+    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+    return physics_tendencies, physics_data
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -150,7 +179,6 @@ class SpeedyFlags(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = Parameters.default()  # flags don't use tunable params
 
-        from jcm.physics.speedy.speedy_physics import set_physics_flags
         tend, data = set_physics_flags(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)

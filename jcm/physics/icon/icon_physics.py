@@ -159,14 +159,7 @@ def _radiation_with_caching(
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        # Force the returned radiation field through the local RadiationData
-        # class so both cond branches share the same pytree class identity,
-        # even when modules were re-imported between tests.
-        rad = RadiationData(
-            **{k: getattr(physics_data.radiation, k)
-               for k in physics_data.radiation.__dict__}
-        )
-        return cached_tend, physics_data.copy(radiation=rad)
+        return cached_tend, physics_data
 
     return jax.lax.cond(should_compute, _compute, _use_cached)
 
