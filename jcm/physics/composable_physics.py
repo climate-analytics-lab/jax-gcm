@@ -2,13 +2,20 @@
 
 ComposablePhysics holds an ordered list of PhysicsTerm instances and iterates
 through them in ``compute_tendencies``, summing tendencies and threading a
-``diagnostics`` dict forward. It implements the ``Physics`` interface so that
-``Model`` can use it as a drop-in replacement for ``SpeedyPhysics`` or
-``IconPhysics``.
+``diagnostics`` dict forward. It implements the ``Physics`` interface that
+``Model`` consumes.
+
+The threaded ``diagnostics`` dict serves a dual role:
+
+- Keys without a leading underscore (e.g. ``"cloud_fraction"``,
+  ``"sw_heating_rate"``) are user-facing diagnostic outputs. They appear in
+  the xarray Dataset returned by ``Model.run().to_xarray()``.
+- Keys prefixed with ``_`` (e.g. ``"_radiation"``, ``"_chemistry"``) are
+  internal inter-term state — typed PhysicsData sub-structs that downstream
+  terms read but the user never sees. ``data_struct_to_dict`` filters them
+  out of the user-facing output.
 
 See docs/design/composable_physics.md for the full design.
-
-Date: 2026-04-12
 """
 
 from __future__ import annotations
@@ -30,7 +37,8 @@ class ComposablePhysics(nnx.Module, Physics):
     """A physics package built from an ordered list of PhysicsTerm modules.
 
     Terms are called in order; each receives the diagnostics dict produced by
-    all preceding terms. Tendencies are summed.
+    all preceding terms (see module docstring for the dict's dual role) and
+    returns a (tendency, updated_diagnostics) pair. Tendencies are summed.
 
     When ``vectorize_columns=True``, the 3D state ``(nlev, nlon, nlat)`` is
     reshaped to column format ``(nlev, ncols)`` before iterating terms, and

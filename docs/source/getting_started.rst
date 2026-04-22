@@ -128,7 +128,7 @@ You can customize various aspects of the model:
 
 .. code-block:: python
 
-   from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+   from jcm.physics.speedy.speedy_terms import speedy_physics
    from jcm.physics.speedy.params import Parameters
    from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
@@ -136,7 +136,7 @@ You can customize various aspects of the model:
    params = Parameters.default()
    params = params.replace(...)  # modify parameters as needed
 
-   physics = SpeedyPhysics(parameters=params)
+   physics = speedy_physics(parameters=params)
 
    model = Model(
       coords=get_speedy_coords(),

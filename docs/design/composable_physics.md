@@ -1,6 +1,12 @@
 # Composable Physics Design
 
-**Status:** Implemented (Phases 1–4 complete)
+**Status:** Implemented (Phases 1–4 complete). Per PR #429 review the legacy
+`SpeedyPhysics` / `IconPhysics` orchestrator classes were removed and the
+process directories were flattened to scheme-named files (e.g.
+`convection/tiedtke_nordeng/`, `clouds/sundqvist.py`); see "Post-PR-#429
+state" at the bottom of this document. The historical narrative below
+describes the design as it landed in PR #429 itself.
+
 **Issue:** [#206 — Make physics composable](https://github.com/climate-analytics-lab/jax-gcm/issues/206)
 **Branch:** `feature/composable-physics-206`
 **Related issues:** #10, #230, #293, #315, #355
@@ -536,3 +542,39 @@ infrastructure modules are unchanged.
 3. **Back-compat shim.** Both `SpeedyPhysics` and `IconPhysics` remain
    as standalone classes (not shims). The composable path is a parallel API,
    not a replacement.
+
+
+---
+
+## Post-PR-#429 state
+
+After review on PR #429 (`composable-physics-206`), the design above was
+tightened in three ways:
+
+1. **Removed legacy orchestrator classes** (`SpeedyPhysics`, `IconPhysics`,
+   `HeldSuarezPhysics`). The composable path is no longer "parallel" — it
+   is the only physics API. Users must instantiate via the
+   `speedy_physics()`, `icon_physics()`, or `held_suarez_physics()`
+   factories. This is a breaking change appropriate to a major version.
+
+2. **Removed `jcm/physics/packages/`.** Factory functions live alongside
+   their schemes in `speedy_terms.py` / `icon_terms.py`; the extra
+   re-export layer added no value.
+
+3. **Flattened process directories to scheme-named files.** Files are
+   named for what they *are* (the scheme) rather than where they were
+   ported from. Examples: `convection/tiedtke_nordeng/`,
+   `clouds/sundqvist.py`, `clouds/echam_1m.py`, `aerosol/macv2_sp.py`,
+   `radiation/grey_two_stream/`, `radiation/rrtmgp.py`,
+   `vertical_diffusion/tte_tke/`, `gravity_waves/hines/`. New ports of the
+   same scheme from a different model (e.g. CAM Tiedtke) drop in beside the
+   existing one without an extra `cam/` subfolder. Model-specific
+   *infrastructure* (parameter containers, coordinate caches, data
+   structs) stays under `speedy/` and `icon/`.
+
+The "diagnostics" dict threaded through the term list serves a dual role:
+keys without a leading underscore are exposed as user-facing diagnostic
+output (written to xarray); keys prefixed with `_` (e.g. `_radiation`,
+`_convection`, `_chemistry`) are internal inter-term state and are
+filtered out of the user-facing output by `data_struct_to_dict`.
+

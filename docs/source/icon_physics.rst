@@ -567,7 +567,7 @@ To customize physics parameters:
 
 .. code-block:: python
 
-   from jcm.physics.icon.icon_physics import IconPhysics
+   from jcm.physics.icon.icon_terms import icon_physics
    from jcm.physics.icon.parameters import Parameters
 
    # Get default parameters
@@ -587,15 +587,18 @@ To customize physics parameters:
    # Ensure all physics timesteps match model dt
    params = params.with_timestep(dt_seconds=1800.0)
 
-   # Create physics with custom parameters (legacy interface)
-   physics = IconPhysics(parameters=params)
+   # Create composable ICON physics with all standard terms
+   physics = icon_physics(parameters=params)
 
 
 Composable Physics API
 -----------------------
 
-The ICON physics is also available as composable ``PhysicsTerm`` instances,
-enabling mix-and-match with other physics packages:
+The ICON physics is composable: each parameterization is a
+``PhysicsTerm`` (``flax.nnx.Module``), and ``icon_physics()`` returns a
+``ComposableIconPhysics`` (a subclass of ``ComposablePhysics``) with the
+standard ordering wired up. Schemes can be swapped in or out without
+touching the orchestrator:
 
 .. code-block:: python
 
@@ -634,27 +637,31 @@ respective process directories:
 
    * - Process
      - Module path
-   * - Radiation
-     - ``jcm.physics.radiation.icon``
+   * - Radiation (grey 2-stream)
+     - ``jcm.physics.radiation.grey_two_stream``
+   * - Radiation (RRTMGP)
+     - ``jcm.physics.radiation.rrtmgp``
    * - Convection
-     - ``jcm.physics.convection.icon``
-   * - Clouds / Microphysics
-     - ``jcm.physics.clouds.icon``
+     - ``jcm.physics.convection.tiedtke_nordeng``
+   * - Clouds (fraction)
+     - ``jcm.physics.clouds.sundqvist``
+   * - Microphysics (1-moment)
+     - ``jcm.physics.clouds.echam_1m``
    * - Surface
      - ``jcm.physics.surface.icon``
    * - Vertical Diffusion
      - ``jcm.physics.vertical_diffusion.tte_tke``
    * - Gravity Waves
      - ``jcm.physics.gravity_waves.hines``
-   * - Aerosol
-     - ``jcm.physics.aerosol.icon``
+   * - Aerosol (MACv2-SP)
+     - ``jcm.physics.aerosol.macv2_sp``
    * - Chemistry
-     - ``jcm.physics.chemistry.icon``
-   * - Diagnostics
-     - ``jcm.physics.diagnostics.icon``
+     - ``jcm.physics.chemistry.simple_chemistry``
+   * - Diagnostics (WMO tropopause)
+     - ``jcm.physics.diagnostics.wmo_tropopause``
 
-ICON infrastructure (parameters, coordinates, orchestrators) remains at
-``jcm.physics.icon``.
+ICON-specific infrastructure (parameters, coordinates, ``PhysicsData``)
+remains at ``jcm.physics.icon``.
 
 
 Scientific References

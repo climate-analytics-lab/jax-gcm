@@ -450,7 +450,7 @@ To customize physics parameters:
 
 .. code-block:: python
 
-   from jcm.physics.speedy.speedy_physics import SpeedyPhysics
+   from jcm.physics.speedy.speedy_terms import speedy_physics
    from jcm.physics.speedy.params import Parameters
    from jcm.model import Model
 
@@ -472,8 +472,8 @@ To customize physics parameters:
        )
    )
 
-   # Create physics with custom parameters (legacy interface)
-   physics = SpeedyPhysics(parameters=params)
+   # Create physics with custom parameters
+   physics = speedy_physics(parameters=params)
 
    # Use in model
    model = Model(physics=physics)

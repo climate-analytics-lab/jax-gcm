@@ -26,11 +26,10 @@ The :py:class:`jcm.model.Model` class serves as the central orchestrator, linkin
    │  └────────────────────────────────────────┘  │
    │                  ↕                           │
    │  ┌────────────────────────────────────────┐  │
-   │  │   Physics Implementations              │  │
-   │  │   • SpeedyPhysics (legacy)             │  │
-   │  │   • IconPhysics (legacy)               │  │
-   │  │   • ComposablePhysics (mix-and-match)  │  │
-   │  │   • HeldSuarezPhysics (simple)         │  │
+   │  │   ComposablePhysics                    │  │
+   │  │   (ordered list of PhysicsTerm)        │  │
+   │  │   built by speedy_physics(),           │  │
+   │  │   icon_physics(), held_suarez_physics()│  │
    │  └────────────────────────────────────────┘  │
    └──────────────────────────────────────────────┘
 
@@ -92,23 +91,22 @@ The physics code follows functional programming principles:
        diagnostics = ...
        return tendencies, diagnostics
 
-**Clear Separation**: Each physics term is clearly separated, making the code easy to understand and modify:
+**Clear Separation**: Each physics term is clearly separated, making the code easy to understand and modify. The ``speedy_physics()`` factory builds an ordered list of ``PhysicsTerm`` instances:
 
 .. code-block:: python
 
-   class SpeedyPhysics(Physics):
-       def __init__(self, parameters: Parameters = None):
-           self.parameters = parameters or Parameters.default()
-
-           # Physics terms are explicit and ordered
-           self.terms = [
-               compute_convection,
-               compute_large_scale_condensation,
-               compute_shortwave_radiation,
-               compute_longwave_radiation,
-               compute_surface_fluxes,
-               compute_vertical_diffusion,
-           ]
+   def speedy_physics(parameters: Parameters | None = None) -> ComposablePhysics:
+       params = parameters or Parameters.default()
+       return ComposablePhysics(terms=[
+           SpeedyFlags(),
+           SpeedyForcing(...),
+           SpeedyConvection(params.convection),
+           SpeedyCondensation(params.condensation),
+           SpeedyShortwaveRadiation(params.shortwave_radiation),
+           SpeedyLongwaveRadiation(...),
+           SpeedySurfaceFlux(params.surface_flux),
+           SpeedyVerticalDiffusion(params.vertical_diffusion),
+       ])
 
 This design makes it easy to:
 
@@ -141,17 +139,7 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
    # Remove a term
    physics = icon_physics().remove("gravity_waves")
 
-Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parameters as ``nnx.Param`` attributes and coordinate caches as ``nnx.Variable``. Terms communicate through a ``diagnostics`` dict that flows through the term list.
-
-**Physics Packages**: Legacy interfaces also work:
-
-.. code-block:: python
-
-   from jcm.physics.speedy.speedy_physics import SpeedyPhysics
-   from jcm.physics.icon.icon_physics import IconPhysics
-
-   model = Model(coords=coords, physics=SpeedyPhysics())
-   model = Model(coords=coords, physics=IconPhysics())
+Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parameters as ``nnx.Param`` attributes and coordinate caches as ``nnx.Variable``. Terms communicate through a ``diagnostics`` dict threaded through the term list. The dict serves a dual role: keys without a leading underscore are exposed as user-facing diagnostic output (written to xarray); keys prefixed with ``_`` (e.g. ``_radiation``, ``_convection``) are internal inter-term state and are filtered out of the user-facing output.
 
 **Configurations**: Model components can be configured independently:
 
@@ -159,7 +147,7 @@ Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parame
 
    coords = get_speedy_coords(nodal_shape=(256, 128), layers=8, spectral_truncation=85)
    terrain = TerrainData.from_coords(coords)
-   physics = SpeedyPhysics(parameters=custom_params)
+   physics = speedy_physics(parameters=custom_params)
 
    model = Model(
        coords,
@@ -176,9 +164,8 @@ A core design goal is full differentiability through the model. This enables:
 
 .. code-block:: python
 
-   # Legacy interface
    def loss(params):
-       physics = SpeedyPhysics(parameters=params)
+       physics = speedy_physics(parameters=params)
        model = Model(coords=get_speedy_coords(), physics=physics)
        predictions = model.run(...)
        return compute_loss(predictions, observations)
@@ -186,7 +173,8 @@ A core design goal is full differentiability through the model. This enables:
    grad_fn = jax.grad(loss)
    gradients = grad_fn(initial_params)
 
-**Per-Scheme Optimization** (composable interface):
+**Per-Scheme Optimization** (using ``nnx.grad`` to differentiate w.r.t.
+individual term parameters):
 
 .. code-block:: python
 
@@ -304,26 +292,41 @@ The codebase maintains high standards to support future complexity:
 Physics Directory Organization
 -------------------------------
 
-Physics code is organized by physical process rather than by package:
+Physics code is organized by **physical process**, with files named after the
+**scheme** rather than the model they were ported from. New schemes drop in
+beside existing ones without nesting:
 
 .. code-block:: text
 
    jcm/physics/
-   ├── radiation/          # All radiation schemes (SPEEDY + ICON)
-   ├── convection/         # All convection schemes
-   ├── clouds/             # Cloud and moisture schemes
-   ├── surface/            # Surface flux schemes
-   ├── vertical_diffusion/ # Vertical mixing schemes
-   ├── gravity_waves/      # Gravity wave drag
-   ├── aerosol/            # Aerosol schemes
-   ├── chemistry/          # Chemistry schemes
-   ├── speedy/             # SPEEDY infrastructure (params, coords)
-   ├── icon/               # ICON infrastructure (params, coords)
-   └── packages/           # Pre-built factory functions
+   ├── radiation/
+   │   ├── grey_two_stream/      # ICON-style grey two-stream package
+   │   ├── rrtmgp.py             # RRTMGP wrapper
+   │   ├── nn_emulator.py        # NN radiation emulator
+   │   ├── speedy_shortwave.py
+   │   └── speedy_longwave.py
+   ├── convection/
+   │   ├── tiedtke_nordeng/      # Tiedtke-Nordeng mass flux
+   │   └── speedy_convection.py
+   ├── clouds/
+   │   ├── sundqvist.py          # Sundqvist diagnostic cloud fraction
+   │   ├── echam_1m.py           # ECHAM 1-moment microphysics
+   │   ├── speedy_humidity.py
+   │   └── speedy_condensation.py
+   ├── vertical_diffusion/
+   │   ├── tte_tke/              # TTE-TKE closure
+   │   └── speedy_vdiff.py
+   ├── gravity_waves/hines/
+   ├── aerosol/macv2_sp.py       # Stevens MACv2-SP simple plumes
+   ├── chemistry/simple_chemistry.py
+   ├── surface/                  # speedy + icon (multi-tile bundle in icon/)
+   ├── speedy/                   # SPEEDY infrastructure (params, coords)
+   └── icon/                     # ICON infrastructure (params, coords)
 
-Each process directory contains both SPEEDY and ICON implementations side-by-side.
-Infrastructure code (parameters, coordinate systems, orchestrators) remains in
-the ``speedy/`` and ``icon/`` directories.
+Model-specific *infrastructure* (parameter containers, coordinate caches,
+data structs) lives under ``speedy/`` and ``icon/``. Everything else is
+named after the scheme so an "ICON" port and a "CAM" port of the same
+parameterization sit side-by-side without per-model subfolders.
 
 Future Directions
 -----------------
