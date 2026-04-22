@@ -37,6 +37,6 @@ def __getattr__(name):
         from jcm.physics.icon.parameters import Parameters
         return Parameters
     if name == "wmo_tropopause":
-        from jcm.physics.diagnostics.icon import wmo_tropopause
+        from jcm.physics.diagnostics.wmo_tropopause import wmo_tropopause
         return wmo_tropopause
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
