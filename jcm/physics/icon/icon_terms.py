@@ -391,6 +391,11 @@ class ComposableIconPhysics(ComposablePhysics):
             parameters or Parameters.default(),
         )
 
+    @property
+    def parameters(self) -> Parameters:
+        """Read access to the shared ICON parameters struct."""
+        return self._icon_parameters.get_value()
+
     def replace(self, category, new_term):
         """Replace a term, preserving ComposableIconPhysics type."""
         new_terms = []

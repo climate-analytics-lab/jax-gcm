@@ -1,9 +1,7 @@
 """Tests for composable ICON physics (icon_terms.py).
 
-Verifies numerical equivalence between composable icon_physics() and the
-original IconPhysics class, and tests mixed-package composition.
-
-Date: 2026-04-13
+Tests mixed-package composition, replacement of individual terms, and
+roundtripping through nnx.split / nnx.merge.
 """
 
 import unittest
@@ -11,7 +9,6 @@ import unittest
 import numpy as np
 import jax
 import jax.numpy as jnp
-import numpy.testing as npt
 from flax import nnx
 
 from jcm.physics_interface import PhysicsState
@@ -80,53 +77,6 @@ class TestIconComposablePhysics(unittest.TestCase):
         self.assertIn("radiation", categories)
         self.assertIn("convection", categories)
         self.assertIn("surface", categories)
-
-    def test_tendency_equivalence(self):
-        """Composable ICON tendencies must match original IconPhysics."""
-        from jcm.physics.icon.icon_physics import IconPhysics
-        from jcm.physics.icon.icon_terms import icon_physics
-        from jcm.physics.icon.parameters import Parameters
-
-        params = Parameters.default()
-
-        # Original IconPhysics
-        original = IconPhysics(
-            parameters=params, checkpoint_terms=False,
-        )
-        original.cache_coords(self.coords)
-        orig_tend, _ = original.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date,
-        )
-
-        # Composable version
-        composable = icon_physics(
-            parameters=params, checkpoint_terms=False,
-        )
-        composable.cache_coords(self.coords)
-        comp_tend, _ = composable.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date,
-        )
-
-        # Compare all tendency fields.
-        # ICON physics produces NaN at some grid points for random
-        # test states; mask those and verify the rest match.
-        for name in ("temperature", "specific_humidity",
-                      "u_wind", "v_wind"):
-            comp = getattr(comp_tend, name)
-            orig = getattr(orig_tend, name)
-            # NaN locations must match
-            npt.assert_array_equal(
-                jnp.isnan(comp), jnp.isnan(orig),
-                err_msg=f"NaN locations differ for {name}",
-            )
-            # Non-NaN values must be close
-            mask = ~jnp.isnan(orig)
-            if jnp.any(mask):
-                npt.assert_allclose(
-                    comp[mask], orig[mask],
-                    rtol=1e-3, atol=1e-6,
-                    err_msg=f"{name} tendencies differ",
-                )
 
     def test_composable_with_model(self):
         """Composable ICON physics works with Model."""

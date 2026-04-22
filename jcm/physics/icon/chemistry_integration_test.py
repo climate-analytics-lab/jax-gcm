@@ -12,7 +12,7 @@ import jax
 import pytest
 from unittest import TestCase
 
-from jcm.physics.icon import IconPhysics
+from jcm.physics.icon.icon_terms import icon_physics
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -30,7 +30,7 @@ class TestChemistryIntegration(TestCase):
         coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
         self.terrain = TerrainData.aquaplanet(coords)
 
-        self.physics = IconPhysics()
+        self.physics = icon_physics()
         self.physics.cache_coords(coords)
 
         # Create test state
@@ -70,24 +70,24 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Check that chemistry data exists
-        self.assertIsNotNone(physics_data.chemistry)
+        self.assertIsNotNone(physics_data["_chemistry"])
         
         # Check that ozone is initialized with reasonable values
-        self.assertTrue(jnp.all(physics_data.chemistry.ozone_vmr > 0))
-        self.assertTrue(jnp.all(physics_data.chemistry.ozone_vmr < 20000))  # Less than 20 ppmv
+        self.assertTrue(jnp.all(physics_data["_chemistry"].ozone_vmr > 0))
+        self.assertTrue(jnp.all(physics_data["_chemistry"].ozone_vmr < 20000))  # Less than 20 ppmv
         
         # Check that methane is initialized
-        self.assertTrue(jnp.all(physics_data.chemistry.methane_vmr > 0))
-        self.assertTrue(jnp.all(physics_data.chemistry.methane_vmr < 5000))  # Less than 5 ppmv
+        self.assertTrue(jnp.all(physics_data["_chemistry"].methane_vmr > 0))
+        self.assertTrue(jnp.all(physics_data["_chemistry"].methane_vmr < 5000))  # Less than 5 ppmv
         
         # Check that CO2 is initialized
-        self.assertTrue(jnp.all(physics_data.chemistry.co2_vmr > 300))
-        self.assertTrue(jnp.all(physics_data.chemistry.co2_vmr < 1000))  # Between 300-1000 ppmv
+        self.assertTrue(jnp.all(physics_data["_chemistry"].co2_vmr > 300))
+        self.assertTrue(jnp.all(physics_data["_chemistry"].co2_vmr < 1000))  # Between 300-1000 ppmv
         
         # Check shapes - chemistry data should have valid array shapes
-        self.assertTrue(physics_data.chemistry.ozone_vmr.shape != ())
-        self.assertTrue(physics_data.chemistry.methane_vmr.shape != ())
-        self.assertTrue(physics_data.chemistry.co2_vmr.shape != ())
+        self.assertTrue(physics_data["_chemistry"].ozone_vmr.shape != ())
+        self.assertTrue(physics_data["_chemistry"].methane_vmr.shape != ())
+        self.assertTrue(physics_data["_chemistry"].co2_vmr.shape != ())
     
     def test_chemistry_evolution(self):
         """Test that chemistry tracers evolve over time"""
@@ -97,8 +97,8 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Save initial chemistry state
-        physics_data1.chemistry.ozone_vmr.copy()
-        physics_data1.chemistry.methane_vmr.copy()
+        physics_data1["_chemistry"].ozone_vmr.copy()
+        physics_data1["_chemistry"].methane_vmr.copy()
         
         # Run physics again (chemistry should evolve)
         tendencies2, physics_data2 = self.physics.compute_tendencies(
@@ -107,13 +107,13 @@ class TestChemistryIntegration(TestCase):
         
         # Check that chemistry has evolved (might be subtle differences)
         # Note: With current implementation, changes might be small
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data2.chemistry.ozone_vmr)))
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data2.chemistry.methane_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data2["_chemistry"].ozone_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data2["_chemistry"].methane_vmr)))
         
         # Check that production/loss rates are computed
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data2.chemistry.ozone_production)))
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data2.chemistry.ozone_loss)))
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data2.chemistry.methane_loss)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data2["_chemistry"].ozone_production)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data2["_chemistry"].ozone_loss)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data2["_chemistry"].methane_loss)))
     
     def test_chemistry_with_different_temperatures(self):
         """Test chemistry response to different temperature profiles"""
@@ -133,17 +133,17 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Both should have valid chemistry
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data_cold.chemistry.ozone_vmr)))
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data_warm.chemistry.ozone_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data_cold["_chemistry"].ozone_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data_warm["_chemistry"].ozone_vmr)))
         
         # Chemistry should respond to temperature (methane loss should be higher in warm case)
-        self.assertTrue(jnp.all(physics_data_warm.chemistry.methane_loss >= 0))
-        self.assertTrue(jnp.all(physics_data_cold.chemistry.methane_loss >= 0))
+        self.assertTrue(jnp.all(physics_data_warm["_chemistry"].methane_loss >= 0))
+        self.assertTrue(jnp.all(physics_data_cold["_chemistry"].methane_loss >= 0))
         
         # In warmer atmosphere, methane loss should generally be higher
         # (This is a simplified test - real behavior depends on pressure too)
-        mean_loss_warm = jnp.mean(physics_data_warm.chemistry.methane_loss)
-        mean_loss_cold = jnp.mean(physics_data_cold.chemistry.methane_loss)
+        mean_loss_warm = jnp.mean(physics_data_warm["_chemistry"].methane_loss)
+        mean_loss_cold = jnp.mean(physics_data_cold["_chemistry"].methane_loss)
         self.assertGreaterEqual(mean_loss_warm, mean_loss_cold * 0.5)  # At least 50% of cold loss
     
     @pytest.mark.skip(reason="Currently chemistry profiles are simplified; revisit when more complex chemistry is implemented")
@@ -155,9 +155,9 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Get chemistry profiles (average over horizontal)
-        nlev, ncols = physics_data.chemistry.ozone_vmr.shape
-        ozone_profile = jnp.mean(physics_data.chemistry.ozone_vmr, axis=1)
-        methane_profile = jnp.mean(physics_data.chemistry.methane_vmr, axis=1)
+        nlev, ncols = physics_data["_chemistry"].ozone_vmr.shape
+        ozone_profile = jnp.mean(physics_data["_chemistry"].ozone_vmr, axis=1)
+        methane_profile = jnp.mean(physics_data["_chemistry"].methane_vmr, axis=1)
         
         # Ozone should have a maximum in the stratosphere (upper levels)
         # With the simplified ozone profile, the maximum may not be in the upper half
@@ -179,8 +179,8 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Should produce valid results
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data.chemistry.ozone_vmr)))
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data.chemistry.methane_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data["_chemistry"].ozone_vmr)))
+        self.assertTrue(jnp.all(jnp.isfinite(physics_data["_chemistry"].methane_vmr)))
         
         # Test that we can compute gradients (though they might be zero)
         def loss_fn(temperature):
@@ -188,7 +188,7 @@ class TestChemistryIntegration(TestCase):
             _, physics_data = self.physics.compute_tendencies(
                 state, self.forcing, self.terrain, self.date
             )
-            return jnp.sum(physics_data.chemistry.ozone_vmr)
+            return jnp.sum(physics_data["_chemistry"].ozone_vmr)
         
         # Compute gradient
         grad_fn = jax.grad(loss_fn)

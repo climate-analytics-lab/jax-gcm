@@ -5,7 +5,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 from jcm.physics.icon.parameters import Parameters
-from jcm.physics.icon.icon_physics import IconPhysics
+from jcm.physics.icon.icon_terms import icon_physics
 
 
 def test_parameters_initialization():
@@ -48,18 +48,18 @@ def test_parameters_with_methods():
 
 
 def test_icon_physics_with_parameters():
-    """Test that IconPhysics can be initialized with Parameters"""
+    """Test that icon_physics() can be initialized with Parameters"""
     # Default parameters
-    physics1 = IconPhysics()
+    physics1 = icon_physics()
     assert physics1.parameters is not None
     assert abs(float(physics1.parameters.convection.entrpen) - 1.0e-4) < 1e-7
     
     # Custom parameters
     custom_params = Parameters.default().with_convection(entrpen=5.0e-4)
-    physics2 = IconPhysics(parameters=custom_params)
+    physics2 = icon_physics(parameters=custom_params)
     assert abs(float(physics2.parameters.convection.entrpen) - 5.0e-4) < 1e-7
     
-    print("✓ IconPhysics accepts Parameters object")
+    print("✓ icon_physics() accepts Parameters object")
 
 
 def test_physics_terms_use_parameters():
@@ -87,7 +87,7 @@ def test_physics_terms_use_parameters():
     
     # Create physics with custom parameters
     custom_params = Parameters.default().with_clouds(crt=0.8)
-    physics = IconPhysics(parameters=custom_params)
+    physics = icon_physics(parameters=custom_params)
     
     # The physics should be able to compute tendencies
     # (This is a basic smoke test)

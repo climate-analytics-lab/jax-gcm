@@ -180,48 +180,6 @@ class TestComposableIconIntegration(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     @pytest.mark.slow
-    def test_icon_composable_equivalence(self):
-        """Composable ICON tendencies match legacy IconPhysics."""
-        from jcm.physics.icon.icon_physics import IconPhysics
-        from jcm.physics.icon.icon_terms import icon_physics
-        from jcm.physics.icon.parameters import Parameters
-        import numpy.testing as npt
-
-        params = Parameters.default()
-        state = self._make_state()
-        date = DateData.zeros()
-
-        original = IconPhysics(parameters=params, checkpoint_terms=False)
-        original.cache_coords(self.coords)
-        orig_tend, _ = original.compute_tendencies(
-            state, self.forcing, self.terrain, date,
-        )
-
-        composable = icon_physics(
-            parameters=params, checkpoint_terms=False,
-        )
-        composable.cache_coords(self.coords)
-        comp_tend, _ = composable.compute_tendencies(
-            state, self.forcing, self.terrain, date,
-        )
-
-        for name in ("temperature", "specific_humidity",
-                      "u_wind", "v_wind"):
-            comp = getattr(comp_tend, name)
-            orig = getattr(orig_tend, name)
-            npt.assert_array_equal(
-                jnp.isnan(comp), jnp.isnan(orig),
-                err_msg=f"NaN locations differ for {name}",
-            )
-            mask = ~jnp.isnan(orig)
-            if jnp.any(mask):
-                npt.assert_allclose(
-                    comp[mask], orig[mask],
-                    rtol=1e-3, atol=1e-6,
-                    err_msg=f"{name} tendencies differ",
-                )
-
-    @pytest.mark.slow
     def test_icon_composable_remove_and_run(self):
         """Remove a term from ICON physics and run."""
         from jcm.model import Model

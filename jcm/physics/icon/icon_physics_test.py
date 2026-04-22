@@ -10,9 +10,9 @@ class TestIconPhysicsIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        global Model, IconPhysics
+        global Model, icon_physics
         from jcm.model import Model
-        from jcm.physics.icon.icon_physics import IconPhysics
+        from jcm.physics.icon.icon_terms import icon_physics
 
     @pytest.mark.slow
     def test_icon_physics_integration_3_timesteps(self):
@@ -36,7 +36,7 @@ class TestIconPhysicsIntegration(unittest.TestCase):
             coords=coords,
             time_step=30,  # 30 minutes - reasonable for atmospheric physics
             terrain=terrain,
-            physics=IconPhysics(),
+            physics=icon_physics(),
         )
         
         # Run the model for 6 hours (with radiation/convection bugs should crash)

@@ -304,17 +304,10 @@ class Model:
         self.physics = physics or SpeedyPhysics()
         self.physics.cache_coords(self.coords)
 
-        # Ensure IconPhysics uses the correct timestep for all parameterizations
-        from jcm.physics.icon import IconPhysics
-        if isinstance(self.physics, IconPhysics):
-            self.physics.parameters = self.physics.parameters.with_timestep(self.dt_si.m)
-        # Also handle composable ICON physics
-        try:
-            from jcm.physics.icon.icon_terms import ComposableIconPhysics
-            if isinstance(self.physics, ComposableIconPhysics):
-                self.physics.apply_timestep(self.dt_si.m)
-        except ImportError:
-            pass
+        # Ensure ComposableIconPhysics uses the correct timestep for all parameterizations
+        from jcm.physics.icon.icon_terms import ComposableIconPhysics
+        if isinstance(self.physics, ComposableIconPhysics):
+            self.physics.apply_timestep(self.dt_si.m)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 

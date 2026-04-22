@@ -25,14 +25,14 @@ def _build_test_model(use_hybrid=True):
     import logging
     from dinosaur.sigma_coordinates import SigmaCoordinates
     from jcm.model import Model
-    from jcm.physics.icon.icon_physics import IconPhysics
+    from jcm.physics.icon.icon_terms import icon_physics
 
     if use_hybrid:
         vertical = get_icon_levels(47)
     else:
         vertical = SigmaCoordinates.equidistant(47)
     coords = get_coords(vertical, spectral_truncation=31)
-    physics = IconPhysics(radiation_scheme="grey", checkpoint_terms=False)
+    physics = icon_physics(radiation_scheme="grey", checkpoint_terms=False)
     return Model(coords=coords, physics=physics, time_step=3.0,
                  log_level=logging.CRITICAL)
 

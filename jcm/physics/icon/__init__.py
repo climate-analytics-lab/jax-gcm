@@ -30,9 +30,9 @@ __all__ = [
 
 def __getattr__(name):
     """Lazy imports to avoid circular dependencies after reorganization."""
-    if name == "IconPhysics":
-        from jcm.physics.icon.icon_physics import IconPhysics
-        return IconPhysics
+    if name == "icon_physics":
+        from jcm.physics.icon.icon_terms import icon_physics
+        return icon_physics
     if name == "Parameters":
         from jcm.physics.icon.parameters import Parameters
         return Parameters

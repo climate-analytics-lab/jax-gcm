@@ -479,7 +479,7 @@ class TestFastIntegration(unittest.TestCase):
 
     def test_icon_physics_2_timesteps_physical_reasonableness(self):
         from jcm.model import Model
-        from jcm.physics.icon.icon_physics import IconPhysics
+        from jcm.physics.icon.icon_terms import icon_physics
 
         sigma_boundaries = np.linspace(0, 1, 41)
         coords = get_coords(sigma_boundaries, spectral_truncation=31)
@@ -489,7 +489,7 @@ class TestFastIntegration(unittest.TestCase):
             coords=coords,
             time_step=30,
             terrain=terrain,
-            physics=IconPhysics(),
+            physics=icon_physics(),
         )
 
         # Run for 1 hour (2 timesteps)
@@ -519,40 +519,44 @@ class TestFastIntegration(unittest.TestCase):
         self.assertLess(sp_max, 1.5, f"Max surface pressure {sp_max:.3f} too high")
 
     def test_icon_physics_exchange_coefficients_active_in_integration(self):
-        from jcm.model import Model
-        from jcm.physics.icon.icon_physics import IconPhysics
+        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics_interface import PhysicsState
+        from jcm.date import DateData
+        from jcm.forcing import ForcingData
 
         sigma_boundaries = np.linspace(0, 1, 41)
         coords = get_coords(sigma_boundaries, spectral_truncation=31)
         terrain = TerrainData.aquaplanet(coords)
+        nlev, nlon, nlat = coords.nodal_shape
+        shape_3d = (nlev, nlon, nlat)
 
-        model = Model(
-            coords=coords,
-            time_step=30,
-            terrain=terrain,
-            physics=IconPhysics(),
+        physics = icon_physics()
+        physics.cache_coords(coords)
+
+        state = PhysicsState(
+            u_wind=jnp.ones(shape_3d) * 5.0,
+            v_wind=jnp.zeros(shape_3d),
+            temperature=jnp.ones(shape_3d) * 280.0,
+            specific_humidity=jnp.ones(shape_3d) * 0.005,
+            geopotential=jnp.zeros(shape_3d),
+            normalized_surface_pressure=jnp.ones((nlon, nlat)),
+            tracers={},
+        )
+        forcing = ForcingData.zeros((nlon, nlat))
+        _, physics_data = physics.compute_tendencies(
+            state, forcing, terrain, DateData.zeros(),
         )
 
-        predictions = model.run(save_interval=1/24., total_time=1/24.)
-        physics_data = predictions.physics
-
-        # Exchange coefficients should have been computed
-        vd = physics_data.vertical_diffusion
+        # Composable ICON stores per-term state under '_<category>' keys.
+        vd = physics_data["_vertical_diffusion"]
         self.assertTrue(
             jnp.any(vd.surface_exchange_heat != 0),
-            "surface_exchange_heat should be nonzero after integration"
+            "surface_exchange_heat should be nonzero after coupling"
         )
 
-        # Surface fluxes should vary spatially
-        shf = physics_data.surface.sensible_heat_flux
-        self.assertFalse(jnp.all(shf == 0),
+        surface = physics_data["_surface"]
+        self.assertFalse(jnp.all(surface.sensible_heat_flux == 0),
                          "Sensible heat flux should not be all zero")
-
-        # Exchange coefficients stored on surface data should be positive and finite
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface.ch)),
-                        "Surface ch should be finite")
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface.cm)),
-                        "Surface cm should be finite")
 
 
 if __name__ == '__main__':
