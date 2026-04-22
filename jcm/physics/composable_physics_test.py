@@ -630,11 +630,11 @@ class TestPackagesImport(unittest.TestCase):
     """Test packages/ factory re-exports."""
 
     def test_packages_speedy_import(self):
-        from jcm.physics.packages.speedy import speedy_physics
+        from jcm.physics.speedy.speedy_terms import speedy_physics
         self.assertTrue(callable(speedy_physics))
 
     def test_packages_icon_import(self):
-        from jcm.physics.packages.icon import icon_physics
+        from jcm.physics.icon.icon_terms import icon_physics
         self.assertTrue(callable(icon_physics))
 
 

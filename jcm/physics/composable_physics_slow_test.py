@@ -243,8 +243,8 @@ class TestComposableIconIntegration(unittest.TestCase):
     @pytest.mark.slow
     def test_packages_factories(self):
         """Package factory re-exports work end-to-end."""
-        from jcm.physics.packages.speedy import speedy_physics
-        from jcm.physics.packages.icon import icon_physics
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.physics.icon.icon_terms import icon_physics
 
         sp = speedy_physics()
         self.assertGreater(len(sp.terms), 0)

@@ -234,7 +234,7 @@ class ComposablePhysics(nnx.Module, Physics):
 The motivating use case — SPEEDY plus RRTMGP — becomes:
 
 ```python
-from jcm.physics.packages import speedy_physics
+from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.physics.radiation import RRTMGPRadiation
 
 physics = speedy_physics().replace("radiation", RRTMGPRadiation())
