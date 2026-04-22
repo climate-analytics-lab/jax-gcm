@@ -14,7 +14,7 @@ from jcm.physics.gravity_waves.icon import GravityWaveParameters
 from jcm.physics.radiation.icon import RadiationParameters
 from jcm.physics.vertical_diffusion.icon.vertical_diffusion_types import VDiffParameters
 from jcm.physics.surface.icon import SurfaceParameters
-from jcm.physics.aerosol.icon.aerosol_params import AerosolParameters
+from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 
 @tree_math.struct
 class Parameters:

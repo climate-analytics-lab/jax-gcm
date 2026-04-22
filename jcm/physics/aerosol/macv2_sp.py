@@ -4,7 +4,7 @@ from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from .aerosol_params import AerosolParameters
+from .macv2_sp_params import AerosolParameters
 
 
 def get_simple_aerosol(

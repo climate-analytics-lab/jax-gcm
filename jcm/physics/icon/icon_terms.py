@@ -170,7 +170,7 @@ class IconAerosol(IconTermBase):
     def __call__(self, state, diagnostics, forcing, terrain):
         """Compute aerosol optical properties."""
         data = self._build_data(diagnostics)
-        from jcm.physics.aerosol.icon.simple_aerosol import (
+        from jcm.physics.aerosol.macv2_sp import (
             get_simple_aerosol,
         )
         tend, data = get_simple_aerosol(
