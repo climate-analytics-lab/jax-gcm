@@ -13,7 +13,7 @@ class TestModelUnit(unittest.TestCase):
         from jcm.physics.speedy.params import Parameters
 
     def test_held_suarez_model(self):
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         from jcm.model import Model
         from jcm.terrain import TerrainData
         from jcm.physics.held_suarez.utils import get_held_suarez_coords
@@ -24,7 +24,7 @@ class TestModelUnit(unittest.TestCase):
             coords=coords,
             terrain=terrain,
             time_step=180,
-            physics=HeldSuarezPhysics(),
+            physics=held_suarez_physics(),
         )
 
         save_interval, total_time = 1, 2

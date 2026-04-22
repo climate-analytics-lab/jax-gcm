@@ -3,14 +3,14 @@ import jax.numpy as jnp
 class TestHeldSuarezUnit(unittest.TestCase):
     def test_held_suarez_forcing(self):
         from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         from jcm.physics_interface import get_physical_tendencies
         from jcm.diffusion import DiffusionFilter
         from jcm.physics.held_suarez.utils import get_held_suarez_coords
 
         time_step = 10
         coords = get_held_suarez_coords()
-        model = Model(coords=coords, time_step=time_step, physics=HeldSuarezPhysics())
+        model = Model(coords=coords, time_step=time_step, physics=held_suarez_physics())
     
         dynamics_tendency = get_physical_tendencies(
             state = model._prepare_initial_modal_state(),
@@ -27,11 +27,11 @@ class TestHeldSuarezUnit(unittest.TestCase):
 
     def test_held_suarez_model(self):
         from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import HeldSuarezPhysics
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         from jcm.physics.held_suarez.utils import get_held_suarez_coords
         
         coords = get_held_suarez_coords()
-        model = Model(coords=coords,physics=HeldSuarezPhysics())
+        model = Model(coords=coords,physics=held_suarez_physics())
 
         _ = model.run(total_time=36)
 

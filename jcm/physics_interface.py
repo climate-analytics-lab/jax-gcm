@@ -462,7 +462,7 @@ def get_physical_tendencies(
         state: Dynamic (dinosaur) State variables
         dynamics: PrimitiveEquations object
         time_step: Time step in seconds
-        physics: Physics object (e.g. HeldSuarezPhysics, SpeedyPhysics)
+        physics: Physics object (e.g. composable physics from held_suarez_physics(), speedy_physics())
         forcing: ForcingData object
         terrain: TerrainData object
         date: DateData object
