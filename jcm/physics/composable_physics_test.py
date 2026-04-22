@@ -586,7 +586,8 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
 
     def test_data_struct_to_dict_filters_internal_keys(self):
         """Underscore-prefixed array keys are exposed without the underscore;
-        underscore-prefixed plumbing keys (`_date`, etc.) stay hidden."""
+        underscore-prefixed plumbing keys (`_date`, etc.) stay hidden.
+        """
         physics = ComposablePhysics(terms=[LinearHeating()])
         struct = {
             "_internal": jnp.array(1.0),
