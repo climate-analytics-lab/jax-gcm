@@ -6,16 +6,16 @@ Date: 2025-01-09
 import jax.numpy as jnp
 import jax
 
-from jcm.physics.convection.icon.tiedtke_nordeng import (
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
     find_cloud_base,
     calculate_cape_cin,
     ConvectionParameters,
     saturation_mixing_ratio
 )
-from jcm.physics.convection.icon.downdraft import calculate_downdraft
-from jcm.physics.convection.icon.updraft import calculate_updraft
-from jcm.physics.convection.icon.flux_tendencies import mass_flux_closure
+from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
+from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
+from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import mass_flux_closure
 
 
 def create_test_atmosphere(nlev=40, unstable=True):
@@ -747,8 +747,8 @@ class TestConvectivePrecipitation:
 
         Direct unit test for the cloud mask bug.
         """
-        from jcm.physics.convection.icon.flux_tendencies import calculate_precipitation_rate
-        from jcm.physics.convection.icon.updraft import UpdatedraftState
+        from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import calculate_precipitation_rate
+        from jcm.physics.convection.tiedtke_nordeng.updraft import UpdatedraftState
 
         nlev = 20
         # Simulate updraft with liquid water between levels 5 (ktop) and 15 (kbase)

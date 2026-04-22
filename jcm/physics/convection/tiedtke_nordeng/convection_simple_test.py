@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jax
 
 # Import basic convection functions
-from jcm.physics.convection.icon.tiedtke_nordeng import (
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     ConvectionParameters,
     saturation_mixing_ratio,
     find_cloud_base,

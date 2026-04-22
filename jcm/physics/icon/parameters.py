@@ -8,7 +8,7 @@ Date: 2025-01-10
 
 import tree_math
 
-from jcm.physics.convection.icon import ConvectionParameters
+from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.clouds.icon import CloudParameters, MicrophysicsParameters
 from jcm.physics.gravity_waves.icon import GravityWaveParameters
 from jcm.physics.radiation.icon import RadiationParameters

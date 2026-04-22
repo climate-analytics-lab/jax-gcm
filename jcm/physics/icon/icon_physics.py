@@ -22,7 +22,7 @@ from jcm.physics.icon.icon_coords import IconCoords
 # Import physics modules (will be implemented progressively)
 from jcm.physics.radiation.icon.radiation_scheme import radiation_scheme
 from jcm.physics.icon.icon_physics_data import RadiationData
-from jcm.physics.convection.icon import tiedtke_nordeng_convection
+from jcm.physics.convection.tiedtke_nordeng import tiedtke_nordeng_convection
 from jcm.physics.clouds.icon import shallow_cloud_scheme, cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics.surface.icon import surface_physics_step, initialize_surface_state

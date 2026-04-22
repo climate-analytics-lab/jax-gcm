@@ -10,13 +10,13 @@ import jax.numpy as jnp
 import jax
 
 # Import convection modules
-from jcm.physics.convection.icon.tiedtke_nordeng import (
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     ConvectionParameters,
     saturation_mixing_ratio,
     find_cloud_base,
     calculate_cape_cin
 )
-from jcm.physics.convection.icon.tracer_transport import (
+from jcm.physics.convection.tiedtke_nordeng.tracer_transport import (
     TracerIndices,
     initialize_tracers
 )
@@ -421,7 +421,7 @@ class TestUpdraftDetrainment:
 
     def test_mass_flux_decreases_toward_cloud_top(self):
         """With organized detrainment, updraft mass flux should decrease toward cloud top."""
-        from jcm.physics.convection.icon.updraft import calculate_updraft
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 
         nlev = 40
         config = ConvectionParameters.default()
@@ -451,7 +451,7 @@ class TestUpdraftDetrainment:
 
     def test_detrainment_exceeds_entrainment_near_top(self):
         """Near cloud top, detrainment should exceed entrainment (organized component)."""
-        from jcm.physics.convection.icon.updraft import calculate_updraft
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 
         nlev = 40
         config = ConvectionParameters.default()

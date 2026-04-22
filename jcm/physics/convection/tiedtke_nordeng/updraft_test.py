@@ -12,8 +12,8 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
-from jcm.physics.convection.icon.updraft import saturation_adjustment
-from jcm.physics.convection.icon.tiedtke_nordeng import saturation_mixing_ratio
+from jcm.physics.convection.tiedtke_nordeng.updraft import saturation_adjustment
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import saturation_mixing_ratio
 
 
 class TestSaturationAdjustmentNewton(unittest.TestCase):
@@ -138,10 +138,10 @@ class TestDynamicCloudTop(unittest.TestCase):
         Parcel starts at the bottom level with T=surface and
         q=q_sat(surface) (saturated cloud base).
         """
-        from jcm.physics.convection.icon.tiedtke_nordeng import (
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, saturation_mixing_ratio
         )
-        from jcm.physics.convection.icon.updraft import calculate_updraft
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 
         nlev = temperature.shape[0]
         # Pressure: TOA (low) → surface (high) to match index convention
@@ -195,10 +195,10 @@ class TestDynamicCloudTop(unittest.TestCase):
         mode against a strongly-buoyant environment should yield a
         *different* entrainment profile (buoyancy-dependent rate kicks in).
         """
-        from jcm.physics.convection.icon.tiedtke_nordeng import (
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, saturation_mixing_ratio,
         )
-        from jcm.physics.convection.icon.updraft import calculate_updraft
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 
         nlev = 20
         pressure = jnp.linspace(10_000.0, 100_000.0, nlev)
