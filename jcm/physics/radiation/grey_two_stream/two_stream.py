@@ -14,7 +14,7 @@ import functools
 import jax.numpy as jnp
 import jax
 from typing import Tuple, Optional
-from .radiation_types import OpticalProperties
+from ..radiation_types import OpticalProperties
 
 
 @jax.jit

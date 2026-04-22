@@ -20,7 +20,7 @@ from jcm.physics.icon.constants import physical_constants
 from jcm.physics.icon.icon_coords import IconCoords
 
 # Import physics modules (will be implemented progressively)
-from jcm.physics.radiation.icon.radiation_scheme import radiation_scheme
+from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_scheme
 from jcm.physics.icon.icon_physics_data import RadiationData
 from jcm.physics.convection.tiedtke_nordeng import tiedtke_nordeng_convection
 from jcm.physics.clouds.sundqvist import shallow_cloud_scheme
@@ -837,7 +837,7 @@ def _apply_radiation_rrtmgp_inner(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply RRTMGP radiation heating rates (inner, always-compute version)."""
-    from jcm.physics.radiation.icon.radiation_scheme_rrtmgp import (
+    from jcm.physics.radiation.rrtmgp import (
         radiation_scheme_rrtmgp,
     )
 
@@ -947,7 +947,7 @@ def _apply_radiation_emulated_inner(
     Uses bidirectional GRU networks to predict SW and LW fluxes for each
     atmospheric column, then derives heating rates from flux divergence.
     """
-    from jcm.physics.radiation.icon.radiation_scheme_emulated import (
+    from jcm.physics.radiation.nn_emulator_scheme import (
         radiation_scheme_emulated,
     )
 

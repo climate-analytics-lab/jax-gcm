@@ -9,7 +9,7 @@ Date: 2025-01-10
 import jax.numpy as jnp
 from typing import Tuple, Optional
 
-from .radiation_types import (
+from ..radiation_types import (
     RadiationParameters, 
     RadiationState,
     RadiationTendencies,
@@ -21,7 +21,7 @@ from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jax_datetime import Datetime
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
-from .cloud_optics import cloud_optics
+from ..cloud_optics import cloud_optics
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 

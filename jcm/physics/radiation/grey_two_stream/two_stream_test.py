@@ -7,7 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from jcm.physics.radiation.icon.two_stream import (
+from jcm.physics.radiation.grey_two_stream.two_stream import (
     two_stream_coefficients,
     layer_reflectance_transmittance,
     adding_method,
@@ -15,8 +15,8 @@ from jcm.physics.radiation.icon.two_stream import (
     shortwave_fluxes,
     flux_to_heating_rate
 )
-from jcm.physics.radiation.icon.radiation_types import OpticalProperties
-from jcm.physics.radiation.icon.planck import planck_bands_lw
+from jcm.physics.radiation.radiation_types import OpticalProperties
+from jcm.physics.radiation.grey_two_stream.planck import planck_bands_lw
 
 
 def test_two_stream_coefficients():

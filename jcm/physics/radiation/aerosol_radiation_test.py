@@ -4,11 +4,11 @@ This script tests the updated radiation scheme with aerosol effects.
 """
 
 import jax.numpy as jnp
-from jcm.physics.radiation.icon.radiation_scheme import (
+from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     combine_optical_properties
 )
-from jcm.physics.radiation.icon.radiation_types import RadiationParameters, OpticalProperties
-from jcm.physics.radiation.icon.cloud_optics import effective_radius_liquid
+from jcm.physics.radiation.radiation_types import RadiationParameters, OpticalProperties
+from jcm.physics.radiation.cloud_optics import effective_radius_liquid
 from jcm.physics.aerosol.macv2_sp import (
     get_optical_properties,
     get_anthropogenic_aod,

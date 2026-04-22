@@ -93,7 +93,7 @@ def planck_bands_lw(
     band_limits: Tuple[Tuple[float, float], ...]
 ) -> jnp.ndarray:
     """Calculate LW planck bands"""
-    from .constants import N_LW_BANDS
+    from ..constants import N_LW_BANDS
 
     # Ensure temperature is at least 1D
     temp_array = jnp.atleast_1d(temperature)
@@ -211,7 +211,7 @@ def _band_fraction_lw(
     band_limits: Tuple[Tuple[float, float], ...]
 ) -> jnp.ndarray:
     """Calculate LW band fractions"""
-    from .constants import N_LW_BANDS
+    from ..constants import N_LW_BANDS
     
     # Total emission
     total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
@@ -232,7 +232,7 @@ def _band_fraction_sw(
     band_limits: Tuple[Tuple[float, float], ...]
 ) -> jnp.ndarray:
     """Calculate SW band fractions"""
-    from .constants import N_SW_BANDS
+    from ..constants import N_SW_BANDS
     
     # Total emission
     total = total_thermal_emission(temperature) / jnp.pi  # Convert to radiance
@@ -320,7 +320,7 @@ def test_planck_functions():
     # Test multiple bands
     bands = ((10, 350), (350, 500), (500, 2500))
     B_bands = planck_bands_lw(jnp.array([250.0, 300.0]), bands)
-    from .constants import N_LW_BANDS
+    from ..constants import N_LW_BANDS
     assert B_bands.shape == (2, N_LW_BANDS)
     assert jnp.all(B_bands > 0)
     

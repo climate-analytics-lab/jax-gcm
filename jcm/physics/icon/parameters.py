@@ -12,7 +12,7 @@ from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.clouds.sundqvist import CloudParameters
 from jcm.physics.clouds.echam_1m import MicrophysicsParameters
 from jcm.physics.gravity_waves.icon import GravityWaveParameters
-from jcm.physics.radiation.icon import RadiationParameters
+from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.vertical_diffusion.icon.vertical_diffusion_types import VDiffParameters
 from jcm.physics.surface.icon import SurfaceParameters
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters

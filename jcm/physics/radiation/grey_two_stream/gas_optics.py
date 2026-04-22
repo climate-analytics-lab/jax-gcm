@@ -319,7 +319,7 @@ def gas_optical_depth_lw(
     # Apply to all LW bands via vmap (was a Python ``for band in range(N_LW_BANDS)``
     # loop that staged N_LW_BANDS separate ``.at[:, band].set(...)`` updates into
     # XLA, producing a long unrolled dependency chain).
-    from .constants import N_LW_BANDS
+    from ..constants import N_LW_BANDS
     bands = jnp.arange(N_LW_BANDS)
     tau_per_band = jax.vmap(single_band_absorption)(bands)  # (N_LW_BANDS, nlev)
     return tau_per_band.T  # (nlev, N_LW_BANDS)
@@ -373,7 +373,7 @@ def gas_optical_depth_sw(
         return k_total * air_density * layer_thickness * sec_zenith
 
     # Apply to all SW bands via vmap (same motivation as ``gas_optical_depth_lw``).
-    from .constants import N_SW_BANDS
+    from ..constants import N_SW_BANDS
     bands = jnp.arange(N_SW_BANDS)
     tau_per_band = jax.vmap(single_band_absorption)(bands)  # (N_SW_BANDS, nlev)
     return tau_per_band.T  # (nlev, N_SW_BANDS)

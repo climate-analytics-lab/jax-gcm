@@ -7,7 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from jcm.physics.radiation.icon.gas_optics import (
+from jcm.physics.radiation.grey_two_stream.gas_optics import (
     water_vapor_continuum,
     co2_absorption,
     ozone_absorption_sw,
@@ -131,7 +131,7 @@ def test_gas_optical_depth_lw():
     )
     
     # Check output shape
-    from jcm.physics.radiation.icon.constants import N_LW_BANDS
+    from jcm.physics.radiation.constants import N_LW_BANDS
     assert tau.shape == (nlev, N_LW_BANDS)
     
     # Optical depth should be non-negative
@@ -164,7 +164,7 @@ def test_gas_optical_depth_sw():
     )
 
     # Check output shape
-    from jcm.physics.radiation.icon.constants import N_SW_BANDS
+    from jcm.physics.radiation.constants import N_SW_BANDS
     assert tau.shape == (nlev, N_SW_BANDS)
 
     # Optical depth should be non-negative
