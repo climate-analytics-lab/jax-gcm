@@ -20,7 +20,7 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
     """cuadjtq-style Newton-Raphson saturation adjustment."""
 
     def _run(self, T, q, p):
-        """Wrapper — returns (T_adj, vapor, liquid)."""
+        """Return (T_adj, vapor, liquid) from saturation_adjustment."""
         return saturation_adjustment(
             jnp.asarray(T, dtype=jnp.float32),
             jnp.asarray(q, dtype=jnp.float32),
@@ -38,7 +38,8 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
 
     def test_saturation_enforced(self):
         """After adjustment, vapor mixing ratio should equal qsat(T_adj)
-        to within tight tolerance (the essence of proper `cuadjtq`)."""
+        to within tight tolerance (the essence of proper `cuadjtq`).
+        """
         T, p = 288.0, 101325.0
         qsat_initial = float(saturation_mixing_ratio(
             jnp.asarray(p), jnp.asarray(T)
@@ -66,7 +67,8 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
 
     def test_latent_heating(self):
         """Condensation must warm the parcel; the latent heat released
-        should match the energy budget cp*dT = L*d_condensed."""
+        should match the energy budget cp*dT = L*d_condensed.
+        """
         from jcm.physics.icon.constants.physical_constants import cp, alhc
         T, p = 290.0, 90000.0
         qsat_T = float(saturation_mixing_ratio(
@@ -82,7 +84,8 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
 
     def test_convergence_strong_supersaturation(self):
         """Under very strong supersaturation, the iterative Newton scheme
-        must still converge — the single-pass version under-converged here."""
+        must still converge — the single-pass version under-converged here.
+        """
         T, p = 300.0, 95000.0
         qsat_T = float(saturation_mixing_ratio(
             jnp.asarray(p), jnp.asarray(T)
@@ -162,8 +165,7 @@ class TestDynamicCloudTop(unittest.TestCase):
         """With a strongly stable inversion above the PBL, mass flux must
         vanish above the inversion regardless of the `ktop` argument.
         """
-        # Build a 20-level profile: adiabatic below, isothermal above (stable)
-        nlev = 20
+        # Build a 20-level profile: adiabatic below, isothermal above (stable).
         # Index 0 = TOA (cold); index 19 = surface (warm)
         #   [0..4]   stratosphere (220 K)
         #   [5..14]  isothermal inversion (260 K) — strongly stable
@@ -235,7 +237,6 @@ class TestDynamicCloudTop(unittest.TestCase):
         nominal `ktop`, the mass flux above should be zero — the updraft is
         terminated dynamically rather than pushed to `ktop` regardless.
         """
-        nlev = 20
         # Very strong capping inversion at k=10: stratospheric temperatures
         # above. Regardless of how high we pass `ktop`, the updraft shouldn't
         # support mass flux in the cap.

@@ -11,7 +11,6 @@ These are the RCE signatures that were missing / wrong before the fixes.
 
 import unittest
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.physics.icon.convection.tiedtke_nordeng import (
     ConvectionParameters,
@@ -87,7 +86,8 @@ class TestRCEConvection(unittest.TestCase):
 
     def test_stable_sounding_no_convection(self):
         """On a stable sounding (cold surface) the scheme should return zero
-        tendencies — ensures we haven't introduced spurious activation."""
+        tendencies — ensures we haven't introduced spurious activation.
+        """
         T, q, p, dz, rho = _tropical_sounding(
             surface_T=260.0, surface_rh=0.5, lapse_K_per_km=2.0
         )
@@ -137,7 +137,8 @@ class TestRCEConvection(unittest.TestCase):
     def test_convective_drying_in_cloud_layer(self):
         """Condensation removes vapour from the column during convection —
         the integrated q tendency should be negative (condensed → precip)
-        minus what was transported up from the BL."""
+        minus what was transported up from the BL.
+        """
         T, q, p, dz, rho = _tropical_sounding(surface_T=302.0, surface_rh=0.85)
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
@@ -158,7 +159,8 @@ class TestRCEConvection(unittest.TestCase):
     def test_saturation_adjustment_leaves_no_supersaturation(self):
         """After the scheme runs (including the post-convection adjustment
         we wired up), applying the tendencies should leave the column at
-        or below saturation everywhere."""
+        or below saturation everywhere.
+        """
         T, q, p, dz, rho = _tropical_sounding(surface_T=302.0, surface_rh=0.85)
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()

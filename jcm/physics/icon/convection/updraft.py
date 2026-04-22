@@ -12,7 +12,6 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
-import jax
 from jax import lax
 from typing import NamedTuple, Tuple
 
