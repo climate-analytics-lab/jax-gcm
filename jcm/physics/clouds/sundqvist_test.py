@@ -5,7 +5,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from .shallow_clouds import (
+from .sundqvist import (
     CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
     saturation_specific_humidity, calculate_cloud_fraction,
     partition_cloud_phase, condensation_evaporation,
@@ -457,7 +457,7 @@ class TestAerosolPrecipitationCoupling:
 
     def _run_column(self, cdnc_value):
         """Run the combined cloud+microphysics column with given CDNC."""
-        from jcm.physics.clouds.icon.cloud_microphysics import MicrophysicsParameters
+        from jcm.physics.clouds.echam_1m import MicrophysicsParameters
         from jcm.physics.icon.icon_physics import _cloud_and_microphysics_column
         from jcm.physics.icon.constants.physical_constants import rd
 

@@ -5,7 +5,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 import jax
-from .cloud_microphysics import (
+from .echam_1m import (
     MicrophysicsParameters, cloud_droplet_radius, autoconversion_kk2000, accretion_rain_cloud,
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
@@ -233,7 +233,7 @@ class TestEvaporationSublimation:
         air_density = jnp.array(1.0)
         
         # Create subsaturated conditions (50% RH)
-        from .shallow_clouds import saturation_specific_humidity
+        from .sundqvist import saturation_specific_humidity
         qs = saturation_specific_humidity(pressure, temperature)
         specific_humidity = 0.5 * qs
         
@@ -256,7 +256,7 @@ class TestEvaporationSublimation:
         air_density = jnp.array(1.0)
         
         # Saturated conditions
-        from .shallow_clouds import saturation_specific_humidity
+        from .sundqvist import saturation_specific_humidity
         qs = saturation_specific_humidity(pressure, temperature)
         specific_humidity = qs
         
@@ -318,7 +318,7 @@ class TestFullMicrophysics:
         pressure = jnp.linspace(100000, 70000, nlev)
         
         # Humid conditions with cloud water
-        from .shallow_clouds import saturation_specific_humidity
+        from .sundqvist import saturation_specific_humidity
         qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
         specific_humidity = 0.9 * qs
         
@@ -356,7 +356,7 @@ class TestFullMicrophysics:
         pressure = jnp.linspace(70000, 30000, nlev)
         
         # Set up ice clouds
-        from .shallow_clouds import saturation_specific_humidity
+        from .sundqvist import saturation_specific_humidity
         qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
         specific_humidity = 0.9 * qs
         
@@ -397,7 +397,7 @@ class TestFullMicrophysics:
         freeze_level = jnp.argmin(jnp.abs(temperature - tmelt))
         
         # Set up mixed-phase clouds
-        from .shallow_clouds import saturation_specific_humidity
+        from .sundqvist import saturation_specific_humidity
         qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
         specific_humidity = 0.9 * qs
         

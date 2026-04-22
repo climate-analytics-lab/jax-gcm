@@ -425,7 +425,7 @@ def evaporation_sublimation(
         Tuple of (rain_evap_rate, snow_sublim_rate) in kg/kg/s
 
     """
-    from .shallow_clouds import saturation_specific_humidity
+    from .sundqvist import saturation_specific_humidity
     
     # Saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
