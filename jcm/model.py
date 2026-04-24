@@ -319,6 +319,11 @@ class Model:
         # ICON-style hybrid coords store `a_boundaries` in Pa, so we override
         # `hpa_quantity` so dinosaur's internal nondimensionalization treats
         # them as Pa (not hPa which is the dinosaur default).
+        # Wire up the ``specific_humidity`` tracer as the dynamics' humidity
+        # so that moisture contributes to virtual temperature in the dycore
+        # (and the moisture-related divergence/vorticity corrections fire).
+        # Without this, q is transported as an inert passive tracer and the
+        # dynamics are effectively dry — inconsistent with the moist physics.
         from dinosaur.hybrid_coordinates import HybridCoordinates
         if isinstance(self.coords.vertical, HybridCoordinates):
             self.primitive = primitive_equations.PrimitiveEquationsHybrid(
@@ -327,6 +332,7 @@ class Model:
                 coords=self.coords,
                 physics_specs=self.physics_specs,
                 hpa_quantity=units.pascal,
+                humidity_key='specific_humidity',
             )
         else:
             self.primitive = primitive_equations.PrimitiveEquations(
@@ -334,6 +340,7 @@ class Model:
                 orography=self.truncated_orography,
                 coords=self.coords,
                 physics_specs=self.physics_specs,
+                humidity_key='specific_humidity',
             )
         
         def conserve_global_mean_surface_pressure(u, u_next):

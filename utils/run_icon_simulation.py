@@ -158,6 +158,7 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
                 coords=coords,
                 physics_specs=model.physics_specs,
                 hpa_quantity=units.pascal,
+                humidity_key='specific_humidity',
             )
         else:
             model.primitive = primitive_equations.PrimitiveEquations(
@@ -165,6 +166,7 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
                 orography=model.truncated_orography,
                 coords=coords,
                 physics_specs=model.physics_specs,
+                humidity_key='specific_humidity',
             )
 
     print(f"Model created. Timestep: {model.dt_si}")
