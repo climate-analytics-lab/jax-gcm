@@ -341,8 +341,26 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
-    # take the log of normalized surface pressure and convert to modal
-    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
+    # Convert normalized surface pressure back to the log-pressure stored by
+    # dinosaur. Convention mirrors ``dynamics_state_to_physics_state``:
+    #
+    #   * SigmaCoordinates: dynamics state carries ``log(P_s / p0)`` — we
+    #     already have ``normalized_surface_pressure = P_s / p0`` in the
+    #     physics state, so just take the log.
+    #   * HybridCoordinates: dynamics state carries ``log(P_s_in_Pa)`` (in
+    #     nondim Pa) because the coordinate blends ``a_boundaries`` (Pa) and
+    #     ``b * P_s`` — we must re-multiply by ``p0_nondim`` before taking
+    #     the log. Without this the reverse conversion produces a near-zero
+    #     surface pressure and the first dynamics step NaNs.
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    if isinstance(dynamics.coords.vertical, HybridCoordinates):
+        from jcm.constants import p0 as P0_PA
+        p0_nondim = dynamics.physics_specs.nondimensionalize(P0_PA * units.pascal)
+        log_surface_pressure = jnp.log(
+            physics_state.normalized_surface_pressure * p0_nondim
+        )
+    else:
+        log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     # Convert all tracers to modal
