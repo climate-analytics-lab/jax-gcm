@@ -335,12 +335,14 @@ class Model:
                 humidity_key='specific_humidity',
             )
         else:
+            # Sigma-coord dinosaur ``PrimitiveEquations`` does not accept
+            # ``humidity_key``; moisture-Tv coupling is only available on the
+            # hybrid variant in this version.
             self.primitive = primitive_equations.PrimitiveEquations(
                 reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
                 orography=self.truncated_orography,
                 coords=self.coords,
                 physics_specs=self.physics_specs,
-                humidity_key='specific_humidity',
             )
         
         def conserve_global_mean_surface_pressure(u, u_next):

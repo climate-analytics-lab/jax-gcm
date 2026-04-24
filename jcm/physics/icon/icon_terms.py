@@ -543,6 +543,21 @@ class ComposableIconPhysics(ComposablePhysics):
             state, nlev, ncols,
         )
 
+        # PhysicsState carries specific_humidity (and mass-mixing-ratio
+        # tracers) in g/kg — a SPEEDY legacy convention. ICON physics is
+        # written for kg/kg (see formulas like e = q·p/(0.622 + 0.378·q)
+        # in icon_physics.py, which requires q in kg/kg or else vapor
+        # pressure exceeds total pressure at realistic moisture levels).
+        # Convert on entry and scale the tendency back on exit so the
+        # interface's g/kg/s → nondim step applies the correct units.
+        vectorized_state = vectorized_state.copy(
+            specific_humidity=vectorized_state.specific_humidity * 1e-3,
+            tracers={
+                name: tracer * 1e-3
+                for name, tracer in vectorized_state.tracers.items()
+            },
+        )
+
         diagnostics: dict = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
@@ -572,6 +587,16 @@ class ComposableIconPhysics(ComposablePhysics):
                 vectorized_state, diagnostics, forcing, terrain,
             )
             acc = _accumulate(acc, tend)
+
+        # Scale q tendencies back kg/kg/s → g/kg/s to match PhysicsTendency
+        # convention expected by physics_tendency_to_dynamics_tendency.
+        acc = {
+            **acc,
+            "specific_humidity": acc["specific_humidity"] * 1e3,
+            "tracers": {
+                name: t * 1e3 for name, t in acc["tracers"].items()
+            },
+        }
 
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
         return tendencies, diagnostics
