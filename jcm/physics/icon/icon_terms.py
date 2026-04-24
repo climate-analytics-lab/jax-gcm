@@ -396,6 +396,91 @@ class ComposableIconPhysics(ComposablePhysics):
         """Read access to the shared ICON parameters struct."""
         return self._icon_parameters.get_value()
 
+    def __add__(self, other):
+        """Compose preserving the ComposableIconPhysics subclass.
+
+        The base ``__add__`` returns a plain ``ComposablePhysics``, which
+        loses the ICON parameter store and our custom ``data_struct_to_dict``
+        (used for writing precip / surface flux diagnostics to xarray).
+        """
+        if hasattr(other, "terms"):
+            other_terms = list(other.terms)
+        elif hasattr(other, "category") and callable(other):
+            other_terms = [other]
+        else:
+            return NotImplemented
+        return ComposableIconPhysics(
+            terms=list(self.terms) + other_terms,
+            checkpoint_terms=self.checkpoint_terms,
+            parameters=self._icon_parameters.get_value(),
+        )
+
+    def data_struct_to_dict(self, struct, nodal_shape=None, sep="."):  # noqa: D401
+        """Expose ICON-specific diagnostic fields for xarray output.
+
+        The composable diagnostics dict uses ``_<sub>`` keys for each ICON
+        sub-struct (radiation, convection, clouds, surface, ...). The parent
+        class filters those out. Here we unpack a curated set of useful
+        scalar diagnostics into top-level keys so they appear in the output
+        Dataset for analysis (precip, evap, surface fluxes, cloud water).
+
+        Fields coming out of column-vectorized terms have a trailing
+        ``ncols = nlon * nlat`` axis; we reshape to ``(..., nlon, nlat)``
+        so ``data_to_xarray`` can resolve the dims.
+        """
+        import jax.numpy as _jnp
+        out = super().data_struct_to_dict(struct, nodal_shape=nodal_shape, sep=sep)
+
+        if not isinstance(struct, dict):
+            return out
+
+        # If caller passed a 3-D nodal_shape (nlev, nlon, nlat), we want the
+        # 2-D (nlon, nlat) view. Otherwise accept it as-is.
+        nodal_2d = None
+        if nodal_shape is not None:
+            if len(nodal_shape) == 3:
+                nodal_2d = (nodal_shape[1], nodal_shape[2])
+            elif len(nodal_shape) == 2:
+                nodal_2d = tuple(nodal_shape)
+
+        def _reshape_to_nodal(arr):
+            """Reshape trailing ncols axis → (nlon, nlat) when possible."""
+            if nodal_2d is None:
+                return arr
+            ncols = nodal_2d[0] * nodal_2d[1]
+            s = arr.shape
+            if s and s[-1] == ncols:
+                return arr.reshape(s[:-1] + nodal_2d)
+            return arr
+
+        # Walk the internal sub-structs and pick fields worth persisting.
+        def _pick(sub, attrs, prefix):
+            if sub is None:
+                return
+            for a in attrs:
+                v = getattr(sub, a, None)
+                if v is None:
+                    continue
+                out[f"{prefix}{a}"] = _reshape_to_nodal(v)
+
+        _pick(struct.get("_convection"), ["precip_conv"], "convection.")
+        _pick(struct.get("_clouds"),
+              ["precip_rain", "precip_snow", "cloud_fraction", "qc", "qi"],
+              "clouds.")
+        _pick(struct.get("_surface"),
+              ["latent_heat_flux", "sensible_heat_flux", "evaporation",
+               "surface_temperature", "momentum_flux_u", "momentum_flux_v"],
+              "surface.")
+        _pick(struct.get("_vertical_diffusion"),
+              ["tke", "pbl_height", "surface_friction_velocity",
+               "monin_obukhov_length"],
+              "vdiff.")
+        _pick(struct.get("_radiation"),
+              ["toa_lw_up", "toa_sw_up", "toa_sw_down",
+               "surface_lw_down", "surface_sw_down", "surface_lw_up"],
+              "radiation.")
+        return out
+
     def replace(self, category, new_term):
         """Replace a term, preserving ComposableIconPhysics type."""
         new_terms = []
