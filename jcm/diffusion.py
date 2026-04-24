@@ -18,7 +18,7 @@ until the JIT / order=4 interaction is diagnosed.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Optional
 
 import jax.numpy as jnp
 import tree_math

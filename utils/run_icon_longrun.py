@@ -13,7 +13,6 @@ import argparse
 import time
 import json
 import logging
-import os
 
 logging.basicConfig(level=logging.INFO)
 

@@ -428,7 +428,6 @@ class ComposableIconPhysics(ComposablePhysics):
         ``ncols = nlon * nlat`` axis; we reshape to ``(..., nlon, nlat)``
         so ``data_to_xarray`` can resolve the dims.
         """
-        import jax.numpy as _jnp
         out = super().data_struct_to_dict(struct, nodal_shape=nodal_shape, sep=sep)
 
         if not isinstance(struct, dict):

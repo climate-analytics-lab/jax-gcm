@@ -4,7 +4,6 @@ Usage:
     CUDA_VISIBLE_DEVICES=1 python utils/run_hs_90d.py
 """
 
-import sys
 import time
 import logging
 
@@ -14,7 +13,6 @@ logging.basicConfig(level=logging.INFO)
 def main(total_days=90.0, save_interval=5.0, output="hs_t85_47hybrid_90d"):
     import jax
     import jax.numpy as jnp
-    import numpy as np
     print(f"JAX backend: {jax.default_backend()}, devices: {jax.devices()}")
 
     from jcm.model import Model

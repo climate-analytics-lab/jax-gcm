@@ -397,6 +397,7 @@ class Model:
             replace_fn: picks which state variables get overwritten by the filter.
             level_orders: optional 1-D array of per-level orders (length nlev)
                 enabling the ECHAM-style level-dependent hyperdiffusion.
+
         """
         from dinosaur.filtering import horizontal_diffusion_filter
         from jcm.diffusion import level_dependent_scaling

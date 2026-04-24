@@ -229,7 +229,6 @@ def run_smoke_test(model, total_days=1.0, save_interval=1.0, label="SMOKE TEST",
                    use_resume=False):
     """Run a short simulation to verify configuration."""
     import jax
-    import jax.numpy as jnp
 
     print(f"\n=== {label} ({total_days} day(s), save every {save_interval*24:.2f}h) ===")
     t0 = time.perf_counter()
@@ -338,8 +337,6 @@ def plot_climatology(ds, output_prefix="icon_t85_47lev"):
 
     # 2. TOA radiation balance
     ax = axes[1]
-    toa_vars = {v: v for v in ds.data_vars
-                if any(k in v for k in ["toa_sw_down", "toa_sw_up", "toa_lw_up"])}
     sw_down_key = next((v for v in ds.data_vars if "toa_sw_down" in v), None)
     sw_up_key = next((v for v in ds.data_vars if "toa_sw_up" in v), None)
     lw_up_key = next((v for v in ds.data_vars if "toa_lw_up" in v), None)
@@ -442,7 +439,10 @@ def plot_diurnal_radiation(ds, output_prefix="icon_diurnal"):
         else:
             gm = arr.mean()
         ax.plot(time, np.asarray(gm).squeeze(), label=name)
-    ax.set_xlabel("Time"); ax.set_ylabel("W/m²"); ax.legend(); ax.grid(alpha=0.3)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("W/m²")
+    ax.legend()
+    ax.grid(alpha=0.3)
     ax.set_title("Global-mean radiative fluxes (diurnal cycle)")
 
     # Panel 2: Hovmöller of TOA SW down (time vs lon) at equator
@@ -457,7 +457,8 @@ def plot_diurnal_radiation(ds, output_prefix="icon_diurnal"):
             data = arr_eq.transpose("time", lon_dim).values if lon_dim else arr_eq.values
             im = ax.pcolormesh(lon, time, data, cmap="inferno", shading="nearest")
             plt.colorbar(im, ax=ax, label="W/m²")
-            ax.set_xlabel("Longitude"); ax.set_ylabel("Time")
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Time")
             ax.set_title("TOA SW down at equator (Hovmöller)")
 
     plt.tight_layout()

@@ -37,6 +37,7 @@ def build_moist_initial_state(model, q_surface_gkg=10.0, scale_height_km=2.0,
 
     Returns:
         PhysicsState suitable for ``model.run(initial_state=...)``.
+
     """
     import jax.numpy as jnp
     import numpy as np
@@ -138,7 +139,6 @@ def main():
     print(f"Saved {args.output}.nc ({ds.nbytes / 1e6:.0f} MB)")
 
     # Quick summary of moisture budget
-    import numpy as np
     if "surface.evaporation" in ds and "clouds.precip_rain" in ds:
         evap = ds["surface.evaporation"].mean(dim=["lon", "lat"])
         precip_rain = ds["clouds.precip_rain"].mean(dim=["lon", "lat"])
