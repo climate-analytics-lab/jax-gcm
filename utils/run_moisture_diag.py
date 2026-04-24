@@ -138,16 +138,21 @@ def main():
     ds.to_netcdf(f"{args.output}.nc")
     print(f"Saved {args.output}.nc ({ds.nbytes / 1e6:.0f} MB)")
 
-    # Quick summary of moisture budget
+    # Quick summary of moisture budget — all terms reduced to a scalar per
+    # time before indexing, so the ``float(...)`` call always gets a 0-d
+    # array regardless of the variable's native shape.
+    def _gmean(da):
+        return da.mean(dim=[d for d in da.dims if d != "time"])
+
     if "surface.evaporation" in ds and "clouds.precip_rain" in ds:
-        evap = ds["surface.evaporation"].mean(dim=["lon", "lat"])
-        precip_rain = ds["clouds.precip_rain"].mean(dim=["lon", "lat"])
-        precip_snow = ds.get("clouds.precip_snow")
-        precip_conv = ds.get("convection.precip_conv")
+        evap = _gmean(ds["surface.evaporation"])
+        precip_rain = _gmean(ds["clouds.precip_rain"])
+        precip_snow = _gmean(ds["clouds.precip_snow"]) if "clouds.precip_snow" in ds else None
+        precip_conv = _gmean(ds["convection.precip_conv"]) if "convection.precip_conv" in ds else None
         print("\nGlobal mean moisture budget (kg/m²/s):")
         print(f"  {'day':>5} {'evap':>10} {'precip_rain':>12} "
               f"{'precip_snow':>12} {'precip_conv':>12} {'E-P':>10}")
-        for i, t in enumerate(ds.time.values):
+        for i, _ in enumerate(ds.time.values):
             day = float(i) * args.save_interval
             e = float(evap.isel(time=i))
             pr = float(precip_rain.isel(time=i))

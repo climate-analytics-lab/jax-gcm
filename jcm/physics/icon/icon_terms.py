@@ -478,6 +478,40 @@ class ComposableIconPhysics(ComposablePhysics):
               ["toa_lw_up", "toa_sw_up", "toa_sw_down",
                "surface_lw_down", "surface_sw_down", "surface_lw_up"],
               "radiation.")
+
+        # Post-pass: normalize remaining sub-struct arrays. ``super()`` emits
+        # every array in every typed sub-struct, including bulky fields on
+        # half levels (``radiation.sw_flux_up`` has shape ``(..., nlev+1, ncols)``)
+        # that ``data_to_xarray`` doesn't know how to label. Reshape trailing
+        # ncols to ``(nlon, nlat)`` where possible, and drop any array whose
+        # trailing two dims aren't the nodal grid — the curated picks above
+        # already cover anything a user is likely to want.
+        nlev_check = nodal_shape[0] if (nodal_shape and len(nodal_shape) == 3) else None
+        if nodal_2d is not None:
+            for k in list(out.keys()):
+                v = out[k]
+                if not hasattr(v, "shape"):
+                    continue
+                v = _reshape_to_nodal(v)
+                out[k] = v
+                s = v.shape
+                # Require the trailing two dims to match the nodal grid so
+                # ``data_to_xarray`` can resolve them. If there is an
+                # additional vertical axis immediately before, it must equal
+                # ``nlev`` (or 1 for surface-with-explicit-axis); anything
+                # else — e.g. half-level ``nlev+1`` radiation fluxes — is
+                # dropped.
+                if len(s) < 2 or s[-2:] != nodal_2d:
+                    del out[k]
+                    continue
+                # Only the ``(time, nlev, nlon, nlat)`` 4-D layout carries an
+                # explicit vertical axis; 2-D and 3-D layouts don't. Catch
+                # half-level fluxes by requiring the vertical dim (if
+                # present) to equal nlev or 1 (surface-with-axis).
+                if nlev_check is not None and len(s) == 4:
+                    vert = s[-3]
+                    if vert not in (nlev_check, 1):
+                        del out[k]
         return out
 
     def replace(self, category, new_term):
