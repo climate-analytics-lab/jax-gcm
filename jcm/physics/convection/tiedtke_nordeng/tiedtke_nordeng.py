@@ -550,9 +550,16 @@ def tiedtke_nordeng_convection(
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
-        # Determine cloud top based on CAPE profile
-        # Simplified - full version would search for equilibrium level
-        cloud_depth = lax.cond(conv_type == 2, lambda: 3, lambda: 6)  # Shallow vs deep
+        # Cloud-top scan ceiling. Deep convection in the tropics commonly
+        # reaches the tropopause (~12-15 km, ~15-20 levels above cloud
+        # base on the ICON 47-level grid); shallow convection peaks
+        # around 2-3 km. Set a generous scan range and let the updraft's
+        # dynamic termination (negative buoyancy or mfu < 1% of base —
+        # see ``calculate_updraft``) decide where the cloud actually
+        # ends. The previous values (6 for deep, 3 for shallow) capped
+        # deep convection at ~3 km so it could never properly transport
+        # heat / moisture through the troposphere.
+        cloud_depth = lax.cond(conv_type == 2, lambda: 5, lambda: 15)
 
         # Handle level ordering properly
         pressure_increasing = pressure[0] < pressure[-1]
