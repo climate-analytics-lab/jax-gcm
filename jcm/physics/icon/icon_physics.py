@@ -811,9 +811,17 @@ def apply_vertical_diffusion(
         vdiff_diagnostics.exchange_coeff_momentum[:, -1:], nsfc_type, axis=1
     )  # (ncols, nsfc_type)
     
-    # Update TKE
+    # Update TKE — clip to a physically defensible range. Strong
+    # convective storms produce updraft-core TKE of ~50–100 m²/s²;
+    # values above ~250 are non-physical and indicate the implicit
+    # vdiff solver has gone unstable (which it does in the moist run
+    # within ~10 timesteps if left unconstrained — TKE then cascades
+    # through the exchange-coefficient back-reaction and NaNs the
+    # whole column on the next step). A hard upper cap is the cheapest
+    # safeguard that lets the rest of the physics step finish; the
+    # underlying TKE budget should be retuned separately.
     new_tke = tke + dt * tke_tend
-    new_tke = jnp.maximum(new_tke, 0.01)  # Minimum TKE
+    new_tke = jnp.clip(new_tke, 0.01, 250.0)
 
     # Create physics tendencies
     physics_tendencies = PhysicsTendency(
