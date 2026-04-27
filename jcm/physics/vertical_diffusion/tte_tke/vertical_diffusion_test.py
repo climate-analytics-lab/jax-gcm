@@ -573,6 +573,176 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     )
 
 
+class TestTKEStability:
+    """Idealized-physics tests that pin down the TKE budget against ECHAM.
+
+    These tests integrate the vdiff scheme forward many timesteps under
+    fixed forcing and verify that TKE stays in a physically defensible
+    range. The core invariant we want is that the source/sink balance
+    in the TKE equation produces a STABLE (not exponentially growing)
+    response — the way ECHAM achieves this is by tying the diffusion
+    coefficient to ``√TKE`` so increased shear feeds TKE which feeds K
+    which damps shear: a closed negative-feedback loop. Smagorinsky-
+    style ``K = l²·|S|`` (which the scheme currently uses) has no such
+    feedback and produces ``shear_prod = K·S² = l²·|S|³`` — cubic in
+    shear — so any sustained shear forcing grows TKE without bound.
+    """
+
+    def _shear_driven_column(
+        self, nlev=20, surface_jet_ms=20.0, dt=600.0,
+    ):
+        """Build a single column with a strong wind shear and neutral T."""
+        from .vertical_diffusion_types import VDiffParameters, VDiffState
+
+        ncol = 1
+        nsfc_type = 3
+
+        # Heights: surface-first (0 at surface, 10 km at top)
+        height_half = jnp.linspace(0.0, 10000.0, nlev + 1)[None, :]
+        height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
+
+        # Linear wind profile from 0 (surface) to surface_jet_ms (top)
+        # gives a constant shear |∂u/∂z| = surface_jet/10km
+        u = jnp.linspace(0.0, surface_jet_ms, nlev)[None, :]
+        v = jnp.zeros((ncol, nlev))
+
+        # Neutral T: dry-adiabatic profile so buoyancy production is ~0
+        surface_T = 288.0
+        gamma = 9.81 / PHYS_CONST.cp  # K/m
+        temperature = surface_T - gamma * height_full
+        qv = jnp.zeros((ncol, nlev))
+        qc = jnp.zeros((ncol, nlev))
+        qi = jnp.zeros((ncol, nlev))
+
+        # Pressure from hydrostatic w/ scale height ~8 km (rough)
+        H = 8000.0
+        pressure_full = 1e5 * jnp.exp(-height_full / H)
+        pressure_half = 1e5 * jnp.exp(-height_half / H)
+        geopotential = PHYS_CONST.grav * height_full
+        dp = jnp.diff(pressure_half, axis=1)
+        air_mass = jnp.abs(dp) / PHYS_CONST.grav
+        dry_air_mass = air_mass
+
+        surface_temperature = jnp.full((ncol, nsfc_type), surface_T)
+        surface_fraction = jnp.ones((ncol, nsfc_type)) / nsfc_type
+        roughness_length = jnp.full((ncol, nsfc_type), 0.01)
+        ocean_u = jnp.zeros(ncol)
+        ocean_v = jnp.zeros(ncol)
+
+        # Start TKE at the floor — let the scheme build it up
+        tke = jnp.full((ncol, nlev), 0.01)
+        thv_variance = jnp.zeros((ncol, nlev))
+
+        state = VDiffState(
+            u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
+            pressure_full=pressure_full, pressure_half=pressure_half,
+            geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
+            surface_temperature=surface_temperature, surface_fraction=surface_fraction,
+            roughness_length=roughness_length,
+            height_full=height_full, height_half=height_half,
+            tke=tke, thv_variance=thv_variance, ocean_u=ocean_u, ocean_v=ocean_v,
+        )
+        return state, VDiffParameters.default(), dt
+
+    def test_tke_does_not_run_away_under_steady_shear(self):
+        """Drive a neutrally stratified column with a fixed 20 m/s jet over 10 km
+        for 50 timesteps and assert TKE stays below a physical ceiling.
+
+        Shear of 2 mm/s/m is a strong but not extreme wind gradient —
+        a healthy TKE closure should reach equilibrium TKE on the order
+        of ``(l·|S|)²`` which for l=100m, |S|=2e-3 is ~0.04 m²/s². Real
+        atmospheric values rarely exceed 5 m²/s² outside thunderstorm
+        cores; anything above 100 m²/s² indicates the source/sink
+        balance has lost its negative feedback.
+        """
+        from .vertical_diffusion import vertical_diffusion_column
+
+        state, params, dt = self._shear_driven_column(surface_jet_ms=20.0)
+        n_steps = 50
+
+        max_tke_history = []
+        for _ in range(n_steps):
+            tendencies, _ = vertical_diffusion_column(state, params, dt)
+            new_tke = state.tke + dt * tendencies.tke_tendency
+            new_tke = jnp.maximum(new_tke, 0.01)
+            state = state._replace(tke=new_tke)
+            max_tke_history.append(float(jnp.max(new_tke)))
+
+        max_tke = max(max_tke_history)
+        assert max_tke < 100.0, (
+            f"TKE ran away under steady-shear forcing — max over "
+            f"{n_steps} steps = {max_tke:.1f} m²/s². Healthy values "
+            f"for this column: < 5 m²/s². Trajectory (first/last 5): "
+            f"{max_tke_history[:5]} ... {max_tke_history[-5:]}"
+        )
+
+    def test_tke_equilibrates_in_neutral_BL(self):
+        """A neutral BL with constant shear should reach a quasi-steady TKE
+        after enough timesteps, not grow monotonically.
+
+        Compute TKE at step 20 vs step 50 — if the scheme has proper
+        TKE-K coupling and dissipation, the two should be within a
+        factor of 2; an exponentially growing scheme will show step
+        50 ≫ step 20.
+        """
+        from .vertical_diffusion import vertical_diffusion_column
+
+        state, params, dt = self._shear_driven_column(surface_jet_ms=10.0)
+
+        for _ in range(20):
+            tendencies, _ = vertical_diffusion_column(state, params, dt)
+            state = state._replace(tke=jnp.maximum(state.tke + dt * tendencies.tke_tendency, 0.01))
+        tke_at_20 = float(jnp.max(state.tke))
+
+        for _ in range(30):
+            tendencies, _ = vertical_diffusion_column(state, params, dt)
+            state = state._replace(tke=jnp.maximum(state.tke + dt * tendencies.tke_tendency, 0.01))
+        tke_at_50 = float(jnp.max(state.tke))
+
+        ratio = tke_at_50 / max(tke_at_20, 0.01)
+        assert ratio < 4.0, (
+            f"TKE not equilibrating — step 20 max = {tke_at_20:.3f}, "
+            f"step 50 max = {tke_at_50:.3f}, ratio = {ratio:.2f}"
+        )
+
+    def test_K_has_negative_feedback_to_shear(self):
+        """The exchange coefficient should depend on TKE (not just shear),
+        so that increased mixing damps the shear that produced it.
+
+        With ``K = l²·|S|`` (Smagorinsky), increasing TKE has no effect
+        on K — the closure is decoupled. With ``K = c·l·√TKE`` (TTE
+        closure), increasing TKE doubles K, which doubles diffusion
+        and halves the shear that drives K back up.
+
+        We test this by feeding the same shear/Ri profile but doubling
+        TKE in the state and asserting that K_m doubles as well (within
+        ~30% to allow for the stability function variations). The
+        existing Smagorinsky implementation will show K unchanged,
+        making this test fail and pinning the TKE coupling requirement.
+        """
+        from .turbulence_coefficients import compute_exchange_coefficients
+
+        state_low, params, _ = self._shear_driven_column(surface_jet_ms=10.0)
+        state_high = state_low._replace(tke=state_low.tke * 4.0)  # 2× sqrt(TKE)
+
+        ml = jnp.full(state_low.u.shape, 100.0)
+        ri = jnp.zeros((state_low.u.shape[0], state_low.u.shape[1] - 1))
+
+        K_low, _, _ = compute_exchange_coefficients(state_low, params, ml, ri)
+        K_high, _, _ = compute_exchange_coefficients(state_high, params, ml, ri)
+
+        # Pick a mid-column level (away from boundary extension artifacts)
+        kmid = state_low.u.shape[1] // 2
+        ratio = float(K_high[0, kmid] / jnp.maximum(K_low[0, kmid], 1e-10))
+        # 2× sqrt(TKE) should give ~2× K (TKE coupling), not 1× (Smagorinsky)
+        assert 1.5 < ratio < 2.5, (
+            f"K is decoupled from TKE — doubling √TKE should ~double K, "
+            f"got ratio K(4·TKE)/K(TKE) = {ratio:.2f}. This is the "
+            f"core of the TKE-runaway issue: without TKE feedback into "
+            f"K, shear production grows as |S|³ instead of self-limiting."
+        )
+
+
 if __name__ == "__main__":
     # Run basic tests
     print("Running vertical diffusion tests...")

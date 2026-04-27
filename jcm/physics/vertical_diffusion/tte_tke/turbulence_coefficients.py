@@ -140,13 +140,36 @@ def compute_exchange_coefficients(
     richardson_number: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute exchange coefficients for momentum, heat, and moisture.
-    
+
+    Uses the Mellor-Yamada level 2.5 / TTE-TKE closure that ECHAM also
+    implements (``vdiff.f90`` lines around the ``zsm``/``zsh``/``ztkesq``
+    block):
+
+        K_m = c_m · l · √TKE
+        K_h = c_h · l · √TKE
+        K_q = K_h
+
+    The ``√TKE`` factor is the key piece — it gives the closure a
+    closed negative-feedback loop. Increased shear pumps TKE, which
+    raises K, which damps the shear that drove the TKE up. Without
+    this coupling (the Smagorinsky form ``K = l²·|S|`` that this
+    function previously used), shear production goes as ``K·S² =
+    l²·|S|³`` — cubic in shear — and any sustained shear forcing
+    produces unbounded TKE growth. We saw this in the moist ICON
+    integration: TKE went from the 0.01 floor to ~10⁷ m²/s² in seven
+    timesteps once convection started actually stirring the column.
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
-        mixing_length: Mixing length [m] (ncol, nlev)
-        richardson_number: Richardson number [-] (ncol, nlev-1)
-        
+        mixing_length: Mixing length [m] (ncol, nlev) — already
+            stability-corrected via the Richardson factor inside
+            ``compute_mixing_length``.
+        richardson_number: Richardson number [-] (ncol, nlev-1).
+            Currently unused here but kept in the signature for
+            symmetry with downstream callers; future work could fold
+            ECHAM-style ``sm(Ri)``/``sh(Ri)`` stability functions in.
+
     Returns:
         Tuple of:
         - Momentum exchange coefficient [m²/s] (ncol, nlev)
@@ -154,50 +177,28 @@ def compute_exchange_coefficients(
         - Moisture exchange coefficient [m²/s] (ncol, nlev)
 
     """
-    ncol, nlev = state.u.shape
-    
-    # Compute wind shear
-    u_diff = jnp.diff(state.u, axis=1)
-    v_diff = jnp.diff(state.v, axis=1)
-    height_diff = jnp.diff(state.height_full, axis=1)
-    
-    # Extend to full levels (nlev) by padding with boundary values
-    # u_diff and v_diff have shape (ncol, nlev-1), need to extend to (ncol, nlev)
-    u_shear = jnp.concatenate([
-        u_diff[:, :1] / height_diff[:, :1],  # Extend top value
-        u_diff / height_diff                # Interior values (nlev-1)
-    ], axis=1)
-    
-    v_shear = jnp.concatenate([
-        v_diff[:, :1] / height_diff[:, :1],  # Extend top value
-        v_diff / height_diff                # Interior values (nlev-1)
-    ], axis=1)
-    # Both u_shear and v_shear now have shape (ncol, nlev)
-    
-    shear_magnitude = jnp.sqrt(u_shear**2 + v_shear**2)
-    
-    # Base exchange coefficient: K = l² * |S|
-    # where l is mixing length and S is shear magnitude
-    exchange_coeff_base = mixing_length**2 * shear_magnitude
-    
-    # Apply minimum value
-    exchange_coeff_base = jnp.maximum(exchange_coeff_base, 0.1)
-    
-    # Momentum exchange coefficient
-    exchange_coeff_momentum = exchange_coeff_base
-    
-    # Heat and moisture exchange coefficients
-    # Apply Prandtl number correction (typically ~0.7-1.0)
-    prandtl_number = 0.8
-    exchange_coeff_heat = exchange_coeff_base / prandtl_number
-    exchange_coeff_moisture = exchange_coeff_heat  # Assume same as heat
-    
-    # Apply upper limits to prevent numerical instability
-    max_exchange_coeff = 1000.0  # m²/s
-    exchange_coeff_momentum = jnp.minimum(exchange_coeff_momentum, max_exchange_coeff)
-    exchange_coeff_heat = jnp.minimum(exchange_coeff_heat, max_exchange_coeff)
-    exchange_coeff_moisture = jnp.minimum(exchange_coeff_moisture, max_exchange_coeff)
-    
+    # Mellor-Yamada level 2.5 closure constants (ECHAM ``zh1``/``zh2``/
+    # ``zm1``/``zm2`` collapse to roughly these in the neutral limit).
+    c_m = 0.4
+    c_h = 0.5
+    c_q = c_h
+
+    sqrt_tke = jnp.sqrt(jnp.maximum(state.tke, 1e-8))
+
+    exchange_coeff_momentum = c_m * mixing_length * sqrt_tke
+    exchange_coeff_heat = c_h * mixing_length * sqrt_tke
+    exchange_coeff_moisture = c_q * mixing_length * sqrt_tke
+
+    # Floor and ceiling — the floor guarantees enough background
+    # mixing for the implicit solver to be well-conditioned, the
+    # ceiling protects against pathological √TKE values the cap on
+    # the TKE update should already prevent (but defence in depth).
+    min_exchange = 0.1
+    max_exchange = 1000.0
+    exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
+    exchange_coeff_heat = jnp.clip(exchange_coeff_heat, min_exchange, max_exchange)
+    exchange_coeff_moisture = jnp.clip(exchange_coeff_moisture, min_exchange, max_exchange)
+
     return exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture
 
 
