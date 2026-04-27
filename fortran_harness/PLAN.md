@@ -73,9 +73,27 @@ package (`mo_cloud.f90` for both Sundqvist and ECHAM-1m microphysics in
 the ICON port). It's the destabiliser per the term-removal experiment
 (removing convection didn't help, removing clouds dodged the cascade).
 
-ECHAM `mo_cloud.f90` is one big module covering both stages, so the
-driver shape is similar to cumastr but simpler dependencies. JAX side:
-`jcm.physics.clouds.sundqvist.py` + `jcm.physics.clouds.echam_1m.py`.
+ECHAM `mo_cloud.f90` is one big module (~1200 lines) covering cloud
+cover diagnosis + condensation + microphysics + sedimentation in a
+single SUBROUTINE. Dependencies include `mo_cloud_utils.f90` (helpers),
+`mo_echam_cld_config.f90` (already stubbed for cumastr harness), and
+`mo_echam_convect_tables.f90` (already pulled in). The JAX side has it
+split into ``jcm.physics.clouds.sundqvist.py`` (cloud cover +
+condensation, ~400 lines) and ``jcm.physics.clouds.echam_1m.py``
+(microphysics, ~700 lines).
+
+Build steps:
+1. Copy `mo_cloud.f90` from `~/atm_phy_echam/`. Add to Makefile.
+2. Pull in `mo_cloud_utils.f90`. Inspect for any further dependencies
+   not already stubbed.
+3. Write `cloud_driver.f90` mirroring `cumastr_driver.f90`: read column
+   state from binary, init configs, call `cloud()`, write outputs.
+   Outputs: `pq_cld`, `pqte_cld`, `pxlte_cld`, `pxite_cld`, `prsfl`,
+   `pssfl`, `paclc`, `paclcov`, `prelhum`.
+4. Build `compare_cloud.py` analogous to `compare_cumastr.py`.
+5. Run on the same RCE column the cumastr harness uses, plus the
+   post-convection state (i.e. apply cumastr's tendencies first, then
+   feed the result through cloud).
 
 ## Phase 4 — TTE-TKE vertical diffusion
 
