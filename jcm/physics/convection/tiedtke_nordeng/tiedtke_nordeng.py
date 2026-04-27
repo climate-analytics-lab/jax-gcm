@@ -626,13 +626,36 @@ def tiedtke_nordeng_convection(
         # remove any residual supersaturation via iterative saturation
         # adjustment (matches the post-convection `cuadjtq` call in the
         # ECHAM reference), then re-derive the tendencies that produce
-        # the adjusted state. Previously this step was missing — the
-        # `convective_adjustment` helper existed but was never called,
-        # leaving the post-convection state supersaturated.
+        # the adjusted state.
+        #
+        # Restrict the adjustment to the cloud column. ECHAM's `cuadjtq`
+        # is only called on the cloud levels processed by cuasc /
+        # cubase; running it across the whole column makes the
+        # saturation adjustment fire on every above-cloud-top level
+        # whose initial RH happens to exceed the JAX qsat cutoff
+        # (which differs slightly from the lookup-table values ECHAM
+        # uses), producing spurious heating tens of times larger than
+        # the actual convective flux divergence. See the harness
+        # comparison in fortran_harness/compare_cumastr.py for the
+        # diagnostic that surfaces this.
+        cloud_top = jnp.minimum(ktop, cloud_base)
+        cloud_bottom = jnp.maximum(ktop, cloud_base)
+        cloud_mask = (jnp.arange(nlev) >= cloud_top - 1) & (
+            jnp.arange(nlev) <= cloud_bottom
+        )
+        zero_outside = lambda arr: jnp.where(cloud_mask, arr, 0.0)
         t_adj, q_adj, qc_adj, qi_adj = convective_adjustment(
             temperature, humidity, pressure, qc, qi,
-            tendencies.dtedt, tendencies.dqdt, dqc_dt, dqi_dt, dt,
+            zero_outside(tendencies.dtedt), zero_outside(tendencies.dqdt),
+            zero_outside(dqc_dt), zero_outside(dqi_dt), dt,
         )
+        # Outside the cloud column, leave the original state untouched
+        # (no tendency, no condensation) regardless of what the
+        # saturation lookup said.
+        t_adj  = jnp.where(cloud_mask, t_adj,  temperature)
+        q_adj  = jnp.where(cloud_mask, q_adj,  humidity)
+        qc_adj = jnp.where(cloud_mask, qc_adj, qc)
+        qi_adj = jnp.where(cloud_mask, qi_adj, qi)
         inv_dt = 1.0 / jnp.maximum(dt, 1e-6)
         dtedt_adj = (t_adj - temperature) * inv_dt
         dqdt_adj = (q_adj - humidity) * inv_dt
@@ -653,6 +676,25 @@ def tiedtke_nordeng_convection(
             dqi_dt=dqi_dt_adj,
         )
         
+        # ECHAM-ICON convention: ktop is the smallest level index (highest
+        # altitude) where the updraft mass flux is still nonzero — i.e.
+        # where the dynamic termination in `calculate_updraft` last left
+        # a nonzero `mfu` before zeroing it above. The previous code wrote
+        # the *scan ceiling* ``ktop = kbase - cloud_depth``, which masks
+        # the actual cloud top whenever the updraft terminates early.
+        # Re-derive it from where ``updraft_state.mfu`` is still active.
+        mfu_active = updraft_state.mfu > config.cmfcmin
+        has_active = jnp.any(mfu_active)
+        candidate = jnp.where(
+            mfu_active, jnp.arange(nlev), jnp.array(nlev, jnp.int32),
+        )
+        # ``min(candidate)`` = topmost active level (smallest index in
+        # ECHAM ordering). If no level is active, fall back to the scan
+        # ceiling so downstream consumers don't see ``nlev``.
+        actual_ktop = jnp.where(
+            has_active, jnp.min(candidate).astype(jnp.int32), ktop,
+        )
+
         # Update state
         new_state = ConvectionState(
             tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
@@ -660,8 +702,8 @@ def tiedtke_nordeng_convection(
             td=downdraft_state.td, qd=downdraft_state.qd,
             ud=u_wind, vd=v_wind,  # Simplified
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
-            ktype=jnp.array(conv_type), kbase=jnp.array(cloud_base), 
-            ktop=jnp.array(ktop), prate=enhanced_tendencies.precip_conv
+            ktype=jnp.array(conv_type), kbase=jnp.array(cloud_base),
+            ktop=actual_ktop, prate=enhanced_tendencies.precip_conv,
         )
         
         return enhanced_tendencies, new_state
