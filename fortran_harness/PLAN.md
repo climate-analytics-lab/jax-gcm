@@ -196,9 +196,88 @@ C. **The heating profile is inverted.** Fortran peaks at the cloud
 
 ### Outcome so far
 
-The harness has paid for itself: three wrapper bugs fixed, three
-inner-algorithm disagreements isolated, no false alarms.
+The harness has paid for itself: three wrapper bugs fixed, four
+inner-algorithm bugs found (one of which was new — runaway downdraft),
+no false alarms.
 
-Next: implement the ECHAM-style heating formula (issue C) — it's the
-biggest single contributor and we have the Fortran reference right
-there in `fortran_harness/src/mo_cufluxdts.f90`.
+### Bug fixes from second harness pass
+
+**Bug D — runaway downdraft mass flux (FIXED, commit ed50547)**
+
+`downdraft.py::downdraft_step` used `entrscv * 0.5` (1.5e-3 / m) as
+the entrainment rate instead of ECHAM's `entrdd` (2e-4 / m), and only
+entrained without detraining. As a result `|mfd|` grew ~50x going
+down a deep RCE column (peak −2.33 kg/m²/s vs ECHAM's conserved
+~−0.02 kg/m²/s). This bogus flux dominated the DSE flux divergence
+and produced peak heating of 704 K/day at the cloud base.
+
+Fixes:
+- Add `entrdd` to `ConvectionParameters` (default 2.0e-4 / m).
+- Use `cmfdeps` (not `cmfctop`) for LFS-init mass flux: ECHAM cudlfs
+  has `zmftop = -cmfdeps*pmfub`.
+- Match entrainment with detrainment in the bulk (mfd conserved),
+  add a surface-taper ramp in the bottom 2 layers so |mfd| drops
+  to zero at the surface.
+
+Result: JAX peak heating drops 704 → 56 K/day.
+
+**Follow-on fixes (commit 317ab17)**
+
+1. **Adiabatic compression in downdraft.** The temperature update was
+   missing the (pgeoh(k-1)-pgeoh(k))/cp term that ECHAM gets implicitly
+   from its DSE-based formulation. Without it, the downdraft cooled
+   monotonically as it descended (273 → 248 K) instead of warming
+   adiabatically. Fixed by decomposing into (a) explicit adiabatic
+   warming td += g*dz/cp, (b) linear mixing toward env at fraction
+   zentr/|mfd|, (c) evaporative cooling from rain.
+
+2. **Allow deeper updraft scan.** `cloud_depth=15` capped deep
+   convection at ~750 hPa; bumped to 35 (matches the ~28 layers
+   ECHAM cumastr uses on the same RCE column).
+
+3. **Saturation-adjustment cloud mask uses actual cloud top.** The
+   mask was using the scan-ceiling `ktop`, so above-real-cloud-top
+   levels with env supersaturated relative to JAX's qsat triggered
+   the iterative cuadjtq, releasing massive bogus condensational
+   heating (~870 K/day spike at level 21). Now derived from where
+   `mfu` is actually nonzero.
+
+### Remaining algorithm disagreements
+
+| Field | Fortran | JAX (post-second-pass) |
+|---|---|---|
+| ktype | 3 (mid) | 1 (deep) |
+| kctop | 17 (~377 hPa) | 26 (~571 hPa) |
+| pq_cnv peak | 6.86 W/m² **at level 16 (top)** | 0.87 W/m² **at level 30 (mid)** |
+| max dT/dt | ~2.7 K/day | ~75 K/day |
+| Column-integrated heating | ~50 W/m² | ~−3 W/m² (small net) |
+| Precipitation | ~0.5 mm/day (typical) | 0.008 mm/day (negligible) |
+
+**Bug A — `ktype=3` (mid-level convection)** still missing. Same as
+before; trigger logic needs the mid-level branch.
+
+**Bug B — JAX cloud terminates too low.** JAX reaches level 26 (~571
+hPa) vs Fortran's level 17 (~377 hPa). Likely buoyancy diverges
+because JAX precip generation (cprcon-based) is inadequate, so lu
+keeps building up in the parcel rather than being depleted, which
+distorts the parcel temperature evolution. Will need to mirror
+ECHAM's per-layer precip conversion `zlnew = plu/(1 + cprcon·dz·g)`.
+
+**Bug C — heating profile distribution.** JAX peaks at level 30 (mid
+cloud, ~75 K/day) while Fortran peaks at level 16 (top, ~2.7 K/day).
+JAX column-integrated heating is near zero (lots of cancellation
+between heating in the upper cloud and cooling in the lower), while
+Fortran integrates to ~50 W/m². Root causes (interleaved):
+
+  i. **JAX precip rate too low.** Per ECHAM's column-mass balance,
+     total heating ≈ alv × precip rate. JAX precip is ~0.008 mm/day,
+     so total heating is ~0.24 W/m². Need to fix the precip
+     formulation first.
+  ii. **Deviation flux vs full flux** distribute heating differently.
+      ECHAM's full-flux + explicit detrainment puts more heating at
+      cloud top via `alv * plude` (detrainment burst). The deviation
+      flux gives a more spatially distributed profile.
+
+Order of attack: Bug B first (precip + termination), then Bug A
+(ktype=3), then Bug C (heating distribution) — Bug C likely
+auto-resolves once precipitation is correctly tracked.
