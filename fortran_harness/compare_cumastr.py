@@ -263,6 +263,15 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
         T, q, p, layer_thickness, rho, u, v, qc_liq, qi_ice, dtime, config,
     )
 
+    # JAX-side internal diagnostics — print directly so we can see what
+    # the JAX scheme thought about cloud base / top vs Fortran's choice.
+    print(f"  JAX internal: kbase={int(jstate.kbase)} (~{float(p[int(jstate.kbase)]) / 100:.1f} hPa)  "
+          f"ktop={int(jstate.ktop)} (~{float(p[int(jstate.ktop)]) / 100:.1f} hPa)  "
+          f"ktype={int(jstate.ktype)}  prate={float(jstate.prate):.3e} kg/m^2/s")
+    print(f"  JAX max(mfu)={float(jnp.max(jstate.mfu)):.4e} kg/m^2/s  "
+          f"max(tu)={float(jnp.max(jstate.tu)):.2f} K  "
+          f"max(qu)={float(jnp.max(jstate.qu)) * 1000:.3f} g/kg")
+
     pq_cnv   = (cp * tend.dtedt).reshape(1, -1)
     pqte_cnv = tend.dqdt.reshape(1, -1)
     pvom     = tend.dudt.reshape(1, -1)
