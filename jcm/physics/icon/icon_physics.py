@@ -570,7 +570,7 @@ def apply_convection(
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
-        v_wind=conv_tendencies_all.dvdt.T, 
+        v_wind=conv_tendencies_all.dvdt.T,
         temperature=conv_tendencies_all.dtedt.T,
         specific_humidity=conv_tendencies_all.dqdt.T,
         tracers={
@@ -1006,9 +1006,19 @@ def apply_gravity_waves(
     height_levels = physics_data.diagnostics.height_full
     air_density = physics_data.diagnostics.air_density
     
-    # Need orography standard deviation - use a placeholder for now
-    # In a real implementation, this would come from boundary data
-    h_std = jnp.ones(ncols) * 200.0  # 200m standard deviation
+    # Subgrid orography standard deviation drives the launch amplitude
+    # for orographic GWs (flux ∝ h_std²). Without it the scheme
+    # defaulted to a hard-coded 200 m global field, which on an
+    # aquaplanet (no orography) sprays gravity-wave momentum into the
+    # stratosphere everywhere and overshoots the column wind in the
+    # 30-200 hPa range — we observed u_wind growing past ±70 m/s at
+    # levels 2-4 by day 0.4 of the moist run, which then NaN'd the
+    # dynamics. The proper subgrid std dev needs a terrain preprocessing
+    # step we don't have yet; for now scale ~10% of the local orography
+    # height as a rough proxy. Aquaplanet (orog ≡ 0) ⇒ h_std = 0 ⇒ GWD
+    # is silent, which is what we want for flat ocean.
+    orog_flat = terrain.orog.reshape(-1)
+    h_std = jnp.abs(orog_flat) * 0.1
     
     gwd_results = jax.vmap(
         gravity_wave_drag,

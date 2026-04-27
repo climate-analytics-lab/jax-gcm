@@ -98,19 +98,27 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         print(f"Upper sponge: {sponge_levels} top levels, "
               f"tau_top={sponge_timescale_h:.1f}h, enspodi={sponge_enspodi}")
 
-    # Diffusion: SPEEDY defaults (temp 24h, vor_q 12h, div 2h) are tuned for
-    # T30-T42 physics. At T85 ICON the dynamics are more energetic and need
-    # stronger diffusion for stability. `diffusion_scale` multiplies timescales
-    # (values < 1 = stronger diffusion, shorter timescales).
+    # Diffusion: SPEEDY defaults (temp 24h, vor_q 12h, div 2h) with uniform
+    # del² are tuned for T30-T42 physics and severely under-damp T85×47.
+    # At T85 the dynamics are far more energetic and the spectral physics
+    # forcing produces sharp horizontal gradients that excite high-mode
+    # noise; without del⁸ filtering on the upper troposphere the noise
+    # accumulates and blows up the dynamics in 0.4 simulated days. Use
+    # the ``echam_t85_l47`` profile which mirrors ECHAM's level-dependent
+    # hyperdiffusion (del² at TOA → del⁸ in the troposphere) and a 3 h
+    # base timescale.
     from jcm.diffusion import DiffusionFilter
-    default_diff = DiffusionFilter.default()
+    base_diff = DiffusionFilter.echam_t85_l47()
     diffusion = DiffusionFilter(
-        div_timescale=default_diff.div_timescale * diffusion_scale,
-        div_order=default_diff.div_order,
-        vor_q_timescale=default_diff.vor_q_timescale * diffusion_scale,
-        vor_q_order=default_diff.vor_q_order,
-        temp_timescale=default_diff.temp_timescale * diffusion_scale,
-        temp_order=default_diff.temp_order,
+        div_timescale=base_diff.div_timescale * diffusion_scale,
+        div_order=base_diff.div_order,
+        vor_q_timescale=base_diff.vor_q_timescale * diffusion_scale,
+        vor_q_order=base_diff.vor_q_order,
+        temp_timescale=base_diff.temp_timescale * diffusion_scale,
+        temp_order=base_diff.temp_order,
+        level_orders_div=base_diff.level_orders_div,
+        level_orders_vor_q=base_diff.level_orders_vor_q,
+        level_orders_temp=base_diff.level_orders_temp,
     )
     if diffusion_scale != 1.0:
         print(f"Diffusion timescales scaled by {diffusion_scale}x "
