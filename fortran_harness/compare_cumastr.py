@@ -254,6 +254,7 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
     config = ConvectionParameters.default(
         dt_conv=dtime,
         entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+        entrdd=2.0e-4,
         tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
         cprcon=2.5e-4, cevapcu=2.0e-5,
         cmfctop=0.20, cmfdeps=0.30,
