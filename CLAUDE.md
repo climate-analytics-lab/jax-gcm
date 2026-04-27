@@ -41,7 +41,7 @@ jcm/                          # Main package
 │   ├── radiation/
 │   │   ├── grey_two_stream/     # ICON-style grey two-stream package
 │   │   ├── rrtmgp.py
-│   │   ├── nn_emulator.py + nn_emulator_scheme.py
+│   │   ├── rrtmgp_nn.py + rrtmgp_nn_scheme.py
 │   │   ├── radiation_types.py, cloud_optics.py, constants.py   # shared
 │   │   └── speedy_shortwave.py, speedy_longwave.py
 │   ├── convection/

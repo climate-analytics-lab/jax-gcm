@@ -19,7 +19,7 @@ from jcm.physics.radiation.radiation_types import (
     RadiationTendencies,
 )
 from jcm.physics.icon.icon_physics_data import RadiationData
-from jcm.physics.radiation.nn_emulator import (
+from jcm.physics.radiation.rrtmgp_nn import (
     EmulatorWeights,
     InputScaling,
     preprocess_sw_inputs,

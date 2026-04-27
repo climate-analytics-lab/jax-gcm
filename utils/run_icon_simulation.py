@@ -32,7 +32,7 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
     from jcm.physics.icon.icon_terms import icon_physics
     from jcm.physics.icon.parameters import Parameters
     from jcm.physics.radiation.radiation_types import RadiationParameters
-    from jcm.physics.radiation.nn_emulator import (
+    from jcm.physics.radiation.rrtmgp_nn import (
         init_emulator_weights,
         InputScaling,
     )

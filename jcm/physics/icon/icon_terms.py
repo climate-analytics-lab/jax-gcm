@@ -238,7 +238,7 @@ class IconRadiationEmulated(IconTermBase):
 
     Uses a pre-trained neural network to emulate radiative transfer,
     providing a fast, differentiable alternative to RRTMGP.
-    See ``jcm.physics.icon.radiation.nn_emulator`` for details.
+    See ``jcm.physics.radiation.rrtmgp_nn`` for details.
     """
 
     name: ClassVar[str] = "icon_radiation_emulated"

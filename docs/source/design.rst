@@ -302,7 +302,7 @@ beside existing ones without nesting:
    ├── radiation/
    │   ├── grey_two_stream/      # ICON-style grey two-stream package
    │   ├── rrtmgp.py             # RRTMGP wrapper
-   │   ├── nn_emulator.py        # NN radiation emulator
+   │   ├── rrtmgp_nn.py          # RRTMGP-NN radiation emulator
    │   ├── speedy_shortwave.py
    │   └── speedy_longwave.py
    ├── convection/

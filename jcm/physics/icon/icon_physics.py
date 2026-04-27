@@ -433,7 +433,7 @@ def _apply_radiation_emulated_inner(
     Uses bidirectional GRU networks to predict SW and LW fluxes for each
     atmospheric column, then derives heating rates from flux divergence.
     """
-    from jcm.physics.radiation.nn_emulator_scheme import (
+    from jcm.physics.radiation.rrtmgp_nn_scheme import (
         radiation_scheme_emulated,
     )
 
