@@ -127,3 +127,40 @@ Fortran: `vdiff.f90` (ECHAM5 convention) or the
 - Driver outputs ktype, kctop, pq_cnv, pqte_cnv, pvom_cnv, pvol_cnv,
   pxtecl, pxteci, prsfc, pssfc, ptop, pcon_dtrl, pcon_dtri, pcon_iqte.
 - Smoke test (RCE) confirms convection fires.
+- JAX side wired up in `compare_cumastr.py::run_jax_cumastr_equivalent`
+  with the JAX `tiedtke_nordeng_convection`. Config knobs pinned to
+  Fortran ECHAM6.3 ``__ICON__`` defaults so any diff is a port bug.
+
+## Port bugs found by the harness (TODO: fix)
+
+Phase 1 already turned up three bugs in `tiedtke_nordeng.py` itself
+(the wrapper around the inner cumastr equivalents in updraft.py /
+flux_tendencies.py — not the inner physics). Listed in increasing
+order of complexity to fix:
+
+1. **`state.ktop` reports the scan ceiling, not the actual cloud top**
+   (`tiedtke_nordeng.py:664`). The diagnostic `state.ktop` is the
+   `kbase - cloud_depth` value from the initial placeholder, but the
+   updraft mass flux actually terminates wherever the dynamic
+   termination criterion fires. Should derive from `mfu > 0` extent.
+   Trivial fix.
+
+2. **`ktype=3` (mid-level convection) is missing entirely** from the
+   trigger logic (`tiedtke_nordeng.py:528-532`). The conv_type ternary
+   only returns 0/1/2 (none / deep / shallow). ECHAM's mid-level
+   branch (`mo_cumastr.f90:754`, `zentr=entrscv` when ktype=2 etc.)
+   needs a Python equivalent. Look at ECHAM `mo_cumastr.f90` lines
+   700-770 for the trigger.
+
+3. **`convective_adjustment` runs on the *whole* column** instead of
+   only the convective levels (`tiedtke_nordeng.py:632-635`). Result:
+   on a moist column the post-conv saturation-adjustment fires at
+   every level where (after the tendencies are added) RH > 100, even
+   though those levels are nowhere near the cloud. Mask the tendency
+   inputs to convective_adjustment by `conv_mask` (or limit the call
+   to the (kbase, ktop) range).
+
+After these are fixed, re-run `compare_cumastr.py --rce` and see what
+discrepancies remain. The actual updraft / saturation-adjustment / flux
+divergence (in updraft.py and flux_tendencies.py) are likely closer to
+correct, but we won't know until the wrapper bugs are out of the way.

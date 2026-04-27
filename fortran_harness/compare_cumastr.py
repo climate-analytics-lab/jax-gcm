@@ -271,6 +271,19 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
     print(f"  JAX max(mfu)={float(jnp.max(jstate.mfu)):.4e} kg/m^2/s  "
           f"max(tu)={float(jnp.max(jstate.tu)):.2f} K  "
           f"max(qu)={float(jnp.max(jstate.qu)) * 1000:.3f} g/kg")
+    # Where does the updraft mass flux actually live?
+    mfu_arr = np.asarray(jstate.mfu)
+    nz = np.nonzero(mfu_arr)[0]
+    if nz.size > 0:
+        print(f"  JAX mfu nonzero at levels {nz.min()}..{nz.max()}: "
+              f"values [{mfu_arr[nz.min()]:.3e} .. {mfu_arr[nz.max()]:.3e}]")
+    # Where does the heating tendency actually live (post-mask)?
+    dtedt_arr = np.asarray(tend.dtedt)
+    nz = np.nonzero(dtedt_arr)[0]
+    if nz.size > 0:
+        print(f"  JAX dtedt nonzero at levels {nz.min()}..{nz.max()}: "
+              f"max |dT/dt| = {np.max(np.abs(dtedt_arr)):.3e} K/s "
+              f"= {np.max(np.abs(dtedt_arr)) * 86400:.1f} K/day")
 
     pq_cnv   = (cp * tend.dtedt).reshape(1, -1)
     pqte_cnv = tend.dqdt.reshape(1, -1)
