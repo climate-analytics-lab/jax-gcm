@@ -98,17 +98,16 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         print(f"Upper sponge: {sponge_levels} top levels, "
               f"tau_top={sponge_timescale_h:.1f}h, enspodi={sponge_enspodi}")
 
-    # Diffusion: SPEEDY defaults (temp 24h, vor_q 12h, div 2h) with uniform
-    # del² are tuned for T30-T42 physics and severely under-damp T85×47.
-    # At T85 the dynamics are far more energetic and the spectral physics
-    # forcing produces sharp horizontal gradients that excite high-mode
-    # noise; without del⁸ filtering on the upper troposphere the noise
-    # accumulates and blows up the dynamics in 0.4 simulated days. Use
-    # the ``echam_t85_l47`` profile which mirrors ECHAM's level-dependent
-    # hyperdiffusion (del² at TOA → del⁸ in the troposphere) and a 3 h
-    # base timescale.
+    # Diffusion: use uniform-order SPEEDY defaults (temp 24h, vor_q 12h,
+    # div 2h, del²). The level-dependent ``echam_t85_l47`` profile (del² at
+    # TOA → del⁸ in the troposphere) destabilises moist runs at T85×47 —
+    # a 30-day default-state test on dt=3 min NaN'd at day 12 with the
+    # ECHAM profile but lasted to day 26 with the uniform default. The
+    # level-dep path also has a known JIT bug at order ≥ 4 (see
+    # ``jcm.diffusion`` module docstring). Stick with default until the
+    # level-dep filter is debugged and re-tuned.
     from jcm.diffusion import DiffusionFilter
-    base_diff = DiffusionFilter.echam_t85_l47()
+    base_diff = DiffusionFilter.default()
     diffusion = DiffusionFilter(
         div_timescale=base_diff.div_timescale * diffusion_scale,
         div_order=base_diff.div_order,
@@ -116,9 +115,6 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         vor_q_order=base_diff.vor_q_order,
         temp_timescale=base_diff.temp_timescale * diffusion_scale,
         temp_order=base_diff.temp_order,
-        level_orders_div=base_diff.level_orders_div,
-        level_orders_vor_q=base_diff.level_orders_vor_q,
-        level_orders_temp=base_diff.level_orders_temp,
     )
     if diffusion_scale != 1.0:
         print(f"Diffusion timescales scaled by {diffusion_scale}x "

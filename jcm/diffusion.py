@@ -9,11 +9,22 @@ suitable for elementwise multiplication against a spectral state of shape
 hyperdiffusion order — del² at TOA, del⁴/⁶/⁸ going down — which keeps the
 stratosphere well-damped without over-smoothing the troposphere.
 
-Known issue: the level-dependent path currently triggers NaN at order >= 4
-under JIT (eager and orders 1-3 are fine). The uniform-order path
-(``level_orders_* = None``) is unaffected. Use the upper sponge layer
-(``jcm.physics.dissipation.UpperSponge``) as an alternative stabiliser
-until the JIT / order=4 interaction is diagnosed.
+Known issues with the level-dependent path (do not use in production until
+diagnosed and re-tuned):
+
+* JIT / order ≥ 4 NaN: even though the per-level scaling values are
+  bit-identical to dinosaur's uniform order-4 filter, jitted execution
+  triggers NaN at order=4 (eager and orders 1-3 are fine).
+* T85×47 moist runs destabilise faster with the ``echam_t85_l47`` profile
+  than with the uniform-order default: a 30-day default-state moist test
+  at dt=3 min NaN'd at day 12 with ``echam_t85_l47`` but lasted to day 26
+  with ``DiffusionFilter.default()``. See ``.claude/moist_run_debug_log.md``
+  for the bisection.
+
+The uniform-order path (``level_orders_* = None``, e.g.
+``DiffusionFilter.default()``) is unaffected. Use the upper sponge layer
+(``jcm.physics.dissipation.UpperSponge``) as a complementary stabiliser
+when the high-mode tail still needs more damping.
 """
 
 from __future__ import annotations
