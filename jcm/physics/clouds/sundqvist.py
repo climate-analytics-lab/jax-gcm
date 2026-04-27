@@ -257,14 +257,25 @@ def condensation_evaporation(
     """
     # Calculate saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
-    
+
     # Calculate condensation/evaporation
     # Positive for condensation, negative for evaporation
     q_excess = specific_humidity - qs
-    
-    # Condensation/evaporation rate (instantaneous adjustment)
-    # Positive q_excess -> condensation, negative -> evaporation
-    cond_evap_rate = q_excess / dt
+
+    # Condensation/evaporation rate. The naïve choice is
+    # ``q_excess / dt`` (consume all excess in one step), but that
+    # produces a single-step heating spike of ``L·q_excess/cp`` which —
+    # for excess of order 1 g/kg at dt=600 s — is ~360 K/day. When many
+    # columns hit supersaturation simultaneously the resulting
+    # synchronized heating creates pressure-gradient shocks that the
+    # spectral dynamics can't absorb (we observed the moist run NaN at
+    # day ~11 with this naïve choice; the dry-physics run made 30 days
+    # clean). Relax the consumption over ``tau_cond`` so per-step
+    # heating is bounded, mirroring the ``zqcon`` damping in ECHAM
+    # ``mo_cloud.f90``. Positive q_excess -> condensation, negative ->
+    # evaporation; the relaxation applies to both directions.
+    tau_cond = jnp.maximum(5.0 * dt, 1800.0)  # at least 30 minutes
+    cond_evap_rate = q_excess / tau_cond
     
     # Limit evaporation to available cloud water/ice
     total_cloud = cloud_water + cloud_ice

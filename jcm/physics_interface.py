@@ -424,12 +424,17 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
 def verify_state(state: PhysicsState) -> PhysicsState:
     """Ensure the physical validity of the state variables.
 
-    Only enforces `specific_humidity >= 0` — we deliberately do NOT clip to
-    an upper bound. Aggressive caps hide bugs in the physics (particularly
-    convection) that should surface as unphysical q values rather than be
-    silently masked. Individual physics routines apply local NaN-avoidance
-    guards on their own narrow scopes (e.g. the `q / (1-q)` conversion in
-    radiation).
+    Clips ``specific_humidity`` and any mass-mixing-ratio tracers
+    (``qc``, ``qi``, ...) to be non-negative. Spectral truncation of
+    sharp gradients introduces small Gibbs negatives in nodal space;
+    cloud microphysics then sees these and either uses them in
+    formulas like ``qc * rain_water * rho^0.5`` (which would be a
+    negative source — adding cloud water from non-existent water) or
+    in cloud-fraction calculations.
+
+    We deliberately do NOT clip to an upper bound. Aggressive caps
+    hide bugs in the physics (particularly convection) that should
+    surface as unphysical values rather than be silently masked.
 
     Args:
         state: The `PhysicsState` object.
@@ -439,8 +444,10 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 
     """
     qa = jnp.maximum(state.specific_humidity, 0.0)
-    updated_state = state.copy(specific_humidity=qa)
-    return updated_state
+    clipped_tracers = {
+        name: jnp.maximum(value, 0.0) for name, value in state.tracers.items()
+    }
+    return state.copy(specific_humidity=qa, tracers=clipped_tracers)
 
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
     """Adjust tendencies to prevent the state from becoming physically invalid in the next time step.
