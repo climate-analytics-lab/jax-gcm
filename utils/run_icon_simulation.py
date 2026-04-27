@@ -20,8 +20,9 @@ logging.basicConfig(level=logging.INFO)
 
 def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0,
                 jw_ref_temp=False, diffusion_scale=1.0, sponge_levels=0,
-                sponge_timescale_h=3.0, sponge_enspodi=2.0):
-    """Construct ICON Model at T85 x 47 levels with the specified radiation scheme."""
+                sponge_timescale_h=3.0, sponge_enspodi=2.0,
+                nlev=47, spectral_truncation=85):
+    """Construct ICON Model with the specified resolution and radiation scheme."""
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -39,14 +40,14 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
 
     if use_sigma:
         from dinosaur.sigma_coordinates import SigmaCoordinates
-        vertical = SigmaCoordinates.equidistant(47)
-        print("Using 47 equidistant sigma levels")
+        vertical = SigmaCoordinates.equidistant(nlev)
+        print(f"Using {nlev} equidistant sigma levels")
     else:
         # Native ICON hybrid coordinates (a + b*P_s): thick lower layers and
         # thinner upper layers should help CFL vs equidistant sigma at T85.
-        vertical = get_icon_levels(47)
-        print("Using 47 ICON hybrid coordinates")
-    coords = get_coords(vertical, spectral_truncation=85)
+        vertical = get_icon_levels(nlev)
+        print(f"Using {nlev} ICON hybrid coordinates")
+    coords = get_coords(vertical, spectral_truncation=spectral_truncation)
     print(f"Grid: {coords.horizontal.nodal_shape}, "
           f"{coords.nodal_shape[0]} levels, "
           f"{coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]} columns")
