@@ -211,49 +211,144 @@ def derive_state_from_xarray(ds: xr.Dataset, time_idx: int, col_idx: int,
 def run_jax_cumastr_equivalent(state: dict, dtime: float):
     """Run the JAX Tiedtke-Nordeng convection scheme on the same column.
 
-    Returns the same field names as the Fortran output. Fields the JAX
-    side doesn't compute are returned as None.
+    Builds JAX config to match Fortran ECHAM6.3 ``__ICON__`` defaults so
+    any remaining discrepancy is a port bug, not a parameter choice.
+    Returns a dict with the same field names as the Fortran driver
+    output for ``report_diff`` to consume.
     """
     import jax.numpy as jnp
     from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
-        get_convection_tendencies,
+        tiedtke_nordeng_convection, ConvectionParameters,
     )
-    from jcm.physics.icon.parameters import Parameters
 
-    # The JAX scheme expects (klev, ...) state. Strip kproma=1.
+    Rd, cp, grav = 287.04, 1004.64, 9.80665
+
     def s(name):
-        return jnp.asarray(state[name][0]) if state[name].ndim == 2 \
-               else jnp.asarray(state[name][0])
+        return jnp.asarray(state[name][0])
 
-    p = Parameters.default()
-    raise NotImplementedError(
-        "Plumb the JAX-side cumastr through `tiedtke_nordeng_full` here. "
-        "Stub out for the first commit; we'll wire it up once the Fortran "
-        "side is producing sane numbers."
+    T = s("pten")
+    q = s("pqen")
+    qc_total = s("pxen")        # total cloud condensate (kg/kg)
+    u = s("puen")
+    v = s("pven")
+    p = s("papp1")
+    z_half = s("pzh")
+
+    # Layer thickness (m, positive). ECHAM convention: index 0 = top so
+    # z_half[k] > z_half[k+1] and the upward-positive thickness is
+    # z_half[k] - z_half[k+1].
+    layer_thickness = z_half[:-1] - z_half[1:]
+    Tv = T * (1.0 + 0.608 * q)
+    rho = p / (Rd * Tv)
+    # Split total cloud water into liquid/ice on a 235-273.15 K mixed-phase
+    # ramp (matches Sundqvist convention).
+    fliq = jnp.clip((T - 235.0) / (273.15 - 235.0), 0.0, 1.0)
+    qc_liq = qc_total * fliq
+    qi_ice = qc_total * (1.0 - fliq)
+
+    # Match Fortran parameters.  Notable mismatches in the JAX defaults
+    # vs Fortran ECHAM-ICON:
+    #   cprcon  = 1.4e-3 (JAX)   vs 2.5e-4 (Fortran __ICON__)
+    #   cmfctop = 0.33  (JAX)    vs 0.20    (Fortran)
+    #   cmfdeps = 0.33  (JAX)    vs 0.30    (Fortran)
+    config = ConvectionParameters.default(
+        dt_conv=dtime,
+        entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+        tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
+        cprcon=2.5e-4, cevapcu=2.0e-5,
+        cmfctop=0.20, cmfdeps=0.30,
     )
+
+    tend, jstate = tiedtke_nordeng_convection(
+        T, q, p, layer_thickness, rho, u, v, qc_liq, qi_ice, dtime, config,
+    )
+
+    pq_cnv   = (cp * tend.dtedt).reshape(1, -1)
+    pqte_cnv = tend.dqdt.reshape(1, -1)
+    pvom     = tend.dudt.reshape(1, -1)
+    pvol     = tend.dvdt.reshape(1, -1)
+    pxtecl   = tend.dqc_dt.reshape(1, -1)
+    pxteci   = tend.dqi_dt.reshape(1, -1)
+
+    # Surface precip split — frozen at the surface if T_surf < 273.15.
+    surface_T = float(T[-1])
+    rate = float(tend.precip_conv)
+    prsfc = np.array([rate if surface_T >= 273.15 else 0.0])
+    pssfc = np.array([rate if surface_T <  273.15 else 0.0])
+
+    ktop = int(jstate.ktop)
+    if 0 <= ktop < len(p):
+        ptop = np.array([float(p[ktop])])
+    else:
+        ptop = np.array([99999.0])
+
+    return {
+        "ktype":     np.array([int(jstate.ktype)]),
+        "kctop":     np.array([ktop + 1]),    # JAX 0-idx → Fortran 1-idx
+        "pq_cnv":    np.asarray(pq_cnv),
+        "pqte_cnv":  np.asarray(pqte_cnv),
+        "pvom_cnv":  np.asarray(pvom),
+        "pvol_cnv":  np.asarray(pvol),
+        "pxtecl":    np.asarray(pxtecl),
+        "pxteci":    np.asarray(pxteci),
+        "prsfc":     prsfc,
+        "pssfc":     pssfc,
+        "ptop":      ptop,
+        # JAX doesn't expose detrainment-budget scalars; leave NaN.
+        "pcon_dtrl": np.array([np.nan]),
+        "pcon_dtri": np.array([np.nan]),
+        "pcon_iqte": np.array([np.nan]),
+    }
 
 
 def report_diff(jax_out: dict | None, fort_out: dict):
     print(f"\n{'field':>12s}  {'shape':>10s}  {'fmin':>14s}  {'fmax':>14s}"
           f"  {'jmin':>14s}  {'jmax':>14s}  {'maxabs':>14s}  {'meanabs':>14s}")
     for k, fv in fort_out.items():
-        fv = np.asarray(fv)
+        fv = np.asarray(fv, dtype=float)
         if jax_out is None or k not in jax_out:
-            print(f"{k:>12s}  {str(fv.shape):>10s}  {fv.min():>14.4e}  {fv.max():>14.4e}"
-                  f"  {'-':>14s}  {'-':>14s}  {'-':>14s}  {'-':>14s}")
+            print(f"{k:>12s}  {str(fv.shape):>10s}  "
+                  f"{fv.min():>14.4e}  {fv.max():>14.4e}  "
+                  f"{'-':>14s}  {'-':>14s}  {'-':>14s}  {'-':>14s}")
             continue
-        jv = np.asarray(jax_out[k])
+        jv = np.asarray(jax_out[k], dtype=float)
+        if np.all(np.isnan(jv)):
+            print(f"{k:>12s}  {str(fv.shape):>10s}  "
+                  f"{fv.min():>14.4e}  {fv.max():>14.4e}  "
+                  f"{'(JAX N/A)':>14s}  {'-':>14s}  {'-':>14s}  {'-':>14s}")
+            continue
         diff = np.abs(fv - jv)
-        print(f"{k:>12s}  {str(fv.shape):>10s}  {fv.min():>14.4e}  {fv.max():>14.4e}"
-              f"  {jv.min():>14.4e}  {jv.max():>14.4e}"
-              f"  {diff.max():>14.4e}  {diff.mean():>14.4e}")
+        print(f"{k:>12s}  {str(fv.shape):>10s}  "
+              f"{fv.min():>14.4e}  {fv.max():>14.4e}  "
+              f"{jv.min():>14.4e}  {jv.max():>14.4e}  "
+              f"{diff.max():>14.4e}  {diff.mean():>14.4e}")
+
+
+def report_per_level(jax_out: dict, fort_out: dict, field: str):
+    """For 2-D fields (e.g. pq_cnv), show per-level F vs J + diff."""
+    if field not in fort_out or field not in jax_out:
+        return
+    fv = np.asarray(fort_out[field], dtype=float).ravel()
+    jv = np.asarray(jax_out[field], dtype=float).ravel()
+    if fv.size != jv.size or np.all(np.isnan(jv)):
+        return
+    print(f"\n  per-level diff for ``{field}``")
+    print(f"    {'k':>3s}  {'fortran':>14s}  {'jax':>14s}  {'diff':>14s}")
+    for k in range(fv.size):
+        if abs(fv[k]) < 1e-15 and abs(jv[k]) < 1e-15:
+            continue
+        print(f"    {k:>3d}  {fv[k]:>14.4e}  {jv[k]:>14.4e}  "
+              f"{(fv[k] - jv[k]):>14.4e}")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--nc", required=True, help="netcdf with the JAX run")
+    parser.add_argument("--nc", help="netcdf with the JAX run")
     parser.add_argument("--time", type=int, default=30, help="time index")
     parser.add_argument("--col",  type=int, default=0,  help="flat column index")
+    parser.add_argument("--rce", action="store_true",
+                        help="Use a synthetic 47-level tropical RCE column "
+                             "instead of reading from --nc")
     parser.add_argument("--dtime", type=float, default=1800.0)
     parser.add_argument("--input", default="/tmp/cumastr_in.bin")
     parser.add_argument("--output", default="/tmp/cumastr_out.bin")
@@ -261,11 +356,22 @@ def main():
                         help="skip JAX side, only run Fortran")
     args = parser.parse_args()
 
-    ds = xr.open_dataset(args.nc)
-    state, eta_full = derive_state_from_xarray(ds, args.time, args.col, args.dtime)
+    if args.rce:
+        sys.path.insert(0, str(HERE))
+        from test_rce_column import tropical_rce_sounding
+        state, eta_full = tropical_rce_sounding(klev=47)
+        print("Synthetic tropical RCE column (47 levels)")
+    else:
+        if not args.nc:
+            raise SystemExit("--nc is required unless --rce is given")
+        ds = xr.open_dataset(args.nc)
+        state, eta_full = derive_state_from_xarray(
+            ds, args.time, args.col, args.dtime,
+        )
+        print(f"Loaded column {args.col} at time={args.time}.")
     nlev = state["pten"].shape[1]
-    print(f"Loaded column {args.col} at time={args.time} (klev={nlev}). "
-          f"T={state['pten'][0]} K\n  q (g/kg)={state['pqen'][0]*1000}")
+    print(f"  klev={nlev}  surface T={state['pten'][0,-1]:.2f} K  "
+          f"surface q={state['pqen'][0,-1]*1000:.3f} g/kg")
 
     write_input_file(Path(args.input), kproma=1, klev=nlev,
                      dtime=args.dtime, eta_full=eta_full, state=state)
@@ -289,6 +395,9 @@ def main():
             print(f"\n[skip JAX side] {e}")
 
     report_diff(jax_out, fort_out)
+    if jax_out is not None:
+        for fname in ("pq_cnv", "pqte_cnv"):
+            report_per_level(jax_out, fort_out, fname)
 
 
 if __name__ == "__main__":
