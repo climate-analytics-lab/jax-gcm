@@ -278,23 +278,21 @@ def calculate_tendencies(
         updraft_state.mfu, downdraft_state.mfd
     )
     
-    # Apply time step
-    dtedt = dtedt / dt
-    dqdt = dqdt / dt
-    dudt = dudt / dt
-    dvdt = dvdt / dt
-    
-    # Calculate fixed qc/qi tendencies (simplified approach)
-    # These represent the tendency of cloud water and ice from convective transport
+    # ``dtedt_k_levels`` and ``dqdt_k_levels`` already have units K/s and
+    # kg/kg/s respectively — the divergence math
+    # ``(dse_flux_div + lh_source) / (cp * layer_mass_per_area)`` gives
+    # tendency in 1/s units already (W/m² · 1/(J/(kg·K)) · 1/(kg/m²) =
+    # K/s). The previous code divided by ``dt`` here, converting them
+    # to K/s² and producing convective heating roughly ``dt`` times too
+    # small (1500× too small for dt=1800 s — see harness comparison).
+    # Same applies to dudt / dvdt.
     nlev = len(temperature)
-    dqc_dt = jnp.zeros(nlev)  # Cloud water tendency from convection
-    dqi_dt = jnp.zeros(nlev)  # Cloud ice tendency from convection
-    
-    # For levels with convective activity, add some tendency
-    # This is a simplified approach - more sophisticated transport would be needed
+    # Calculate fixed qc/qi tendencies (simplified approach). qc_conv /
+    # qi_conv are mass mixing ratios (kg/kg), so dividing by dt gives
+    # the right units for these stub tendencies.
+    dqc_dt = jnp.zeros(nlev)
+    dqi_dt = jnp.zeros(nlev)
     conv_levels = (jnp.arange(nlev) >= kbase) & (jnp.arange(nlev) <= ktop)
-
-    # Simple cloud water/ice production based on updraft liquid water
     dqc_dt = jnp.where(conv_levels, qc_conv * 0.1 / dt, 0.0)
     dqi_dt = jnp.where(conv_levels, qi_conv * 0.1 / dt, 0.0)
     

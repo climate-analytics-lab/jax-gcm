@@ -259,6 +259,44 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
         cmfctop=0.20, cmfdeps=0.30,
     )
 
+    # Build the same updraft + tendency machinery the wrapper does, so
+    # we can inspect the un-adjusted ``calculate_tendencies`` output
+    # alongside the post-saturation-adjustment final tendency.
+    from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
+    from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
+    from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+        calculate_tendencies as _calc_tend, mass_flux_closure,
+    )
+    from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+        find_cloud_base as _find_cb, calculate_cape_cin as _cape_cin,
+    )
+
+    cloud_base, _has_cb = _find_cb(T, q, p, config)
+    cape, cin = _cape_cin(T, q, p, layer_thickness, cloud_base, config)
+    conv_type = 1 if float(cape) > 1000 else (2 if float(cape) > 100 else 0)
+    cloud_depth = 5 if conv_type == 2 else 15
+    ktop_ceil = jnp.maximum(cloud_base - cloud_depth, jnp.array(2))
+    mfb = mass_flux_closure(cape, cin, jnp.array(0.0), conv_type, config)
+    upd = calculate_updraft(
+        T, q, p, layer_thickness, rho, cloud_base, ktop_ceil,
+        conv_type, mfb, config,
+    )
+    dwn = calculate_downdraft(
+        T, q, p, layer_thickness, rho, upd, jnp.array(0.0),
+        cloud_base, ktop_ceil, config,
+    )
+    raw_tend = _calc_tend(
+        T, q, u, v, p, rho, layer_thickness, upd, dwn,
+        cloud_base, ktop_ceil, dtime, config,
+    )
+    raw_dtedt = np.asarray(raw_tend.dtedt)
+    print(f"  raw calculate_tendencies dtedt: max|.|={np.max(np.abs(raw_dtedt)):.3e} K/s "
+          f"({np.max(np.abs(raw_dtedt)) * 86400:.2f} K/day)")
+    print(f"    levels with |dtedt|>1e-12: "
+          f"{np.where(np.abs(raw_dtedt) > 1e-12)[0].tolist()}")
+    print(f"    raw_dtedt[10:30] = {raw_dtedt[10:30]}")
+    print(f"    raw_dtedt[30:46] = {raw_dtedt[30:46]}")
+
     tend, jstate = tiedtke_nordeng_convection(
         T, q, p, layer_thickness, rho, u, v, qc_liq, qi_ice, dtime, config,
     )
