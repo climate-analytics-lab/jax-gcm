@@ -17,8 +17,8 @@ from jax import lax
 from typing import NamedTuple, Tuple
 from functools import partial
 
-from jcm.constants import (
-    cp, alhc
+from jcm.physics.icon.constants.physical_constants import (
+    cp, alhc, grav,
 )
 from .tiedtke_nordeng import (
     ConvectionParameters, saturation_mixing_ratio
@@ -206,66 +206,72 @@ def downdraft_step(
         prev_td = carry.td[k - 1]
         prev_qd = carry.qd[k - 1]
 
-        # ECHAM cuddraf: zentr = entrdd * |pmfd(k-1)| * Rd*T(k-1)/p(k-1) * pmref(k-1).
-        # With pmref/rho ≈ Δz hydrostatically, this collapses to
-        # entrdd*|prev_mfd|*dz, the same fractional-entrainment-per-metre
-        # closure used in the updraft.
+        # 1) Dry-adiabatic descent: a parcel falling by dz warms by g·dz/cp
+        # (~1.95 K per 200 m). ECHAM ``cuddraf`` builds this into the DSE
+        # update implicitly through the (pgeoh(k-1)-pgeoh(k))/cp term;
+        # we apply it explicitly so the temperature mixing step is just
+        # a linear interpolation toward the environment.
+        adiabatic_warming = grav * dz / cp
+        td_desc = prev_td + adiabatic_warming
+        qd_desc = prev_qd
+
+        # 2) Entrainment / detrainment magnitude (mass flux per layer,
+        # kg/m²/s). ECHAM cuddraf: zentr = entrdd*|mfd(k-1)|*Rd*T/p*pmref;
+        # with pmref/rho≈dz this reduces to entrdd*|mfd|*dz.
         zentr = entrdd * jnp.abs(prev_mfd) * dz
 
-        # Bulk levels: entrainment matches detrainment, so mfd is conserved.
-        zdmfen_bulk = zentr
-        zdmfde_bulk = zentr
-
-        # Surface-taper levels (Fortran ``itopde = klev-2``, indices klev-1
-        # and klev): zero entrainment, linear detrainment so |mfd| → 0 at
-        # the surface. ``p_taper_frac`` is pmref(k-1) / Σpmref(itopde:),
-        # i.e. the fraction of the lowest-two-layer mass exchange that
-        # happens in this layer.
+        # 3) Surface taper. Fortran ``itopde=klev-2``: in the lowest two
+        # layers, shut off entrainment and apply a linear detrainment
+        # ramp so the mass flux reaches zero at the surface. In the bulk
+        # of the column, entrainment is matched by detrainment so mfd is
+        # conserved going down.
         in_surface_taper = k > klev_m2
-        zdmfen = jnp.where(in_surface_taper, 0.0, zdmfen_bulk)
-        zdmfde = jnp.where(
+        # In bulk, zdmfen and zdmfde cancel; mass flux is unchanged.
+        # In taper, zdmfde ramps |mfd| down to zero in the lowest layer.
+        extra_detr = jnp.where(
             in_surface_taper,
             jnp.abs(prev_mfd) * p_taper_frac,
-            zdmfde_bulk,
+            0.0,
         )
+        # ``prev_mfd`` is negative; detrainment (extra_detr ≥ 0) makes
+        # it less negative.
+        mfd_new = prev_mfd + extra_detr
 
-        # New mass flux. ``prev_mfd`` is negative; entrainment makes it
-        # more negative, detrainment less negative.
-        mfd_new = prev_mfd - zdmfen + zdmfde
+        # 4) Mixing: in the bulk, fraction ``zentr/|mfd|`` of environment
+        # air is mixed in (matched by the same fraction detrained out
+        # of the downdraft). In the surface taper there is no entrainment
+        # so no mixing — the parcel just retains its previous-level
+        # properties, modified only by adiabatic warming.
+        mix_fraction = jnp.where(
+            in_surface_taper,
+            0.0,
+            zentr / jnp.maximum(jnp.abs(prev_mfd), cmfcmin),
+        )
+        td_mix = (1.0 - mix_fraction) * td_desc + mix_fraction * env_temp
+        qd_mix = (1.0 - mix_fraction) * qd_desc + mix_fraction * env_q
 
-        # Mix DSE/q with environment using the cuddraf flux update:
-        #   pmfds(k) = pmfds(k-1) + (cp*Tenh+geoh)*zdmfen - (cp*Td+geoh)*zdmfde
-        # The geopotential terms cancel, so the temperature update is
-        #   td(k) = (prev_mfd*prev_td + (env_T - prev_td)*zentr) / mfd(k)
-        # which goes to ``prev_td`` if zentr=0 (no mixing) or pulls
-        # towards env_T at fraction zentr/|mfd| per layer.
-        safe_mfd = jnp.where(jnp.abs(mfd_new) > cmfcmin,
-                             mfd_new, -cmfcmin)
-        td_mix = (prev_mfd * prev_td
-                  + (env_temp - prev_td) * zdmfen) / safe_mfd
-        qd_mix = (prev_mfd * prev_qd
-                  + (env_q - prev_qd) * zdmfen) / safe_mfd
-
-        # Evaporative cooling from precipitation (mirrors cuadjtq icall=2:
-        # parcel is forced to saturation by evaporating rain into it,
-        # capped by the available rain mass flux).
+        # 5) Evaporative cooling from precipitation (mirrors cuadjtq
+        # icall=2: parcel is forced to saturation by evaporating rain
+        # into it, capped by the available rain mass flux).
         qs = saturation_mixing_ratio(pressure, td_mix)
         evap_potential = jnp.maximum(qs - qd_mix, 0.0)
+        safe_abs_mfd = jnp.maximum(jnp.abs(mfd_new), cmfcmin)
         evap_rate = jnp.minimum(
-            cevapcu * evap_potential * jnp.abs(mfd_new),
+            cevapcu * evap_potential * safe_abs_mfd,
             precip,
         )
-        td_new = td_mix - alhc * evap_rate / (cp * jnp.abs(safe_mfd))
-        qd_new = qd_mix + evap_rate / jnp.abs(safe_mfd)
+        td_new = td_mix - alhc * evap_rate / (cp * safe_abs_mfd)
+        qd_new = qd_mix + evap_rate / safe_abs_mfd
 
         td_new = jnp.clip(td_new, 100.0, 400.0)
         qd_new = jnp.maximum(qd_new, 0.0)
 
-        # Buoyancy check: kill downdraft if it becomes positively buoyant.
+        # 6) Buoyancy check: kill downdraft if it has become positively
+        # buoyant relative to the environment (ECHAM cuddraf line 339:
+        # ``llo1 = zbuo<0 .AND. (prfl - pmfd*zcond > 0)``).
         vt_down = td_new * (1.0 + 0.608 * qd_new)
         vt_env = env_temp * (1.0 + 0.608 * env_q)
-        buoyancy = (vt_down - vt_env) / vt_env
-        still_neg_buoyant = buoyancy < 0.0
+        still_neg_buoyant = vt_down < vt_env
         mfd_final = jnp.where(still_neg_buoyant, mfd_new, 0.0)
 
         return carry._replace(

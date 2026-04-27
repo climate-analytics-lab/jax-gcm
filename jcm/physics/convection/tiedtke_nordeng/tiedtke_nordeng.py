@@ -552,16 +552,18 @@ def tiedtke_nordeng_convection(
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
-        # Cloud-top scan ceiling. Deep convection in the tropics commonly
-        # reaches the tropopause (~12-15 km, ~15-20 levels above cloud
-        # base on the ICON 47-level grid); shallow convection peaks
-        # around 2-3 km. Set a generous scan range and let the updraft's
-        # dynamic termination (negative buoyancy or mfu < 1% of base —
-        # see ``calculate_updraft``) decide where the cloud actually
-        # ends. The previous values (6 for deep, 3 for shallow) capped
-        # deep convection at ~3 km so it could never properly transport
-        # heat / moisture through the troposphere.
-        cloud_depth = lax.cond(conv_type == 2, lambda: 5, lambda: 15)
+        # Cloud-top scan ceiling. Deep convection in the tropics regularly
+        # reaches the tropopause (~12-16 km, ~30 levels above cloud base
+        # on a 47-level ICON grid; ECHAM cumastr on the same RCE column
+        # terminates around level 17 / 400 hPa, ~28 levels above a
+        # surface cloud base). Shallow convection peaks at 2-3 km.
+        # Set a generous scan range and let the updraft's dynamic
+        # termination (negative buoyancy or mfu < 1 % of base — see
+        # ``calculate_updraft``) decide where the cloud actually ends.
+        # The previous limit of 15 layers capped deep convection at
+        # ~750 hPa, ~18 levels short of where the harness shows ECHAM
+        # cuasc terminating.
+        cloud_depth = lax.cond(conv_type == 2, lambda: 5, lambda: 35)
 
         # Handle level ordering properly
         pressure_increasing = pressure[0] < pressure[-1]
@@ -640,8 +642,27 @@ def tiedtke_nordeng_convection(
         # the actual convective flux divergence. See the harness
         # comparison in fortran_harness/compare_cumastr.py for the
         # diagnostic that surfaces this.
-        cloud_top = jnp.minimum(ktop, cloud_base)
-        cloud_bottom = jnp.maximum(ktop, cloud_base)
+        #
+        # The cloud column is delimited by the *actual* updraft extent
+        # (where mfu is still nonzero), not the scan ceiling ``ktop`` —
+        # using the ceiling lets the adjustment fire above the real
+        # cloud top, where the env can be supersaturated relative to
+        # JAX's qsat formula and the iteration explodes into spurious
+        # condensational heating. Derive the actual top from where the
+        # updraft mass flux extends.
+        _mfu_active_for_mask = updraft_state.mfu > config.cmfcmin
+        _has_active_for_mask = jnp.any(_mfu_active_for_mask)
+        _candidate_for_mask = jnp.where(
+            _mfu_active_for_mask, jnp.arange(nlev),
+            jnp.array(nlev, jnp.int32),
+        )
+        actual_top_for_mask = jnp.where(
+            _has_active_for_mask,
+            jnp.min(_candidate_for_mask).astype(jnp.int32),
+            ktop,
+        )
+        cloud_top = jnp.minimum(actual_top_for_mask, cloud_base)
+        cloud_bottom = jnp.maximum(actual_top_for_mask, cloud_base)
         cloud_mask = (jnp.arange(nlev) >= cloud_top - 1) & (
             jnp.arange(nlev) <= cloud_bottom
         )
