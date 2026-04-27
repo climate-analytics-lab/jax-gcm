@@ -148,3 +148,56 @@ def uniform_scaling(
     pos_eig_max = jnp.abs(eigenvalues[-1])
     scale = time_step / (timescale * pos_eig_max ** order)
     return jnp.exp(-scale * (-eigenvalues) ** order)
+
+
+def velocity_enhancement(
+    eigenvalues: jnp.ndarray,
+    u_max_per_level: jnp.ndarray,
+    radius: float,
+    time_step: float,
+    vcrit: float = 85.0,
+) -> jnp.ndarray:
+    """ECHAM-style velocity-dependent diffusion amplifier.
+
+    From ``mo_hdiff.f90`` lines 311-321:
+
+        zcons = 2.5·dt/a
+        zcor  = 1 + zcons·(n·|u|max(jk) − vcrit)
+        zndif *= max(zcor, 1)
+
+    Returns a multiplicative enhancement of shape ``(nlev, 1, lat_modes)``
+    that should multiply the per-step damping exponent (i.e. the
+    *exponent* of the existing scaling, not the scaling itself):
+
+        scaling_velocity = base_scaling ** enhancement
+
+    Self-limiting: enhancement is 1 unless the local wind exceeds
+    ``vcrit`` (≈ 85 m/s); above that the per-level diffusion factor for
+    each wavenumber grows linearly with ``n·|u|max − vcrit``. This is
+    the safety net that catches localised wind spikes from physics
+    forcing before they NaN the dynamics.
+
+    Args:
+        eigenvalues: ``grid.laplacian_eigenvalues`` (lat_modes,) — non-
+            positive. ``n(n+1) ≈ |eigenvalue|`` so ``n ≈ √|eig|``.
+        u_max_per_level: max |wind| per level (nlev,) in m/s.
+        radius: planet radius in metres (use the dimensional value, not
+            the nondim).
+        time_step: dynamics timestep in seconds (dimensional).
+        vcrit: critical wind speed (m/s). ECHAM default 85.
+
+    Returns:
+        Enhancement multiplier with shape (nlev, 1, lat_modes), value
+        ≥ 1 everywhere. Apply as ``base_scaling ** enhancement`` so that
+        velocities below the threshold leave the scaling alone.
+
+    """
+    # Laplacian eigenvalues on a sphere of radius a are −n(n+1)/a², so the
+    # spherical-harmonic order is ``n ≈ a·√|eig|``.
+    n_per_mode = radius * jnp.sqrt(jnp.abs(eigenvalues))             # (lat_modes,)
+    zcons = 2.5 * time_step / radius
+    overshoot = (
+        n_per_mode[None, :] * u_max_per_level[:, None] - vcrit       # (nlev, lat_modes)
+    )
+    enhancement = jnp.maximum(1.0 + zcons * overshoot, 1.0)
+    return enhancement[:, None, :]                                    # (nlev, 1, lat_modes)

@@ -351,12 +351,18 @@ class Model:
                 log_surface_pressure=u_next.log_surface_pressure.at[0, 0, 0].set(u.log_surface_pressure[0, 0, 0])
             )
         
-        # create diffusion filter function handles
+        # create diffusion filter function handles. Velocity-enhanced
+        # damping (ECHAM ``damhih``/``vcrit`` mechanism) on divergence
+        # and vorticity: when |u|max at any level grows past ~85 m/s,
+        # diffusion at that level is multiplicatively amplified at the
+        # high wavenumbers — the safety net that catches localised wind
+        # spikes before they NaN the dynamics.
         diffuse_div = self._make_diffusion_fn(
             self.diffusion.div_timescale,
             self.diffusion.div_order,
             replace_fn=lambda u_next, u_temp: u_next.replace(divergence=u_temp.divergence),
             level_orders=self.diffusion.level_orders_div,
+            velocity_enhanced=True,
         )
 
         diffuse_vor_q = self._make_diffusion_fn(
@@ -364,6 +370,7 @@ class Model:
             self.diffusion.vor_q_order,
             replace_fn=lambda u_next, u_temp: u_next.replace(vorticity=u_temp.vorticity,tracers={'specific_humidity': u_temp.tracers['specific_humidity']}),
             level_orders=self.diffusion.level_orders_vor_q,
+            velocity_enhanced=True,
         )
 
         diffuse_temp = self._make_diffusion_fn(
@@ -388,7 +395,8 @@ class Model:
         # spectral space primitive_equations.State updated by model.run and model.resume
         self._final_modal_state = None
     
-    def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None):
+    def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None,
+                           velocity_enhanced=False):
         """Return a diffusion filter closure for one of the three state slots.
 
         Args:
@@ -397,18 +405,72 @@ class Model:
             replace_fn: picks which state variables get overwritten by the filter.
             level_orders: optional 1-D array of per-level orders (length nlev)
                 enabling the ECHAM-style level-dependent hyperdiffusion.
+            velocity_enhanced: when True, multiply the per-step damping
+                exponent by ECHAM's ``damhih`` factor — when ``n·|u|max(jk)``
+                exceeds ``vcrit`` (≈ 85 m/s), kick in proportionally
+                stronger diffusion at level ``jk`` and wavenumber ``n``.
+                The safety net that catches localised wind spikes from
+                physics forcing before they NaN the dynamics; off by
+                default since it requires a per-step nodal transform of
+                vorticity / divergence to compute |u|max.
 
         """
         from dinosaur.filtering import horizontal_diffusion_filter
-        from jcm.diffusion import level_dependent_scaling
+        from dinosaur.spherical_harmonic import vor_div_to_uv_nodal
+        from dinosaur.scales import units
+        from jcm.diffusion import level_dependent_scaling, velocity_enhancement
         import jax
 
+        # Radius and dt feed into ECHAM's ``zcons = 2.5·dt/a``. With
+        # SI_SCALE both are dimensional SI; under a different scale we
+        # nondimensionalize the threshold instead so the formula stays
+        # self-consistent.
+        radius_m = float(self.physics_specs.radius)
+        dt_s = float(self.dt_si.m)
+        # vcrit in the same nondim "speed" units the state uses
+        vcrit_nondim = float(
+            self.physics_specs.nondimensionalize(85.0 * units.metre / units.second)
+        )
+        # The velocity-enhancement reads u, v from the state; we'll need
+        # this transform inside the filter closure.
+
         if level_orders is None:
+            if not velocity_enhanced:
+                def diffusion_filter(u, u_next):
+                    eigenvalues = self.coords.horizontal.laplacian_eigenvalues
+                    scale = self.dt / (timescale * abs(eigenvalues[-1]) ** order)
+                    filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
+                    u_temp = filter_fn(u_next)
+                    return replace_fn(u_next, u_temp)
+                return diffusion_filter
+
+            # Uniform-order with velocity enhancement
+            from jcm.diffusion import uniform_scaling
+            eigenvalues = self.coords.horizontal.laplacian_eigenvalues
+
             def diffusion_filter(u, u_next):
-                eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-                scale = self.dt / (timescale * abs(eigenvalues[-1]) ** order)
-                filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
-                u_temp = filter_fn(u_next)
+                base = uniform_scaling(eigenvalues, timescale, order, self.dt)  # (lat_modes,)
+                u_nodal, v_nodal = vor_div_to_uv_nodal(
+                    self.coords.horizontal, u_next.vorticity, u_next.divergence,
+                )
+                # |u|max per level (nondim speed, same units as state)
+                speed_max = jnp.max(jnp.abs(u_nodal) + jnp.abs(v_nodal), axis=(-2, -1))
+                enhancement = velocity_enhancement(
+                    eigenvalues=eigenvalues,
+                    u_max_per_level=speed_max,
+                    radius=radius_m,
+                    time_step=dt_s,
+                    vcrit=vcrit_nondim,
+                )
+                # base (lat_modes,) ** enhancement (nlev,1,lat_modes) → (nlev,1,lat_modes)
+                scaled = base[None, None, :] ** enhancement
+                def rescale(x):
+                    if not hasattr(x, "shape"):
+                        return x
+                    if jnp.shape(x) != jnp.broadcast_shapes(jnp.shape(x), scaled.shape):
+                        return x
+                    return scaled * x
+                u_temp = jax.tree_util.tree_map(rescale, u_next)
                 return replace_fn(u_next, u_temp)
             return diffusion_filter
 
@@ -421,14 +483,42 @@ class Model:
             eigenvalues, timescale, level_orders, self.dt,
         ))  # (nlev, 1, lat_modes), numpy array → inlined as JIT constant
 
+        if not velocity_enhanced:
+            def diffusion_filter(u, u_next):
+                def rescale(x):
+                    if not hasattr(x, "shape"):
+                        return x
+                    target_shape = np.shape(x)
+                    if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
+                        return x
+                    return scaling_const * x
+                u_temp = jax.tree_util.tree_map(rescale, u_next)
+                return replace_fn(u_next, u_temp)
+            return diffusion_filter
+
+        # Level-dependent + velocity-enhanced: combine.
+        scaling_jax = jnp.asarray(scaling_const)
+        eigenvalues_jax = self.coords.horizontal.laplacian_eigenvalues
+
         def diffusion_filter(u, u_next):
+            u_nodal, v_nodal = vor_div_to_uv_nodal(
+                self.coords.horizontal, u_next.vorticity, u_next.divergence,
+            )
+            speed_max = jnp.max(jnp.abs(u_nodal) + jnp.abs(v_nodal), axis=(-2, -1))
+            enhancement = velocity_enhancement(
+                eigenvalues=eigenvalues_jax,
+                u_max_per_level=speed_max,
+                radius=radius_m,
+                time_step=dt_s,
+                vcrit=vcrit_nondim,
+            )
+            scaled = scaling_jax ** enhancement  # (nlev, 1, lat_modes)
             def rescale(x):
                 if not hasattr(x, "shape"):
                     return x
-                target_shape = np.shape(x)
-                if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
+                if jnp.shape(x) != jnp.broadcast_shapes(jnp.shape(x), scaled.shape):
                     return x
-                return scaling_const * x
+                return scaled * x
             u_temp = jax.tree_util.tree_map(rescale, u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
