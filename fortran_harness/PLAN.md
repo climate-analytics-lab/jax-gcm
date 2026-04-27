@@ -131,36 +131,74 @@ Fortran: `vdiff.f90` (ECHAM5 convention) or the
   with the JAX `tiedtke_nordeng_convection`. Config knobs pinned to
   Fortran ECHAM6.3 ``__ICON__`` defaults so any diff is a port bug.
 
-## Port bugs found by the harness (TODO: fix)
+## Port bugs found by the harness
 
-Phase 1 already turned up three bugs in `tiedtke_nordeng.py` itself
-(the wrapper around the inner cumastr equivalents in updraft.py /
-flux_tendencies.py — not the inner physics). Listed in increasing
-order of complexity to fix:
+### Wrapper bugs — FIXED in commit a299118
 
 1. **`state.ktop` reports the scan ceiling, not the actual cloud top**
-   (`tiedtke_nordeng.py:664`). The diagnostic `state.ktop` is the
-   `kbase - cloud_depth` value from the initial placeholder, but the
-   updraft mass flux actually terminates wherever the dynamic
-   termination criterion fires. Should derive from `mfu > 0` extent.
-   Trivial fix.
+   (`tiedtke_nordeng.py:664`). Was using `kbase - cloud_depth` from
+   the initial placeholder; now derives from where the updraft mass
+   flux actually extends.
 
-2. **`ktype=3` (mid-level convection) is missing entirely** from the
-   trigger logic (`tiedtke_nordeng.py:528-532`). The conv_type ternary
-   only returns 0/1/2 (none / deep / shallow). ECHAM's mid-level
-   branch (`mo_cumastr.f90:754`, `zentr=entrscv` when ktype=2 etc.)
-   needs a Python equivalent. Look at ECHAM `mo_cumastr.f90` lines
-   700-770 for the trigger.
+2. **`convective_adjustment` ran on the *whole* column** instead of
+   the cloud levels. On a moist column the post-conv saturation
+   adjustment fired at every level whose initial RH exceeded the JAX
+   qsat cutoff, producing spurious heating ~600× larger than the
+   actual flux divergence (229 K/day across levels 9-45 vs the
+   0.4 K/day the divergence delivers). Now masked to (kbase, ktop).
 
-3. **`convective_adjustment` runs on the *whole* column** instead of
-   only the convective levels (`tiedtke_nordeng.py:632-635`). Result:
-   on a moist column the post-conv saturation-adjustment fires at
-   every level where (after the tendencies are added) RH > 100, even
-   though those levels are nowhere near the cloud. Mask the tendency
-   inputs to convective_adjustment by `conv_mask` (or limit the call
-   to the (kbase, ktop) range).
+3. **`calculate_tendencies` divided dtedt/dqdt by dt at the end**
+   (`flux_tendencies.py:282-285`), making convective heating ~1500×
+   too small for dt=1800 s. The divergence math gives K/s already.
 
-After these are fixed, re-run `compare_cumastr.py --rce` and see what
-discrepancies remain. The actual updraft / saturation-adjustment / flux
-divergence (in updraft.py and flux_tendencies.py) are likely closer to
-correct, but we won't know until the wrapper bugs are out of the way.
+### Remaining algorithm-level disagreements
+
+After the wrapper fixes, the harness still shows substantial
+divergence between JAX and Fortran on the same RCE column:
+
+| Field | Fortran | JAX (post-wrapper-fix) |
+|---|---|---|
+| ktype | 3 (mid) | 1 (deep) |
+| kctop | 17 (~377 hPa) | 36 (~765 hPa) |
+| pq_cnv peak | 6.86 J/kg/s **at level 16 (top)** | 8.19 J/kg/s **at level 45 (base)** |
+
+These are inner-physics disagreements:
+
+A. **`ktype=3` (mid-level convection) is missing** from the trigger
+   logic (`tiedtke_nordeng.py:528-532`). The conv_type ternary only
+   returns 0/1/2. ECHAM's mid-level branch (`mo_cumastr.f90:754`,
+   `zentr=entrscv` when ktype=2 etc., plus the `kctype=3`
+   classification when CAPE is moderate and the trigger is in the
+   free troposphere) needs a Python equivalent.
+
+B. **The JAX updraft terminates ~18 levels too early.** Fortran
+   reaches level 17 (~377 hPa); JAX terminates at level 35 (~765 hPa).
+   Both use the same dynamic termination criterion (negative
+   buoyancy or mfu < 1 % of base). Either:
+   - the JAX buoyancy calculation differs from Fortran's
+     (different latent-heat sign? different env-temperature?), or
+   - the JAX entrainment is too aggressive (ECHAM's `entrpen=1e-4` is
+     matched, but ICON port has organized entrainment that may have
+     a different scale).
+
+C. **The heating profile is inverted.** Fortran peaks at the cloud
+   top (level 16, ~398 hPa); JAX peaks at the cloud base (level 45,
+   ~981 hPa). Suspect the deviation-flux formulation in
+   `flux_tendencies.py` (`(s_par − s̄)·mfu`) is producing heating
+   where mfu is biggest (base) instead of where the detrainment is
+   biggest (top). ECHAM uses the full DSE flux `pmfus = mfu·s_par`
+   plus explicit `alv*(plude + pdmfup)` detrainment terms, which
+   concentrate heating at cloud top. Recommended:
+   1. Implement ECHAM's full-flux + explicit detrainment formula
+      directly (mirror `mo_cufluxdts.f90:298-310`).
+   2. The deviation-flux derivation in commit cd7e9f7 may have
+      missed the latent-heat-of-detrainment contribution.
+
+### Outcome so far
+
+The harness has paid for itself: three wrapper bugs fixed, three
+inner-algorithm disagreements isolated, no false alarms.
+
+Next: implement the ECHAM-style heating formula (issue C) — it's the
+biggest single contributor and we have the Fortran reference right
+there in `fortran_harness/src/mo_cufluxdts.f90`.
