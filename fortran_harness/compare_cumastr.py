@@ -275,7 +275,7 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
     cloud_base, _has_cb = _find_cb(T, q, p, config)
     cape, cin = _cape_cin(T, q, p, layer_thickness, cloud_base, config)
     conv_type = 1 if float(cape) > 1000 else (2 if float(cape) > 100 else 0)
-    cloud_depth = 5 if conv_type == 2 else 15
+    cloud_depth = 5 if conv_type == 2 else 35
     ktop_ceil = jnp.maximum(cloud_base - cloud_depth, jnp.array(2))
     mfb = mass_flux_closure(cape, cin, jnp.array(0.0), conv_type, config)
     upd = calculate_updraft(
