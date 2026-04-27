@@ -173,94 +173,109 @@ def downdraft_step(
     level_inputs: Tuple
 ) -> Tuple[DowndraftState, DowndraftState]:
     """Single step of downdraft calculation for use with lax.scan
-    
+
+    Mirrors ECHAM ``mo_cudescent.f90::cuddraf``: in the bulk of the
+    downdraft column the fractional entrainment ``entrdd`` is matched
+    by an equal detrainment, so the downdraft mass flux is conserved
+    going down. In the lowest two layers, entrainment is shut off and
+    detrainment is set to a linear ramp that drives the mass flux to
+    zero at the surface. Without these, the prior implementation only
+    entrained (no matching detrainment), so |mfd| ran away by ~50x as
+    the downdraft descended a deep RCE column.
+
     Args:
         carry: Current downdraft state
         level_inputs: Environment variables at current level
-        
+
     Returns:
         Tuple of (updated_carry, output_state)
 
     """
-    k, env_temp, env_q, pressure, dz, rho, precip, entrscv, cmfcmin, cevapcu = level_inputs
-    
-    # Skip if downdraft not active or above LFS
-    skip = jnp.logical_or(~carry.active, k < carry.lfs)
-    
+    (k, env_temp, env_q, pressure, dz, rho, precip,
+     entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac) = level_inputs
+
+    # Surface-first index convention: k=0 = TOA, k=nlev-1 = surface.
+    # Downdraft is active from carry.lfs (somewhere in cloud, lower index)
+    # downward. Skip levels at or above the LFS — those are handled by
+    # the LFS-init step before the scan.
+    skip = jnp.logical_or(~carry.active, k <= carry.lfs)
+
     def compute_downdraft():
-        # Entrainment rate for downdrafts
-        entr = entrscv * 0.5  # Reduced entrainment for downdrafts
+        # State from immediately above (towards LFS).
+        prev_mfd = carry.mfd[k - 1]
+        prev_td = carry.td[k - 1]
+        prev_qd = carry.qd[k - 1]
 
-        # At LFS (first active level), use the initialized values at k;
-        # for subsequent levels, use the previous level's state
-        is_lfs_level = k == carry.lfs
-        src_level = jnp.where(is_lfs_level, k, jnp.maximum(k - 1, 0))
+        # ECHAM cuddraf: zentr = entrdd * |pmfd(k-1)| * Rd*T(k-1)/p(k-1) * pmref(k-1).
+        # With pmref/rho ≈ Δz hydrostatically, this collapses to
+        # entrdd*|prev_mfd|*dz, the same fractional-entrainment-per-metre
+        # closure used in the updraft.
+        zentr = entrdd * jnp.abs(prev_mfd) * dz
 
-        # Mass flux change due to entrainment (no detrainment in downdraft)
-        prev_mfd = carry.mfd[src_level]
-        dmf_entr = entr * jnp.abs(prev_mfd) * dz
+        # Bulk levels: entrainment matches detrainment, so mfd is conserved.
+        zdmfen_bulk = zentr
+        zdmfde_bulk = zentr
 
-        # Update mass flux (more negative)
-        mfd_new = prev_mfd - dmf_entr
+        # Surface-taper levels (Fortran ``itopde = klev-2``, indices klev-1
+        # and klev): zero entrainment, linear detrainment so |mfd| → 0 at
+        # the surface. ``p_taper_frac`` is pmref(k-1) / Σpmref(itopde:),
+        # i.e. the fraction of the lowest-two-layer mass exchange that
+        # happens in this layer.
+        in_surface_taper = k > klev_m2
+        zdmfen = jnp.where(in_surface_taper, 0.0, zdmfen_bulk)
+        zdmfde = jnp.where(
+            in_surface_taper,
+            jnp.abs(prev_mfd) * p_taper_frac,
+            zdmfde_bulk,
+        )
 
-        # Mix in environmental air
-        safe_mfd_denom = jnp.maximum(jnp.abs(mfd_new), 1e-10)
-        if_mfd = 1.0 / safe_mfd_denom
+        # New mass flux. ``prev_mfd`` is negative; entrainment makes it
+        # more negative, detrainment less negative.
+        mfd_new = prev_mfd - zdmfen + zdmfde
 
-        # Temperature after mixing
-        temp_mix = carry.td[src_level] * jnp.abs(prev_mfd) + env_temp * dmf_entr
-        temp_mix = temp_mix * if_mfd
+        # Mix DSE/q with environment using the cuddraf flux update:
+        #   pmfds(k) = pmfds(k-1) + (cp*Tenh+geoh)*zdmfen - (cp*Td+geoh)*zdmfde
+        # The geopotential terms cancel, so the temperature update is
+        #   td(k) = (prev_mfd*prev_td + (env_T - prev_td)*zentr) / mfd(k)
+        # which goes to ``prev_td`` if zentr=0 (no mixing) or pulls
+        # towards env_T at fraction zentr/|mfd| per layer.
+        safe_mfd = jnp.where(jnp.abs(mfd_new) > cmfcmin,
+                             mfd_new, -cmfcmin)
+        td_mix = (prev_mfd * prev_td
+                  + (env_temp - prev_td) * zdmfen) / safe_mfd
+        qd_mix = (prev_mfd * prev_qd
+                  + (env_q - prev_qd) * zdmfen) / safe_mfd
 
-        # Humidity after mixing
-        q_mix = carry.qd[src_level] * jnp.abs(prev_mfd) + env_q * dmf_entr
-        q_mix = q_mix * if_mfd
-        
-        # Evaporative cooling from precipitation
-        # Amount of rain that can evaporate
-        qs = saturation_mixing_ratio(pressure, temp_mix)
-        evap_potential = jnp.maximum(qs - q_mix, 0.0)
-        
-        # Actual evaporation limited by available precipitation
+        # Evaporative cooling from precipitation (mirrors cuadjtq icall=2:
+        # parcel is forced to saturation by evaporating rain into it,
+        # capped by the available rain mass flux).
+        qs = saturation_mixing_ratio(pressure, td_mix)
+        evap_potential = jnp.maximum(qs - qd_mix, 0.0)
         evap_rate = jnp.minimum(
             cevapcu * evap_potential * jnp.abs(mfd_new),
-            precip
+            precip,
         )
-        
-        # Update temperature and humidity due to evaporation
-        # Use the same safe denominator as the mixing step to avoid division by near-zero
-        safe_mfd = jnp.maximum(jnp.abs(mfd_new), 1e-10)
-        td_new = temp_mix - alhc * evap_rate / (cp * safe_mfd)
-        qd_new = q_mix + evap_rate / safe_mfd
-        
-        # Ensure physical bounds
+        td_new = td_mix - alhc * evap_rate / (cp * jnp.abs(safe_mfd))
+        qd_new = qd_mix + evap_rate / jnp.abs(safe_mfd)
+
         td_new = jnp.clip(td_new, 100.0, 400.0)
         qd_new = jnp.maximum(qd_new, 0.0)
-        
-        # Check buoyancy - stop downdraft if becomes positively buoyant
+
+        # Buoyancy check: kill downdraft if it becomes positively buoyant.
         vt_down = td_new * (1.0 + 0.608 * qd_new)
         vt_env = env_temp * (1.0 + 0.608 * env_q)
         buoyancy = (vt_down - vt_env) / vt_env
-        
-        # Continue only if negatively buoyant
-        mfd_new = lax.cond(
-            buoyancy < 0.0,
-            lambda: mfd_new,
-            lambda: 0.0
-        )
-        
-        # Update state
-        new_state = carry._replace(
+        still_neg_buoyant = buoyancy < 0.0
+        mfd_final = jnp.where(still_neg_buoyant, mfd_new, 0.0)
+
+        return carry._replace(
             td=carry.td.at[k].set(td_new),
             qd=carry.qd.at[k].set(qd_new),
-            mfd=carry.mfd.at[k].set(mfd_new),
-            active=jnp.abs(mfd_new) > cmfcmin
+            mfd=carry.mfd.at[k].set(mfd_final),
+            active=jnp.abs(mfd_final) > cmfcmin,
         )
-        
-        return new_state
-    
-    # Skip calculation if appropriate
+
     updated_state = lax.cond(skip, lambda: carry, compute_downdraft)
-    
     return updated_state, updated_state
 
 
@@ -316,23 +331,28 @@ def calculate_downdraft(
         )
         td_new = td_init.at[lfs].set(0.5 * (updraft_state.tu[lfs] + twb))
         qd_new = qd_init.at[lfs].set(0.5 * (updraft_state.qu[lfs] + qwb))
-        
-        # Initial downdraft mass flux (fraction of updraft mass flux)
+
+        # Initial downdraft mass flux: ECHAM cudlfs uses
+        #   zmftop = -cmfdeps * pmfub
+        # where pmfub = mfu(kcbot) is the cloud-base mass flux. The
+        # previous code used ``cmfctop`` (a different parameter that
+        # controls cloud-top mass flux fraction in the updraft) which is
+        # numerically similar (~0.2-0.3) but conceptually wrong.
         mfd_new = mfd_init.at[lfs].set(
-            -config.cmfctop * updraft_state.mfu[kbase]
+            -config.cmfdeps * updraft_state.mfu[kbase]
         )
         return td_new, qd_new, mfd_new
-    
+
     def no_downdraft():
         return td_init, qd_init, mfd_init
-    
+
     # Apply Pattern 2: Conditional Computation
     td_final, qd_final, mfd_final = lax.cond(
         has_lfs,
         initialize_downdraft,
         no_downdraft
     )
-    
+
     initial_state = DowndraftState(
         td=td_final,
         qd=qd_final,
@@ -340,15 +360,29 @@ def calculate_downdraft(
         lfs=lfs,
         active=has_lfs
     )
-    
+
+    # Surface-taper geometry (mirrors ``itopde = klev-2`` in cuddraf):
+    # in the bottom two layers, entrainment is shut off and detrainment
+    # is split linearly across the layers so the mass flux reaches zero
+    # at the surface. ``p_taper_frac`` is the fraction of the residual
+    # mass-flux to detrain in each surface-taper layer; the simplest
+    # uniform split is 0.5 in the second-to-last layer and 1.0 in the
+    # last (which fully zeroes mfd at the surface).
+    klev_m2 = jnp.array(nlev - 3, dtype=jnp.int32)  # Fortran ``itopde``-equivalent (0-indexed: nlev-3 = top of taper)
+    p_taper_frac = jnp.zeros(nlev)
+    p_taper_frac = p_taper_frac.at[nlev - 2].set(0.5)
+    p_taper_frac = p_taper_frac.at[nlev - 1].set(1.0)
+
     # Prepare inputs for scan (extract config parameters to avoid passing object)
     k_levels = jnp.arange(nlev)
     level_inputs = (
-        k_levels, temperature, humidity, pressure, 
-        layer_thickness, rho, jnp.full(nlev, precip_rate), 
-        jnp.full(nlev, config.entrscv),
+        k_levels, temperature, humidity, pressure,
+        layer_thickness, rho, jnp.full(nlev, precip_rate),
+        jnp.full(nlev, config.entrdd),
         jnp.full(nlev, config.cmfcmin),
-        jnp.full(nlev, config.cevapcu)
+        jnp.full(nlev, config.cevapcu),
+        jnp.full(nlev, klev_m2),
+        p_taper_frac,
     )
     
     # Use scan to compute downdraft from LFS downward
