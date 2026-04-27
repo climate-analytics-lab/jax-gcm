@@ -365,10 +365,23 @@ class Model:
             velocity_enhanced=True,
         )
 
+        # Filter vorticity AND every tracer (not just specific_humidity).
+        # ``qc`` and ``qi`` are produced by Sundqvist condensation as
+        # localised sources at the supersaturation boundary; without
+        # spectral hyperdiffusion they accumulate Gibbs ringing across
+        # successive timesteps and the negative tail blows up the run
+        # (we observed q_min growing from -1e-4 to -1e-2 g/kg over a
+        # day, consistent with un-damped tracer noise). Same timescale
+        # / order as humidity is the right baseline.
+        def _replace_vor_and_all_tracers(u_next, u_temp):
+            return u_next.replace(
+                vorticity=u_temp.vorticity,
+                tracers={k: u_temp.tracers[k] for k in u_next.tracers},
+            )
         diffuse_vor_q = self._make_diffusion_fn(
             self.diffusion.vor_q_timescale,
             self.diffusion.vor_q_order,
-            replace_fn=lambda u_next, u_temp: u_next.replace(vorticity=u_temp.vorticity,tracers={'specific_humidity': u_temp.tracers['specific_humidity']}),
+            replace_fn=_replace_vor_and_all_tracers,
             level_orders=self.diffusion.level_orders_vor_q,
             velocity_enhanced=True,
         )
