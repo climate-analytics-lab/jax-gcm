@@ -97,6 +97,27 @@ def mixed_layer_ocean_step(
     params: SurfaceParameters = SurfaceParameters.default()
 ) -> jnp.ndarray:
     """Evolve mixed layer ocean temperature.
+
+    .. note::
+
+        This routine and ``ocean_surface_temperature_step`` below are
+        currently DORMANT in the production ICON-physics flow:
+        ``apply_surface`` (jcm/physics/icon/icon_physics.py) resets
+        ``ocean_temp`` from the prescribed boundary SST at every
+        physics step, so the temperature tendency these functions
+        return is computed and discarded. The code is kept for two
+        reasons:
+
+        1. It's needed for any future interactive-ocean configuration
+           — at that point ``physics_data.surface.ocean_temp`` would
+           need a separate prognostic slot and ``apply_forcing_data``
+           wouldn't overwrite it from the climatological SST file.
+        2. It's needed for SCM / column-mode tests where the
+           atmosphere is forced with a fixed surface heat budget and
+           the ocean temperature has to evolve.
+
+        See Bug F4 in fortran_harness/PLAN.md for the policy
+        discussion.
     
     Args:
         ocean_temp: Ocean temperature [K] (ncol,)
