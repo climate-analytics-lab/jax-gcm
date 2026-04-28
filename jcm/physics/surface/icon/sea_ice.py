@@ -269,12 +269,45 @@ def ice_thickness_evolution(
         )
     )
     
+    # Frazil ice formation from supercooled open ocean (Bug F5).
+    #
+    # ECHAM uses ``ctfreez = 271.38 K`` (saline-water freezing point —
+    # ``mo_physc2.f90`` / ``iniphy.f90:71``). When the ocean energy
+    # budget would drive SST below ctfreez, the excess negative heat
+    # flux is consumed forming new ice instead, holding the ocean at
+    # ctfreez. The ice forms at the surface (top layer in our column).
+    #
+    # Without this mechanism, the JAX ocean kept cooling below 271 K
+    # in polar regions during long runs, producing unphysical
+    # surface temperatures and decoupling the atmosphere from any
+    # plausible ocean reservoir.
+    #
+    # Frazil rate: ``Q_excess / (rho_ice * L_fusion)`` where
+    # ``Q_excess = (ctfreez - ocean_temp) * rho_w * cp_w * h_ml / dt``
+    # is the heat that needs to be removed from the ocean to raise it
+    # to the freezing point. We use the mixed-layer heat capacity from
+    # the surface params; this is the same ``rho_water * cp_water *
+    # ml_depth`` used in ``mixed_layer_ocean_step``.
+    ctfreez = 271.38  # K
+    ocean_below_freezing = ocean_temp < ctfreez
+    ml_heat_capacity = params.rho_water * params.cp_water * params.ml_depth
+    # Heat that *would* be needed to bring ocean back up to ctfreez:
+    deficit_heat = (ctfreez - ocean_temp) * ml_heat_capacity  # J/m² (positive)
+    frazil_rate = jnp.where(
+        ocean_below_freezing,
+        deficit_heat / (params.rho_ice * latent_heat_fusion * dt),
+        0.0,
+    )
+
     # Distribute thickness changes
     thickness_tendency = jnp.zeros((ncol, nice_layers))
-    
+
     # Surface melting affects top layer
     thickness_tendency = thickness_tendency.at[:, 0].add(-surface_melt_rate)
-    
+
+    # Frazil ice grows at the top layer (open-ocean surface freezing).
+    thickness_tendency = thickness_tendency.at[:, 0].add(frazil_rate)
+
     # Bottom changes affect bottom layer
     thickness_tendency = thickness_tendency.at[:, -1].add(bottom_rate)
     
