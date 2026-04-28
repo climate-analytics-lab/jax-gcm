@@ -29,30 +29,35 @@ def calculate_precipitation_rate(
     dt: float,
     config: ConvectionParameters
 ) -> jnp.ndarray:
-    """Calculate surface precipitation rate from convection
-    
+    """Calculate surface precipitation rate from convection.
+
+    Sums the per-layer ``pdmfup`` (precipitation generated in the
+    updraft, kg/m²/s) computed inside ``calculate_updraft``. Each layer
+    converts a fraction ``cprcon * g * dz / (1 + cprcon * g * dz)`` of
+    its liquid water content to precip, mirroring ECHAM
+    ``mo_cuascent.f90`` lines 454-457. The column integral of those
+    per-layer rates is the surface rain mass flux.
+
+    The previous implementation returned ``sum(mfu*lu) * cprcon`` —
+    i.e. it ignored the per-layer precip removal step entirely. As a
+    result the surface precip estimate was ~60x too small (typical
+    0.008 mm/day on a tropical RCE column vs. ECHAM's ~0.5 mm/day),
+    AND the liquid water built up unphysically inside the parcel as it
+    rose — distorting the buoyancy and terminating the updraft early.
+
     Args:
-        updraft_state: Updraft calculation results
-        kbase: Cloud base level
-        dt: Time step (s)
-        config: Convection configuration
-        
+        updraft_state: Updraft calculation results (with per-layer
+            ``pdmfup`` precip generation already computed).
+        kbase: Cloud base level (unused — kept for backwards-compat).
+        dt: Time step (s) (unused — kept for backwards-compat).
+        config: Convection configuration (unused — kept for
+            backwards-compat).
+
     Returns:
-        Surface precipitation rate (kg/m²/s)
+        Surface precipitation rate (kg/m²/s).
 
     """
-    # Precipitation conversion efficiency
-    precip_eff = config.cprcon
-
-    # Liquid water flux at all levels: where there is both updraft mass flux
-    # and liquid water, precipitation is produced
-    lw_flux = updraft_state.mfu * updraft_state.lu
-
-    # Surface precipitation is the column integral of liquid water flux
-    # times the precipitation conversion efficiency
-    precip_rate = jnp.sum(lw_flux) * precip_eff
-
-    return precip_rate
+    return jnp.sum(updraft_state.pdmfup)
 
 
 def calculate_cloud_water_ice(

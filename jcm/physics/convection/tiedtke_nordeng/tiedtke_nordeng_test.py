@@ -741,23 +741,27 @@ class TestConvectivePrecipitation:
                 f"(lu_max={float(jnp.max(state.lu)):.4e}, mfu_max={float(jnp.max(state.mfu)):.4e}), " \
                 f"got precip_conv={float(tendencies.precip_conv):.4e}"
 
-    def test_calculate_precipitation_rate_cloud_mask(self):
-        """calculate_precipitation_rate must sum liquid water flux within
-        the cloud layer, not below it.
+    def test_calculate_precipitation_rate_sums_pdmfup(self):
+        """``calculate_precipitation_rate`` should sum the per-layer
+        precipitation generated inside the updraft (``pdmfup`` field).
 
-        Direct unit test for the cloud mask bug.
+        The previous implementation returned ``sum(mfu*lu)*cprcon``, which
+        is ~60x too small relative to what the per-layer precip-conversion
+        step (ECHAM cuasc lines 454-457) actually produces. The Fortran
+        harness flagged this as Bug B (parcel liquid water builds up
+        unphysically when no precip is removed each layer, distorting
+        buoyancy and terminating the updraft early).
         """
         from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import calculate_precipitation_rate
         from jcm.physics.convection.tiedtke_nordeng.updraft import UpdatedraftState
 
         nlev = 20
-        # Simulate updraft with liquid water between levels 5 (ktop) and 15 (kbase)
-        # The cloud spans levels 5-15. Precipitation should sum the liquid
-        # water flux over this entire cloud layer.
-        mfu = jnp.zeros(nlev)
-        mfu = mfu.at[5:16].set(0.1)  # Mass flux in cloud layer
-        lu = jnp.zeros(nlev)
-        lu = lu.at[5:16].set(1e-3)   # Liquid water in cloud layer
+        # Synthetic updraft: cloud spans levels 5-15 (ktop=5, kbase=15)
+        # with non-zero per-layer precip generated.
+        mfu = jnp.zeros(nlev).at[5:16].set(0.1)
+        lu = jnp.zeros(nlev).at[5:16].set(1e-3)
+        # Per-layer precip generated: 1e-5 kg/m²/s per cloud layer
+        pdmfup = jnp.zeros(nlev).at[5:16].set(1e-5)
 
         updraft = UpdatedraftState(
             tu=jnp.full(nlev, 280.0),
@@ -766,19 +770,16 @@ class TestConvectivePrecipitation:
             entr=jnp.zeros(nlev),
             detr=jnp.zeros(nlev),
             buoy=jnp.zeros(nlev),
+            pdmfup=pdmfup,
         )
         config = ConvectionParameters.default()
 
         precip = calculate_precipitation_rate(updraft, kbase=15, dt=3600.0, config=config)
 
-        # The full cloud liquid water flux is sum(mfu * lu) over levels 5-15
-        total_lw_flux = jnp.sum(mfu[5:16] * lu[5:16]) * config.cprcon
-
-        # Precipitation should capture the bulk of the cloud's liquid water flux,
-        # not just the single cloud base level
-        assert precip > 0.5 * total_lw_flux, \
-            f"Precipitation ({float(precip):.6e}) should capture most of the " \
-            f"cloud liquid water flux ({float(total_lw_flux):.6e})"
+        expected = float(jnp.sum(pdmfup))
+        assert abs(float(precip) - expected) < 1e-12, \
+            f"Precipitation rate {float(precip):.6e} should equal " \
+            f"sum(pdmfup)={expected:.6e}"
 
 
 class TestConvectionNumericalStability:
