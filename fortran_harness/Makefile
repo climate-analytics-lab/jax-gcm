@@ -36,16 +36,17 @@ CUMASTR_SRCS := \
 # mo_cloud-specific modules
 CLOUD_SRCS := \
     $(COMMON_SRCS) \
-    $(SRCDIR)/mo_cloud.f90
+    $(SRCDIR)/mo_cloud.f90 \
+    $(SRCDIR)/cloud_driver.f90
 
 CUMASTR_OBJS := $(patsubst $(SRCDIR)/%.f90,$(BUILDDIR)/%.o,$(CUMASTR_SRCS))
 CLOUD_OBJS   := $(patsubst $(SRCDIR)/%.f90,$(BUILDDIR)/%.o,$(CLOUD_SRCS))
 
 CUMASTR_TARGET := $(BUILDDIR)/cumastr_driver
-CLOUD_TARGET   := $(BUILDDIR)/mo_cloud.o   # No driver yet — compile-only
+CLOUD_TARGET   := $(BUILDDIR)/cloud_driver
 
 .PHONY: all cumastr cloud clean
-all: cumastr
+all: cumastr cloud
 cumastr: $(CUMASTR_TARGET)
 cloud:   $(CLOUD_TARGET)
 
@@ -53,6 +54,7 @@ $(CUMASTR_TARGET): $(CUMASTR_OBJS)
 	$(FC) $(FFLAGS) -J$(BUILDDIR) -o $@ $^ $(LDFLAGS)
 
 $(CLOUD_TARGET): $(CLOUD_OBJS)
+	$(FC) $(FFLAGS) -J$(BUILDDIR) -o $@ $^ $(LDFLAGS)
 
 # Compile sources in declared order, putting .mod into BUILDDIR
 $(BUILDDIR)/%.o: $(SRCDIR)/%.f90 | $(BUILDDIR)

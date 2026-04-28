@@ -82,18 +82,31 @@ split into ``jcm.physics.clouds.sundqvist.py`` (cloud cover +
 condensation, ~400 lines) and ``jcm.physics.clouds.echam_1m.py``
 (microphysics, ~700 lines).
 
-Build steps:
-1. Copy `mo_cloud.f90` from `~/atm_phy_echam/`. Add to Makefile.
-2. Pull in `mo_cloud_utils.f90`. Inspect for any further dependencies
-   not already stubbed.
-3. Write `cloud_driver.f90` mirroring `cumastr_driver.f90`: read column
-   state from binary, init configs, call `cloud()`, write outputs.
-   Outputs: `pq_cld`, `pqte_cld`, `pxlte_cld`, `pxite_cld`, `prsfl`,
-   `pssfl`, `paclc`, `paclcov`, `prelhum`.
-4. Build `compare_cloud.py` analogous to `compare_cumastr.py`.
-5. Run on the same RCE column the cumastr harness uses, plus the
-   post-convection state (i.e. apply cumastr's tendencies first, then
-   feed the result through cloud).
+**Status (2026-04-28)**: harness scaffold built. ``cloud_driver`` compiles
+clean; ``compare_cloud.py`` runs end-to-end on a tropical RCE column,
+producing diff tables. Next session can immediately start iterating on
+bugs.
+
+**Bug E — design difference, not a bug per se**: JAX
+``shallow_cloud_scheme`` diagnoses cloud cover internally via
+``calculate_cloud_fraction(RH, RHc)``. ECHAM ``cloud()`` expects
+``paclc`` as INPUT (cloud cover is set in a separate ``mo_cover.f90``
+upstream). On a 90 % RH column with no initial cloud water:
+  - Fortran ``paclc`` stays 0 (no condensation triggered)
+  - JAX ``paclc`` jumps to 0.42 in the moist mid-troposphere
+
+Fix options for fair comparison:
+  (a) pull in ``mo_cover.f90`` upstream of cloud_driver (need to find
+      and stub its dependencies — likely simpler than mo_cloud)
+  (b) run JAX with cover-diagnosis disabled, comparing only
+      condensation/microphysics
+  (c) feed both Fortran and JAX a column with non-zero pxlm1/pxim1
+      (e.g. post-convection state)
+
+Recommended: (c) for the next iteration — the most physically
+meaningful test case is "what happens when convection has already
+detrained cloud water and then the cloud module fires?" That's the
+realistic flow in the production model.
 
 ## Phase 4 — TTE-TKE vertical diffusion
 
