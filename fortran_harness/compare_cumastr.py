@@ -275,7 +275,13 @@ def run_jax_cumastr_equivalent(state: dict, dtime: float):
     cloud_base, _has_cb = _find_cb(T, q, p, config)
     cape, cin = _cape_cin(T, q, p, layer_thickness, cloud_base, config)
     conv_type = 1 if float(cape) > 1000 else (2 if float(cape) > 100 else 0)
-    cloud_depth = 5 if conv_type == 2 else 35
+    # Derive scan ceiling from target cloud-top pressure (resolution-
+    # independent — see ``tiedtke_nordeng.cloud_depth_for_target_top``).
+    from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+        cloud_depth_for_target_top as _depth_fn,
+    )
+    target_top_pa = 70_000.0 if conv_type == 2 else 15_000.0
+    cloud_depth = int(_depth_fn(p, cloud_base, target_top_pa))
     ktop_ceil = jnp.maximum(cloud_base - cloud_depth, jnp.array(2))
     mfb = mass_flux_closure(cape, cin, jnp.array(0.0), conv_type, config)
     upd = calculate_updraft(
