@@ -70,11 +70,12 @@ class UpdatedraftState(NamedTuple):
 
     tu: jnp.ndarray      # Updraft temperature (K)
     qu: jnp.ndarray      # Updraft specific humidity (kg/kg)
-    lu: jnp.ndarray      # Updraft liquid water (kg/kg)
+    lu: jnp.ndarray      # Updraft liquid water (kg/kg) — after per-layer precip removal
     mfu: jnp.ndarray     # Updraft mass flux (kg/m²/s)
     entr: jnp.ndarray    # Entrainment rate (1/m)
     detr: jnp.ndarray    # Detrainment rate (1/m)
     buoy: jnp.ndarray    # Buoyancy (m/s²)
+    pdmfup: jnp.ndarray  # Precip generated per layer (kg/m²/s) — ECHAM ``pdmfup``
 
 
 def saturation_adjustment(
@@ -183,6 +184,7 @@ def calculate_updraft(
     entr_init = jnp.zeros(nlev)
     detr_init = jnp.zeros(nlev)
     buoy_init = jnp.zeros(nlev)
+    pdmfup_init = jnp.zeros(nlev)
 
     # Set cloud base values. The parcel arriving at the LCL has the
     # surface mixing ratio (q is conserved during dry-adiabatic ascent).
@@ -216,26 +218,34 @@ def calculate_updraft(
         tu=tu_init, qu=qu_init, lu=lu_init,
         mfu=mfu_init, entr=entr_init, detr=detr_init,
         buoy=buoy_init,
+        pdmfup=pdmfup_init,
     )
     # Carry = (updraft_state, integrated_buoyancy). The integrated
     # buoyancy drives Nordeng (1994) organized entrainment and is kept
     # *outside* UpdatedraftState so external callers see the same type.
     initial_state = (updraft_init, jnp.zeros(()))
     
-    # Prepare inputs for scan (extract config parameters to avoid passing object)
+    # Prepare inputs for scan (extract config parameters to avoid passing object).
+    # ``p_base_const`` carries the cloud-base pressure as a per-level constant
+    # so the precip-zone gate (zdnoprc threshold) inside the scan can compare
+    # against it.
     k_levels = jnp.arange(nlev)
+    p_base_const = jnp.full(nlev, pressure[kbase])
     level_inputs = (
         k_levels, temperature, humidity, pressure, layer_thickness, rho,
         jnp.full(nlev, kbase), jnp.full(nlev, ktop),
         jnp.full(nlev, ktype),
         jnp.full(nlev, config.entrpen), jnp.full(nlev, config.entrscv),
-        jnp.full(nlev, config.entrmid)
+        jnp.full(nlev, config.entrmid),
+        jnp.full(nlev, config.cprcon),
+        p_base_const,
     )
 
     # Create specialized step function with config parameters
     def updraft_step_with_config(carry_tuple, inputs):
         carry, zbuoy_accum = carry_tuple
-        k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype, entrpen, entrscv, entrmid = inputs
+        (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
+         entrpen, entrscv, entrmid, cprcon, p_at_base) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -355,7 +365,40 @@ def calculate_updraft(
                 compute_updraft_properties,
                 use_environmental_values
             )
-            
+
+            # Per-layer precipitation generation (ECHAM cuasc lines 454-457).
+            # The parcel converts a fraction of its liquid water to precip
+            # in each layer it ascends through:
+            #
+            #   zlnew  = plu(jk) / (1 + cprcon * (geoh(jk) - geoh(jk+1)))
+            #   pdmfup = max(0, (plu(jk) - zlnew) * pmfu(jk))
+            #   plu(jk) = zlnew
+            #
+            # Without this step JAX's surface precip estimator
+            # ``sum(lu*mfu)*cprcon`` was ~60x too small (0.008 mm/day vs
+            # typical 0.5 mm/day for tropical deep convection), and the
+            # parcel's liquid water built up unphysically as it rose,
+            # distorting buoyancy and terminating the updraft early.
+            #
+            # ECHAM gates this on a thickness threshold ``zdnoprc``: precip
+            # is only generated when the level is more than dnoprc Pa
+            # above cloud base. ECHAM defaults: 1.5e4 Pa over ocean,
+            # 3.0e4 Pa over land. We use the ocean value here (the only
+            # column in the harness is ocean RCE) — full land/ocean
+            # discrimination is a future generalisation.
+            zdnoprc = 1.5e4  # Pa, ECHAM ocean default
+            in_precip_zone = (p_at_base - pressure) >= zdnoprc
+            geoh_diff = grav * dz  # ≈ pgeoh(jk) - pgeoh(jk+1) in ECHAM
+            cprcon_eff = jnp.where(
+                jnp.logical_and(mfu_new > mfu_threshold, in_precip_zone),
+                cprcon, 0.0,
+            )
+            lu_after_precip = lu_new / (1.0 + cprcon_eff * geoh_diff)
+            pdmfup = jnp.maximum(
+                (lu_new - lu_after_precip) * mfu_new, 0.0,
+            )
+            lu_new = lu_after_precip
+
             # Calculate buoyancy
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
@@ -383,6 +426,7 @@ def calculate_updraft(
                 entr=carry.entr.at[k].set(entr),
                 detr=carry.detr.at[k].set(detr),
                 buoy=carry.buoy.at[k].set(buoy_new),
+                pdmfup=carry.pdmfup.at[k].set(pdmfup),
             )
             # Accumulate integrated positive buoyancy for the next step's
             # organized-entrainment denominator (matches ECHAM `zbuoy`).

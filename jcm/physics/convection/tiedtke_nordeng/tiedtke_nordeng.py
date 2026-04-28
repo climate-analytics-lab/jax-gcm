@@ -669,7 +669,11 @@ def tiedtke_nordeng_convection(
         )
         
         # Calculate precipitation from updraft
-        precip_rate = jnp.sum(updraft_state.lu * updraft_state.mfu) * config.cprcon
+        # Use the per-layer precip generated inside calculate_updraft (the
+        # ECHAM ``pdmfup`` accumulator) rather than the previous
+        # ``sum(lu*mfu)*cprcon`` estimator, which was ~60x too small on
+        # tropical RCE columns. See ``flux_tendencies.calculate_precipitation_rate``.
+        precip_rate = jnp.sum(updraft_state.pdmfup)
         
         # Calculate downdraft (now properly implemented)
         downdraft_state = calculate_downdraft(
