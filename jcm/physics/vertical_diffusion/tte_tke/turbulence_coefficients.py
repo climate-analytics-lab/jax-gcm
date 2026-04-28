@@ -263,11 +263,27 @@ def compute_surface_exchange_coefficients(
                      (0.5 * (theta_air + theta_surface) * 
                       jnp.maximum(wind_speed_surface**2, 0.01)))
         
-        # Stability function (simplified Businger-Dyer)
+        # Surface-layer stability multiplier on CH (heat exchange).
+        #
+        # Standard Businger-Dyer gives the gradient-to-flux ratio
+        # Φh(ζ) = (1 − 16ζ)^(−1/2) for unstable (ζ<0). The DIFFUSIVITY
+        # (and hence CH) scales as 1/Φh = (1 − 16Ri)^(+1/2) — > 1 for
+        # unstable, enhancing the flux. Stable side: φh = 1 + 5ζ, so
+        # CH ∝ 1/(1 + 5Ri) — < 1 for stable, suppressing.
+        #
+        # The previous expression had ``(1 - 16*Ri)**(-0.5)`` for the
+        # unstable branch — that's Φh itself, NOT 1/Φh. So strongly
+        # unstable conditions (e.g. ΔT = −85 K of cold air over warm
+        # ocean) gave a multiplier of ~0.13 instead of ~7.65,
+        # *suppressing* the surface flux by an order of magnitude
+        # exactly when it should be ~7x enhanced. That's how the
+        # 1-year aquaplanet drifted to T_air = 188 K over 273 K SST
+        # without surface fluxes pulling it back: convective coupling
+        # was effectively shut off.
         stability_heat = jnp.where(
             ri_surface < 0,
-            (1.0 - 16.0 * ri_surface)**(-0.5),  # Unstable
-            1.0 / (1.0 + 5.0 * ri_surface)     # Stable
+            (1.0 - 16.0 * ri_surface)**(+0.5),  # Unstable: enhance
+            1.0 / (1.0 + 5.0 * ri_surface),     # Stable: suppress
         )
         
         # Exchange coefficient: CH = κ² / [ln(z/z0)]²
