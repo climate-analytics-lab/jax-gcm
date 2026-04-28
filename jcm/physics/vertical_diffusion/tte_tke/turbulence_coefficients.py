@@ -193,7 +193,17 @@ def compute_exchange_coefficients(
     # mixing for the implicit solver to be well-conditioned, the
     # ceiling protects against pathological √TKE values the cap on
     # the TKE update should already prevent (but defence in depth).
-    min_exchange = 0.1
+    #
+    # Floor previously was 0.1 m²/s but ECHAM's vdiff uses
+    # ``cmin_kh = 0.01 m²/s`` for the free-troposphere background
+    # — a 10x looser floor. With 0.1 m²/s applied at every
+    # free-troposphere level for many timesteps, the temperature
+    # profile gets dragged around far more than ECHAM does. Tighten
+    # to 0.01 to match ECHAM. The implicit tridiagonal solver is
+    # still well-conditioned at 0.01 m²/s (the conditioning concern
+    # was for elements near machine epsilon, not 0.01 — 8 orders
+    # above eps).
+    min_exchange = 0.01
     max_exchange = 1000.0
     exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
     exchange_coeff_heat = jnp.clip(exchange_coeff_heat, min_exchange, max_exchange)

@@ -140,9 +140,28 @@ Lower priority — vdiff was a no-op in the term-removal experiment
 port has had repeated TKE-runaway issues (commits b6172a7, 8250601),
 so worth a sanity check.
 
-Fortran: `vdiff.f90` (ECHAM5 convention) or the
-`atm_phy_echam` equivalent if there is one. JAX:
-`jcm.physics.vertical_diffusion.tte_tke.*`.
+Fortran: `~/atm_phy_echam/mo_vdiff_solver.f90` (939 lines) +
+`mo_vdiff_downward_sweep.f90` (321) + `mo_vdiff_upward_sweep.f90`
+(148) + `mo_echam_vdiff_params.f90`. JAX:
+`jcm.physics.vertical_diffusion.tte_tke/` (~1700 lines across
+``vertical_diffusion.py``, ``turbulence_coefficients.py``,
+``matrix_solver.py``, ``tke_budget.py``).
+
+**Status**: deferred — multi-session effort.
+
+Fortran side ~1400 lines across 4 files plus deps (need to stub
+``mo_echam_vdiff_params``, possibly ``mo_thermodyn``,
+``mo_surface_tools``). JAX side splits across coefficient calc, TKE
+budget, and the implicit tridiagonal solver — three separate
+comparison points. TKE-runaway is path-dependent (integrates over
+time), so single-column single-step harness only catches the
+coefficient/solver pieces; multi-step is needed for runaway.
+
+**Quick-win observation (not yet harness-validated)**:
+``compute_exchange_coefficients`` clips ``K_m, K_h, K_q`` to
+``[0.1, 1000.0] m²/s``. The ``0.1`` floor is generous vs. ECHAM's
+``cmin_kh = 0.01 m²/s`` background. Worth tightening to 0.01 in a
+quick test simulation before building the full harness.
 
 ## Open questions / things to remember
 
