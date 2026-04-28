@@ -200,6 +200,70 @@ coefficient/solver pieces; multi-step is needed for runaway.
 ``cmin_kh = 0.01 m²/s`` background. Worth tightening to 0.01 in a
 quick test simulation before building the full harness.
 
+## Phase 5 — Surface fluxes (ocean / sea-ice / land)
+
+The 1-year T85×47 aquaplanet run from the harness branch (commit
+493d480) failed at day 280-285 with bottom-level air-T drifting to
+188 K over a prescribed 273 K SST. Surface-flux audit found one
+sign error already fixed (commit 4332fec) and several structural
+issues to track:
+
+### Bug F1 — FIXED (commit 4332fec): Businger-Dyer sign error
+
+``compute_surface_exchange_coefficients`` had unstable-branch
+multiplier as Φh = (1−16Ri)^(−0.5), which suppresses CH for
+unstable conditions instead of enhancing it. Should be 1/Φh =
+(1−16Ri)^(+0.5). At polar drift conditions (Ri ≈ −3.6) the
+multiplier swings from 0.13 (suppressed) to 7.66 (enhanced) —
+60x change in surface coupling.
+
+### Bug F2 — TODO: vdiff uses hardcoded all-land surface_fraction
+
+``apply_vertical_diffusion`` (icon_physics.py:747-748) sets
+``surface_fraction = [0, 0, 1]`` (all land) regardless of the actual
+boundary tile fractions. ``apply_surface`` uses the real fractions
+(L:880-882). The vdiff field is dead in current code (not consumed
+downstream — verified by grep), but this is confusing dead code that
+will cause subtle bugs when the field IS consumed. Either remove or
+wire up properly.
+
+### Bug F3 — TODO: per-tile surface temperature broadcast from one
+
+``apply_vertical_diffusion`` does ``surface_temperature =
+jnp.repeat(surface_temp_col, nsfc_type, axis=1)`` — broadcasts one
+SST across all 3 tiles. ECHAM has separate ``ptsfc_tile`` per tile
+type, so cold sea ice and warm open water get different fluxes. With
+prescribed SST and no live ice tile, this happens to be OK in our
+aquaplanet, but breaks when sea ice is present.
+
+### Bug F4 — TODO: Mixed-layer ocean is dead code
+
+``ocean_surface_temperature_step`` computes a temperature tendency
+from the surface energy balance (mixed-layer model with SW
+penetration, etc.). But ``apply_surface`` (icon_physics.py:884)
+RESETS ``ocean_temp = surface_temp`` from the boundary at every
+physics step. So the mixed-layer evolution is never persisted. For
+prescribed-SST aquaplanet this is intentional behaviour, but the
+code looks like it's meant to be interactive. Either delete the
+mixed-layer code or wire it through ``physics_data`` properly.
+
+### Bug F5 — TODO: No frazil ice formation from supercooled ocean
+
+``ice_thickness_evolution`` (sea_ice.py:209-296) only grows ice
+from existing ice via bottom conduction. It cannot create new ice
+when an open-ocean cell drops below the freezing point. ECHAM uses
+``ctfreez = 271.38 K`` (saline-water freezing point) and creates
+new ice when SST < ctfreez. Required for any non-aquaplanet run with
+seasonal sea ice.
+
+### Bug F6 — TODO: Default forcing.stl_am = 0 K
+
+``ForcingData.zeros`` defaults ``stl_am`` (land temperature) to a
+zero array. If a run is built with ``ForcingData.zeros(...)`` and
+land actually exists in the terrain (fmask > 0), the apply_forcing
+path sets surface_temperature = 0 K over land. Defensive: should
+default to 273.15 K or to the global mean SST.
+
 ## Open questions / things to remember
 
 - **Sigma TOA**: don't use `sigma=0` at the top — `compare_cumastr.py`
