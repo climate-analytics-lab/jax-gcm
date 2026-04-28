@@ -184,21 +184,58 @@ Fortran: `~/atm_phy_echam/mo_vdiff_solver.f90` (939 lines) +
 ``vertical_diffusion.py``, ``turbulence_coefficients.py``,
 ``matrix_solver.py``, ``tke_budget.py``).
 
-**Status**: deferred — multi-session effort.
+**Status**: scaffolding done — branch ``fortran-harness-vdiff``.
 
-Fortran side ~1400 lines across 4 files plus deps (need to stub
-``mo_echam_vdiff_params``, possibly ``mo_thermodyn``,
-``mo_surface_tools``). JAX side splits across coefficient calc, TKE
-budget, and the implicit tridiagonal solver — three separate
-comparison points. TKE-runaway is path-dependent (integrates over
-time), so single-column single-step harness only catches the
-coefficient/solver pieces; multi-step is needed for runaway.
+Fortran sources copied in: ``mo_vdiff_solver.f90``,
+``mo_vdiff_downward_sweep.f90``, ``mo_vdiff_upward_sweep.f90``,
+``mo_echam_vdiff_params.f90``, ``mo_turbulence_diag.f90``.
+Stubs added: ``mo_impl_constants``, ``mo_echam_phy_config``
+(only ``ljsb`` field), ``mo_echam_vdf_config`` (TTE-TKE closure
+constants from ECHAM6.3 defaults), ``mo_convect_tables`` (shim
+re-exporting our existing ``mo_echam_convect_tables`` lookup
+splines plus a ``compute_qsat`` helper).
 
-**Quick-win observation (not yet harness-validated)**:
-``compute_exchange_coefficients`` clips ``K_m, K_h, K_q`` to
-``[0.1, 1000.0] m²/s``. The ``0.1`` floor is generous vs. ECHAM's
-``cmin_kh = 0.01 m²/s`` background. Worth tightening to 0.01 in a
-quick test simulation before building the full harness.
+Patches needed:
+- Added ``earth_angular_velocity = 7.29212e-5`` to
+  ``mo_physical_constants`` (was commented out — ECHAM reads from
+  namelist).
+- Added the ``jg=1`` first arg to one ``prepare_ua_index_spline``
+  call in ``mo_turbulence_diag.f90`` (newer ICON dropped that arg;
+  our ``mo_echam_convect_tables`` still takes it).
+
+All five vdiff modules compile clean via ``make vdiff``.
+
+### Next steps (next session)
+
+1. Write ``vdiff_driver.f90`` calling
+   ``mo_turbulence_diag::atm_exchange_coeff`` (the 26-arg
+   diagnostic interface for K_h, K_m on the column). Optionally
+   also ``sfc_exchange_coeff`` for the bulk transfer coefficients
+   that surface fluxes use — that's the path where Bug F1 lived,
+   and a direct K_h(unstable Ri) comparison would be the cleanest
+   regression test.
+2. Write ``compare_vdiff.py`` analogous to ``compare_cumastr.py``
+   and ``compare_cloud.py``: build an RCE column with realistic
+   shear, run Fortran ``atm_exchange_coeff``, run JAX
+   ``compute_exchange_coefficients`` +
+   ``compute_surface_exchange_coefficients``, diff the output
+   K_h, K_m, surface CH at each level.
+3. Run on the same RCE column the cumastr harness uses, plus
+   variants with strong surface-layer instability (cold air over
+   warm ocean) to verify the F1 fix actually matches ECHAM's
+   ``stab`` function output.
+4. (stretch) Wire ``vdiff_down`` / ``vdiff_up`` to test the
+   tridiagonal solver against JAX ``matrix_solver.py``.
+
+JAX side: ``jcm.physics.vertical_diffusion.tte_tke/`` (~1700 lines
+across ``vertical_diffusion.py``, ``turbulence_coefficients.py``,
+``matrix_solver.py``, ``tke_budget.py``).
+
+Note: TKE-runaway is path-dependent (integrates over time), so
+single-column single-step harness only catches the coefficient and
+solver pieces; multi-step is needed for runaway. The 1-year
+aquaplanet stability achieved on ``fortran-harness-cumastr`` (PR
+#442) is the practical TKE-runaway test for now.
 
 ## Phase 5 — Surface fluxes (ocean / sea-ice / land)
 

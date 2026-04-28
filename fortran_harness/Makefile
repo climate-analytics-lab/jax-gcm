@@ -39,22 +39,41 @@ CLOUD_SRCS := \
     $(SRCDIR)/mo_cloud.f90 \
     $(SRCDIR)/cloud_driver.f90
 
+# vdiff-specific modules (TTE-TKE solver from atm_phy_echam)
+VDIFF_SRCS := \
+    $(COMMON_SRCS) \
+    $(SRCDIR)/mo_impl_constants.f90 \
+    $(SRCDIR)/mo_echam_phy_config.f90 \
+    $(SRCDIR)/mo_echam_vdf_config.f90 \
+    $(SRCDIR)/mo_echam_vdiff_params.f90 \
+    $(SRCDIR)/mo_convect_tables.f90 \
+    $(SRCDIR)/mo_turbulence_diag.f90 \
+    $(SRCDIR)/mo_vdiff_solver.f90 \
+    $(SRCDIR)/mo_vdiff_downward_sweep.f90 \
+    $(SRCDIR)/mo_vdiff_upward_sweep.f90
+
 CUMASTR_OBJS := $(patsubst $(SRCDIR)/%.f90,$(BUILDDIR)/%.o,$(CUMASTR_SRCS))
 CLOUD_OBJS   := $(patsubst $(SRCDIR)/%.f90,$(BUILDDIR)/%.o,$(CLOUD_SRCS))
+VDIFF_OBJS   := $(patsubst $(SRCDIR)/%.f90,$(BUILDDIR)/%.o,$(VDIFF_SRCS))
 
 CUMASTR_TARGET := $(BUILDDIR)/cumastr_driver
 CLOUD_TARGET   := $(BUILDDIR)/cloud_driver
+VDIFF_TARGET   := $(BUILDDIR)/vdiff_modules.stamp  # No driver yet — compile-only
 
-.PHONY: all cumastr cloud clean
+.PHONY: all cumastr cloud vdiff clean
 all: cumastr cloud
 cumastr: $(CUMASTR_TARGET)
 cloud:   $(CLOUD_TARGET)
+vdiff:   $(VDIFF_TARGET)
 
 $(CUMASTR_TARGET): $(CUMASTR_OBJS)
 	$(FC) $(FFLAGS) -J$(BUILDDIR) -o $@ $^ $(LDFLAGS)
 
 $(CLOUD_TARGET): $(CLOUD_OBJS)
 	$(FC) $(FFLAGS) -J$(BUILDDIR) -o $@ $^ $(LDFLAGS)
+
+$(VDIFF_TARGET): $(VDIFF_OBJS)
+	@touch $@
 
 # Compile sources in declared order, putting .mod into BUILDDIR
 $(BUILDDIR)/%.o: $(SRCDIR)/%.f90 | $(BUILDDIR)

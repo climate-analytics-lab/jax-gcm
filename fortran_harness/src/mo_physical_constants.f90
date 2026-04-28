@@ -89,8 +89,8 @@ MODULE mo_physical_constants
   !!
   REAL(wp), PARAMETER :: earth_radius           = 6.371229e6_wp    !! [m]    average radius
   REAL(wp), PARAMETER :: inverse_earth_radius   = 1._wp/earth_radius         !! [1/m]
-  !REAL(wp), PARAMETER :: earth_angular_velocity = 7.29212e-5_wp    !! [rad/s]  angular velocity
-  !                       read from namelist runctl, is saved in mo_control (for RCE)
+  REAL(wp), PARAMETER :: earth_angular_velocity = 7.29212e-5_wp    !! [rad/s]  angular velocity
+  !                       (uncommented for the harness; ECHAM reads this from the runctl namelist)
   !
   ! WMO/SI value
   REAL(wp), PARAMETER :: grav  = 9.80665_wp       !> [m/s2] av. gravitational acceleration
