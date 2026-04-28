@@ -655,12 +655,28 @@ def cloud_microphysics(
     snow_gm3 = snow * air_density * 1000.0
     vt_snow = config.vt_snow_a * snow_gm3**config.vt_snow_b * 1e-3  # m/s
     
-    vt_ice = jnp.ones(nlev) * config.vt_ice
-    
-    # Simple sedimentation tendencies (more sophisticated version would use flux form)
-    # For now, just remove with time scale based on fall speed and layer thickness
-    ice_sedi = cloud_ice * vt_ice / (layer_thickness + config.epsilon)
-    rain_sedi = rain_water * vt_rain / (layer_thickness + config.epsilon) 
+    # Ice sedimentation: ECHAM mo_cloud.f90 lines 472-491 uses
+    # ``zxifall = cvtfall * (rho*xi)^0.16`` (Heymsfield-Donner content-
+    # dependent fall speed) PLUS an exponential-decay integral form
+    # ``zxised = xi*exp(-vt*dt/dz) + flux_in/(rho*vt)*(1-exp(...))`` so
+    # the per-timestep depletion is naturally bounded by ``1 - exp(-…)``,
+    # never the unbounded ``vt*dt/dz`` of the instantaneous form.
+    #
+    # The cloud harness flagged the prior implementation as ~3x too
+    # slow (fixed vt=0.1 m/s). After switching to the content-dependent
+    # vt but keeping the instantaneous rate formula, it became ~3x too
+    # fast (the linear rate overshoots for typical dt=1800s timesteps).
+    # Use the integral form for ice; keep the linear approximation for
+    # rain/snow which usually have shorter residence times than dt.
+    rho_qi = jnp.maximum(air_density * cloud_ice, config.epsilon)
+    vt_ice = config.cvtfall * rho_qi ** 0.16  # m/s, content-dependent
+
+    # Integral form: per-timestep depletion fraction = 1 - exp(-vt*dt/dz),
+    # converted back to a rate by dividing by dt.
+    zal1_ice = vt_ice * dt / jnp.maximum(layer_thickness, config.epsilon)
+    ice_sedi = cloud_ice * (1.0 - jnp.exp(-zal1_ice)) / jnp.maximum(dt, 1e-6)
+
+    rain_sedi = rain_water * vt_rain / (layer_thickness + config.epsilon)
     snow_sedi = snow * vt_snow / (layer_thickness + config.epsilon)
     
     # Update tendencies
