@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+from jcm.constants import PhysicalConstants
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing, 
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics

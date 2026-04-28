@@ -30,7 +30,7 @@ from jcm.physics.radiation.nn_emulator import (
     reconstruct_lw_fluxes,
     flux_to_heating_rate,
 )
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+from jcm.constants import PhysicalConstants
 
 
 def radiation_scheme_emulated(

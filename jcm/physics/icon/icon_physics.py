@@ -7,13 +7,15 @@ monolithic orchestrator class — use ``icon_physics()`` from
 ``icon_terms`` to build a composable ICON physics package.
 """
 
+import logging
+
 import jax
 from jax import jit
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.physics.icon.constants import physical_constants
+from jcm import constants as physical_constants
 
 # Import physics modules (will be implemented progressively)
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_scheme
@@ -27,6 +29,8 @@ from jcm.physics.surface.icon.surface_types import AtmosphericForcing
 from jcm.physics.gravity_waves.hines import gravity_wave_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.icon.icon_physics_data import PhysicsData
+
+logger = logging.getLogger(__name__)
 
 @jit
 def _prepare_common_physics_state(
@@ -570,7 +574,7 @@ def apply_convection(
     
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
-        v_wind=conv_tendencies_all.dvdt.T,
+        v_wind=conv_tendencies_all.dvdt.T, 
         temperature=conv_tendencies_all.dtedt.T,
         specific_humidity=conv_tendencies_all.dqdt.T,
         tracers={
@@ -634,6 +638,188 @@ def _cloud_and_microphysics_column(
     )
 
     return cloud_tendencies, cloud_state, micro_tendencies, micro_state
+
+
+@jit
+def apply_cloud_fraction(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """Run the ICON shallow cloud / condensation scheme.
+
+    Emits the condensation tendencies (dtedt, dqdt, dqcdt, dqidt) and
+    publishes post-condensation ``cloud_fraction``, ``qc``, ``qi`` and
+    ``relative_humidity`` on ``physics_data`` for downstream microphysics
+    terms to consume. Split from ``apply_clouds_and_microphysics`` so that
+    the microphysics scheme (1M or 2M) can be swapped independently via
+    ComposablePhysics.replace("clouds", ...).
+    """
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    surface_pressure = physics_data.diagnostics.surface_pressure
+    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
+    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
+    cloud_config = parameters.clouds
+
+    cloud_tend_all, cloud_state_all = jax.vmap(
+        shallow_cloud_scheme,
+        in_axes=(1, 1, 1, 1, 1, 0, None, None),
+        out_axes=(0, 0),
+    )(state.temperature, state.specific_humidity, pressure_levels,
+      qc, qi, surface_pressure, dt, cloud_config)
+
+    tendencies = PhysicsTendency(
+        u_wind=jnp.zeros_like(state.u_wind),
+        v_wind=jnp.zeros_like(state.v_wind),
+        temperature=cloud_tend_all.dtedt.T,
+        specific_humidity=cloud_tend_all.dqdt.T,
+        tracers={
+            'qc': cloud_tend_all.dqcdt.T,
+            'qi': cloud_tend_all.dqidt.T,
+        },
+    )
+
+    cloud_data = physics_data.clouds.copy(
+        cloud_fraction=cloud_state_all.cloud_fraction.T,
+        qc=cloud_state_all.cloud_water.T,
+        qi=cloud_state_all.cloud_ice.T,
+    )
+    diagnostics = physics_data.diagnostics.copy(
+        relative_humidity=cloud_state_all.rel_humidity.T,
+    )
+    return tendencies, physics_data.copy(clouds=cloud_data, diagnostics=diagnostics)
+
+
+@jit
+def apply_microphysics_1m(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """Run ICON 1-moment cloud microphysics.
+
+    Consumes the post-condensation ``qc``, ``qi``, ``cloud_fraction`` that
+    :func:`apply_cloud_fraction` wrote to ``physics_data.clouds`` — so this
+    term must be composed after it.
+    """
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    air_density = physics_data.diagnostics.air_density
+    dz = physics_data.diagnostics.layer_thickness
+    micro_config = parameters.microphysics
+
+    qc_interim = physics_data.clouds.qc
+    qi_interim = physics_data.clouds.qi
+    cloud_fraction = physics_data.clouds.cloud_fraction
+
+    base_cdnc = parameters.microphysics.base_cdnc
+    cdnc_factor = physics_data.aerosol.cdnc_factor
+    cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+    droplet_number_per_kg = cdnc_m3 / air_density
+
+    micro_tend_all, micro_state_all = jax.vmap(
+        cloud_microphysics,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+        out_axes=(0, 0),
+    )(state.temperature, state.specific_humidity, pressure_levels,
+      qc_interim, qi_interim, cloud_fraction, air_density, dz,
+      droplet_number_per_kg, dt, micro_config)
+
+    tendencies = PhysicsTendency(
+        u_wind=jnp.zeros_like(state.u_wind),
+        v_wind=jnp.zeros_like(state.v_wind),
+        temperature=micro_tend_all.dtedt.T,
+        specific_humidity=micro_tend_all.dqdt.T,
+        tracers={
+            'qc': micro_tend_all.dqcdt.T,
+            'qi': micro_tend_all.dqidt.T,
+        },
+    )
+
+    cloud_data = physics_data.clouds.copy(
+        precip_rain=micro_state_all.precip_rain,
+        precip_snow=micro_state_all.precip_snow,
+        droplet_number=cdnc_m3,
+    )
+    return tendencies, physics_data.copy(clouds=cloud_data)
+
+
+@jit
+def apply_microphysics_2m(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    parameters: Parameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+) -> tuple[PhysicsTendency, PhysicsData]:
+    """Run ICON 2-moment cloud microphysics (Phase 5a: minimal warm-rain only).
+
+    Consumes the post-condensation ``qc``/``qi``/``cloud_fraction`` emitted by
+    :func:`apply_cloud_fraction` and returns tendencies for the full 2M tracer
+    set ``{qc, qi, qnc, qni, qr, qs}``. Warm-rain (KK2000) + cold-phase
+    precipitation formation (ice aggregation + riming) are wired in;
+    sedimentation, melting, deposition/WBF, and latent-heat release are
+    later Phase-5b steps — see issue #341.
+    """
+    from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+
+    dt = parameters.convection.dt_conv
+    pressure_levels = physics_data.diagnostics.pressure_full
+    air_density = physics_data.diagnostics.air_density
+    layer_thickness = physics_data.diagnostics.layer_thickness
+    tke = physics_data.vertical_diffusion.tke
+    params_2m = parameters.microphysics_2m
+
+    qc_interim = physics_data.clouds.qc
+    qi_interim = physics_data.clouds.qi
+    cloud_fraction = physics_data.clouds.cloud_fraction
+
+    # Default any declared-but-missing tracers to zero.
+    zeros = jnp.zeros_like(state.temperature)
+    qnc = state.tracers.get('qnc', zeros)
+    qni = state.tracers.get('qni', zeros)
+    qr = state.tracers.get('qr', zeros)
+    qs = state.tracers.get('qs', zeros)
+
+    # Aerosol-activated CDNC from MACv2-SP (same formula as 1M path).
+    base_cdnc = parameters.microphysics.base_cdnc
+    cdnc_factor = physics_data.aerosol.cdnc_factor
+    activated_cdnc = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+
+    tend_all = jax.vmap(
+        cloud_microphysics_2m,
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+        out_axes=0,
+    )(state.temperature, state.specific_humidity, pressure_levels,
+      qc_interim, qi_interim, qnc, qni, qr, qs,
+      cloud_fraction, air_density, layer_thickness, tke,
+      activated_cdnc, dt, params_2m)
+
+    tendencies = PhysicsTendency(
+        u_wind=jnp.zeros_like(state.u_wind),
+        v_wind=jnp.zeros_like(state.v_wind),
+        temperature=tend_all.dtedt.T,
+        specific_humidity=tend_all.dqdt.T,
+        tracers={
+            'qc': tend_all.dqcdt.T,
+            'qi': tend_all.dqidt.T,
+            'qnc': tend_all.dqncdt.T,
+            'qni': tend_all.dqnidt.T,
+            'qr': tend_all.dqrdt.T,
+            'qs': tend_all.dqsdt.T,
+        },
+    )
+    # Stash the current-step qnc/qni as the tm1 state so the next call of
+    # this term (or downstream update_tendencies_and_important_vars) can
+    # read previous-step number concentrations. PhysicsData.clouds is
+    # carried forward across timesteps in ComposableIconPhysics.__call__.
+    clouds_next = physics_data.clouds.copy(qnc_prev=qnc, qni_prev=qni)
+    return tendencies, physics_data.copy(clouds=clouds_next)
 
 
 @jit
@@ -811,17 +997,9 @@ def apply_vertical_diffusion(
         vdiff_diagnostics.exchange_coeff_momentum[:, -1:], nsfc_type, axis=1
     )  # (ncols, nsfc_type)
     
-    # Update TKE — clip to a physically defensible range. Strong
-    # convective storms produce updraft-core TKE of ~50–100 m²/s²;
-    # values above ~250 are non-physical and indicate the implicit
-    # vdiff solver has gone unstable (which it does in the moist run
-    # within ~10 timesteps if left unconstrained — TKE then cascades
-    # through the exchange-coefficient back-reaction and NaNs the
-    # whole column on the next step). A hard upper cap is the cheapest
-    # safeguard that lets the rest of the physics step finish; the
-    # underlying TKE budget should be retuned separately.
+    # Update TKE
     new_tke = tke + dt * tke_tend
-    new_tke = jnp.clip(new_tke, 0.01, 250.0)
+    new_tke = jnp.maximum(new_tke, 0.01)  # Minimum TKE
 
     # Create physics tendencies
     physics_tendencies = PhysicsTendency(
@@ -1006,19 +1184,9 @@ def apply_gravity_waves(
     height_levels = physics_data.diagnostics.height_full
     air_density = physics_data.diagnostics.air_density
     
-    # Subgrid orography standard deviation drives the launch amplitude
-    # for orographic GWs (flux ∝ h_std²). Without it the scheme
-    # defaulted to a hard-coded 200 m global field, which on an
-    # aquaplanet (no orography) sprays gravity-wave momentum into the
-    # stratosphere everywhere and overshoots the column wind in the
-    # 30-200 hPa range — we observed u_wind growing past ±70 m/s at
-    # levels 2-4 by day 0.4 of the moist run, which then NaN'd the
-    # dynamics. The proper subgrid std dev needs a terrain preprocessing
-    # step we don't have yet; for now scale ~10% of the local orography
-    # height as a rough proxy. Aquaplanet (orog ≡ 0) ⇒ h_std = 0 ⇒ GWD
-    # is silent, which is what we want for flat ocean.
-    orog_flat = terrain.orog.reshape(-1)
-    h_std = jnp.abs(orog_flat) * 0.1
+    # Need orography standard deviation - use a placeholder for now
+    # In a real implementation, this would come from boundary data
+    h_std = jnp.ones(ncols) * 200.0  # 200m standard deviation
     
     gwd_results = jax.vmap(
         gravity_wave_drag,

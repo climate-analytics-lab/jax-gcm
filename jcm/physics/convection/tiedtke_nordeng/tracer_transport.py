@@ -11,7 +11,7 @@ from typing import NamedTuple, Tuple, Optional
 
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
-from jcm.physics.icon.constants.physical_constants import tmelt
+from jcm.constants import tmelt
 
 
 class TracerIndices(NamedTuple):

@@ -1,3 +1,8 @@
 [run]
 omit =
     *_test.py
+    # Two-moment microphysics process functions are ported but not yet fully
+    # wired into the column orchestrator — remove these entries once Phase 5b
+    # lands the full ECHAM6 sequence (see issue #341).
+    jcm/physics/clouds/icon/cloud_microphysics_2m.py
+    jcm/physics/clouds/icon/cloud_utils.py

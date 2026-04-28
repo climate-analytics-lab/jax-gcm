@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
-from jcm.physics.icon.constants.physical_constants import (
+from jcm.constants import (
     tmelt, alhc, alhs, cp, eps
 )
 
@@ -23,10 +23,9 @@ from jcm.physics.icon.constants.physical_constants import (
 class CloudParameters:
     """Configuration parameters for shallow cloud scheme"""
     
-    # Cloud fraction parameters — ``crs`` at surface, ``crt`` aloft,
-    # matching the convention used in ECHAM ``mo_echam_cloud_params.f90``.
-    crs: float           # Critical relative humidity at surface
-    crt: float           # Critical relative humidity aloft / at TOA
+    # Cloud fraction parameters
+    crt: float           # Critical relative humidity at surface  
+    crs: float           # Critical relative humidity at TOA  
     nex: float           # Exponent for RH threshold profile
     csatsc: float        # Saturation factor for stratocumulus
     
@@ -43,14 +42,14 @@ class CloudParameters:
     t_mix_max: float     # Upper bound of mixed phase (K)
 
     @classmethod
-    def default(cls, crs=0.9, crt=0.7, nex=4.0,
+    def default(cls, crt=0.9, crs=0.7, nex=4.0,
                  csatsc=0.97, ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
-        """Return default cloud parameters (RHc = 0.9 at surface, 0.7 aloft)."""
+        """Return default cloud parameters"""
         return cls(
-            crs=jnp.array(crs),
             crt=jnp.array(crt),
+            crs=jnp.array(crs),
             nex=jnp.array(nex),
             csatsc=jnp.array(csatsc),
             ceffmin=jnp.array(ceffmin),
@@ -173,14 +172,14 @@ def calculate_cloud_fraction(
     rel_humidity = specific_humidity / (qs + config.epsilon)
     rel_humidity = jnp.clip(rel_humidity, 0.0, 1.0)
     
-    # Calculate critical relative humidity threshold.
-    # Varies from ``crs`` at surface to ``crt`` aloft, matching ECHAM
-    # (Lohmann & Roeckner 1996; ``mo_cover.f90::cover`` uses the same
-    # form with ``crs`` = surface, ``crt`` = aloft).
-    sigma = pressure / surface_pressure  # 1 at surface, 0 at TOA
-    # At sigma=1 (surface): exp(0) = 1 → rhc = crt + (crs-crt) = crs.
-    # As sigma→0 (TOA): exp(-nex) → 0 → rhc = crt.
-    rhc = config.crt + (config.crs - config.crt) * jnp.exp(
+    # Calculate critical relative humidity threshold
+    # Varies from crt at surface to crs at TOA
+    # Following Lohmann & Roeckner (1996) formulation
+    sigma = pressure / surface_pressure  # Normalized pressure (1 at surface, 0 at TOA)
+    # RHc = crt at surface (sigma=1) and crs at TOA (sigma→0)
+    # Using exponential interpolation: at sigma=1, exp(0)=1 so rhc=crt
+    # as sigma→0, exp(-nex)→0 so rhc→crs
+    rhc = config.crs + (config.crt - config.crs) * jnp.exp(
         -config.nex * (1.0 - sigma)
     )
     

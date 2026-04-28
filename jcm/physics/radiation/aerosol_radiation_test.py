@@ -233,7 +233,7 @@ def test_aerosol_microphysics_droplet_coupling():
     qc = jnp.zeros((nlev, ncols))
     qc = qc.at[15:25, :].set(1e-3)
 
-    from jcm.physics.icon.constants import physical_constants as pc
+    from jcm import constants as pc
     height_profile = -pc.rd * 290.0 / pc.grav * np.log(sigma_mid)
     geopotential = jnp.broadcast_to(
         jnp.array(height_profile * pc.grav)[:, jnp.newaxis], (nlev, ncols)

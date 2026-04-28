@@ -69,7 +69,7 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
         """Condensation must warm the parcel; the latent heat released
         should match the energy budget cp*dT = L*d_condensed.
         """
-        from jcm.physics.icon.constants.physical_constants import cp, alhc
+        from jcm.constants import cp, alhc
         T, p = 290.0, 90000.0
         qsat_T = float(saturation_mixing_ratio(
             jnp.asarray(p), jnp.asarray(T)

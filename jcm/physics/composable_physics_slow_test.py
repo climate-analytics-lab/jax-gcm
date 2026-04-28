@@ -170,6 +170,31 @@ class TestComposableIconIntegration(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     @pytest.mark.slow
+    def test_icon_2m_composable_model_run(self):
+        """Composable ICON with 2-moment microphysics runs through Model.
+
+        Exercises ``cloud_microphysics_2m`` (and the cloud_utils helpers)
+        end-to-end so the slow-test coverage gate sees them. The ``qc``,
+        ``qi``, ``qnc``, ``qni``, ``qr``, ``qs`` tracers are auto-zeroed by
+        ``apply_microphysics_2m`` if the initial state doesn't supply them.
+        """
+        from jcm.model import Model
+        from jcm.physics.icon.icon_terms import icon_physics
+
+        physics = icon_physics(cloud_scheme="2m")
+        model = Model(
+            coords=self.coords,
+            terrain=self.terrain,
+            physics=physics,
+        )
+        preds = model.run(
+            forcing=self.forcing,
+            save_interval=1.0,
+            total_time=1.0,
+        )
+        self.assertIsNotNone(preds)
+
+    @pytest.mark.slow
     def test_packages_factories(self):
         """Package factory re-exports work end-to-end."""
         from jcm.physics.speedy.speedy_terms import speedy_physics

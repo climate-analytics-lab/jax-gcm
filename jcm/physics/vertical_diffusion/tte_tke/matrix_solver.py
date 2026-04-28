@@ -7,7 +7,7 @@ vertical diffusion scheme, following the downward sweep/upward sweep approach.
 import jax
 import jax.numpy as jnp
 
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+from jcm.constants import PhysicalConstants
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies
 )

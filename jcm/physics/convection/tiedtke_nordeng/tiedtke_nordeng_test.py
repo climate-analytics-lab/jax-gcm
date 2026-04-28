@@ -221,7 +221,7 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from jcm.physics.icon.constants.physical_constants import cp, alhc
+            from jcm.constants import cp, alhc
             
             # Sensible heat change
             dH_sensible = jnp.sum(tendencies.dtedt * cp)
@@ -343,7 +343,7 @@ class TestIdealizedConvection:
         temperature = jnp.full(nlev, 288.0)  # K
 
         # Hydrostatic height from pressure
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
         height = -rd * 288.0 / grav * jnp.log(pressure / 1e5)
 
         # Very dry conditions - no moisture
@@ -381,7 +381,7 @@ class TestIdealizedConvection:
         sigma_levels = jnp.array([0.95, 0.835, 0.685, 0.51, 0.34, 0.2, 0.095, 0.025])
         pressure = sigma_levels * 1e5  # Pa
 
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
 
         # Temperature profile following approximate moist adiabat
         # Starting from warm, moist surface
@@ -676,7 +676,7 @@ class TestConvectivePrecipitation:
 
     def _create_convective_profile(self, nlev=20):
         """Create a profile that reliably triggers deep convection with precipitation."""
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
 
         # Surface-first pressure profile
         pressure = jnp.linspace(1e5, 1e4, nlev)
@@ -796,7 +796,7 @@ class TestConvectionNumericalStability:
         (as produced by one step of surface evaporation from a dry initial state).
         This marginal humidity previously triggered convection with NaN tendencies.
         """
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
 
         # 40 uniform sigma layers — same as the ICON integration test
         sigma_centers = jnp.linspace(0.0125, 0.9875, nlev)
@@ -994,7 +994,7 @@ class TestConvectionNumericalStability:
         Regression test for #411 where parcel_temp_moist = temperature
         (the environmental T), causing CAPE to be near zero.
         """
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
 
         nlev = 20
         # Surface-first profile with unstable lapse rate
@@ -1031,7 +1031,7 @@ class TestConvectionNumericalStability:
         Regression test for #411. With the old bug (parcel_temp = environmental T),
         the buoyancy was identically zero above cloud base.
         """
-        from jcm.physics.icon.constants.physical_constants import rd, grav, rv
+        from jcm.constants import rd, grav, rv
 
         nlev = 20
         # TOA-first: pressure increases with index
@@ -1068,7 +1068,7 @@ class TestConvectionNumericalStability:
             p_curr, p_next = p_pair
             dp = p_next - p_curr
             qs_val = saturation_mixing_ratio(p_curr, parcel_t)
-            from jcm.physics.icon.constants.physical_constants import alhc, cp
+            from jcm.constants import alhc, cp
             dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs_val) / (
                 cp + alhc**2 * qs_val / (rv * parcel_t**2)
             )
@@ -1120,7 +1120,7 @@ class TestConvectionNumericalStability:
         Tests that the moist adiabat calculation is physically reasonable
         by comparing a steep vs moderate lapse rate.
         """
-        from jcm.physics.icon.constants.physical_constants import rd, grav
+        from jcm.constants import rd, grav
 
         nlev = 20
         pressure = jnp.linspace(1e5, 2e4, nlev)

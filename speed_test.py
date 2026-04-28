@@ -16,6 +16,7 @@ import jax
 import numpy as np
 
 from jcm.model import Model
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 
 def block_until_ready(predictions):
@@ -48,7 +49,7 @@ def run_speed_test(total_time=360.0, save_interval=30.0, n_repeats=5):
 
     # --- Model setup ---
     print("Creating model (T31, 8 layers, dt=30min)...")
-    model = Model(time_step=30.0)
+    model = Model(coords=get_speedy_coords(), time_step=30.0)
     print("Model created.")
 
     # --- Warmup / compile ---

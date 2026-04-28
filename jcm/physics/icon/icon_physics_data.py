@@ -157,6 +157,13 @@ class CloudData:
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
+    # Previous-timestep (t-dt) 2M number concentrations, carried across steps
+    # by the physics-data pass-through in ComposableIconPhysics so the 2M
+    # update_tendencies_and_important_vars step has the tm1 state it needs.
+    # Stored per kg of air (matching the qnc/qni tracer convention).
+    qnc_prev: jnp.ndarray            # Previous-step cloud droplet number [1/kg] (nlev, ncols)
+    qni_prev: jnp.ndarray            # Previous-step ice crystal number    [1/kg] (nlev, ncols)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -166,6 +173,8 @@ class CloudData:
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
+            qnc_prev=jnp.zeros((nlev,) + nodal_shape),
+            qni_prev=jnp.zeros((nlev,) + nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -176,6 +185,8 @@ class CloudData:
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
             'droplet_number': self.droplet_number,
+            'qnc_prev': self.qnc_prev,
+            'qni_prev': self.qni_prev,
         }
         new_data.update(kwargs)
         return CloudData(**new_data)

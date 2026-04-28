@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+from jcm.constants import PhysicalConstants
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
 )
@@ -177,36 +177,24 @@ def vertical_diffusion_column(
     
     # Compute TKE budget and exchange coefficient
     tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length)
-
+    
     # Compute TKE budget diagnostics
     tke_shear_prod, tke_buoyancy_prod, tke_dissipation, _ = compute_tke_diagnostics(
         state, params, exchange_coeff_momentum, exchange_coeff_heat, mixing_length
     )
-
+    
     # Compute diagnostics
     diagnostics = compute_turbulence_diagnostics(
-        state, params, exchange_coeff_momentum,
+        state, params, exchange_coeff_momentum, 
         exchange_coeff_heat, exchange_coeff_moisture
     )
-
-    # Perform vertical diffusion step — solves the implicit matrix system
-    # for vertical transport of u, v, T, q-hydrometeors, TKE, theta_v_var.
-    # The returned ``tke_tendency`` includes only the vertical-transport
-    # contribution; shear/buoyancy production and dissipation must be
-    # added explicitly here or the TKE stays pinned at its initial value.
+    
+    # Perform vertical diffusion step
     tendencies = vertical_diffusion_step(
         state, params, exchange_coeff_momentum,
         exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
     )
-
-    # Add TKE source/sink terms (explicit): shear + buoyancy − dissipation.
-    tke_source_tendency = (
-        tke_shear_prod + tke_buoyancy_prod - tke_dissipation
-    )
-    tendencies = tendencies._replace(
-        tke_tendency=tendencies.tke_tendency + tke_source_tendency,
-    )
-
+    
     return tendencies, diagnostics
 
 

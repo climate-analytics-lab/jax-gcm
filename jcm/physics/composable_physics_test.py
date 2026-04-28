@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy.testing as npt
 from flax import nnx
 
-from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
@@ -649,6 +649,128 @@ class TestPackagesImport(unittest.TestCase):
     def test_packages_icon_import(self):
         from jcm.physics.icon.icon_terms import icon_physics
         self.assertTrue(callable(icon_physics))
+
+
+class TestTracerSpec(unittest.TestCase):
+    """TracerSpec declaration + ComposablePhysics aggregation."""
+
+    def test_default_required_tracers_is_empty(self):
+        self.assertEqual(LinearHeating().required_tracers(), ())
+
+    def test_aggregation_dedups_identical_specs(self):
+        class A(PhysicsTerm):
+            name: ClassVar[str] = "a"
+            category: ClassVar[str] = "x"
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc"),)
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        class B(PhysicsTerm):
+            name: ClassVar[str] = "b"
+            category: ClassVar[str] = "y"
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc"), TracerSpec("qi"))
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[A(), B()])
+        names = {spec.name for spec in physics.required_tracers()}
+        self.assertEqual(names, {"qc", "qi"})
+
+    def test_conflicting_specs_raise(self):
+        class A(PhysicsTerm):
+            name: ClassVar[str] = "a"
+            category: ClassVar[str] = "x"
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qnc", nondimensionalize=False),)
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        class B(PhysicsTerm):
+            name: ClassVar[str] = "b"
+            category: ClassVar[str] = "y"
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qnc", nondimensionalize=True),)
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[A(), B()])
+        with self.assertRaisesRegex(ValueError, "qnc"):
+            physics.required_tracers()
+
+    def test_nondimensionalize_flag_round_trip(self):
+        """Tracers with nondimensionalize=False must round-trip unchanged through the converters."""
+        from dinosaur import primitive_equations
+        from dinosaur.scales import SI_SCALE
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics_interface import (
+            dynamics_state_to_physics_state,
+            physics_state_to_dynamics_state,
+        )
+
+        coords = get_speedy_coords()
+        specs = primitive_equations.PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+        primitive = primitive_equations.PrimitiveEquations(
+            reference_temperature=jnp.ones(coords.nodal_shape[0]) * 288.0,
+            orography=jnp.zeros(coords.modal_shape[1:]),
+            coords=coords,
+            physics_specs=specs,
+        )
+        nodal_shape = coords.nodal_shape
+
+        physics_state = PhysicsState.zeros(nodal_shape)
+        physics_state = physics_state.copy(
+            temperature=jnp.ones(nodal_shape) * 288.0,
+            normalized_surface_pressure=jnp.ones(nodal_shape[1:]),
+            tracers={"qnc": jnp.ones(nodal_shape) * 1e8},  # number per kg
+        )
+
+        tracer_specs = {"qnc": TracerSpec("qnc", nondimensionalize=False)}
+
+        modal = physics_state_to_dynamics_state(
+            physics_state, primitive, tracer_specs=tracer_specs,
+        )
+        back = dynamics_state_to_physics_state(
+            modal, primitive, tracer_specs=tracer_specs,
+        )
+
+        # qnc should round-trip within spectral transform tolerance
+        npt.assert_allclose(back.tracers["qnc"], physics_state.tracers["qnc"], rtol=1e-3)
+
+
+class TestModelSeedsTracers(unittest.TestCase):
+    """Model seeds the initial tracer dict from physics.required_tracers()."""
+
+    def test_model_seeds_declared_tracers(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        class NeedsQC(PhysicsTerm):
+            name: ClassVar[str] = "needs_qc"
+            category: ClassVar[str] = "clouds"
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc"), TracerSpec("qnc", nondimensionalize=False))
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[NeedsQC()])
+        model = Model(coords=get_speedy_coords(), physics=physics, time_step=720)
+        # _prepare_initial_modal_state runs inside .run(), but we can call the
+        # underlying prep directly to verify the tracer dict.
+        state = model._prepare_initial_modal_state()
+        self.assertIn("specific_humidity", state.tracers)
+        self.assertIn("qc", state.tracers)
+        self.assertIn("qnc", state.tracers)
+        self.assertEqual(
+            state.tracers["qc"].shape,
+            state.tracers["specific_humidity"].shape,
+        )
 
 
 if __name__ == "__main__":

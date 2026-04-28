@@ -12,6 +12,7 @@ Date: 2026-04-12
 
 from __future__ import annotations
 
+import dataclasses
 from typing import ClassVar
 
 import jax.numpy as jnp
@@ -20,6 +21,35 @@ from flax import nnx
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+
+
+@dataclasses.dataclass(frozen=True)
+class TracerSpec:
+    """Declares a tracer that a PhysicsTerm reads or writes.
+
+    Model aggregates specs from every term at build time and seeds the
+    initial state's tracer dict with ``initial_value`` for any tracer
+    whose name is declared here and not already present.
+
+    ``nondimensionalize=False`` means the state/tendency converters in
+    physics_interface pass the tracer through untouched (no gram/kg
+    scaling). Use this for tracers that already carry no unit expressible
+    as a mixing ratio — e.g. number concentrations per kg of air.
+
+    Attributes:
+        name: key in ``state.tracers`` (also on the dynamics side).
+        units: human-readable units, informational only.
+        initial_value: fill value used when seeding the initial tracer dict.
+        nondimensionalize: whether to apply the standard gram/kg
+            nondimensionalization when converting between physics and
+            dynamics representations.
+
+    """
+
+    name: str
+    units: str = "kg/kg"
+    initial_value: float = 0.0
+    nondimensionalize: bool = True
 
 
 class PhysicsTerm(nnx.Module):
@@ -39,6 +69,17 @@ class PhysicsTerm(nnx.Module):
     category: ClassVar[str] = ""
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def required_tracers(cls) -> tuple[TracerSpec, ...]:
+        """Declare the tracers this term needs in ``state.tracers``.
+
+        ``ComposablePhysics`` aggregates specs across all terms and
+        ``Model`` uses the union to seed the initial state's tracer dict.
+        Default is ``()`` — terms that only read ``specific_humidity``
+        don't need to override.
+        """
+        return ()
 
     def cache_coords(self, coords) -> None:
         """Populate coordinate-dependent cached state (in-place).

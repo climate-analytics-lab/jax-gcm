@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
-from jcm.physics.icon.constants.physical_constants import (
+from jcm.constants import (
     tmelt, alhf, alhc, alhs, cp, rhow
 )
 
@@ -71,7 +71,7 @@ class MicrophysicsParameters:
     dt_sedi: float       # Sub-timestep for sedimentation (s)
 
     @classmethod
-    def default(cls, ccraut=1.0e-4, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
+    def default(cls, ccraut=5.0e-4, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
                  ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,

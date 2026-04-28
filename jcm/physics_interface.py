@@ -100,9 +100,7 @@ Attributes:
     temperature : jnp.ndarray
         Atmospheric temperature.
     specific_humidity : jnp.ndarray
-        The mass of water vapor per unit mass of moist air, in g/kg
-        (convention inherited from SPEEDY). Schemes that work natively in
-        kg/kg — notably ICON — convert on entry/exit.
+        The mass of water vapor per unit mass of moist air.
     geopotential : jnp.ndarray
         The gravitational potential energy per unit mass at a given height.
     normalized_surface_pressure : jnp.ndarray
@@ -166,8 +164,7 @@ Attributes:
     temperature : jnp.ndarray
         Tendency of temperature.
     specific_humidity : jnp.ndarray
-        Tendency of specific humidity, in (g/kg)/s. ICON schemes that work
-        natively in kg/kg/s convert when composing their tendency.
+        Tendency of specific humidity.
 """
 
 class Physics:
@@ -176,6 +173,14 @@ class Physics:
 
     def cache_coords(self, coords: CoordinateSystem):
         return None
+
+    def required_tracers(self):
+        """Return a tuple of TracerSpec objects this physics needs in state.tracers.
+
+        Default is empty — only ``specific_humidity`` is assumed. Composable
+        physics packages override this to aggregate declarations from terms.
+        """
+        return ()
 
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
@@ -237,12 +242,20 @@ class Physics:
 
         return items
 
-def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) -> PhysicsState:
+def dynamics_state_to_physics_state(
+    state: State,
+    dynamics: PrimitiveEquations,
+    tracer_specs: dict | None = None,
+) -> PhysicsState:
     """Convert the state variables from the dynamics to the physics state variables.
 
     Args:
         state: Dynamic (dinosaur) State variables
         dynamics: PrimitiveEquations object containing the reference temperature and orography
+        tracer_specs: Optional mapping ``name -> TracerSpec``. Tracers whose spec
+            has ``nondimensionalize=False`` bypass the gram/kg conversion. When
+            ``None`` or a tracer is absent from the mapping, the default gram/kg
+            conversion is applied (existing behavior).
 
     Returns:
         Physics state variables
@@ -301,11 +314,20 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
 
-    # Extract all tracers from the nodal state (except specific_humidity which is handled separately)
+    # Extract all tracers from the nodal state (except specific_humidity which is handled separately).
+    # Tracers whose TracerSpec has nondimensionalize=False (e.g. number concentrations) pass through
+    # untouched; everything else is treated as a mass mixing ratio in gram/kilogram.
     all_tracers = {}
     for tracer_name, tracer_value in nodal_state.tracers.items():
-        if tracer_name != 'specific_humidity':
-            all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(tracer_value, units.gram / units.kilogram).m
+        if tracer_name == 'specific_humidity':
+            continue
+        spec = tracer_specs.get(tracer_name) if tracer_specs else None
+        if spec is not None and not spec.nondimensionalize:
+            all_tracers[tracer_name] = tracer_value
+        else:
+            all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(
+                tracer_value, units.gram / units.kilogram
+            ).m
 
     # Produce a PhysicsState with `normalized_surface_pressure = P_s / p0`.
     # For sigma coords state stores log(P_s / p0) already, so sp = P_s/p0.
@@ -320,15 +342,21 @@ def dynamics_state_to_physics_state(state: State, dynamics: PrimitiveEquations) 
 
     return PhysicsState(u, v, t, q, phi, nsp, all_tracers)
 
-def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: PrimitiveEquations) -> State:
+def physics_state_to_dynamics_state(
+    physics_state: PhysicsState,
+    dynamics: PrimitiveEquations,
+    tracer_specs: dict | None = None,
+) -> State:
     """Convert state variables from the physics (nodal space) back to the dynamical core (spectral space).
     This is the inverse of `dynamics_state_to_physics_state`. It is currently not used in the main
     time-stepping loop but can be useful for diagnostics or model initialization.
-    
+
     Args:
         physics_state: The `PhysicsState` object containing the atmospheric state on the model grid.
         dynamics: The `PrimitiveEquations` object containing model configuration.
-    
+        tracer_specs: Optional mapping ``name -> TracerSpec``. Tracers whose spec has
+            ``nondimensionalize=False`` are carried through without gram/kg scaling.
+
     Returns:
         A `State` object for the dynamical core.
 
@@ -344,32 +372,21 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
-    # Convert normalized surface pressure back to the log-pressure stored by
-    # dinosaur. Convention mirrors ``dynamics_state_to_physics_state``:
-    #
-    #   * SigmaCoordinates: dynamics state carries ``log(P_s / p0)`` — we
-    #     already have ``normalized_surface_pressure = P_s / p0`` in the
-    #     physics state, so just take the log.
-    #   * HybridCoordinates: dynamics state carries ``log(P_s_in_Pa)`` (in
-    #     nondim Pa) because the coordinate blends ``a_boundaries`` (Pa) and
-    #     ``b * P_s`` — we must re-multiply by ``p0_nondim`` before taking
-    #     the log. Without this the reverse conversion produces a near-zero
-    #     surface pressure and the first dynamics step NaNs.
-    from dinosaur.hybrid_coordinates import HybridCoordinates
-    if isinstance(dynamics.coords.vertical, HybridCoordinates):
-        from jcm.constants import p0 as P0_PA
-        p0_nondim = dynamics.physics_specs.nondimensionalize(P0_PA * units.pascal)
-        log_surface_pressure = jnp.log(
-            physics_state.normalized_surface_pressure * p0_nondim
-        )
-    else:
-        log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
+    # take the log of normalized surface pressure and convert to modal
+    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
-    # Convert all tracers to modal
+    # Convert all tracers to modal; respect TracerSpec.nondimensionalize to
+    # decide whether the gram/kg scaling applies.
     tracers_modal = {'specific_humidity': q_modal}
     for tracer_name, tracer_value in physics_state.tracers.items():
-        tracer_nd = dynamics.physics_specs.nondimensionalize(tracer_value * units.gram / units.kilogram)
+        spec = tracer_specs.get(tracer_name) if tracer_specs else None
+        if spec is not None and not spec.nondimensionalize:
+            tracer_nd = tracer_value
+        else:
+            tracer_nd = dynamics.physics_specs.nondimensionalize(
+                tracer_value * units.gram / units.kilogram
+            )
         tracers_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_nd)
 
     return State(
@@ -380,12 +397,18 @@ def physics_state_to_dynamics_state(physics_state: PhysicsState, dynamics: Primi
         tracers=tracers_modal
     )
 
-def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
+def physics_tendency_to_dynamics_tendency(
+    physics_tendency: PhysicsTendency,
+    dynamics: PrimitiveEquations,
+    tracer_specs: dict | None = None,
+) -> State:
     """Convert the physics tendencies to the dynamics tendencies.
 
     Args:
         physics_tendency: Physics tendencies
         dynamics: PrimitiveEquations object containing the reference temperature and orography
+        tracer_specs: Optional mapping ``name -> TracerSpec``. Tracer tendencies whose spec
+            has ``nondimensionalize=False`` are carried through without gram/kg/second scaling.
 
     Returns:
         Dynamics tendencies
@@ -395,19 +418,27 @@ def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dyn
     v_tend = physics_tendency.v_wind
     t_tend = physics_tendency.temperature
     q_tend = physics_tendency.specific_humidity
-
+    
     q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
-
+    
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
     q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
-
+    
     log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
 
-    # Convert all tracer tendencies to modal
+    # Convert all tracer tendencies to modal; TracerSpec.nondimensionalize=False
+    # tendencies carry the same (pre-nondimensional) units as the tracer itself
+    # divided by model time, so we only strip the /second for the default path.
     tracers_tend_modal = {'specific_humidity': q_tend_modal}
     for tracer_name, tracer_tend in physics_tendency.tracers.items():
-        tracer_tend_nd = dynamics.physics_specs.nondimensionalize(tracer_tend * units.gram / units.kilogram / units.second)
+        spec = tracer_specs.get(tracer_name) if tracer_specs else None
+        if spec is not None and not spec.nondimensionalize:
+            tracer_tend_nd = tracer_tend
+        else:
+            tracer_tend_nd = dynamics.physics_specs.nondimensionalize(
+                tracer_tend * units.gram / units.kilogram / units.second
+            )
         tracers_tend_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_tend_nd)
 
     # Create a new state object with the updated tendencies (which will be added to the current state)
@@ -493,7 +524,9 @@ def get_physical_tendencies(
         Physical tendencies in dinosaur.primitive_equations.State format
 
     """
-    physics_state = dynamics_state_to_physics_state(state, dynamics)
+    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
+
+    physics_state = dynamics_state_to_physics_state(state, dynamics, tracer_specs=tracer_specs)
 
     clamped_physics_state = verify_state(physics_state)
 
@@ -517,7 +550,9 @@ def get_physical_tendencies(
     if diagnostics_collector is not None:
             diagnostics_collector.accumulate_if_physical_step(physics_data)
 
-    dynamics_tendency = physics_tendency_to_dynamics_tendency(physics_tendency, dynamics)
+    dynamics_tendency = physics_tendency_to_dynamics_tendency(
+        physics_tendency, dynamics, tracer_specs=tracer_specs,
+    )
 
     return dynamics_tendency
 
@@ -550,5 +585,8 @@ def filter_tendencies(dynamics_tendency: State,
         temperature_variation=dynamics_tendency.temperature_variation,
         log_surface_pressure=dynamics_tendency.log_surface_pressure,
         sim_time=dynamics_tendency.sim_time,
-        tracers={'specific_humidity': dynamics_tendency.tracers['specific_humidity']}
+        # Pass every tracer tendency through — the filter only modifies
+        # divergence. Dropping other tracer tendencies here silently zeros
+        # microphysics tracers (qc, qi, qnc, ...).
+        tracers=dict(dynamics_tendency.tracers),
     )

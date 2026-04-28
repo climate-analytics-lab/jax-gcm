@@ -16,7 +16,7 @@ import jax
 from jax import lax
 from typing import Tuple
 
-from jcm.physics.icon.constants.physical_constants import (
+from jcm.constants import (
     cp, alhc, alhs, tmelt
 )
 from .tiedtke_nordeng import (

@@ -55,12 +55,7 @@ class HeldSuarez(PhysicsTerm):
 
     def cache_coords(self, coords: coordinate_systems.CoordinateSystem) -> None:
         """Cache the sigma centers and latitudes used by the analytic forcing."""
-        vertical = coords.vertical
-        if hasattr(vertical, 'centers'):
-            sigma = vertical.centers
-        else:
-            sigma = vertical.get_sigma_centers(101325.0)
-        self._sigma = nnx.Variable(jnp.asarray(sigma))
+        self._sigma = nnx.Variable(jnp.asarray(coords.vertical.centers))
         self._lat = nnx.Variable(jnp.asarray(coords.horizontal.latitudes))
         self._coords_cached = True
 

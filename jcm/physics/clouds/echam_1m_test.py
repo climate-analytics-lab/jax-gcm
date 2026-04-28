@@ -10,7 +10,7 @@ from .echam_1m import (
     ice_autoconversion, snow_accretion, melting_freezing,
     evaporation_sublimation, sedimentation_flux, cloud_microphysics
 )
-from jcm.physics.icon.constants.physical_constants import tmelt
+from jcm.constants import tmelt
 
 
 class TestCloudDropletRadius:

@@ -319,11 +319,6 @@ class Model:
         # ICON-style hybrid coords store `a_boundaries` in Pa, so we override
         # `hpa_quantity` so dinosaur's internal nondimensionalization treats
         # them as Pa (not hPa which is the dinosaur default).
-        # Wire up the ``specific_humidity`` tracer as the dynamics' humidity
-        # so that moisture contributes to virtual temperature in the dycore
-        # (and the moisture-related divergence/vorticity corrections fire).
-        # Without this, q is transported as an inert passive tracer and the
-        # dynamics are effectively dry — inconsistent with the moist physics.
         from dinosaur.hybrid_coordinates import HybridCoordinates
         if isinstance(self.coords.vertical, HybridCoordinates):
             self.primitive = primitive_equations.PrimitiveEquationsHybrid(
@@ -332,12 +327,8 @@ class Model:
                 coords=self.coords,
                 physics_specs=self.physics_specs,
                 hpa_quantity=units.pascal,
-                humidity_key='specific_humidity',
             )
         else:
-            # Sigma-coord dinosaur ``PrimitiveEquations`` does not accept
-            # ``humidity_key``; moisture-Tv coupling is only available on the
-            # hybrid variant in this version.
             self.primitive = primitive_equations.PrimitiveEquations(
                 reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
                 orography=self.truncated_orography,
@@ -355,22 +346,25 @@ class Model:
         diffuse_div = self._make_diffusion_fn(
             self.diffusion.div_timescale,
             self.diffusion.div_order,
-            replace_fn=lambda u_next, u_temp: u_next.replace(divergence=u_temp.divergence),
-            level_orders=self.diffusion.level_orders_div,
+            replace_fn=lambda u_next, u_temp: u_next.replace(divergence=u_temp.divergence)
         )
 
         diffuse_vor_q = self._make_diffusion_fn(
             self.diffusion.vor_q_timescale,
             self.diffusion.vor_q_order,
-            replace_fn=lambda u_next, u_temp: u_next.replace(vorticity=u_temp.vorticity,tracers={'specific_humidity': u_temp.tracers['specific_humidity']}),
-            level_orders=self.diffusion.level_orders_vor_q,
+            # Apply the filter to vorticity and every tracer (specific_humidity + any
+            # extras like qc/qi/qnc). Keeping only specific_humidity silently zeros
+            # microphysics tracers over time.
+            replace_fn=lambda u_next, u_temp: u_next.replace(
+                vorticity=u_temp.vorticity,
+                tracers=dict(u_temp.tracers),
+            )
         )
 
         diffuse_temp = self._make_diffusion_fn(
             self.diffusion.temp_timescale,
             self.diffusion.temp_order,
-            replace_fn=lambda u_next, u_temp: u_next.replace(temperature_variation=u_temp.temperature_variation),
-            level_orders=self.diffusion.level_orders_temp,
+            replace_fn=lambda u_next, u_temp: u_next.replace(temperature_variation=u_temp.temperature_variation)
         )
         
         self.filters = [
@@ -388,48 +382,22 @@ class Model:
         # spectral space primitive_equations.State updated by model.run and model.resume
         self._final_modal_state = None
     
-    def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None):
-        """Return a diffusion filter closure for one of the three state slots.
+    def _make_diffusion_fn(self, timescale: jnp.float_, order: jnp.int_, replace_fn):
+        """Return diffusion filter function handle for use in the model time step.
 
-        Args:
-            timescale: base hyperdiffusion timescale (s).
-            order: uniform-order spectral power (used when level_orders is None).
-            replace_fn: picks which state variables get overwritten by the filter.
-            level_orders: optional 1-D array of per-level orders (length nlev)
-                enabling the ECHAM-style level-dependent hyperdiffusion.
-
+        timescale: diffusion timescale (s)
+        order: order of diffusion operator
+        replace_fn: function that takes (u_next, u_temp) and returns the updated u_next after diffusion (selects which variables to diffuse)
         """
         from dinosaur.filtering import horizontal_diffusion_filter
-        from jcm.diffusion import level_dependent_scaling
-        import jax
-
-        if level_orders is None:
-            def diffusion_filter(u, u_next):
-                eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-                scale = self.dt / (timescale * abs(eigenvalues[-1]) ** order)
-                filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
-                u_temp = filter_fn(u_next)
-                return replace_fn(u_next, u_temp)
-            return diffusion_filter
-
-        import numpy as np
-        # Precompute the scaling once (pure constant, not traced). This avoids
-        # JIT-time issues observed when the 3-D scaling was rebuilt inside the
-        # filter closure at high hyperdiffusion orders.
-        eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-        scaling_const = np.asarray(level_dependent_scaling(
-            eigenvalues, timescale, level_orders, self.dt,
-        ))  # (nlev, 1, lat_modes), numpy array → inlined as JIT constant
 
         def diffusion_filter(u, u_next):
-            def rescale(x):
-                if not hasattr(x, "shape"):
-                    return x
-                target_shape = np.shape(x)
-                if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
-                    return x
-                return scaling_const * x
-            u_temp = jax.tree_util.tree_map(rescale, u_next)
+            eigenvalues = self.coords.horizontal.laplacian_eigenvalues
+            scale = self.dt / (timescale * abs(eigenvalues[-1]) ** order)
+
+            filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
+
+            u_temp = filter_fn(u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
     
@@ -452,10 +420,12 @@ class Model:
         """
         from jcm.physics_interface import physics_state_to_dynamics_state
 
+        tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
+
         # Either use the designated initial state, or generate one. The initial state to the dycore is a modal primitive_equations.State,
         # but the optional initial state from the user is a nodal PhysicsState
         if physics_state is not None:
-            state = physics_state_to_dynamics_state(physics_state, self.primitive)
+            state = physics_state_to_dynamics_state(physics_state, self.primitive, tracer_specs=tracer_specs)
         else:
             state = self.default_state_fn(jax.random.PRNGKey(random_seed))
             # For sigma coords, we want log(P_s / p0) so that `exp(log_sp)` gives
@@ -473,6 +443,17 @@ class Model:
             state.tracers = {
                 'specific_humidity': (1e-2 if humidity_perturbation else 0.0) * primitive_equations_states.gaussian_scalar(self.coords, self.physics_specs)
             }
+
+        # Seed modal tracers for every TracerSpec the physics declares so that the
+        # dynamics core advects them. Shape matches specific_humidity (modal).
+        for spec in tracer_specs.values():
+            if spec.name in state.tracers:
+                continue
+            state.tracers[spec.name] = (
+                spec.initial_value
+                * jnp.ones_like(state.tracers['specific_humidity'])
+            )
+
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
     def _date_from_sim_time(self, sim_time) -> DateData:
@@ -530,8 +511,9 @@ class Model:
         from jcm.physics_interface import verify_state
         jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
+        tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         predictions = Predictions(
-            dynamics=dynamics_state_to_physics_state(state, self.primitive),
+            dynamics=dynamics_state_to_physics_state(state, self.primitive, tracer_specs=tracer_specs),
             physics=None,
             times=None
         )
@@ -687,7 +669,8 @@ class Model:
 
         """
         if isinstance(initial_state, primitive_equations.State):
-            self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive)
+            tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
+            self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive, tracer_specs=tracer_specs)
             self._final_modal_state = initial_state
         else:
             self.initial_nodal_state = initial_state

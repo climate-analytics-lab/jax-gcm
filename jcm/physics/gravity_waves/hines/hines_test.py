@@ -9,7 +9,7 @@ from .hines import (
     GravityWaveParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
     gravity_wave_drag
 )
-from jcm.physics.icon.constants.physical_constants import grav, cp
+from jcm.constants import grav, cp
 
 
 class TestBruntVaisalaFrequency:

@@ -22,7 +22,7 @@ from typing import NamedTuple, Tuple, Optional
 # from functools import partial  # No longer needed
 import tree_math
 
-from jcm.physics.icon.constants.physical_constants import (
+from jcm.constants import (
     grav, rd, cp
 )
 

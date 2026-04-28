@@ -21,7 +21,7 @@ The conversion follows a modular approach where each physics process is
 implemented as a separate JAX function that can be composed together.
 """
 
-from jcm.physics.icon.constants import physical_constants
+from jcm import constants as physical_constants
 
 __all__ = [
     'physical_constants',

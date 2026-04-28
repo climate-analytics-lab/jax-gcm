@@ -228,7 +228,7 @@ def _infer_dims_shape_and_coords(
     if hasattr(vertical, 'centers'):
         level_coords = vertical.centers
     else:
-        from jcm.physics.icon.constants.physical_constants import p0
+        from jcm.constants import p0
         level_coords = np.asarray(vertical.get_sigma_centers(p0))
 
     all_xr_coords = {

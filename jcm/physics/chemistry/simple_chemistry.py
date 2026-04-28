@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple
 import tree_math
 
-from jcm.physics.icon.constants.physical_constants import grav, rd
+from jcm.constants import grav, rd
 
 
 @tree_math.struct

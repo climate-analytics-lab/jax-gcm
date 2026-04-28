@@ -33,7 +33,7 @@ from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice,
 )
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+from jcm.constants import PhysicalConstants
 
 import rrtmgp
 from rrtmgp.config import radiative_transfer

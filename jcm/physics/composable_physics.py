@@ -30,7 +30,7 @@ from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
-from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -81,6 +81,24 @@ class ComposablePhysics(nnx.Module, Physics):
         """Delegate cache_coords to each term."""
         for term in self.terms:
             term.cache_coords(coords)
+
+    def required_tracers(self) -> tuple[TracerSpec, ...]:
+        """Union of TracerSpecs declared by every term.
+
+        Raises ``ValueError`` if two terms declare the same tracer name with
+        different specs — ambiguity should be resolved at composition time,
+        not silently.
+        """
+        seen: dict[str, TracerSpec] = {}
+        for term in self.terms:
+            for spec in term.required_tracers():
+                if spec.name in seen and seen[spec.name] != spec:
+                    raise ValueError(
+                        f"Conflicting TracerSpec for {spec.name!r}: "
+                        f"{seen[spec.name]} vs {spec}"
+                    )
+                seen[spec.name] = spec
+        return tuple(seen.values())
 
     def compute_tendencies(
         self,

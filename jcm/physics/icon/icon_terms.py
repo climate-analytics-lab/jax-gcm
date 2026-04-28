@@ -18,7 +18,7 @@ from typing import ClassVar
 
 from flax import nnx
 
-from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.date import DateData
 from jcm.physics.icon.icon_physics_data import PhysicsData
 from jcm.physics.icon.icon_coords import IconCoords
@@ -274,8 +274,96 @@ class IconConvection(IconTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
+class SundqvistCloudFraction(IconTermBase):
+    """Sundqvist (1989) / Lohmann-Roeckner (1996) diagnostic cloud fraction.
+
+    Diagnoses cloud fraction as ``cc = 1 - sqrt(1 - b0)`` with
+    ``b0 = (RH - RH_crit) / (1 - RH_crit)`` and emits the associated
+    condensation tendencies. Originally the ICON shallow-cloud step;
+    renamed to reflect the underlying scheme rather than the package.
+    """
+
+    name: ClassVar[str] = "sundqvist_cloud_fraction"
+    category: ClassVar[str] = "cloud_fraction"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute condensation tendencies and cloud-fraction diagnostics."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import apply_cloud_fraction
+        tend, data = apply_cloud_fraction(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
+class IconCloudsAndMicrophysics2M(IconTermBase):
+    """ICON 2-moment cloud microphysics (Phase 5a: warm-rain only).
+
+    Declares the full 2M prognostic tracer set — qc, qi, qnc, qni, qr, qs —
+    via :meth:`required_tracers`. The qnc/qni number concentrations are
+    stored per kg of air and carry ``nondimensionalize=False`` so they
+    round-trip through the modal/nodal converters without the gram/kg scaling
+    that mass mixing ratios get.
+
+    Only the Khairoutdinov-Kogan warm-rain autoconversion is wired in at this
+    stage; ice-phase and sedimentation work is tracked in issue #341. Must be
+    composed downstream of :class:`SundqvistCloudFraction`.
+    """
+
+    name: ClassVar[str] = "icon_clouds_microphysics_2m"
+    category: ClassVar[str] = "clouds"
+
+    @classmethod
+    def required_tracers(cls):
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+            TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
+            TracerSpec("qni", units="kg^-1", nondimensionalize=False),
+            TracerSpec("qr", units="kg/kg"),
+            TracerSpec("qs", units="kg/kg"),
+        )
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute 2-moment microphysics tendencies."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import apply_microphysics_2m
+        tend, data = apply_microphysics_2m(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
+class IconCloudsAndMicrophysics1M(IconTermBase):
+    """ICON 1-moment cloud microphysics (autoconversion + precipitation).
+
+    Reads post-condensation ``qc``/``qi``/``cloud_fraction`` from the
+    diagnostics dict; must be composed downstream of an
+    :class:`SundqvistCloudFraction` term.
+    """
+
+    name: ClassVar[str] = "icon_clouds_microphysics_1m"
+    category: ClassVar[str] = "clouds"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute microphysics tendencies."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import apply_microphysics_1m
+        tend, data = apply_microphysics_1m(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
 class IconCloudsAndMicrophysics(IconTermBase):
-    """Coupled cloud fraction and microphysics scheme."""
+    """Coupled cloud fraction and microphysics scheme (legacy single-term).
+
+    Deprecated: use :class:`SundqvistCloudFraction` + :class:`IconCloudsAndMicrophysics1M`
+    instead. Kept for backward compat with existing call sites.
+    """
 
     name: ClassVar[str] = "icon_clouds_microphysics"
     category: ClassVar[str] = "clouds"
@@ -357,6 +445,7 @@ def _icon_params_with(**overrides) -> Parameters:
         convection=overrides.get("convection", p.convection),
         clouds=overrides.get("clouds", p.clouds),
         microphysics=overrides.get("microphysics", p.microphysics),
+        microphysics_2m=overrides.get("microphysics_2m", p.microphysics_2m),
         gravity_waves=overrides.get("gravity_waves", p.gravity_waves),
         radiation=overrides.get("radiation", p.radiation),
         vertical_diffusion=overrides.get(
@@ -395,124 +484,6 @@ class ComposableIconPhysics(ComposablePhysics):
     def parameters(self) -> Parameters:
         """Read access to the shared ICON parameters struct."""
         return self._icon_parameters.get_value()
-
-    def __add__(self, other):
-        """Compose preserving the ComposableIconPhysics subclass.
-
-        The base ``__add__`` returns a plain ``ComposablePhysics``, which
-        loses the ICON parameter store and our custom ``data_struct_to_dict``
-        (used for writing precip / surface flux diagnostics to xarray).
-        """
-        if hasattr(other, "terms"):
-            other_terms = list(other.terms)
-        elif hasattr(other, "category") and callable(other):
-            other_terms = [other]
-        else:
-            return NotImplemented
-        return ComposableIconPhysics(
-            terms=list(self.terms) + other_terms,
-            checkpoint_terms=self.checkpoint_terms,
-            parameters=self._icon_parameters.get_value(),
-        )
-
-    def data_struct_to_dict(self, struct, nodal_shape=None, sep="."):  # noqa: D401
-        """Expose ICON-specific diagnostic fields for xarray output.
-
-        The composable diagnostics dict uses ``_<sub>`` keys for each ICON
-        sub-struct (radiation, convection, clouds, surface, ...). The parent
-        class filters those out. Here we unpack a curated set of useful
-        scalar diagnostics into top-level keys so they appear in the output
-        Dataset for analysis (precip, evap, surface fluxes, cloud water).
-
-        Fields coming out of column-vectorized terms have a trailing
-        ``ncols = nlon * nlat`` axis; we reshape to ``(..., nlon, nlat)``
-        so ``data_to_xarray`` can resolve the dims.
-        """
-        out = super().data_struct_to_dict(struct, nodal_shape=nodal_shape, sep=sep)
-
-        if not isinstance(struct, dict):
-            return out
-
-        # If caller passed a 3-D nodal_shape (nlev, nlon, nlat), we want the
-        # 2-D (nlon, nlat) view. Otherwise accept it as-is.
-        nodal_2d = None
-        if nodal_shape is not None:
-            if len(nodal_shape) == 3:
-                nodal_2d = (nodal_shape[1], nodal_shape[2])
-            elif len(nodal_shape) == 2:
-                nodal_2d = tuple(nodal_shape)
-
-        def _reshape_to_nodal(arr):
-            """Reshape trailing ncols axis → (nlon, nlat) when possible."""
-            if nodal_2d is None:
-                return arr
-            ncols = nodal_2d[0] * nodal_2d[1]
-            s = arr.shape
-            if s and s[-1] == ncols:
-                return arr.reshape(s[:-1] + nodal_2d)
-            return arr
-
-        # Walk the internal sub-structs and pick fields worth persisting.
-        def _pick(sub, attrs, prefix):
-            if sub is None:
-                return
-            for a in attrs:
-                v = getattr(sub, a, None)
-                if v is None:
-                    continue
-                out[f"{prefix}{a}"] = _reshape_to_nodal(v)
-
-        _pick(struct.get("_convection"), ["precip_conv"], "convection.")
-        _pick(struct.get("_clouds"),
-              ["precip_rain", "precip_snow", "cloud_fraction", "qc", "qi"],
-              "clouds.")
-        _pick(struct.get("_surface"),
-              ["latent_heat_flux", "sensible_heat_flux", "evaporation",
-               "surface_temperature", "momentum_flux_u", "momentum_flux_v"],
-              "surface.")
-        _pick(struct.get("_vertical_diffusion"),
-              ["tke", "pbl_height", "surface_friction_velocity",
-               "monin_obukhov_length"],
-              "vdiff.")
-        _pick(struct.get("_radiation"),
-              ["toa_lw_up", "toa_sw_up", "toa_sw_down",
-               "surface_lw_down", "surface_sw_down", "surface_lw_up"],
-              "radiation.")
-
-        # Post-pass: normalize remaining sub-struct arrays. ``super()`` emits
-        # every array in every typed sub-struct, including bulky fields on
-        # half levels (``radiation.sw_flux_up`` has shape ``(..., nlev+1, ncols)``)
-        # that ``data_to_xarray`` doesn't know how to label. Reshape trailing
-        # ncols to ``(nlon, nlat)`` where possible, and drop any array whose
-        # trailing two dims aren't the nodal grid — the curated picks above
-        # already cover anything a user is likely to want.
-        nlev_check = nodal_shape[0] if (nodal_shape and len(nodal_shape) == 3) else None
-        if nodal_2d is not None:
-            for k in list(out.keys()):
-                v = out[k]
-                if not hasattr(v, "shape"):
-                    continue
-                v = _reshape_to_nodal(v)
-                out[k] = v
-                s = v.shape
-                # Require the trailing two dims to match the nodal grid so
-                # ``data_to_xarray`` can resolve them. If there is an
-                # additional vertical axis immediately before, it must equal
-                # ``nlev`` (or 1 for surface-with-explicit-axis); anything
-                # else — e.g. half-level ``nlev+1`` radiation fluxes — is
-                # dropped.
-                if len(s) < 2 or s[-2:] != nodal_2d:
-                    del out[k]
-                    continue
-                # Only the ``(time, nlev, nlon, nlat)`` 4-D layout carries an
-                # explicit vertical axis; 2-D and 3-D layouts don't. Catch
-                # half-level fluxes by requiring the vertical dim (if
-                # present) to equal nlev or 1 (surface-with-axis).
-                if nlev_check is not None and len(s) == 4:
-                    vert = s[-3]
-                    if vert not in (nlev_check, 1):
-                        del out[k]
-        return out
 
     def replace(self, category, new_term):
         """Replace a term, preserving ComposableIconPhysics type."""
@@ -576,21 +547,6 @@ class ComposableIconPhysics(ComposablePhysics):
             state, nlev, ncols,
         )
 
-        # PhysicsState carries specific_humidity (and mass-mixing-ratio
-        # tracers) in g/kg — a SPEEDY legacy convention. ICON physics is
-        # written for kg/kg (see formulas like e = q·p/(0.622 + 0.378·q)
-        # in icon_physics.py, which requires q in kg/kg or else vapor
-        # pressure exceeds total pressure at realistic moisture levels).
-        # Convert on entry and scale the tendency back on exit so the
-        # interface's g/kg/s → nondim step applies the correct units.
-        vectorized_state = vectorized_state.copy(
-            specific_humidity=vectorized_state.specific_humidity * 1e-3,
-            tracers={
-                name: tracer * 1e-3
-                for name, tracer in vectorized_state.tracers.items()
-            },
-        )
-
         diagnostics: dict = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
@@ -621,16 +577,6 @@ class ComposableIconPhysics(ComposablePhysics):
             )
             acc = _accumulate(acc, tend)
 
-        # Scale q tendencies back kg/kg/s → g/kg/s to match PhysicsTendency
-        # convention expected by physics_tendency_to_dynamics_tendency.
-        acc = {
-            **acc,
-            "specific_humidity": acc["specific_humidity"] * 1e3,
-            "tracers": {
-                name: t * 1e3 for name, t in acc["tracers"].items()
-            },
-        }
-
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
         return tendencies, diagnostics
 
@@ -643,6 +589,7 @@ def icon_physics(
     parameters: Parameters | None = None,
     checkpoint_terms: bool = True,
     radiation_scheme: str = "grey",
+    cloud_scheme: str = "1m",
 ):
     """Create a ComposableIconPhysics with standard ICON ordering.
 
@@ -650,6 +597,8 @@ def icon_physics(
         parameters: Optional ICON Parameters. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms.
         radiation_scheme: "grey" (default), "rrtmgp", or "emulated".
+        cloud_scheme: "1m" (default, single-moment) or "2m" (two-moment
+            warm-rain; see issue #341 for ongoing scheme completion).
 
     Returns:
         A ComposableIconPhysics instance with all ICON terms.
@@ -669,6 +618,15 @@ def icon_physics(
             "Choose 'grey', 'rrtmgp', or 'emulated'."
         )
 
+    if cloud_scheme == "1m":
+        micro_term = IconCloudsAndMicrophysics1M()
+    elif cloud_scheme == "2m":
+        micro_term = IconCloudsAndMicrophysics2M()
+    else:
+        raise ValueError(
+            f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
+        )
+
     return ComposableIconPhysics(
         terms=[
             IconPrepareState(),
@@ -677,7 +635,8 @@ def icon_physics(
             IconChemistry(),
             rad_term,
             IconConvection(),
-            IconCloudsAndMicrophysics(),
+            SundqvistCloudFraction(),
+            micro_term,
             IconVerticalDiffusion(),
             IconSurface(),
             IconGravityWaves(),

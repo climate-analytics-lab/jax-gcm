@@ -52,7 +52,7 @@ def _make_icon_state(nlev=40, nlat=32, nlon=64, surface_temp_k=300.0,
     )
 
     # Geopotential from hydrostatic balance (approximate)
-    from jcm.physics.icon.constants import physical_constants as pc
+    from jcm import constants as pc
     height_profile = -pc.rd * atm_temp_k / pc.grav * np.log(sigma_mid)
     geopotential = jnp.broadcast_to(
         jnp.array(height_profile * pc.grav)[:, jnp.newaxis], (nlev, ncols)

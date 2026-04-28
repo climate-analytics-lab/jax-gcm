@@ -23,7 +23,7 @@ Date: 2025-01-10
 
 import jax.numpy as jnp
 from ..speedy.physical_constants import p0
-from .constants.physical_constants import grav, rd
+from jcm.constants import grav, rd
 
 
 def convert_surface_pressure(surface_pressure_normalized: jnp.ndarray) -> jnp.ndarray:

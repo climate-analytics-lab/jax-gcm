@@ -72,11 +72,20 @@ class TestIconComposablePhysics(unittest.TestCase):
         from jcm.physics.icon.icon_terms import icon_physics
 
         physics = icon_physics(checkpoint_terms=False)
-        self.assertEqual(len(physics.terms), 10)
+        # Cloud fraction and microphysics are now separate terms.
+        self.assertEqual(len(physics.terms), 11)
         categories = [t.category for t in physics.terms]
         self.assertIn("radiation", categories)
         self.assertIn("convection", categories)
         self.assertIn("surface", categories)
+        self.assertIn("cloud_fraction", categories)
+        self.assertIn("clouds", categories)
+        # Cloud fraction must precede microphysics so the microphysics term
+        # can read the post-condensation qc/qi/cloud_fraction diagnostics.
+        self.assertLess(
+            categories.index("cloud_fraction"),
+            categories.index("clouds"),
+        )
 
     def test_composable_with_model(self):
         """Composable ICON physics works with Model."""
@@ -129,7 +138,7 @@ class TestIconComposablePhysics(unittest.TestCase):
         # Verify split/merge roundtrip works
         graphdef, state = nnx.split(composable)
         restored = nnx.merge(graphdef, state)
-        self.assertEqual(len(restored.terms), 10)
+        self.assertEqual(len(restored.terms), 11)
 
 
 if __name__ == "__main__":
