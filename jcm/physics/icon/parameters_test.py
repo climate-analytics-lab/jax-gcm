@@ -17,10 +17,14 @@ def test_parameters_initialization():
     assert params.clouds is not None
     assert params.microphysics is not None
     
-    # Check some default values
+    # Check some default values.
+    # ECHAM-matching convention: crs at surface (0.9), crt aloft (0.7);
+    # ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
+    # KK2000 threshold the previous JAX port used).
     assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7
-    assert abs(float(params.clouds.crt) - 0.9) < 1e-7
-    assert abs(float(params.microphysics.ccraut) - 5.0e-4) < 1e-7
+    assert abs(float(params.clouds.crs) - 0.9) < 1e-7
+    assert abs(float(params.clouds.crt) - 0.7) < 1e-7
+    assert abs(float(params.microphysics.ccraut) - 15.0) < 1e-5
     
     print("✓ Default parameters initialized correctly")
 
@@ -42,7 +46,7 @@ def test_parameters_with_methods():
     # Test with_microphysics
     params4 = params.with_microphysics(ccraut=0.5e-3)
     assert abs(float(params4.microphysics.ccraut) - 0.5e-3) < 1e-7
-    assert abs(float(params.microphysics.ccraut) - 5.0e-4) < 1e-7  # Original unchanged
+    assert abs(float(params.microphysics.ccraut) - 15.0) < 1e-5  # Original unchanged (Beheng default)
     
     print("✓ Parameter update methods work correctly")
 

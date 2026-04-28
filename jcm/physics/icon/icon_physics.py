@@ -928,16 +928,48 @@ def apply_vertical_diffusion(
         tke = tke.reshape(nlev, ncols)
     thv_variance = jnp.zeros((nlev, ncols))
 
-    # Surface properties (simplified - should come from boundaries)
+    # Surface tile fractions and temperatures, derived from the boundary
+    # forcing exactly as ``apply_surface`` does — see icon_physics.py
+    # ``apply_surface``. Indices: 0=water, 1=sea-ice, 2=land. The
+    # previous code hardcoded ``[0, 0, 1]`` (all-land) here, which was
+    # inconsistent with ``apply_surface`` and only didn't break things
+    # because ``surface_fraction`` is currently dead inside the vdiff
+    # routines (Bug F2 in fortran_harness/PLAN.md). Wiring it up now
+    # so downstream consumers see correct values when the field is
+    # eventually used.
     nsfc_type = 3  # water, ice, land
+    land_fraction = terrain.fmask.reshape(ncols)
+    raw_ice = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
+    sea_ice_fraction = jnp.clip(raw_ice.reshape(ncols), 0.0, 1.0 - land_fraction)
+    water_fraction = 1.0 - land_fraction - sea_ice_fraction
     surface_fraction = jnp.zeros((ncols, nsfc_type))
-    surface_fraction = surface_fraction.at[:, 2].set(1.0)  # All land for now
+    surface_fraction = surface_fraction.at[:, 0].set(water_fraction)
+    surface_fraction = surface_fraction.at[:, 1].set(sea_ice_fraction)
+    surface_fraction = surface_fraction.at[:, 2].set(land_fraction)
 
-    # Get surface properties from boundaries
-    surface_temp_col = physics_data.surface.surface_temperature.reshape(ncols)
+    # Per-tile surface temperatures (Bug F3 in PLAN.md). Previously a
+    # single ``surface_temp`` was broadcast to all 3 tiles, so cold sea
+    # ice and warm open water got identical surface fluxes whenever
+    # both fractions were non-zero. Use the boundary SST for water,
+    # the prescribed ice temperature for ice (proxy: ``ctfreez = 271.38
+    # K`` saline-water freezing point — physically sea ice can't be
+    # warmer than this since the underlying ocean caps it), and
+    # ``forcing.stl_am`` for land.
+    sst_col = physics_data.surface.surface_temperature.reshape(ncols)
+    land_temp_col = (forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3
+                     else forcing.stl_am).reshape(ncols)
+    ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71``
+    ice_temp_col = jnp.where(sea_ice_fraction > 0.0,
+                             jnp.minimum(sst_col, ctfreez),
+                             sst_col)
+    surface_temperature = jnp.stack([sst_col, ice_temp_col, land_temp_col], axis=1)
+    # Roughness: same per-tile structure (water and ice ~1e-4 m, land 1e-2).
     roughness_length_col = physics_data.surface.roughness_length.reshape(ncols)
-    surface_temperature = jnp.repeat(surface_temp_col[:, jnp.newaxis], nsfc_type, axis=1)
-    roughness = jnp.repeat(roughness_length_col[:, jnp.newaxis], nsfc_type, axis=1)
+    roughness = jnp.stack([
+        jnp.full(ncols, 1e-4),  # water
+        jnp.full(ncols, 1e-3),  # sea ice (rougher than water)
+        roughness_length_col,   # land (from boundary)
+    ], axis=1)
 
     # Per-tile heat roughness z0h. ECHAM uses tile-specific forms:
     # open water gets ``exp(2 - 86·z0^0.375)`` (Charnock-derived), sea
@@ -1085,9 +1117,21 @@ def apply_surface(
     surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
     surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
+    # Per-tile surface temperatures (Bug F3 in PLAN.md). Previously
+    # ``ice_temp`` and ``soil_temp`` were both copies of ``surface_temp``
+    # (= the boundary SST), so the sea-ice and land tiles received the
+    # warm SST as their tile temperature whenever both fractions were
+    # non-zero. Use the SST for ocean, the saline freezing point
+    # (271.38 K) capped by SST for ice, and ``forcing.stl_am`` for land.
     ocean_temp = surface_temp
-    ice_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
-    soil_temp = jnp.repeat(surface_temp[:, jnp.newaxis], 4, axis=1)  # 4 soil layers
+    ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
+    land_temp = (forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3
+                 else forcing.stl_am).reshape(ncols)
+    ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
+                                 jnp.minimum(surface_temp, ctfreez),
+                                 surface_temp)
+    ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
+    soil_temp = jnp.repeat(land_temp[:, jnp.newaxis], 4, axis=1)         # 4 soil layers
     
     surface_state = initialize_surface_state(
         ncols, surface_fractions, ocean_temp, ice_temp, soil_temp, parameters.surface
