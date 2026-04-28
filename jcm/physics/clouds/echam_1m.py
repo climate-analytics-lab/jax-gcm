@@ -71,7 +71,7 @@ class MicrophysicsParameters:
     dt_sedi: float       # Sub-timestep for sedimentation (s)
 
     @classmethod
-    def default(cls, ccraut=1.0e-4, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
+    def default(cls, ccraut=15.0, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
                  ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
@@ -183,47 +183,67 @@ def autoconversion_kk2000(
     dt: float,
     config: MicrophysicsParameters
 ) -> jnp.ndarray:
-    """Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)
-    
-    This parameterization is more sophisticated than simple threshold-based
-    schemes and depends on both cloud water content and droplet concentration.
-    
+    """Autoconversion of cloud water to rain — Beheng (1994) implicit form.
+
+    The function name is kept as ``autoconversion_kk2000`` for callers'
+    backwards compat, but the body now uses the Beheng-1994 formulation
+    that ECHAM ``mo_cloud.f90`` uses (lines 841-863). The original
+    Khairoutdinov-Kogan (2000) explicit-rate form was unstable for
+    realistic post-convection cloud water values: at qc=0.3 g/kg the
+    raw KK2000 rate gives a depletion fraction of ~37500 % per 1800 s
+    timestep, requiring downstream clipping to mass-conservation bounds.
+    The Fortran-cloud-harness comparison surfaced this (Bug E-1: JAX
+    cloud water removal ~20x too fast vs ECHAM).
+
+    Beheng implicit-integration formulation:
+
+        zraut_rate = ccraut * 1.2e27 / rho * Nc^-3.3 * rho^4.7 * qc^3.7
+        qc_remain  = (1 + zraut_rate * dt * 3.7 * qc^3.7) ^ (-1/3.7)
+        autoconv   = qc * (1 - qc_remain) / dt
+
+    This Bernoulli-style integration always produces a
+    physically-bounded depletion fraction in [0, 1], even for very
+    large qc or long dt.
+
     Args:
-        cloud_water: Cloud water mixing ratio (kg/kg) 
+        cloud_water: Grid-mean cloud water mixing ratio (kg/kg)
         cloud_fraction: Cloud fraction (0-1)
         air_density: Air density (kg/m³)
-        droplet_number: Cloud droplet number concentration (1/kg)
+        droplet_number: Cloud droplet number concentration (1/m³)
         dt: Time step (s)
-        config: Microphysics configuration
-        
+        config: Microphysics configuration (uses ccraut, epsilon)
+
     Returns:
-        Autoconversion rate (kg/kg/s)
+        Grid-mean autoconversion rate (kg/kg/s)
 
     """
-    # In-cloud values
     qc_in_cloud = jnp.where(
         cloud_fraction > config.epsilon,
         cloud_water / cloud_fraction,
-        0.0
+        0.0,
     )
-    
-    # Convert mixing ratios to g/m³ for KK2000 formula
-    qc_gm3 = qc_in_cloud * air_density * 1000.0  # g/m³
-    nc_cm3 = droplet_number * air_density * 1e-6  # 1/cm³
-    
-    # KK2000 autoconversion rate formula
-    # P_aut = 1350 * qc^2.47 * (Nc * 1e-6)^-1.79
-    # Factor of 1e-3 converts from g/m³/s to kg/m³/s
-    autoconv_rate = jnp.where(
-        qc_in_cloud > config.ccraut,
-        1350.0 * qc_gm3**2.47 * (nc_cm3 + config.epsilon)**(-1.79) * 1e-3 / air_density,
-        0.0
-    )
-    
-    # Convert to grid-mean tendency
-    autoconv_rate = autoconv_rate * cloud_fraction
 
-    return autoconv_rate
+    zexm1 = 3.7  # 4.7 - 1.0
+    nc_per_cm3 = droplet_number * air_density * 1e-6  # 1/cm³
+    rho_g_cm3 = air_density * 1e-3                    # g/cm³
+
+    # Beheng's Nc^-3.3 dependence blows up for Nc → 0; floor at 1/cm³
+    nc_safe = jnp.maximum(nc_per_cm3, 1.0)
+    zraut_rate = (
+        config.ccraut * 1.2e27 / air_density
+        * nc_safe ** (-3.3)
+        * rho_g_cm3 ** 4.7
+    )
+
+    # Implicit integration: protect against (qc^zexm1) underflow at
+    # near-zero qc — the formula gives no autoconv there anyway.
+    qc_pow = jnp.where(qc_in_cloud > 1e-12, qc_in_cloud ** zexm1, 0.0)
+    denominator = 1.0 + zraut_rate * dt * zexm1 * qc_pow
+    qc_remaining_frac = denominator ** (-1.0 / zexm1)
+    autoconv_in_cloud = qc_in_cloud * (1.0 - qc_remaining_frac) / dt
+
+    # Convert to grid-mean
+    return autoconv_in_cloud * cloud_fraction
 
 
 def accretion_rain_cloud(
