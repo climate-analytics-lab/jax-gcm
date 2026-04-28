@@ -599,13 +599,45 @@ def tiedtke_nordeng_convection(
         lambda: (jnp.array(0.0), jnp.array(0.0))
     )
     
-    # Determine convection type based on CAPE and other criteria
+    # Determine convection type based on CAPE + free-troposphere moisture.
     # 0 = no convection, 1 = deep, 2 = shallow, 3 = mid-level
-    # Use more reasonable CAPE thresholds for triggering
+    #
+    # Mirrors the ECHAM trigger structure (mo_cumastr.f90 ``zktype`` line
+    # 276 + ``cubasmc`` line 660). ECHAM activates ktype=3 (mid-level
+    # convection) inside ``cuasc`` when no surface-based deep/shallow
+    # convection has fired AND a free-tropospheric layer is moist
+    # (RH > 90 %), upward-rising and above the boundary layer (z > 1500 m).
+    #
+    # JAX uses CAPE-based closure (which is more responsive than ECHAM's
+    # PBL-moisture-convergence closure on the same column) so ``ktype=1``
+    # often fires here when ECHAM would have picked ``ktype=3`` instead.
+    # We add ``ktype=3`` as a fallback for *moderate* CAPE columns
+    # (100 < CAPE < 1000 J/kg) with high free-tropospheric RH — a proxy
+    # for the cubasmc trigger that doesn't require a separate vertical-
+    # velocity input. Deep ``ktype=1`` still wins when CAPE is large.
+    qsat_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+    rh_env = humidity / jnp.maximum(qsat_env, 1e-12)
+    # Free-troposphere mask: ~700-300 hPa
+    free_trop_mask = jnp.logical_and(pressure < 70_000.0, pressure > 30_000.0)
+    has_moist_free_trop = jnp.any(
+        jnp.logical_and(free_trop_mask, rh_env > 0.90)
+    )
+
+    def select_active_conv_type():
+        # Deep convection if CAPE is strong
+        def deep_branch():
+            return jnp.array(1)
+        # Otherwise, mid-level if free-trop moist conditions met,
+        # else shallow.
+        def mid_or_shallow_branch():
+            return lax.cond(has_moist_free_trop, lambda: jnp.array(3),
+                            lambda: jnp.array(2))
+        return lax.cond(cape > 1000.0, deep_branch, mid_or_shallow_branch)
+
     conv_type = lax.cond(
-        jnp.logical_and(has_cloud_base, cape > 100.0),  # Minimum CAPE threshold
-        lambda: lax.cond(cape > 1000.0, lambda: 1, lambda: 2),  # Deep vs shallow
-        lambda: 0  # No convection
+        jnp.logical_and(has_cloud_base, cape > 100.0),
+        select_active_conv_type,
+        lambda: jnp.array(0),  # No convection
     )
     
     # Initialize tendencies to zero with explicit float32 dtype
