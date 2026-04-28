@@ -468,6 +468,81 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     return cape, cin
 
 
+def cloud_depth_for_target_top(
+    pressure: jnp.ndarray,
+    cloud_base: jnp.ndarray,
+    target_top_pa: float,
+    min_layers: int = 2,
+) -> jnp.ndarray:
+    """Number of model levels between ``cloud_base`` and the level closest
+    to ``target_top_pa`` from above — used as the updraft scan ceiling.
+
+    The scan ceiling is a *maximum* depth the updraft is allowed to
+    extend to, NOT the actual cloud top. The actual termination is
+    decided dynamically inside ``calculate_updraft`` (negative
+    buoyancy, or mfu < 1 % of mfb). ``cloud_depth`` only needs to give
+    the scan enough headroom to reach physically plausible cloud tops;
+    too small a value silently truncates real convection, too large
+    just wastes compute on levels that would terminate dynamically
+    anyway.
+
+    A fixed level-count value would be vertical-resolution-dependent in
+    surprising ways:
+
+    * On the 47-level ICON hybrid grid we run T85×L47 on, layers are
+      ~22 hPa thick in the mid-troposphere; ``cloud_depth=35`` ≈ a
+      surface-to-200-hPa scan range.
+    * On a coarser 8-level sigma grid (used in some bisection tests),
+      ``cloud_depth=35`` would be silently clamped to ``nlev-2`` —
+      the cloud is allowed to reach the model top, which both wastes
+      compute and risks unphysical extension into the stratosphere.
+    * On a 90-level grid, the same ``35`` would only let the cloud
+      reach ~700 hPa, cutting off real deep convection.
+
+    Deriving from a target *pressure* makes the value
+    resolution-independent. Recommended targets:
+
+    * Deep convection: 15000 Pa (150 hPa) — tropical Cb tops typically
+      reach the tropopause around this pressure.
+    * Shallow convection: 70000 Pa (700 hPa) — trade-cumulus cloud
+      tops at ~3 km.
+
+    Implementation: for any pressure index ordering, find the level
+    closest to ``target_top_pa`` from above (i.e. the level with the
+    HIGHEST pressure among levels whose pressure ≤ target). That's
+    the level we want the scan to reach. ``cloud_depth`` is then the
+    integer index distance ``|cloud_base - target_top_idx|``. The
+    result is clipped to ``[min_layers, nlev-2]`` so the scan always
+    has at least ``min_layers`` levels of headroom and stops short of
+    TOA.
+
+    Args:
+        pressure: Full-level pressure profile (Pa) [nlev]
+        cloud_base: Cloud-base level index (0-indexed)
+        target_top_pa: Scan should reach (at least) this pressure level
+        min_layers: Minimum scan depth (≥ 2 to avoid degenerate scans)
+
+    Returns:
+        Scan-ceiling depth in *levels* (int32), clipped to
+        ``[min_layers, nlev-2]``.
+    """
+    nlev = pressure.shape[0]
+    above_target = pressure <= target_top_pa
+    # Among levels at or above target, pick the HIGHEST-pressure one —
+    # that's the level closest to ``target_top_pa`` from above, where we
+    # want the scan to reach. ``argmax`` of ``-inf`` outside the mask
+    # returns 0 if no level is above target (clipped to ``min_layers``
+    # so it doesn't matter for the result).
+    masked_p = jnp.where(
+        above_target,
+        pressure,
+        jnp.array(-jnp.inf, dtype=pressure.dtype),
+    )
+    target_top_idx = jnp.argmax(masked_p)
+    depth = jnp.abs(cloud_base.astype(jnp.int32) - target_top_idx.astype(jnp.int32))
+    return jnp.clip(depth, min_layers, nlev - 2)
+
+
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray, 
@@ -552,18 +627,21 @@ def tiedtke_nordeng_convection(
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
-        # Cloud-top scan ceiling. Deep convection in the tropics regularly
-        # reaches the tropopause (~12-16 km, ~30 levels above cloud base
-        # on a 47-level ICON grid; ECHAM cumastr on the same RCE column
-        # terminates around level 17 / 400 hPa, ~28 levels above a
-        # surface cloud base). Shallow convection peaks at 2-3 km.
-        # Set a generous scan range and let the updraft's dynamic
-        # termination (negative buoyancy or mfu < 1 % of base — see
-        # ``calculate_updraft``) decide where the cloud actually ends.
-        # The previous limit of 15 layers capped deep convection at
-        # ~750 hPa, ~18 levels short of where the harness shows ECHAM
-        # cuasc terminating.
-        cloud_depth = lax.cond(conv_type == 2, lambda: 5, lambda: 35)
+        # Cloud-top scan ceiling. The ceiling is a *maximum* depth, not
+        # the actual cloud top — actual termination is decided
+        # dynamically inside ``calculate_updraft`` (negative buoyancy or
+        # mfu < 1 % of mfb). Derive the ceiling from a target cloud-top
+        # PRESSURE rather than a fixed level count so the value is
+        # vertical-resolution-independent. Targets:
+        #   * Deep:    150 hPa (tropical Cb tops near the tropopause)
+        #   * Shallow: 700 hPa (trade-cumulus tops at ~3 km)
+        # See ``cloud_depth_for_target_top`` for the derivation and a
+        # detailed discussion of why a fixed level count is wrong.
+        cloud_depth = lax.cond(
+            conv_type == 2,
+            lambda: cloud_depth_for_target_top(pressure, cloud_base, 70_000.0),
+            lambda: cloud_depth_for_target_top(pressure, cloud_base, 15_000.0),
+        )
 
         # Handle level ordering properly
         pressure_increasing = pressure[0] < pressure[-1]
