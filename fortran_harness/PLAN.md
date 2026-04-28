@@ -204,9 +204,18 @@ quick test simulation before building the full harness.
 
 The 1-year T85×47 aquaplanet run from the harness branch (commit
 493d480) failed at day 280-285 with bottom-level air-T drifting to
-188 K over a prescribed 273 K SST. Surface-flux audit found one
-sign error already fixed (commit 4332fec) and several structural
-issues to track:
+188 K over a prescribed 273 K SST. Surface-flux audit found six
+issues (F1-F6); all fixed.
+
+**Outcome (commit b409b1f and earlier)**: full 1-year T85×47 ICON
+aquaplanet runs cleanly for 365 days from a 1 g/kg humidity
+perturbation. Final state has tropical surface air at ~280 K under
+~300 K SST, polar surface air at ~260 K, q max 7.3 g/kg, u max
+95 m/s. No NaN, no climate drift, surface flux coupling holds
+near-surface air close to the prescribed SST. Compare to the prior
+"10 days stable" baseline before this branch — >36× improvement.
+
+Per-bug detail follows.
 
 ### Bug F1 — FIXED (commit 4332fec): Businger-Dyer sign error
 
