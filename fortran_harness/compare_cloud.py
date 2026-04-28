@@ -197,22 +197,17 @@ def run_jax_cloud_equivalent(state: dict) -> dict:
     qi_post = jnp.maximum(qi + cld_tend.dqidt * dt, 0.0)
 
     # Stage 2: microphysics (autoconversion, accretion, sedimentation, etc.)
+    # Signature: (T, q, p, qc, qi, cloud_fraction, rho, layer_thickness,
+    #             droplet_number, dt, config)
     mp_cfg = MicrophysicsParameters.default()
-    try:
-        mp_tend, _ = cloud_microphysics(
-            T_post, q_post, qc_post, qi_post,
-            cld_state.cloud_fraction,
-            p, rho, pmref, dt, mp_cfg,
-        )
-    except TypeError:
-        # Signature variant — fall back to zeros so the harness still runs.
-        nlev = T.shape[0]
-        from jcm.physics.clouds.echam_1m import MicrophysicsTendencies
-        mp_tend = MicrophysicsTendencies(
-            dtedt=jnp.zeros(nlev), dqdt=jnp.zeros(nlev),
-            dqcdt=jnp.zeros(nlev), dqidt=jnp.zeros(nlev),
-            dqrdt=jnp.zeros(nlev), dqsdt=jnp.zeros(nlev),
-        )
+    pdz = jnp.asarray(state["pdz"][0])
+    nc  = jnp.full_like(T, 100e6)  # cm⁻³ × 1e6 = 100/cm³ in /m³
+    mp_tend, _ = cloud_microphysics(
+        T_post, q_post, p, qc_post, qi_post,
+        cld_state.cloud_fraction,
+        rho, pdz, nc,
+        dt, mp_cfg,
+    )
 
     # Combine tendencies for the diff. ECHAM ``cloud()`` returns one set
     # of (heating, q-tend, qc-tend, qi-tend) covering both phases.
