@@ -280,11 +280,29 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rce", action="store_true",
                         help="run on a tropical RCE column")
+    parser.add_argument("--with-cloud-water", action="store_true",
+                        help="seed pxlm1/pxim1 with realistic detrained cloud "
+                             "water (Bug E mitigation: lets cloud() actually "
+                             "do something on the column)")
     parser.add_argument("--klev", type=int, default=47)
     args = parser.parse_args()
 
     if args.rce:
         state = tropical_rce_state(args.klev)
+        if args.with_cloud_water:
+            # Seed cloud liquid water in the mid-troposphere (~600-300 hPa)
+            # to mimic post-convection detrainment. ~0.3 g/kg liquid where
+            # T > 273 K; ~0.1 g/kg ice where T < 250 K.
+            p = state["papm1"][0]
+            T = state["ptm1"][0]
+            qc = np.where(np.logical_and(p < 60_000.0, T > 273.0), 3e-4, 0.0)
+            qi = np.where(np.logical_and(p < 30_000.0, T < 250.0), 1e-4, 0.0)
+            state["pxlm1"] = qc.reshape(1, -1)
+            state["pxim1"] = qi.reshape(1, -1)
+            # Pre-set cloud cover where there's water (matching ECHAM's
+            # mo_cover-style upstream); JAX would diagnose this internally.
+            state["paclc"] = (np.where(qc + qi > 1e-10, 0.5, 0.0)).reshape(1, -1)
+            print(f"Seeded {(qc>0).sum()} liquid + {(qi>0).sum()} ice cloud levels")
         print(f"Tropical RCE column: klev={args.klev}, "
               f"surface T={state['ptm1'][0, -1]:.2f} K, "
               f"surface q={state['pqm1'][0, -1] * 1000:.3f} g/kg")

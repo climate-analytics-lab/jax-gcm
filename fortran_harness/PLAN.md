@@ -108,6 +108,31 @@ meaningful test case is "what happens when convection has already
 detrained cloud water and then the cloud module fires?" That's the
 realistic flow in the production model.
 
+**With seeded cloud water (`compare_cloud.py --rce --with-cloud-water`)**:
+
+The harness fires meaningful tendencies in both Fortran and JAX. Initial
+findings:
+
+| Field | Fortran | JAX |
+|---|---|---|
+| pq_cld peak (W/m²)    | -83.7 (cooling) | -45.2 (cooling) |
+| pq_cld column sum     | -171.9          | -106.3          |
+| pqte_cld peak         | +1.4e-7         | +8.6e-8         |
+| pxlte_cld peak (drop) | -4.7e-9         | **-8.6e-8** (~20x larger) |
+| pxite_cld peak (drop) | **-3.5e-8** (~3x larger) | -1.0e-8 |
+| paclc peak            | 0.50 (preset)   | 0.42 (diagnosed) |
+
+Discrepancies for next-session investigation:
+- **Cloud-water removal too fast in JAX** (20x): suggests
+  ``echam_1m`` autoconversion (Khairoutdinov-Kogan 2000) or accretion
+  rate is too aggressive vs ECHAM's Beheng (1994).
+- **Cloud-ice sedimentation too slow in JAX** (3x): suggests
+  ``echam_1m`` ice fall speed (Heymsfield-Donner) is underestimated.
+- Heating sign agrees (sublimation-driven cooling at the ice levels)
+  but magnitude differs by ~2x.
+
+These are tractable next-pass fixes once the harness is in shape.
+
 ## Phase 4 — TTE-TKE vertical diffusion
 
 Lower priority — vdiff was a no-op in the term-removal experiment
