@@ -9,6 +9,7 @@ T85x47 grid here.
 import unittest
 from pathlib import Path
 
+import pytest
 from hydra import compose, initialize_config_dir
 
 from jcm.runners import (
@@ -280,3 +281,29 @@ class TestMainCLI(unittest.TestCase):
                 HydraConfig.instance().set_config(cfg)
                 main_module.main.__wrapped__(cfg)
             self.assertTrue(Path(tmpdir, "cli_test.nc").exists())
+
+
+# ---------------------------------------------------------------------------
+# Slow-marked companions
+#
+# The PR CI runs ``pytest -m "slow" --cov-fail-under=80``. The push CI runs
+# ``-m "not slow" --cov-fail-under=90``. We need the same end-to-end paths
+# exercised in *both* passes so neither coverage threshold drops below the
+# bar after we add new code. Subclassing inherits every test method and the
+# class-level ``slow`` marker decides which CI pass picks them up.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestEndToEndSlow(TestEndToEnd):
+    pass
+
+
+@pytest.mark.slow
+class TestModeDispatchSlow(TestModeDispatch):
+    pass
+
+
+@pytest.mark.slow
+class TestMainCLISlow(TestMainCLI):
+    pass

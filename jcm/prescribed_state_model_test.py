@@ -3,6 +3,7 @@
 import unittest
 
 import jax.numpy as jnp
+import pytest
 
 from jcm.constants import grav
 from jcm.physics_interface import PhysicsState
@@ -46,3 +47,10 @@ class TestPrescribedStateModel(unittest.TestCase):
         self.assertIsInstance(predictions, PrescribedStatePredictions)
         self.assertEqual(predictions.tendencies.temperature.shape[0], 3)
         self.assertEqual(predictions.times.shape[0], 3)
+
+
+# Slow-marked companion — see jcm/runners_test.py for rationale.
+
+@pytest.mark.slow
+class TestPrescribedStateModelSlow(TestPrescribedStateModel):
+    pass

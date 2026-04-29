@@ -3,6 +3,7 @@
 import unittest
 
 import jax.numpy as jnp
+import pytest
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
@@ -124,3 +125,15 @@ class TestSCMHelpers(unittest.TestCase):
         self.assertEqual(set(tracers), {'qc', 'qi'})
         self.assertEqual(tracers['qc'].shape, (4,))
         self.assertAlmostEqual(float(tracers['qc'][0]), 1e-4)
+
+
+# Slow-marked companions — see jcm/runners_test.py for rationale.
+
+@pytest.mark.slow
+class TestSCMHeldSuarezSlow(TestSCMHeldSuarez):
+    pass
+
+
+@pytest.mark.slow
+class TestSCMICONSlow(TestSCMICON):
+    pass
