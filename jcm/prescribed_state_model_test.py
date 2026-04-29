@@ -3,7 +3,6 @@
 import unittest
 
 import jax.numpy as jnp
-import pytest
 
 from jcm.constants import grav
 from jcm.physics_interface import PhysicsState
@@ -33,7 +32,6 @@ def _make_test_state(coords) -> PhysicsState:
     )
 
 
-@pytest.mark.slow
 class TestPrescribedStateModel(unittest.TestCase):
     def setUp(self):
         self.coords = get_held_suarez_coords(layers=8, spectral_truncation=21)

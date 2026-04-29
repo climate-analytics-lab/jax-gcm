@@ -3,7 +3,6 @@
 import unittest
 
 import jax.numpy as jnp
-import pytest
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
@@ -60,7 +59,6 @@ class TestSCMConstruction(unittest.TestCase):
         self.assertEqual(scm.forcing.sea_surface_temperature.shape, (1, 1))
 
 
-@pytest.mark.slow
 class TestSCMHeldSuarez(unittest.TestCase):
     """Held-Suarez SCM run on a small column."""
 
@@ -93,7 +91,6 @@ class TestSCMHeldSuarez(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
 
 
-@pytest.mark.slow
 class TestSCMICON(unittest.TestCase):
     """ICON-grey SCM run — exercises tracer evolution."""
 

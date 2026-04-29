@@ -9,7 +9,6 @@ T85x47 grid here.
 import unittest
 from pathlib import Path
 
-import pytest
 from hydra import compose, initialize_config_dir
 
 from jcm.runners import (
@@ -150,8 +149,10 @@ class TestBuilders(unittest.TestCase):
         self.assertEqual(model.coords.horizontal.nodal_shape, (96, 48))
 
 
-@pytest.mark.slow
 class TestEndToEnd(unittest.TestCase):
+    """Tiny end-to-end runs at T31/L8 — kept fast so the push CI exercises
+    the full ``runners.run`` + ``Model.run`` path."""
+
     def test_run_held_suarez_smoke(self):
         cfg = _compose([
             "physics=held_suarez",
@@ -172,3 +173,107 @@ class TestEndToEnd(unittest.TestCase):
         ])
         predictions = run(cfg)
         self.assertEqual(predictions.dynamics.u_wind.shape[0], 2)
+
+
+class TestModeDispatch(unittest.TestCase):
+    """Cover the ``run.mode = chunked / prescribed / scm`` dispatch paths."""
+
+    def test_chunked_run_writes_per_chunk_netcdfs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.total_time=2",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                f"run.output_prefix={tmpdir}/chunk",
+            ])
+            preds = run(cfg)
+            # ``run_chunked`` returns a list of per-chunk health reports.
+            self.assertIsInstance(preds, list)
+            self.assertGreaterEqual(len(preds), 1)
+            self.assertTrue(any(Path(tmpdir).glob("chunk_day*.nc")))
+
+    def _write_state_file(self, path):
+        # Run a tiny full simulation and dump it so the prescribed/scm modes
+        # have a JCM-shaped state to load.
+        cfg = _compose([
+            "physics=held_suarez",
+            "grid=held_suarez_t31_l8",
+            "run.time_step=180",
+            "run.total_time=2",
+            "run.save_interval=1",
+        ])
+        preds = run(cfg)
+        preds.to_xarray().to_netcdf(path)
+
+    def test_prescribed_mode_runs_from_state_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.nc"
+            self._write_state_file(str(state_file))
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.mode=prescribed",
+                f"run.state_file={state_file}",
+            ])
+            preds = run(cfg)
+            self.assertEqual(preds.tendencies.temperature.shape[0], 2)
+
+    def test_scm_mode_picks_column_from_state_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.nc"
+            self._write_state_file(str(state_file))
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.mode=scm",
+                f"run.state_file={state_file}",
+                "run.column.lat_deg=0.0",
+                "run.column.lon_deg=0.0",
+            ])
+            preds = run(cfg)
+            # SCM output is 1-D in level with a leading time axis.
+            self.assertEqual(preds.tendencies.temperature.shape, (2, 8))
+
+
+class TestMainCLI(unittest.TestCase):
+    """Smoke-test the Hydra CLI entry point at ``jcm.main``."""
+
+    def test_main_writes_netcdf(self):
+        # Hydra's testing helpers compose the same config the CLI would and
+        # invoke the entry point; this covers ``main`` + ``resolve_output_path``
+        # + ``save_predictions`` without spawning a subprocess.
+        import tempfile
+        from hydra.experimental.callback import Callback  # noqa: F401  (Hydra check)
+        from jcm import main as main_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+                cfg = compose(
+                    config_name="config",
+                    overrides=[
+                        "physics=held_suarez",
+                        "grid=held_suarez_t31_l8",
+                        "run.time_step=180",
+                        "run.total_time=2",
+                        "run.save_interval=1",
+                        f"run.output={tmpdir}/cli_test.nc",
+                    ],
+                    return_hydra_config=True,
+                )
+                # Hydra's runtime config isn't normally available outside the
+                # ``@hydra.main`` decorator; resolve it manually for the test.
+                from hydra.core.hydra_config import HydraConfig
+                HydraConfig.instance().set_config(cfg)
+                main_module.main.__wrapped__(cfg)
+            self.assertTrue(Path(tmpdir, "cli_test.nc").exists())
