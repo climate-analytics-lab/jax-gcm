@@ -34,10 +34,13 @@ Command-line interface
 ----------------------
 
 Most simulations can be launched without writing any Python via the bundled
-Hydra CLI::
+Hydra CLI. ``jcm/main.py`` is executable so it can be invoked either as a
+module or directly::
 
-   python -m jcm.main                                          # default 10-day SPEEDY aquaplanet
-   python -m jcm.main physics=icon grid=icon_t85_l47_hybrid    # ICON T85x47
+   ./jcm/main.py                                               # direct invocation
+   python -m jcm.main                                          # equivalent module form
+   ./jcm/main.py physics=icon grid=icon_t85_l47_hybrid         # ICON T85x47
+   python -m jcm.main physics=icon grid=icon_t85_l47_hybrid    # equivalent
    python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
        run.total_time=30 run.save_interval=1
    python -m jcm.main physics=icon physics.params.convection.entrpen=4e-4

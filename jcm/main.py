@@ -1,10 +1,12 @@
+#!/usr/bin/env python
 """Hydra-based CLI entry point for JAX-GCM.
 
 Examples
 --------
 Default 10-day SPEEDY aquaplanet run::
 
-    python -m jcm.main
+    python -m jcm.main      # via the module path
+    ./jcm/main.py           # or directly as an executable
 
 Switch physics package via Hydra config groups::
 
