@@ -10,3 +10,6 @@ sponge:
   levels: 0
   timescale_h: 3.0
   enspodi: 2.0
+
+chunk_days: 0
+output_prefix: smoke_chunked

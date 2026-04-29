@@ -1,4 +1,5 @@
-# Held-Suarez T31 / 8-layer.
-vertical: held_suarez
+# T31 / 8 sigma layers — the standard Held-Suarez resolution.
+vertical: sigma
 layers: 8
 spectral_truncation: 31
+spmd_mesh: null

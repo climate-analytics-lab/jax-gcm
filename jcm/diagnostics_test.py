@@ -54,3 +54,11 @@ class TestCheckHealth(unittest.TestCase):
         ds = _make_dataset(T_min=50.0, T_max=600.0)
         _, report = check_health(ds, 1, 90.0)
         print_report(report)
+
+    def test_any_nan_temperature_fails(self):
+        # A single NaN in T should fail the run, not require a > 10% fraction.
+        ds = _make_dataset(T_min=240.0, T_max=300.0, nan_frac=0.5)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertGreater(report["T_nan_frac"], 0)
+        self.assertFalse(ok)
+        self.assertTrue(any("NaN" in reason for reason in report["reasons"]))

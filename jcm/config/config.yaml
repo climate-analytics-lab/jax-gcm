@@ -5,6 +5,7 @@ defaults:
   - run: default
   - init: isothermal
   - terrain: aquaplanet
+  - forcing: default
   - diffusion: default
   - override hydra/help: custom_help
 

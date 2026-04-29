@@ -1,4 +1,5 @@
-# ICON T85 / 47 hybrid (a + b·P_s) levels — the standard moist-physics target.
-vertical: icon_hybrid
+# T85 / 47 hybrid (a + b·P_s) levels — the standard ICON moist-physics target.
+vertical: hybrid
 layers: 47
 spectral_truncation: 85
+spmd_mesh: null

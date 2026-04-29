@@ -2,3 +2,4 @@
 vertical: sigma
 layers: 8
 spectral_truncation: 42
+spmd_mesh: null

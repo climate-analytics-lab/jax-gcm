@@ -1,4 +1,6 @@
-# Long ICON run: monthly snapshots, conservative timestep, sponge enabled.
+# Long ICON run: chunked into 90-day pieces with health checks between each
+# chunk, monthly snapshots inside each chunk, conservative timestep, sponge
+# enabled. Replaces the old ``utils/run_icon_longrun.py`` script.
 time_step: 12
 save_interval: 30
 total_time: 365
@@ -10,3 +12,6 @@ sponge:
   levels: 5
   timescale_h: 3.0
   enspodi: 2.0
+
+chunk_days: 90
+output_prefix: longrun

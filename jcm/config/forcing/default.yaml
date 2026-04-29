@@ -1,0 +1,3 @@
+# Default surface forcing — aquaplanet built from ``coords.horizontal`` at
+# ``ForcingData.zeros``. Land + SST default to 288.15 K.
+kind: default

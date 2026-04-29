@@ -30,6 +30,13 @@ template: |
       python -m jcm.main physics=icon grid=icon_t85_l47_hybrid init=jw \
           run.sponge.levels=5
 
+    Realistic boundary forcing from a netCDF file:
+      python -m jcm.main forcing=from_file forcing.file=/path/to/forcing.nc
+
+    Long ICON run with chunked health checks (replaces run_icon_longrun.py):
+      python -m jcm.main physics=icon grid=icon_t85_l47_hybrid run=longrun \
+          run.total_time=1095 run.chunk_days=90
+
     Parameter sweep:
       python -m jcm.main -m run.time_step=10,20,30
 
@@ -41,6 +48,7 @@ template: |
     run:        default | smoke | longrun        (time/save_interval/total_time)
     init:       isothermal | jw
     terrain:    aquaplanet | from_file
+    forcing:    default | from_file
     diffusion:  default | strong
 
   Useful overrides:
@@ -52,10 +60,16 @@ template: |
     run.output_averages:  Output time-averaged diagnostics (default: false)
     run.log_level:        DEBUG | INFO | WARNING | CRITICAL
     run.sponge.levels:    Top levels covered by Rayleigh sponge (0 = off)
+    run.chunk_days:       Chunk a long run into N-day pieces with health
+                          checks between each chunk (0 = single integration)
+    run.output_prefix:    Prefix for chunked-mode output netCDFs
     physics.radiation:    grey | rrtmgp | emulated  (icon only)
     physics.cloud_scheme: 1m | 2m                   (icon only)
+    grid.vertical:        sigma | hybrid
     grid.layers:          Number of vertical levels
     grid.spectral_truncation: T-truncation (e.g. 31, 42, 85)
+    grid.spmd_mesh:       SPMD device mesh [x, y, z] (null = single device)
+    forcing.file:         Path to a forcing netCDF (with forcing=from_file)
 
   Output:
   -------

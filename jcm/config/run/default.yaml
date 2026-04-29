@@ -12,3 +12,10 @@ sponge:
   levels: 0
   timescale_h: 3.0
   enspodi: 2.0
+
+# Chunked-mode options. When ``chunk_days > 0`` the integration is broken
+# into chunks and run through ``jcm.diagnostics.check_health`` between each
+# one — useful for long runs that may need to bail out on a NaN. Chunks are
+# written to ``{output_prefix}_day{N}.nc``.
+chunk_days: 0
+output_prefix: chunked_run

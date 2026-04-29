@@ -1,0 +1,5 @@
+# Realistic surface forcing loaded from a netCDF boundary file (SST, sea
+# ice, land T, soil moisture, snow cover, albedo). The path must be set at
+# the command line: ``forcing=from_file forcing.file=/path/to/forcing.nc``.
+kind: from_file
+file: ???

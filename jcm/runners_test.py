@@ -9,6 +9,7 @@ T85x47 grid here.
 import unittest
 from pathlib import Path
 
+import pytest
 from hydra import compose, initialize_config_dir
 
 from jcm.runners import (
@@ -34,11 +35,12 @@ class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()
         self.assertEqual(cfg.physics.name, "speedy")
-        self.assertEqual(cfg.grid.vertical, "speedy")
+        self.assertEqual(cfg.grid.vertical, "sigma")
         self.assertEqual(cfg.grid.layers, 8)
         self.assertEqual(cfg.run.time_step, 10)
         self.assertEqual(cfg.init.kind, "isothermal")
         self.assertEqual(cfg.terrain.kind, "aquaplanet")
+        self.assertEqual(cfg.forcing.kind, "default")
         self.assertEqual(float(cfg.diffusion.scale), 1.0)
 
     def test_icon_compose(self):
@@ -114,6 +116,7 @@ class TestBuilders(unittest.TestCase):
         self.assertEqual(model.coords.horizontal.nodal_shape, (96, 48))
 
 
+@pytest.mark.slow
 class TestEndToEnd(unittest.TestCase):
     def test_run_held_suarez_smoke(self):
         cfg = _compose([

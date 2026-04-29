@@ -3,6 +3,7 @@
 import unittest
 
 import jax.numpy as jnp
+import pytest
 
 from jcm.constants import grav
 from jcm.physics_interface import PhysicsState
@@ -41,6 +42,7 @@ def _make_test_state(coords) -> PhysicsState:
     )
 
 
+@pytest.mark.slow
 class TestSingleColumnModel(unittest.TestCase):
     """Held-Suarez SCM tests — cheap and fully aquaplanet."""
 
@@ -80,6 +82,7 @@ class TestSingleColumnModel(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape[0], 2)
 
 
+@pytest.mark.slow
 class TestSingleColumnModelICON(unittest.TestCase):
     """ICON-physics SCM test on a small grid — exercises tracer evolution."""
 

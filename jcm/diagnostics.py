@@ -71,7 +71,9 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
 
     ok = True
     reasons: list[str] = []
-    if report.get("T_nan_frac", 0) > 0.1:
+    # Any NaN in temperature is a failure — the integration has either
+    # blown up locally or the dycore has produced an out-of-domain state.
+    if report.get("T_nan_frac", 0) > 0:
         ok = False
         reasons.append(f"T NaN fraction {report['T_nan_frac']:.1%}")
     if report.get("T_min", 200) < 100:

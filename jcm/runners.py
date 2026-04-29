@@ -33,38 +33,50 @@ logger = logging.getLogger(__name__)
 def build_coords(cfg: DictConfig):
     """Build a ``CoordinateSystem`` from ``cfg.grid``.
 
-    ``cfg.grid.vertical`` selects the vertical-coordinate family:
-        ``speedy``      -- SPEEDY sigma boundaries (8 levels by default)
-        ``held_suarez`` -- Held-Suarez sigma boundaries
-        ``icon_hybrid`` -- ICON hybrid (a + b·P_s) coordinates
-        ``sigma``       -- equidistant sigma coordinates
+    ``cfg.grid.vertical`` is the coordinate *family* — ``sigma`` for
+    equidistant sigma coordinates, ``hybrid`` for an ICON-style
+    ``HybridCoordinates`` table. Layer count is independent of physics: each
+    physics package is responsible for raising if it can't accept the chosen
+    ``cfg.grid.layers`` (SPEEDY, for instance, only supports a fixed set).
+
+    ``cfg.grid.spmd_mesh`` (optional) is a ``[x, y, z]`` triple specifying
+    the SPMD device mesh over (longitude, latitude, vertical); pass ``null``
+    or omit to run on a single device.
     """
     grid = cfg.grid
     layers = grid.layers
     truncation = grid.spectral_truncation
+    spmd_mesh = grid.get("spmd_mesh", None)
+    spmd_mesh = tuple(spmd_mesh) if spmd_mesh is not None else None
 
     vertical = grid.vertical
-    if vertical == "speedy":
-        from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        return get_speedy_coords(layers=layers, spectral_truncation=truncation)
-    if vertical == "held_suarez":
-        from jcm.physics.held_suarez.utils import get_held_suarez_coords
-        return get_held_suarez_coords(layers=layers, spectral_truncation=truncation)
-    if vertical == "icon_hybrid":
-        from jcm.physics.icon.icon_levels import get_icon_levels
-        return get_coords(
-            vertical_coords=get_icon_levels(layers),
-            spectral_truncation=truncation,
-        )
     if vertical == "sigma":
         from dinosaur.sigma_coordinates import SigmaCoordinates
         return get_coords(
             vertical_coords=SigmaCoordinates.equidistant(layers),
             spectral_truncation=truncation,
+            spmd_mesh=spmd_mesh,
+        )
+    if vertical == "hybrid":
+        # ICON ships pre-tuned hybrid tables for 40 / 47 levels; for any
+        # other count the user has to drop the table in by hand. Keep the
+        # error chatty so the failure mode is obvious.
+        from jcm.physics.icon.icon_levels import get_icon_levels
+        try:
+            vert = get_icon_levels(layers)
+        except ValueError as exc:
+            raise ValueError(
+                f"hybrid coords with {layers} levels are not pre-configured. "
+                "Use one of the supported counts (40, 47) or extend "
+                "jcm.physics.icon.icon_levels.get_icon_levels."
+            ) from exc
+        return get_coords(
+            vertical_coords=vert,
+            spectral_truncation=truncation,
+            spmd_mesh=spmd_mesh,
         )
     raise ValueError(
-        f"Unknown grid.vertical={vertical!r}; "
-        "expected one of: speedy, held_suarez, icon_hybrid, sigma"
+        f"Unknown grid.vertical={vertical!r}; expected 'sigma' or 'hybrid'."
     )
 
 
@@ -148,16 +160,48 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
 # Initial state injection (JW-style lapse-rate profile)
 # ---------------------------------------------------------------------------
 
-def inject_jw_profile(model: Model) -> None:
-    """Replace the default isothermal init with a JW-style lapse-rate profile.
+# Standard-atmosphere lapse rate and surface temperature for the JW init.
+_JW_T_SFC = 288.0       # K, mid-latitude mean surface T
+_JW_LAPSE = 6.5e-3      # K/m, ICAO standard tropospheric lapse rate
+_JW_T_FLOOR = 250.0     # K, cold-tail cap so semi-implicit reference T stays
+                        # close (dycore goes unstable for ΔT ~ 50 K).
+# Reference temperature used for the column-mean hydrostatic balance applied
+# to surface pressure over orography. ~ midpoint between troposphere and
+# stratosphere — exact value matters very little for the surface-pressure
+# field, but the nondimensionalisation is sensitive to changes here.
+_HYDROSTATIC_T_REF = 260.0
 
-    Mirrors ``utils/run_icon_simulation.py:inject_realistic_profile`` so that
-    moist ICON runs see a realistic T/q sounding instead of the isothermal
-    rest atmosphere. Modifies ``model._final_modal_state`` in place; the
-    caller is expected to follow with ``model.resume(...)``.
+# Tetens / Bolton coefficients for saturation vapour pressure over water.
+_ES0 = 611.2     # Pa
+_ES_A = 17.67
+_ES_B = 29.65    # K offset
+_T0_C = 273.15   # K, melting point reference
+
+# Tropopause cap above which we set RH = 0 in the JW humidity profile.
+_RH_CAP_PRESSURE_PA = 20000.0   # 200 hPa
+
+
+def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
+    """Inject a Jablonowski-Williamson-style lapse-rate initial condition.
+
+    Replaces ``model._final_modal_state`` (set up by the default isothermal
+    rest atmosphere) with a vertical profile suitable for moist physics:
+
+    * Temperature: 288 K at the surface, ICAO standard lapse 6.5 K/km, capped
+      at 250 K so the semi-implicit reference temperature stays close.
+    * Surface pressure: hydrostatically balanced against the model's
+      orography when present (otherwise the isothermal init places air below
+      ground on tall mountains and the run blows up).
+    * Humidity: ``rh`` × q_sat(T) below ~200 hPa, zero above; clipped to a
+      sensible range for q.
+
+    Mutates ``model._final_modal_state`` in place. Follow with
+    ``model.resume(...)`` rather than ``model.run(...)``.
     """
     from dinosaur.hybrid_coordinates import HybridCoordinates
     from dinosaur.scales import units
+
+    from jcm.constants import grav, p0s1_bg, rd
 
     model._final_modal_state = model._prepare_initial_modal_state(
         physics_state=None, random_seed=0,
@@ -165,26 +209,26 @@ def inject_jw_profile(model: Model) -> None:
     state = model._final_modal_state
 
     nlon, nlat = model.coords.horizontal.nodal_shape
-    p0_pa = 101325.0
+    p0_pa = p0s1_bg
     if isinstance(model.coords.vertical, HybridCoordinates):
         sigma = jnp.asarray(model.coords.vertical.get_sigma_centers(p0_pa))
     else:
         sigma = jnp.asarray(model.coords.vertical.centers)
     nlev = sigma.size
 
-    # Standard-atmosphere T(sigma); cap the cold tail so the semi-implicit
-    # reference temperature stays close.
+    # Hypsometric height for an isothermal column at T = 288 K. The scale
+    # height H = R_d * T / g comes out to ~ 8400 m; we use it to convert
+    # sigma to z so the lapse-rate profile can be evaluated.
     p = sigma * p0_pa
-    T_sfc, gamma = 288.0, 6.5e-3
-    z = 8400.0 * jnp.log(p0_pa / p)
-    T_profile = jnp.maximum(T_sfc - gamma * z, 250.0)
+    scale_height = rd * _JW_T_SFC / grav
+    z = scale_height * jnp.log(p0_pa / p)
+    T_profile = jnp.maximum(_JW_T_SFC - _JW_LAPSE * z, _JW_T_FLOOR)
 
-    # Hydrostatic-balance the surface pressure when there's nontrivial
+    # Hydrostatically rebalance surface pressure when there's nontrivial
     # orography, otherwise the isothermal-rest init produces air below ground.
     orog = jnp.asarray(model.terrain.orog)
     if jnp.any(orog > 1.0):
-        Rd, grav, T_ref_avg = 287.04, 9.80665, 260.0
-        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (Rd * T_ref_avg))
+        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _HYDROSTATIC_T_REF))
         scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
         log_ps_nodal = jnp.log(ps_pa_nodal * scale)
         state.log_surface_pressure = model.coords.horizontal.to_modal(
@@ -198,11 +242,11 @@ def inject_jw_profile(model: Model) -> None:
     ).astype(state.temperature_variation.dtype)
     state.temperature_variation = model.coords.horizontal.to_modal(T_var_nodal)
 
-    # Humidity: 60% RH below 200 hPa
-    es = 611.2 * jnp.exp(17.67 * (T_profile - 273.15) / (T_profile - 29.65))
+    # Humidity: rh * q_sat(T) below the tropopause cap, dry above.
+    es = _ES0 * jnp.exp(_ES_A * (T_profile - _T0_C) / (T_profile - _ES_B))
     q_sat = 0.622 * es / jnp.maximum(p - es, 1.0)
-    rh = jnp.where(p > 20000.0, 0.6, 0.0)
-    q_profile = jnp.clip(rh * q_sat, 1e-8, 0.03)
+    rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
+    q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)
     q_dtype = state.tracers["specific_humidity"].dtype
     q_nodal = jnp.broadcast_to(
         q_profile[:, None, None], (nlev, nlon, nlat)
@@ -237,20 +281,53 @@ def build_model(cfg: DictConfig) -> Model:
 
 
 # ---------------------------------------------------------------------------
+# Forcing
+# ---------------------------------------------------------------------------
+
+def build_forcing(cfg: DictConfig, coords):
+    """Build a ``ForcingData`` from ``cfg.forcing``.
+
+    ``kind: default`` returns ``None`` — ``Model.run`` then falls back to the
+    aquaplanet ``default_forcing(coords.horizontal)``. ``kind: from_file``
+    loads a netCDF boundary file via ``ForcingData.from_file``.
+    """
+    forcing_cfg = cfg.get("forcing", None)
+    if forcing_cfg is None or forcing_cfg.kind == "default":
+        return None
+    if forcing_cfg.kind == "from_file":
+        from jcm.forcing import ForcingData
+        return ForcingData.from_file(forcing_cfg.file, coords=coords)
+    raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
+
+
+# ---------------------------------------------------------------------------
 # Run + save
 # ---------------------------------------------------------------------------
 
 def run(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     """Build the model (if not supplied) and run a simulation.
 
-    Honours ``cfg.init.kind``: ``isothermal`` uses the default rest atmosphere;
-    ``jw`` injects a JW-style profile and resumes.
+    Dispatches on ``cfg.init.kind`` (``isothermal`` vs ``jw``) and
+    ``cfg.run.chunk_days`` — when the latter is positive, the integration is
+    chunked with health-check stops via :func:`run_chunked`.
     """
     if model is None:
         model = build_model(cfg)
 
+    forcing = build_forcing(cfg, model.coords)
+    chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
+    if chunk_days > 0:
+        return run_chunked(
+            cfg,
+            chunk_days=chunk_days,
+            output_prefix=cfg.run.get("output_prefix", "chunked_run"),
+            model=model,
+            forcing=forcing,
+        )
+
     if cfg.init.kind == "isothermal":
         return model.run(
+            forcing=forcing,
             save_interval=cfg.run.save_interval,
             total_time=cfg.run.total_time,
             output_averages=cfg.run.output_averages,
@@ -258,6 +335,7 @@ def run(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if cfg.init.kind == "jw":
         inject_jw_profile(model)
         return model.resume(
+            forcing=forcing,
             save_interval=cfg.run.save_interval,
             total_time=cfg.run.total_time,
             output_averages=cfg.run.output_averages,
@@ -270,22 +348,22 @@ def run_chunked(
     chunk_days: float,
     output_prefix: str,
     model: Model | None = None,
+    forcing=None,
 ):
     """Long-running integration broken into ``chunk_days``-day pieces.
 
     Each chunk is dumped to ``{output_prefix}_day{N}.nc`` and run through
     ``jcm.diagnostics.check_health``. The loop stops early on the first
-    failed health check.
-
-    Returns a list of per-chunk health-check reports.
+    failed health check. Returns the per-chunk reports.
     """
     import time
-
 
     from jcm.diagnostics import check_health, print_report
 
     if model is None:
         model = build_model(cfg)
+    if forcing is None:
+        forcing = build_forcing(cfg, model.coords)
 
     save_interval = float(cfg.run.save_interval)
     total_time = float(cfg.run.total_time)
@@ -305,18 +383,21 @@ def run_chunked(
         if i == 0 and cfg.init.kind == "jw":
             inject_jw_profile(model)
             preds = model.resume(
+                forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
             )
         elif i == 0:
             preds = model.run(
+                forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
             )
         else:
             preds = model.resume(
+                forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
@@ -352,6 +433,8 @@ def run_chunked(
             f"  Wall: {chunk_wall:.1f}s this chunk, {total_wall:.0f}s total "
             f"({sdph:.0f} sim days/hr)"
         )
+
+    return reports
 
     return reports
 
