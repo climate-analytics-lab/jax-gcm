@@ -83,18 +83,34 @@ Dependencies are in `requirements.txt`: dinosaur, flax, jax-datetime, tree-math,
 ## Running Tests
 
 ```bash
-# All tests
+# Default — run in parallel across ~12 workers (pytest-xdist).
+# Cuts a full sweep from ~15 min to a couple of minutes locally.
+JAX_PLATFORMS=cpu pytest -n 12
+
+# Single-process if you need ordered output or are debugging a flake
 pytest
 
 # Fast tests only (skip slow integration tests >1 min)
-pytest -m "not slow"
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow"
 
 # Specific test file
 pytest jcm/model_test.py
 
-# With coverage
-pytest --cov=jcm --cov-fail-under=90
+# With coverage (xdist works with --cov)
+JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90
 ```
+
+`-n auto` will pick the number of workers from the visible CPU count;
+`-n 12` is the recommended local default on the dev workstation. Use
+`-n 0` (or just omit `-n`) to fall back to a single process when you
+need deterministic ordering.
+
+**``JAX_PLATFORMS=cpu`` is required for parallel runs on GPU hosts.**
+Without it, every xdist worker tries to grab the same GPU and you
+get ``CUDA_ERROR_OUT_OF_MEMORY`` / ``dnn_support != nullptr``
+``RET_CHECK`` failures from XLA. The unit tests don't need a GPU —
+they're small column-mode integrations that compile and run faster
+on CPU than they would round-trip through the device anyway.
 
 Test files use the `*_test.py` naming convention and are co-located with their source modules. Tests use `unittest.TestCase` classes run via pytest. The `conftest.py` at root cleans `jcm` module imports between tests to prevent state leakage.
 
