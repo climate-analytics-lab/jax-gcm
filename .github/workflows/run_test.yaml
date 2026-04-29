@@ -31,14 +31,14 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install -e .
 
-      # run fast tests when triggered by a push 
+      # run fast tests when triggered by a push
       - name: Test with pytest (no slow tests on push)
         if: github.event_name == 'push'
         run: |
-          pytest -v -s -m "not slow" --cov=jcm --cov-fail-under=90
+          JAX_PLATFORMS=cpu pytest -n auto -m "not slow" --cov=jcm --cov-fail-under=90
 
-      # run slow tests when triggered by a push to an open PR
+      # run the full suite (fast + slow) when triggered by a PR
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |
-          pytest -v -s -m "slow" --cov=jcm --cov-fail-under=80
+          JAX_PLATFORMS=cpu pytest -n auto --cov=jcm --cov-fail-under=80
