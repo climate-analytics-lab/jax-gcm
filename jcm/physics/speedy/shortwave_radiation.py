@@ -261,7 +261,7 @@ def get_zonal_average_fields(
     azen = 1.0
     nzen = 2
 
-    rzen = -jnp.cos(alpha) * 23.45 * jnp.arcsin(1.0) / 90.0
+    rzen = 0 # -jnp.cos(alpha) * 23.45 * jnp.arcsin(1.0) / 90.0
 
     fs0 = 6.0
 
