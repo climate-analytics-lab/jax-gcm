@@ -1,2 +1,5 @@
 # Held-Suarez (1994) idealised forcing — no moist physics, no radiation.
 name: held_suarez
+
+# Held-Suarez has no tunable Parameters object — keep ``params`` empty.
+params: {}

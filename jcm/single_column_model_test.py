@@ -4,108 +4,114 @@ import unittest
 
 import jax.numpy as jnp
 import pytest
-
-from jcm.constants import grav
-from jcm.physics_interface import PhysicsState
-from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-from jcm.physics.held_suarez.utils import get_held_suarez_coords
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
+from jcm.constants import grav
+from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.icon.icon_terms import icon_physics
+from jcm.physics_interface import PhysicsState
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
-from jcm.terrain import TerrainData
-from jcm.utils import (
-    create_initial_tracers,
-    create_single_column_state,
-    get_coords,
-)
+from jcm.utils import create_initial_tracers, create_single_column_state
 
 
-def _make_test_state(coords) -> PhysicsState:
-    """Build a vertically stratified atmospheric state on the test grid."""
-    nlev = coords.nodal_shape[0]
-    nlon, nlat = coords.horizontal.nodal_shape
-    shape = (nlev, nlon, nlat)
-
+def _make_column_state(nlev: int) -> PhysicsState:
+    """Build a vertically stratified 1-D column state."""
     z = jnp.linspace(0, 30000, nlev)[::-1]
     t_profile = jnp.maximum(288.0 - 6.5e-3 * z, 200.0)
     q_profile = 0.012 * jnp.exp(-z / 3000.0)
-
     return PhysicsState(
-        u_wind=jnp.full(shape, 5.0),
-        v_wind=jnp.zeros(shape),
-        temperature=jnp.broadcast_to(t_profile[:, None, None], shape),
-        specific_humidity=jnp.broadcast_to(q_profile[:, None, None], shape),
-        geopotential=jnp.broadcast_to((grav * z)[:, None, None], shape),
-        normalized_surface_pressure=jnp.ones((nlon, nlat)),
-        tracers={'qc': jnp.zeros(shape), 'qi': jnp.zeros(shape)},
+        u_wind=jnp.full(nlev, 5.0),
+        v_wind=jnp.zeros(nlev),
+        temperature=t_profile,
+        specific_humidity=q_profile,
+        geopotential=grav * z,
+        normalized_surface_pressure=jnp.asarray(1.0),
+        tracers={'qc': jnp.zeros(nlev), 'qi': jnp.zeros(nlev)},
     )
 
 
+class TestSCMConstruction(unittest.TestCase):
+    """Cheap tests for the SCM's coord-stub bookkeeping."""
+
+    def test_init_builds_internal_grid_at_lat_lon(self):
+        # The internal grid is padded to ncols=2 (still a single column from
+        # the user's perspective; the duplicate cell sidesteps an ICON cond
+        # shape mismatch — see _make_single_column_coords).
+        scm = SingleColumnModel(
+            physics=held_suarez_physics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            lat_deg=30.0,
+            lon_deg=180.0,
+        )
+        self.assertEqual(scm.coords.horizontal.nodal_shape, (1, 2))
+        self.assertEqual(scm.coords.nodal_shape, (8, 1, 2))
+        self.assertAlmostEqual(
+            float(scm.coords.horizontal.latitudes[0]),
+            float(jnp.deg2rad(30.0)),
+        )
+        self.assertAlmostEqual(
+            float(scm.coords.horizontal.longitudes[0]),
+            float(jnp.deg2rad(180.0)),
+        )
+
+    def test_init_tiles_single_column_terrain_and_forcing(self):
+        scm = SingleColumnModel(
+            physics=held_suarez_physics(),
+            vertical=SigmaCoordinates.equidistant(8),
+        )
+        # User passes single-column terrain / forcing (shape (1, 1));
+        # internally tiled to the (1, 2) grid.
+        self.assertEqual(scm.terrain.orog.shape, (1, 2))
+        self.assertEqual(scm.forcing.sea_surface_temperature.shape, (1, 2))
+
+
 @pytest.mark.slow
-class TestSingleColumnModel(unittest.TestCase):
-    """Held-Suarez SCM tests — cheap and fully aquaplanet."""
+class TestSCMHeldSuarez(unittest.TestCase):
+    """Held-Suarez SCM run on a small column."""
 
     def setUp(self):
-        self.coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
-        self.terrain = TerrainData.aquaplanet(self.coords)
-        self.state = _make_test_state(self.coords)
-        self.physics = held_suarez_physics()
+        self.column_state = _make_column_state(nlev=8)
+        self.scm = SingleColumnModel(
+            physics=held_suarez_physics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            lat_deg=0.0,
+            lon_deg=0.0,
+        )
 
-    def test_initialization_caches_coords(self):
-        model = SingleColumnModel(physics=self.physics, coords=self.coords)
-        self.assertIsNotNone(model.coords)
-        self.assertIsNotNone(model.terrain)
-        self.assertEqual(model.dt_seconds, 1800.0)
-        self.assertTrue(model.apply_tracer_tendencies)
-
-    def test_run_held_suarez_smoke(self):
-        model = SingleColumnModel(physics=self.physics, coords=self.coords)
-        states = [self.state, self.state, self.state]
-        predictions = model.run(states)
+    def test_run_smoke(self):
+        states = [self.column_state, self.column_state, self.column_state]
+        predictions = self.scm.run(states)
         self.assertIsInstance(predictions, SCMPredictions)
-        self.assertEqual(predictions.tendencies.temperature.shape[0], 3)
-        # qc/qi were carried in via the prescribed state; Held-Suarez writes
-        # no tracer tendency, so they should remain at their initial zeros.
+        # Tendencies should be 1-D in level with a leading time axis.
+        self.assertEqual(predictions.tendencies.temperature.shape, (3, 8))
         self.assertIn('qc', predictions.tracer_states)
-        self.assertEqual(predictions.tracer_states['qc'].shape[0], 3)
+        self.assertEqual(predictions.tracer_states['qc'].shape, (3, 8))
 
     def test_disable_tracer_update(self):
         scm = SingleColumnModel(
-            physics=self.physics,
-            coords=self.coords,
+            physics=held_suarez_physics(),
+            vertical=SigmaCoordinates.equidistant(8),
             apply_tracer_tendencies=False,
         )
-        states = [self.state, self.state]
+        states = [self.column_state, self.column_state]
         predictions = scm.run(states)
-        # Held-Suarez has no tracer tendencies, so this just checks the path runs.
-        self.assertEqual(predictions.tendencies.temperature.shape[0], 2)
+        self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
 
 
 @pytest.mark.slow
-class TestSingleColumnModelICON(unittest.TestCase):
-    """ICON-physics SCM test on a small grid — exercises tracer evolution."""
-
-    def setUp(self):
-        # ICON only ships hybrid level definitions for 40/47; use sigma here
-        # to keep the test cheap.
-        self.coords = get_coords(
-            SigmaCoordinates.equidistant(8), spectral_truncation=21,
-        )
-        self.terrain = TerrainData.aquaplanet(self.coords)
-        self.state = _make_test_state(self.coords)
+class TestSCMICON(unittest.TestCase):
+    """ICON-grey SCM run — exercises tracer evolution."""
 
     def test_icon_run_smoke(self):
-        physics = icon_physics(radiation_scheme='grey')
+        column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=physics, coords=self.coords, terrain=self.terrain,
+            physics=icon_physics(radiation_scheme='grey'),
+            vertical=SigmaCoordinates.equidistant(8),
+            lat_deg=0.0,
+            lon_deg=0.0,
         )
-        # Two timesteps is enough for tracer-evolution wiring.
-        states = [self.state, self.state]
-        predictions = scm.run(states)
-        self.assertIsInstance(predictions, SCMPredictions)
-        self.assertEqual(predictions.tendencies.temperature.shape[0], 2)
-        # qc/qi are required tracers; they should evolve through scan.
+        predictions = scm.run([column_state, column_state])
+        self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
         self.assertIn('qc', predictions.tracer_states)
         self.assertIn('qi', predictions.tracer_states)
 
@@ -113,16 +119,16 @@ class TestSingleColumnModelICON(unittest.TestCase):
 class TestSCMHelpers(unittest.TestCase):
     """The SCM-oriented helpers in ``jcm.utils``."""
 
-    def test_create_single_column_state(self):
+    def test_create_single_column_state_is_one_dimensional(self):
         nlev = 8
         T = jnp.linspace(280, 220, nlev)
         q = jnp.full((nlev,), 0.005)
         state = create_single_column_state(T, q)
-        self.assertEqual(state.temperature.shape, (nlev, 1, 1))
-        self.assertEqual(state.normalized_surface_pressure.shape, (1, 1))
+        self.assertEqual(state.temperature.shape, (nlev,))
+        self.assertEqual(state.normalized_surface_pressure.shape, ())
 
     def test_create_initial_tracers(self):
-        tracers = create_initial_tracers((4, 1, 1), cloud_water=1e-4)
+        tracers = create_initial_tracers(4, cloud_water=1e-4)
         self.assertEqual(set(tracers), {'qc', 'qi'})
-        self.assertAlmostEqual(float(tracers['qc'][0, 0, 0]), 1e-4)
-        self.assertAlmostEqual(float(tracers['qi'][0, 0, 0]), 0.0)
+        self.assertEqual(tracers['qc'].shape, (4,))
+        self.assertAlmostEqual(float(tracers['qc'][0]), 1e-4)

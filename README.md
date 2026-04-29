@@ -75,6 +75,44 @@ ds = predictions.to_xarray()
 print(ds)
 ```
 
+## Command-line interface
+
+Most simulations can be launched with the bundled Hydra CLI without writing
+any Python:
+
+```bash
+# Default 10-day SPEEDY aquaplanet
+python -m jcm.main
+
+# ICON physics on T85x47 hybrid coords with grey radiation
+python -m jcm.main physics=icon grid=icon_t85_l47_hybrid
+
+# Held-Suarez 30-day integration
+python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
+    run.total_time=30 run.save_interval=1
+
+# Override individual physics parameters
+python -m jcm.main physics=icon physics.params.convection.entrpen=4e-4
+
+# Long ICON run with chunked health checks
+python -m jcm.main physics=icon grid=icon_t85_l47_hybrid run=longrun
+
+# Single-column physics evolution from a saved JCM run
+python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
+    run.column.lat_deg=0 run.column.lon_deg=180
+```
+
+Inspect the available config groups and the fully-composed config:
+
+```bash
+python -m jcm.main --help                  # config-group choices + Hydra usage
+python -m jcm.main --cfg job               # print the composed config
+python -m jcm.main --cfg job grid=icon_t85_l47_hybrid   # with overrides
+```
+
+Config groups live under `jcm/config/` (`physics`, `grid`, `run`, `init`,
+`terrain`, `forcing`, `diffusion`).
+
 ## Examples
 
 Example notebooks are available in the `notebooks/` directory:

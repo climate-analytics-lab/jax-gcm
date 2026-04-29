@@ -84,20 +84,74 @@ def build_coords(cfg: DictConfig):
 # Physics
 # ---------------------------------------------------------------------------
 
+def _apply_param_overrides(base, overrides: dict | None):
+    """Apply a ``{subgroup: {field: value}}`` override dict to a Parameters-like object.
+
+    Works for any ``tree_math.struct``-style container whose subgroups are
+    themselves field-based dataclasses (which covers both
+    ``jcm.physics.speedy.params.Parameters`` and
+    ``jcm.physics.icon.parameters.Parameters``). Unknown subgroups raise
+    ``ValueError`` so typos don't silently no-op.
+    """
+    if not overrides:
+        return base
+    base_fields = dict(base.__dict__)
+    for subgroup, subdict in overrides.items():
+        if subgroup not in base_fields:
+            raise ValueError(
+                f"Unknown physics parameter subgroup {subgroup!r}; "
+                f"choices: {sorted(base_fields)}"
+            )
+        sub = base_fields[subgroup]
+        base_fields[subgroup] = sub.__class__(**{**sub.__dict__, **dict(subdict)})
+    return base.__class__(**base_fields)
+
+
+def _physics_param_overrides(cfg: DictConfig) -> dict:
+    """Pull ``cfg.physics.params`` out of OmegaConf into a plain nested dict."""
+    raw = cfg.physics.get("params", None)
+    if raw is None:
+        return {}
+    from omegaconf import OmegaConf
+    return OmegaConf.to_container(raw, resolve=True) or {}
+
+
 def build_physics(cfg: DictConfig):
-    """Build the physics package from ``cfg.physics``."""
+    """Build the physics package from ``cfg.physics``.
+
+    Each package's own ``Parameters.default()`` is the source of truth for
+    tunables. ``cfg.physics.params`` (a free-form nested dict) is walked at
+    build time and applied via ``_apply_param_overrides``, so users can
+    poke individual fields from the CLI without having to mirror the
+    Parameters structure in YAML, e.g.::
+
+        python -m jcm.main physics.params.convection.entrpen=4e-4
+    """
     name = cfg.physics.name
+    overrides = _physics_param_overrides(cfg)
+
     if name == "speedy":
+        from jcm.physics.speedy.params import Parameters as SpeedyParameters
         from jcm.physics.speedy.speedy_terms import speedy_physics
+        params = _apply_param_overrides(SpeedyParameters.default(), overrides)
         return speedy_physics(
+            parameters=params,
             checkpoint_terms=cfg.physics.get("checkpoint_terms", True),
         )
     if name == "held_suarez":
+        if overrides:
+            raise ValueError(
+                "Held-Suarez has no Parameters object; cfg.physics.params "
+                "must be empty."
+            )
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         return held_suarez_physics()
     if name == "icon":
         from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.icon.parameters import Parameters as IconParameters
+        params = _apply_param_overrides(IconParameters.default(), overrides)
         return icon_physics(
+            parameters=params,
             radiation_scheme=cfg.physics.radiation,
             cloud_scheme=cfg.physics.get("cloud_scheme", "1m"),
             checkpoint_terms=cfg.physics.get("checkpoint_terms", True),
@@ -304,13 +358,33 @@ def build_forcing(cfg: DictConfig, coords):
 # Run + save
 # ---------------------------------------------------------------------------
 
-def run(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
-    """Build the model (if not supplied) and run a simulation.
+def run(cfg: DictConfig, model: Model | None = None):
+    """Dispatch to the appropriate runtime mode.
 
-    Dispatches on ``cfg.init.kind`` (``isothermal`` vs ``jw``) and
-    ``cfg.run.chunk_days`` — when the latter is positive, the integration is
-    chunked with health-check stops via :func:`run_chunked`.
+    ``cfg.run.mode`` selects between:
+
+    * ``full`` — the standard dynamical-core integration (``Model.run`` /
+      ``Model.resume``). Honours ``cfg.init.kind`` and ``cfg.run.chunk_days``.
+    * ``prescribed`` — load a full-grid state time series from
+      ``cfg.run.state_file`` and run :class:`PrescribedStateModel`. No
+      dynamical core; just diagnostic physics tendencies per snapshot.
+    * ``scm`` — load a state time series, slice the column nearest to
+      ``cfg.run.column.{lat_deg,lon_deg}``, and run :class:`SingleColumnModel`
+      for tracer evolution at that column.
     """
+    mode = cfg.run.get("mode", "full")
+    if mode == "full":
+        return _run_full(cfg, model)
+    if mode == "prescribed":
+        return _run_prescribed(cfg)
+    if mode == "scm":
+        return _run_scm(cfg)
+    raise ValueError(
+        f"Unknown run.mode={mode!r}; expected 'full', 'prescribed' or 'scm'."
+    )
+
+
+def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if model is None:
         model = build_model(cfg)
 
@@ -341,6 +415,106 @@ def run(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
         )
     raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+
+
+def _load_states_from_cfg(cfg: DictConfig):
+    """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``."""
+    state_file = cfg.run.get("state_file", None)
+    if not state_file:
+        raise ValueError(
+            f"run.mode={cfg.run.mode!r} requires run.state_file to point "
+            "at a netCDF written by a previous JCM run."
+        )
+    import xarray as xr
+    from omegaconf import OmegaConf
+    from jcm.utils import load_states_from_xarray
+
+    tracer_vars = cfg.run.get("tracer_vars", None)
+    if tracer_vars is not None:
+        tracer_vars = OmegaConf.to_container(tracer_vars, resolve=True)
+    ds = xr.open_dataset(state_file)
+    return ds, load_states_from_xarray(ds, tracer_vars=tracer_vars or None)
+
+
+def _run_prescribed(cfg: DictConfig):
+    """Diagnose physics tendencies from a JCM state-file time series."""
+    from jcm.prescribed_state_model import PrescribedStateModel
+
+    coords = build_coords(cfg)
+    physics = build_physics(cfg)
+    terrain = build_terrain(cfg, coords)
+    forcing = build_forcing(cfg, coords)
+    _, states = _load_states_from_cfg(cfg)
+
+    model = PrescribedStateModel(
+        physics=physics,
+        coords=coords,
+        terrain=terrain,
+        dt_seconds=float(cfg.run.time_step) * 60.0,
+    )
+    return model.run(states, forcing=forcing)
+
+
+def _select_column(states, ds, lat_deg: float, lon_deg: float):
+    """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
+
+    The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
+    JCM run that wrote it; pick by nearest neighbour so users can give
+    physical degrees rather than grid indices.
+    """
+    import numpy as np
+    from jax.tree_util import tree_map
+
+    lat = np.asarray(ds["lat"].values)
+    lon = np.asarray(ds["lon"].values)
+    i_lat = int(np.argmin(np.abs(lat - lat_deg)))
+    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
+
+    def slice_field(arr):
+        # JCM xarray output is laid out (time, level, lon, lat) for column
+        # variables and (time, lon, lat) for surface scalars.
+        if arr.ndim == 4:
+            return arr[:, :, i_lon, i_lat]
+        if arr.ndim == 3:
+            return arr[:, i_lon, i_lat]
+        return arr
+
+    return tree_map(slice_field, states), (i_lon, i_lat, float(lat[i_lat]), float(lon[i_lon]))
+
+
+def _run_scm(cfg: DictConfig):
+    """Run the single-column model on the column nearest to the user's lat/lon."""
+    from jcm.single_column_model import SingleColumnModel
+
+    column_cfg = cfg.run.get("column", None)
+    if column_cfg is None:
+        raise ValueError(
+            "run.mode='scm' requires run.column.{lat_deg,lon_deg} to pick the column."
+        )
+    lat_deg = float(column_cfg.lat_deg)
+    lon_deg = float(column_cfg.lon_deg)
+
+    physics = build_physics(cfg)
+    # Build coords just to grab the vertical coord; horizontal grid is unused.
+    coords = build_coords(cfg)
+    ds, states = _load_states_from_cfg(cfg)
+    column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
+        states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
+    )
+    logger.info(
+        "SCM: requested (lat=%.2f, lon=%.2f) → grid cell (i_lon=%d, i_lat=%d) "
+        "at (lat=%.2f, lon=%.2f)",
+        lat_deg, lon_deg, i_lon, i_lat, actual_lat, actual_lon,
+    )
+
+    scm = SingleColumnModel(
+        physics=physics,
+        vertical=coords.vertical,
+        lat_deg=actual_lat,
+        lon_deg=actual_lon,
+        dt_seconds=float(cfg.run.time_step) * 60.0,
+    )
+    return scm.run(column_states)
 
 
 def run_chunked(

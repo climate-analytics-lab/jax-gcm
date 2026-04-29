@@ -1,36 +1,42 @@
-"""Single-column / prescribed-state physics driver.
+"""Single-column physics driver.
 
 ``SingleColumnModel`` evolves prognostic tracers (cloud water/ice, aerosols,
 chemistry species, etc.) with ``lax.scan`` while large-scale atmospheric
-state is supplied externally as a time series. The dynamical core does not
-run; this is a process-level integrator where physics tendencies decide
+state is supplied externally as a time series for *one column at one
+location*. The dynamical core does not run; physics tendencies decide
 state evolution.
 
-Useful for:
-- Process-level cloud/aerosol scheme validation against reference data.
-- Reanalysis-driven offline physics runs.
-- Faster-than-real-time tracer experiments (no spectral transform overhead).
+The user supplies a vertical coordinate (``SigmaCoordinates`` or
+``HybridCoordinates``) and a single ``(lat_deg, lon_deg)`` location, plus a
+single-column ``TerrainData`` and ``ForcingData``. Internally the SCM
+builds a duck-typed ``(1, 1)`` coords stub so column-based physics can
+cache its coord-dependent transforms (lat, vertical-level transforms,
+etc.) without dragging in a full horizontal grid.
 
-The companion ``PrescribedStateModel`` (in
-``jcm.prescribed_state_model``) performs the same diagnostic step but uses
-``vmap`` because each step's tendencies are independent of every other.
+Multiple columns at unrelated locations should be run in parallel one
+layer above the SCM (e.g. ``jax.vmap`` over a list of
+``(lat, lon, column_state)`` triples).
+
+The companion ``PrescribedStateModel`` (in ``jcm.prescribed_state_model``)
+is the multi-column equivalent: it accepts a full-grid prescribed state
+and computes tendencies for every cell with ``vmap``.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 from jax import lax
 from jax.tree_util import tree_map
 
-from dinosaur.coordinate_systems import CoordinateSystem
-
 from jcm.date import DateData
-from jcm.forcing import ForcingData, default_forcing
+from jcm.forcing import ForcingData
 from jcm.physics_interface import (
     Physics,
     PhysicsState,
@@ -44,12 +50,16 @@ from jcm.terrain import TerrainData
 class SCMPredictions:
     """Container for ``SingleColumnModel.run`` outputs.
 
+    All array fields are 1-D in the level dimension with a leading time
+    axis: ``(n_times, nlev)`` for column profiles, ``(n_times,)`` for
+    surface scalars.
+
     Attributes:
-        prescribed_states: Time series of prescribed atmospheric states.
-        tracer_states: Time series of evolved prognostic tracers (dict of arrays).
-        relaxed_states: Time series of relaxed prognostic variables (dict of arrays;
+        prescribed_states: Time series of input column states (1-D).
+        tracer_states: Time series of evolved tracers (dict of 1-D arrays).
+        relaxed_states: Time series of relaxed prognostic variables (dict;
             empty when no relaxation is configured).
-        tendencies: Physics tendencies computed at each step.
+        tendencies: Physics tendencies at each step (1-D).
         physics_data: Per-step diagnostics dict from the physics package.
         times: Times in days since ``start_date``.
 
@@ -63,40 +73,186 @@ class SCMPredictions:
     times: Any
 
 
+def _vertical_nlev(vertical) -> int:
+    if hasattr(vertical, "centers"):
+        return int(np.asarray(vertical.centers).shape[0])
+    if hasattr(vertical, "a_boundaries"):
+        return int(np.asarray(vertical.a_boundaries).shape[0]) - 1
+    raise TypeError(
+        f"Unsupported vertical coordinate type {type(vertical).__name__!r}; "
+        "expected SigmaCoordinates or HybridCoordinates."
+    )
+
+
+def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
+    """Duck-typed ``CoordinateSystem`` analogue at the user's column.
+
+    The SCM's physics packages only read ``coords.vertical``,
+    ``coords.horizontal.{latitudes, longitudes, nodal_shape}`` and
+    ``coords.nodal_shape`` from whatever they're handed, so a
+    ``SimpleNamespace`` with those attributes is enough — no T21 grid
+    needed.
+
+    We pad the latitude axis to length 2 (both copies at the user's
+    latitude) because ICON's radiation sub-stepping uses ``jax.lax.cond``
+    whose branches collapse to mismatching pytree shapes when ``ncols == 1``
+    (separate bug — search the issue tracker for ICON SCM cond). The user
+    only ever sees the 1-D column on input/output; the duplicate cell is
+    hidden inside ``_column_state_to_grid`` / ``_squeeze_*``.
+    """
+    nlev = _vertical_nlev(vertical)
+    lat_rad = jnp.asarray([float(np.deg2rad(lat_deg))] * 2)
+    lon_rad = jnp.asarray([float(np.deg2rad(lon_deg))])
+    horizontal = SimpleNamespace(
+        nodal_shape=(1, 2),
+        latitudes=lat_rad,
+        longitudes=lon_rad,
+        # ``nodal_axes`` returns (lon, sin(lat)) by convention; included so
+        # any helper that touches it on a stub coord still works.
+        nodal_axes=(lon_rad, jnp.sin(lat_rad)),
+    )
+    return SimpleNamespace(
+        horizontal=horizontal,
+        vertical=vertical,
+        nodal_shape=(nlev, 1, 2),
+    )
+
+
+def _expand_field(value: jnp.ndarray, nlev: int) -> jnp.ndarray:
+    """Reshape a 1-D column field to the internal ``(nlev, 1, 2)`` grid."""
+    arr = jnp.asarray(value)
+    if arr.ndim == 1:
+        return jnp.broadcast_to(arr[:, None, None], (nlev, 1, 2))
+    if arr.ndim == 0:
+        return jnp.broadcast_to(arr, (1, 2))
+    return arr
+
+
+def _column_state_to_grid(column_state: PhysicsState, nlev: int) -> PhysicsState:
+    """Reshape a 1-D column ``PhysicsState`` onto the internal ``(nlev, 1, 2)`` grid."""
+    grid_args = {}
+    for field, value in column_state.asdict().items():
+        if field == "tracers":
+            grid_args["tracers"] = {
+                k: _expand_field(v, nlev) for k, v in value.items()
+            }
+        elif field == "normalized_surface_pressure":
+            arr = jnp.asarray(value)
+            if arr.ndim == 0:
+                grid_args[field] = jnp.broadcast_to(arr, (1, 2))
+            else:
+                grid_args[field] = arr
+        else:
+            grid_args[field] = _expand_field(value, nlev)
+    return type(column_state)(**grid_args)
+
+
+def _squeeze_field(value: jnp.ndarray) -> jnp.ndarray:
+    """Pull a single column out of the internal ``(..., 1, 2)`` grid."""
+    arr = jnp.asarray(value)
+    if arr.ndim >= 2:
+        return arr[..., 0, 0]
+    return arr
+
+
+_INTERNAL_NLON, _INTERNAL_NLAT = 1, 2
+
+
+def _broadcast_to_internal(arr: jnp.ndarray) -> jnp.ndarray:
+    """Tile a single-cell horizontal field to ``(1, 2)`` (the internal grid)."""
+    arr = jnp.asarray(arr)
+    if arr.ndim < 2:
+        return arr
+    if arr.shape[-2:] == (_INTERNAL_NLON, _INTERNAL_NLAT):
+        return arr
+    if arr.shape[-2:] == (1, 1):
+        return jnp.broadcast_to(arr, arr.shape[:-2] + (_INTERNAL_NLON, _INTERNAL_NLAT))
+    raise ValueError(
+        "single-column SCM expects horizontal field with last two dims (1, 1); "
+        f"got {arr.shape!r}"
+    )
+
+
+def _expand_terrain_to_grid(terrain: TerrainData) -> TerrainData:
+    """Tile a (1, 1) ``TerrainData`` onto the internal grid."""
+    return TerrainData(
+        orog=_broadcast_to_internal(terrain.orog),
+        phis0=_broadcast_to_internal(terrain.phis0),
+        fmask=_broadcast_to_internal(terrain.fmask),
+        lfluxland=terrain.lfluxland,
+    )
+
+
+def _expand_forcing_to_grid(forcing: ForcingData) -> ForcingData:
+    """Tile a (1, 1) ``ForcingData`` onto the internal grid (per-cell fields only)."""
+    fields = forcing.asdict()
+    expanded = {}
+    for name, value in fields.items():
+        arr = jnp.asarray(value)
+        # Per-plume aerosol arrays are 1-D over plumes — leave alone.
+        if name in ("aerosol_year_weight", "aerosol_ann_cycle"):
+            expanded[name] = arr
+            continue
+        expanded[name] = _broadcast_to_internal(arr)
+    return type(forcing)(**expanded)
+
+
+def _squeeze_tendency(tend: PhysicsTendency) -> PhysicsTendency:
+    args = {}
+    for field, value in tend.asdict().items():
+        if field == "tracers":
+            args["tracers"] = {k: _squeeze_field(v) for k, v in value.items()}
+        else:
+            args[field] = _squeeze_field(value)
+    return type(tend)(**args)
+
+
 class SingleColumnModel:
-    """Evolve physics tracers with prescribed atmospheric state.
+    """Evolve physics tracers for one column at one ``(lat, lon)`` location.
 
     Example::
 
+        from dinosaur.sigma_coordinates import SigmaCoordinates
         from jcm.physics.icon.icon_terms import icon_physics
-        from jcm.physics.icon.icon_levels import get_icon_levels
-        from jcm.utils import get_coords
-        coords = get_coords(get_icon_levels(40), spectral_truncation=21)
-        model = SingleColumnModel(physics=icon_physics(), coords=coords)
-        predictions = model.run(states, initial_tracers={'qc': ..., 'qi': ...})
+        scm = SingleColumnModel(
+            physics=icon_physics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            lat_deg=0.0, lon_deg=180.0,
+        )
+        # column_state is a PhysicsState whose array fields are 1-D (nlev,)
+        # and normalized_surface_pressure is a scalar.
+        predictions = scm.run([column_state, column_state, ...])
 
     Args:
-        physics: Physics package whose ``compute_tendencies`` will drive evolution.
-        coords: ``CoordinateSystem`` used to size grids and to call
-            ``physics.cache_coords``. Required.
-        terrain: Optional ``TerrainData`` boundary conditions. Defaults to
-            ``TerrainData.aquaplanet(coords)``.
+        physics: Physics package whose ``compute_tendencies`` drives evolution.
+        vertical: Vertical coordinate (``SigmaCoordinates`` or
+            ``HybridCoordinates``) — the only required spatial input.
+        lat_deg: Column latitude in degrees (default 0).
+        lon_deg: Column longitude in degrees (default 0).
+        terrain: Optional single-column ``TerrainData`` (shape ``(1, 1)``);
+            defaults to ``TerrainData.single_column()`` (flat, all ocean).
+        forcing: Optional single-column ``ForcingData`` (shape ``(1, 1)``);
+            defaults to ``ForcingData.zeros((1, 1))``.
         start_date: Starting date for the time series (default 2000-01-01).
         dt_seconds: Physics timestep in seconds (default 1800).
-        apply_tracer_tendencies: When ``False`` tracers are reported diagnostically
-            but not advanced — useful for sanity-checking tendencies in isolation.
+        apply_tracer_tendencies: When ``False`` tracers are reported
+            diagnostically but not advanced.
         relaxation_timescales: Optional ``{var_name: tau_seconds}`` mapping.
-            Listed prognostic variables (``u_wind``, ``v_wind``, ``temperature``,
-            ``specific_humidity``) are nudged toward the prescribed state with
-            timescale ``tau`` while still receiving their physics tendency.
+            Listed prognostic variables (``u_wind``, ``v_wind``,
+            ``temperature``, ``specific_humidity``) are nudged toward the
+            prescribed state with timescale ``tau`` while still receiving
+            their physics tendency.
 
     """
 
     def __init__(
         self,
         physics: Physics,
-        coords: CoordinateSystem,
+        vertical,
+        lat_deg: float = 0.0,
+        lon_deg: float = 0.0,
         terrain: TerrainData | None = None,
+        forcing: ForcingData | None = None,
         start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
         dt_seconds: float = 1800.0,
         apply_tracer_tendencies: bool = True,
@@ -104,47 +260,55 @@ class SingleColumnModel:
     ) -> None:
         """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
-        self.coords = coords
-        self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
+        self.vertical = vertical
+        self.lat_deg = float(lat_deg)
+        self.lon_deg = float(lon_deg)
         self.start_date = start_date
         self.dt_seconds = float(dt_seconds)
         self.apply_tracer_tendencies = apply_tracer_tendencies
         self.relaxation_timescales = dict(relaxation_timescales or {})
 
-        # Cache coord-dependent transforms once. ICON physics also needs the
-        # timestep so radiation sub-stepping / accumulators are correct.
-        self.physics.cache_coords(coords)
+        self.coords = _make_single_column_coords(vertical, lat_deg, lon_deg)
+        user_terrain = terrain if terrain is not None else TerrainData.single_column()
+        user_forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
+        # Tile single-column terrain/forcing to the internal grid shape (the
+        # padded ncols=2 case explained in ``_make_single_column_coords``).
+        self.terrain = _expand_terrain_to_grid(user_terrain)
+        self.forcing = _expand_forcing_to_grid(user_forcing)
+
+        self.physics.cache_coords(self.coords)
         from jcm.physics.icon.icon_terms import ComposableIconPhysics
         if isinstance(self.physics, ComposableIconPhysics):
             self.physics.apply_timestep(self.dt_seconds)
 
     # ------------------------------------------------------------------
-    # Date helper
+    # Helpers
     # ------------------------------------------------------------------
 
-    def _date_from_time_index(self, time_index) -> DateData:
-        sim_time_seconds = time_index * self.dt_seconds
+    def _date(self, time_idx) -> DateData:
+        sim_time_seconds = time_idx * self.dt_seconds
         seconds_int = jnp.round(sim_time_seconds).astype(jnp.int32)
         return DateData.set_date(
             model_time=self.start_date + jdt.Timedelta(seconds=seconds_int),
-            model_step=jnp.asarray(time_index).astype(jnp.int32),
+            model_step=jnp.asarray(time_idx).astype(jnp.int32),
             dt_seconds=self.dt_seconds,
         )
 
-    # ------------------------------------------------------------------
-    # Pure step factory (closed over static config)
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _stack_states(states: list[PhysicsState]) -> PhysicsState:
+        return tree_map(lambda *arrays: jnp.stack(arrays, axis=0), *states)
 
     def _make_step_fn(
         self,
         forcing: ForcingData,
-        terrain: TerrainData,
         apply_tendencies: bool,
-        dt_seconds: float,
         tracer_names: tuple[str, ...],
         relaxed_var_params: tuple[tuple[str, float], ...],
     ) -> Callable:
         physics = self.physics
+        terrain = self.terrain
+        nlev = self.coords.nodal_shape[0]
+        dt_seconds = self.dt_seconds
         start_date = self.start_date
 
         def compute_date(time_idx):
@@ -156,19 +320,21 @@ class SingleColumnModel:
                 dt_seconds=dt_seconds,
             )
 
-        def step_fn(prescribed_state, tracers, relaxed_vars, physics_data, time_idx):
-            full_state_args = prescribed_state.asdict()
+        def step_fn(prescribed_column, tracers, relaxed_vars, physics_data, time_idx):
+            full_state_args = prescribed_column.asdict()
             full_state_args.pop("tracers", None)
             for name, _ in relaxed_var_params:
                 full_state_args[name] = relaxed_vars[name]
             full_state_args["tracers"] = tracers
-            full_state = type(prescribed_state)(**full_state_args)
-            clamped_state = verify_state(full_state)
+            column_state = type(prescribed_column)(**full_state_args)
 
-            tendencies, new_physics_data = physics.compute_tendencies(
-                clamped_state, forcing, terrain, compute_date(time_idx),
+            grid_state = _column_state_to_grid(column_state, nlev)
+            clamped = verify_state(grid_state)
+            tendencies_grid, new_physics_data = physics.compute_tendencies(
+                clamped, forcing, terrain, compute_date(time_idx),
                 prev_physics_data=physics_data,
             )
+            tendencies = _squeeze_tendency(tendencies_grid)
 
             if apply_tendencies:
                 updated_tracers = {}
@@ -184,7 +350,7 @@ class SingleColumnModel:
             updated_relaxed_vars = {}
             for name, tau in relaxed_var_params:
                 current_val = relaxed_vars[name]
-                target_val = getattr(prescribed_state, name)
+                target_val = getattr(prescribed_column, name)
                 phys_tend = getattr(tendencies, name)
                 nudging_tend = (target_val - current_val) / tau
                 updated_relaxed_vars[name] = (
@@ -199,10 +365,6 @@ class SingleColumnModel:
     # Public API
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _stack_states(states: list[PhysicsState]) -> PhysicsState:
-        return tree_map(lambda *arrays: jnp.stack(arrays, axis=0), *states)
-
     def run(
         self,
         prescribed_states: list[PhysicsState] | PhysicsState,
@@ -215,25 +377,25 @@ class SingleColumnModel:
         """Run the SCM with evolving tracers.
 
         Args:
-            prescribed_states: List of ``PhysicsState`` snapshots, or a single
-                ``PhysicsState`` whose leading axis is time.
-            forcing: Surface forcing data; defaults to the aquaplanet forcing
-                derived from ``self.coords.horizontal``.
-            initial_tracers: Initial values for prognostic tracers. Defaults
-                to the first prescribed state's tracers (or ``{}``).
-            initial_physics_data: Optional initial diagnostics dict; if ``None``
-                one physics step is run upfront to materialise the right pytree
-                structure for ``lax.scan``.
-            times: Optional days-since-start array; defaults to
-                ``jnp.arange(n_times) * dt_seconds / 86400``.
-            initial_relaxed_vars: Initial values for relaxed prognostic variables.
+            prescribed_states: List of column ``PhysicsState`` snapshots, or
+                a single ``PhysicsState`` whose leading axis is time. Array
+                fields must be 1-D ``(nlev,)`` per snapshot.
+            forcing: Optional override for the single-column forcing supplied
+                at construction.
+            initial_tracers: Initial values for prognostic tracers
+                (1-D ``(nlev,)`` per tracer). Defaults to the first
+                prescribed state's tracers (or ``{}``).
+            initial_physics_data: Optional initial diagnostics dict.
+            times: Optional days-since-start array.
+            initial_relaxed_vars: Initial values for relaxed prognostic
+                variables (1-D ``(nlev,)`` per variable).
 
         Returns:
             ``SCMPredictions``.
 
         """
         if forcing is None:
-            forcing = default_forcing(self.coords.horizontal)
+            forcing = self.forcing
 
         if isinstance(prescribed_states, list):
             prescribed_states = self._stack_states(prescribed_states)
@@ -245,7 +407,6 @@ class SingleColumnModel:
             initial_tracers = first_tracers if first_tracers else {}
 
         relaxed_var_params = tuple(sorted(self.relaxation_timescales.items()))
-
         if initial_relaxed_vars is None:
             first_state_slice = tree_map(lambda x: x[0], prescribed_states)
             initial_relaxed_vars = {
@@ -262,10 +423,11 @@ class SingleColumnModel:
                 state_args[name] = val
             state_args["tracers"] = initial_tracers
             first_state_combined = type(first_state)(**state_args)
-            first_date = self._date_from_time_index(0)
-            clamped_state = verify_state(first_state_combined)
+            nlev = self.coords.nodal_shape[0]
+            grid_state = _column_state_to_grid(first_state_combined, nlev)
+            clamped = verify_state(grid_state)
             _, initial_physics_data = self.physics.compute_tendencies(
-                clamped_state, forcing, self.terrain, first_date,
+                clamped, forcing, self.terrain, self._date(0),
             )
 
         if times is None:
@@ -273,19 +435,17 @@ class SingleColumnModel:
 
         step_fn = self._make_step_fn(
             forcing=forcing,
-            terrain=self.terrain,
             apply_tendencies=self.apply_tracer_tendencies,
-            dt_seconds=self.dt_seconds,
             tracer_names=tuple(initial_tracers.keys()),
             relaxed_var_params=relaxed_var_params,
         )
 
         def scan_step(carry, time_idx):
             tracers, relaxed_vars, physics_data = carry
-            prescribed_state = tree_map(lambda x: x[time_idx], prescribed_states)
-            prescribed_state = prescribed_state.copy(tracers={})
+            prescribed_column = tree_map(lambda x: x[time_idx], prescribed_states)
+            prescribed_column = prescribed_column.copy(tracers={})
             tendencies, new_tracers, new_relaxed_vars, new_physics_data = step_fn(
-                prescribed_state, tracers, relaxed_vars, physics_data, time_idx,
+                prescribed_column, tracers, relaxed_vars, physics_data, time_idx,
             )
             new_carry = (new_tracers, new_relaxed_vars, new_physics_data)
             return new_carry, (tendencies, new_tracers, new_relaxed_vars, new_physics_data)
@@ -305,51 +465,4 @@ class SingleColumnModel:
             tendencies=tendencies,
             physics_data=physics_data_history,
             times=times,
-        )
-
-    def run_single(
-        self,
-        prescribed_state: PhysicsState,
-        forcing: ForcingData | None = None,
-        tracers: dict | None = None,
-        physics_data: Any = None,
-        time_index: int = 0,
-    ) -> tuple[PhysicsTendency, dict, dict, Any]:
-        """Compute one physics step against ``prescribed_state``.
-
-        Returns ``(tendencies, updated_tracers, updated_relaxed_vars, physics_data)``.
-        """
-        if forcing is None:
-            forcing = default_forcing(self.coords.horizontal)
-        if tracers is None:
-            tracers = prescribed_state.tracers if prescribed_state.tracers else {}
-
-        relaxed_var_params = tuple(sorted(self.relaxation_timescales.items()))
-        relaxed_vars = {
-            name: getattr(prescribed_state, name) for name, _ in relaxed_var_params
-        }
-
-        if physics_data is None:
-            temp_state = prescribed_state.copy(tracers=tracers)
-            clamped_state = verify_state(temp_state)
-            _, physics_data = self.physics.compute_tendencies(
-                clamped_state, forcing, self.terrain,
-                self._date_from_time_index(time_index),
-            )
-
-        step_fn = self._make_step_fn(
-            forcing=forcing,
-            terrain=self.terrain,
-            apply_tendencies=self.apply_tracer_tendencies,
-            dt_seconds=self.dt_seconds,
-            tracer_names=tuple(tracers.keys()),
-            relaxed_var_params=relaxed_var_params,
-        )
-
-        return step_fn(
-            prescribed_state.copy(tracers={}),
-            tracers,
-            relaxed_vars,
-            physics_data,
-            time_index,
         )

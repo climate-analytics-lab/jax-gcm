@@ -90,6 +90,40 @@ class TestBuilders(unittest.TestCase):
         physics = build_physics(cfg)
         self.assertIsNotNone(physics)
 
+    def test_build_physics_param_overrides(self):
+        # Override an ICON convection parameter via the cfg.physics.params
+        # path; the resulting Parameters should pick up the new value.
+        cfg = _compose([
+            "physics=icon",
+            "grid=icon_t42_l8_sigma",
+            "+physics.params.convection.entrpen=4e-4",
+        ])
+        physics = build_physics(cfg)
+        self.assertAlmostEqual(
+            float(physics.parameters.convection.entrpen), 4e-4,
+        )
+
+    def test_build_physics_unknown_subgroup_raises(self):
+        cfg = _compose([
+            "physics=icon",
+            "grid=icon_t42_l8_sigma",
+            "+physics.params.not_a_subgroup.foo=1.0",
+        ])
+        with self.assertRaisesRegex(ValueError, "Unknown physics parameter subgroup"):
+            build_physics(cfg)
+
+    def test_build_physics_curated_preset(self):
+        # The icon-strong-conv preset should bump entrpen via the same
+        # override pipeline.
+        cfg = _compose([
+            "physics=icon-strong-conv",
+            "grid=icon_t42_l8_sigma",
+        ])
+        physics = build_physics(cfg)
+        self.assertAlmostEqual(
+            float(physics.parameters.convection.entrpen), 4e-4,
+        )
+
     def test_build_terrain_aquaplanet(self):
         cfg = _compose()
         coords = build_coords(cfg)

@@ -441,10 +441,10 @@ def create_single_column_state(
     surface_pressure: float = 101325.0,
     nlev: int | None = None,
 ):
-    """Build a ``(nlev, 1, 1)`` ``PhysicsState`` from 1-D profiles.
+    """Build a 1-D column ``PhysicsState`` for ``SingleColumnModel``.
 
-    Geopotential is approximated hydrostatically from a column-mean temperature
-    and ``surface_pressure``.
+    Geopotential is approximated hydrostatically from the column-mean
+    temperature and ``surface_pressure``.
 
     Args:
       temperature: Temperature profile [K], shape ``(nlev,)``.
@@ -455,7 +455,8 @@ def create_single_column_state(
       nlev: Optional explicit level count (otherwise inferred).
 
     Returns:
-      ``PhysicsState`` reshaped to ``(nlev, 1, 1)``.
+      ``PhysicsState`` whose array fields are 1-D ``(nlev,)`` and
+      ``normalized_surface_pressure`` is a scalar.
 
     """
     from jcm.physics_interface import PhysicsState
@@ -464,15 +465,15 @@ def create_single_column_state(
     if nlev is None:
         nlev = temperature.shape[0]
 
-    temperature = jnp.asarray(temperature).reshape(nlev, 1, 1)
-    specific_humidity = jnp.asarray(specific_humidity).reshape(nlev, 1, 1)
-    u_wind = jnp.zeros((nlev, 1, 1)) if u_wind is None else jnp.asarray(u_wind).reshape(nlev, 1, 1)
-    v_wind = jnp.zeros((nlev, 1, 1)) if v_wind is None else jnp.asarray(v_wind).reshape(nlev, 1, 1)
+    temperature = jnp.asarray(temperature).reshape(nlev)
+    specific_humidity = jnp.asarray(specific_humidity).reshape(nlev)
+    u_wind = jnp.zeros(nlev) if u_wind is None else jnp.asarray(u_wind).reshape(nlev)
+    v_wind = jnp.zeros(nlev) if v_wind is None else jnp.asarray(v_wind).reshape(nlev)
 
     p_levels = surface_pressure * jnp.linspace(0.1, 1.0, nlev)[::-1]
     scale_height = rd * jnp.mean(temperature) / grav
     z_approx = -scale_height * jnp.log(p_levels / surface_pressure)
-    geopotential = (grav * z_approx).reshape(nlev, 1, 1)
+    geopotential = (grav * z_approx).reshape(nlev)
 
     return PhysicsState(
         u_wind=u_wind,
@@ -480,13 +481,13 @@ def create_single_column_state(
         temperature=temperature,
         specific_humidity=specific_humidity,
         geopotential=geopotential,
-        normalized_surface_pressure=jnp.array([[surface_pressure / p0]]),
+        normalized_surface_pressure=jnp.asarray(surface_pressure / p0),
         tracers={},
     )
 
 
 def create_initial_tracers(
-    shape: tuple,
+    shape: tuple | int,
     tracer_names: list[str] | None = None,
     cloud_water: float = 0.0,
     cloud_ice: float = 0.0,
@@ -494,8 +495,12 @@ def create_initial_tracers(
     """Build a tracer dict for SCM/prescribed-state runs.
 
     ``qc`` and ``qi`` are populated with ``cloud_water`` and ``cloud_ice``;
-    any other listed tracer names get zero arrays.
+    any other listed tracer names get zero arrays. ``shape`` is normally a
+    tuple but ``int`` is accepted for the 1-D SCM case
+    (``shape=nlev`` ⇒ ``(nlev,)``).
     """
+    if isinstance(shape, int):
+        shape = (shape,)
     if tracer_names is None:
         tracer_names = ['qc', 'qi']
     tracers = {}

@@ -1,3 +1,11 @@
 # SPEEDY atmospheric physics package.
 name: speedy
 checkpoint_terms: true
+
+# Free-form override map applied to ``Parameters.default()`` at build time.
+# Every key is a sub-Parameters group name (convection, condensation,
+# shortwave_radiation, mod_radcon, surface_flux, vertical_diffusion,
+# forcing) and each value is a ``{field: value}`` dict. Override individual
+# fields from the CLI without editing this file::
+#     python -m jcm.main physics.params.convection.entrpen=4e-4
+params: {}

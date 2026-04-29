@@ -13,3 +13,10 @@ sponge:
 
 chunk_days: 0
 output_prefix: smoke_chunked
+
+mode: full
+state_file: null
+tracer_vars: null
+column:
+  lat_deg: 0.0
+  lon_deg: 0.0

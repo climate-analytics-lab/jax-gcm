@@ -19,3 +19,25 @@ sponge:
 # written to ``{output_prefix}_day{N}.nc``.
 chunk_days: 0
 output_prefix: chunked_run
+
+# Runtime mode:
+#   full        — standard dynamical-core integration (Model.run)
+#   prescribed  — diagnose physics tendencies from a saved state file
+#                 (PrescribedStateModel)
+#   scm         — single-column physics evolution at one (lat, lon)
+#                 (SingleColumnModel)
+mode: full
+
+# State file (xarray netCDF written by a previous JCM run) — required when
+# ``mode`` is ``prescribed`` or ``scm``.
+state_file: null
+
+# Tracer variables to load from the state file (mapping tracer name →
+# variable name). Defaults to none; set e.g. ``{qc: qc, qi: qi}`` for the
+# ICON 1-moment scheme.
+tracer_vars: null
+
+# Column location for ``mode: scm`` (degrees).
+column:
+  lat_deg: 0.0
+  lon_deg: 0.0
