@@ -1,8 +1,22 @@
 # CLAUDE.md
 
+## Think Before Coding
+This is a complex codebase with many interdependencies and intricate scientific formulations. Don't assume. Don't hide confusion. Surface tradeoffs.
+
+Before implementing:
+
+ - State your assumptions explicitly. If uncertain, ask.
+ - If multiple interpretations exist, present them - don't pick silently.
+ - If a simpler approach exists, say so. Push back when warranted.
+ - If something is unclear, stop. Name what's confusing. Ask.
+
+Always document these decisions in the comments, and if appropriate in the documentation (and possibly in the high-level design documentation)
+
+Comments should always reference the current state of the code, and explain *why* it is doing what it is doing, not how it is different to some previous version of the code (Which can get out of date and confusing)
+
 ## Project Overview
 
-JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
+JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
 
 - **Package name:** `jcm`
 - **Python:** >= 3.11 (strict requirement)

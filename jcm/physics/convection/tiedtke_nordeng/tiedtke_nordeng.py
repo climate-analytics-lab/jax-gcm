@@ -56,7 +56,14 @@ class ConvectionParameters:
     
     # Precipitation parameters
     cprcon: float            # Coefficient for precipitation conversion
-    
+    cu_dnoprc_ocean: float   # Pressure thickness above cloud base before
+                             # precip generation starts, over ocean (Pa)
+                             # — ECHAM ``zdnoprc`` ocean default 1.5e4
+    cu_dnoprc_land: float    # Same threshold over land (Pa) — ECHAM
+                             # ``zdnoprc`` land default 3.0e4 (continental
+                             # convection has thicker non-precipitating
+                             # cloud-base layer)
+
     # Evaporation parameters
     cevapcu: float           # Coefficient for rain evaporation
     
@@ -77,6 +84,7 @@ class ConvectionParameters:
     @classmethod
     def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4, # FIXME: validate dt_conv
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=1.4e-3,
+                 cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
                  cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
                  cmfctop=0.33, cmfdeps=0.33, entrdd=2.0e-4) -> 'ConvectionParameters':
         """Return default convection parameters"""
@@ -89,6 +97,8 @@ class ConvectionParameters:
             cmfcmax=jnp.array(cmfcmax),
             cmfcmin=jnp.array(cmfcmin),
             cprcon=jnp.array(cprcon),
+            cu_dnoprc_ocean=jnp.array(cu_dnoprc_ocean),
+            cu_dnoprc_land=jnp.array(cu_dnoprc_land),
             cevapcu=jnp.array(cevapcu),
             epsilon=jnp.array(epsilon),
             rlcrit=jnp.array(rlcrit),
@@ -545,7 +555,7 @@ def cloud_depth_for_target_top(
 
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
-    humidity: jnp.ndarray, 
+    humidity: jnp.ndarray,
     pressure: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     rho: jnp.ndarray,
@@ -554,10 +564,11 @@ def tiedtke_nordeng_convection(
     qc: jnp.ndarray,
     qi: jnp.ndarray,
     dt: float,
-    config: ConvectionParameters = None
+    config: ConvectionParameters = None,
+    land_fraction: jnp.ndarray = jnp.array(0.0),
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
-    
+
     Args:
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental specific humidity (kg/kg) [nlev]
@@ -570,7 +581,11 @@ def tiedtke_nordeng_convection(
         qi: Cloud ice mixing ratio (kg/kg) [nlev]
         dt: Time step (s)
         config: Convection configuration
-        
+        land_fraction: Fraction of column underlying land (0=ocean, 1=land).
+            Selects ECHAM's per-surface ``zdnoprc`` precip-zone threshold
+            via ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``.
+            Defaults to 0 (ocean).
+
     Returns:
         Tuple of (tendencies, final_state) with fixed qc/qi transport
 
@@ -697,7 +712,8 @@ def tiedtke_nordeng_convection(
         # Calculate updraft
         updraft_state = calculate_updraft(
             temperature, humidity, pressure, layer_thickness, rho,
-            cloud_base, ktop, conv_type, mass_flux_base, config
+            cloud_base, ktop, conv_type, mass_flux_base, config,
+            land_fraction=land_fraction,
         )
         
         # Calculate precipitation from updraft

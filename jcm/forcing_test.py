@@ -14,7 +14,11 @@ class TestForcingDataZeros(unittest.TestCase):
     """Tests for ForcingData.zeros classmethod."""
 
     def test_zeros_all_defaults(self):
-        """Zeros with no additional args should create all-zero arrays."""
+        """Zeros with no additional args should produce a baseline forcing
+        state — zeros for fluxes/fractions, and a sensible default for
+        the surface temperatures (~15 °C) so the surface flux scheme
+        isn't presented with an unphysical ΔT against the atmosphere.
+        """
         nodal_shape = (96, 48)
         forcing = ForcingData.zeros(nodal_shape)
 
@@ -29,8 +33,8 @@ class TestForcingDataZeros(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.sice_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.snowc_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.soilw_am, 0.0))
-        self.assertTrue(jnp.allclose(forcing.stl_am, 0.0))
-        self.assertTrue(jnp.allclose(forcing.sea_surface_temperature, 0.0))
+        self.assertTrue(jnp.allclose(forcing.stl_am, 288.15))
+        self.assertTrue(jnp.allclose(forcing.sea_surface_temperature, 288.15))
 
     def test_zeros_with_custom_sst(self):
         """Zeros with custom SST should use provided values."""
@@ -280,7 +284,9 @@ class TestDefaultForcing(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.sea_surface_temperature, expected_sst))
 
     def test_default_forcing_other_fields_zero(self):
-        """default_forcing should have zeros for non-SST fields."""
+        """default_forcing zeroes flux/fraction fields and uses the
+        ``ForcingData.zeros`` default (~15 °C) for land temperature.
+        """
         coords = get_speedy_coords(layers=8, spectral_truncation=31)
         grid = coords.horizontal
         forcing = default_forcing(grid)
@@ -289,7 +295,7 @@ class TestDefaultForcing(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.sice_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.snowc_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.soilw_am, 0.0))
-        self.assertTrue(jnp.allclose(forcing.stl_am, 0.0))
+        self.assertTrue(jnp.allclose(forcing.stl_am, 288.15))
 
     def test_default_forcing_different_resolutions(self):
         """default_forcing should work for different resolutions."""

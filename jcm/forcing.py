@@ -25,13 +25,12 @@ class ForcingData:
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               aerosol_year_weight=None,aerosol_ann_cycle=None,
               nplumes=9):
-        # Land + SST temperatures default to 273.15 K (rather than 0 K)
-        # so that ``ForcingData.zeros(...)`` produces a physically
-        # plausible state when no forcing file is supplied. The previous
-        # 0 K default would create extreme ΔT at any column with
-        # land mask > 0, driving numerical surface-flux blow-ups
-        # (Bug F6 in fortran_harness/PLAN.md).
-        T_default = 273.15
+        # Land + SST temperatures default to ~15 °C — a sensible global
+        # mean surface temperature — so that ``ForcingData.zeros(...)``
+        # yields a physically plausible state when no forcing file is
+        # supplied and the surface flux scheme isn't presented with an
+        # unphysical ΔT against the atmosphere.
+        T_default = 288.15
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),

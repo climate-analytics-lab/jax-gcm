@@ -151,17 +151,18 @@ def calculate_updraft(
     layer_thickness: jnp.ndarray,
     rho: jnp.ndarray,
     kbase: int,
-    ktop: int, 
+    ktop: int,
     ktype: int,
     mass_flux_base: float,
-    config: ConvectionParameters
+    config: ConvectionParameters,
+    land_fraction: jnp.ndarray = jnp.array(0.0),
 ) -> UpdatedraftState:
     """Calculate full updraft profile
-    
+
     Args:
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental humidity (kg/kg) [nlev]
-        pressure: Pressure (Pa) [nlev] 
+        pressure: Pressure (Pa) [nlev]
         layer_thickness: Layer thickness (m) [nlev]
         rho: Air density (kg/m³) [nlev]
         kbase: Cloud base level index
@@ -169,12 +170,23 @@ def calculate_updraft(
         ktype: Convection type
         mass_flux_base: Cloud base mass flux (kg/m²/s)
         config: Convection configuration
-        
+        land_fraction: Fraction of column underlying land surface (0=open
+            ocean, 1=land). Selects ECHAM's per-surface ``zdnoprc``
+            threshold via ``config.cu_dnoprc_ocean`` and
+            ``config.cu_dnoprc_land``. Defaults to 0 (ocean) so existing
+            single-column tests behave as before.
+
     Returns:
         UpdatedraftState with computed profiles
 
     """
     nlev = len(temperature)
+    # Linear blend of ocean/land precip-zone threshold by land fraction —
+    # smooth in land_fraction so the column gradient is well-defined.
+    zdnoprc_col = (
+        (1.0 - land_fraction) * config.cu_dnoprc_ocean
+        + land_fraction * config.cu_dnoprc_land
+    )
 
     # Initialize updraft state at cloud base
     tu_init = jnp.zeros(nlev)
@@ -239,13 +251,14 @@ def calculate_updraft(
         jnp.full(nlev, config.entrmid),
         jnp.full(nlev, config.cprcon),
         p_base_const,
+        jnp.full(nlev, zdnoprc_col),
     )
 
     # Create specialized step function with config parameters
     def updraft_step_with_config(carry_tuple, inputs):
         carry, zbuoy_accum = carry_tuple
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
-         entrpen, entrscv, entrmid, cprcon, p_at_base) = inputs
+         entrpen, entrscv, entrmid, cprcon, p_at_base, zdnoprc) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -374,19 +387,14 @@ def calculate_updraft(
             #   pdmfup = max(0, (plu(jk) - zlnew) * pmfu(jk))
             #   plu(jk) = zlnew
             #
-            # Without this step JAX's surface precip estimator
-            # ``sum(lu*mfu)*cprcon`` was ~60x too small (0.008 mm/day vs
-            # typical 0.5 mm/day for tropical deep convection), and the
-            # parcel's liquid water built up unphysically as it rose,
-            # distorting buoyancy and terminating the updraft early.
-            #
             # ECHAM gates this on a thickness threshold ``zdnoprc``: precip
-            # is only generated when the level is more than dnoprc Pa
-            # above cloud base. ECHAM defaults: 1.5e4 Pa over ocean,
-            # 3.0e4 Pa over land. We use the ocean value here (the only
-            # column in the harness is ocean RCE) — full land/ocean
-            # discrimination is a future generalisation.
-            zdnoprc = 1.5e4  # Pa, ECHAM ocean default
+            # is only generated when the level is more than ``zdnoprc`` Pa
+            # above cloud base. ECHAM uses different thresholds over
+            # ocean vs land (continental convection has a thicker non-
+            # precipitating layer near cloud base); the per-column value
+            # is built in ``calculate_updraft`` from
+            # ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``
+            # blended by ``land_fraction``.
             in_precip_zone = (p_at_base - pressure) >= zdnoprc
             geoh_diff = grav * dz  # ≈ pgeoh(jk) - pgeoh(jk+1) in ECHAM
             cprcon_eff = jnp.where(

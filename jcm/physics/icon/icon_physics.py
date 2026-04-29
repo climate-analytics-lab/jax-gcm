@@ -557,17 +557,24 @@ def apply_convection(
     pressure_levels = physics_data.diagnostics.pressure_full
     layer_thickness = physics_data.diagnostics.layer_thickness
     air_density = physics_data.diagnostics.air_density
+    ncols = state.temperature.shape[1]
 
     # Extract fixed qc/qi tracers (with defaults if not present)
     qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    
+
+    # Per-column land fraction selects between ECHAM's ocean and land
+    # ``zdnoprc`` precip-zone thresholds inside the updraft.
+    land_fraction = terrain.fmask.reshape(ncols)
+
     conv_results = jax.vmap(
         tiedtke_nordeng_convection,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),  # dt and config are scalars
+        # dt and config are scalar (None); land_fraction is per-column (axis 0)
+        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0),
         out_axes=(0, 0)  # Returns (ConvectionTendencies, ConvectionState) per column
-    )(state.temperature, state.specific_humidity, pressure_levels, layer_thickness, 
-      air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection)
+    )(state.temperature, state.specific_humidity, pressure_levels, layer_thickness,
+      air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection,
+      land_fraction)
     
     # Unpack structured results directly (no tuple unpacking needed)
     conv_tendencies_all, conv_states_all = conv_results
@@ -928,15 +935,9 @@ def apply_vertical_diffusion(
         tke = tke.reshape(nlev, ncols)
     thv_variance = jnp.zeros((nlev, ncols))
 
-    # Surface tile fractions and temperatures, derived from the boundary
-    # forcing exactly as ``apply_surface`` does — see icon_physics.py
-    # ``apply_surface``. Indices: 0=water, 1=sea-ice, 2=land. The
-    # previous code hardcoded ``[0, 0, 1]`` (all-land) here, which was
-    # inconsistent with ``apply_surface`` and only didn't break things
-    # because ``surface_fraction`` is currently dead inside the vdiff
-    # routines (Bug F2 in fortran_harness/PLAN.md). Wiring it up now
-    # so downstream consumers see correct values when the field is
-    # eventually used.
+    # Surface tile fractions: 0=water, 1=sea-ice, 2=land. Derived from
+    # boundary forcing the same way ``apply_surface`` does so the vdiff
+    # path sees consistent fractions.
     nsfc_type = 3  # water, ice, land
     land_fraction = terrain.fmask.reshape(ncols)
     raw_ice = forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am
@@ -947,14 +948,9 @@ def apply_vertical_diffusion(
     surface_fraction = surface_fraction.at[:, 1].set(sea_ice_fraction)
     surface_fraction = surface_fraction.at[:, 2].set(land_fraction)
 
-    # Per-tile surface temperatures (Bug F3 in PLAN.md). Previously a
-    # single ``surface_temp`` was broadcast to all 3 tiles, so cold sea
-    # ice and warm open water got identical surface fluxes whenever
-    # both fractions were non-zero. Use the boundary SST for water,
-    # the prescribed ice temperature for ice (proxy: ``ctfreez = 271.38
-    # K`` saline-water freezing point — physically sea ice can't be
-    # warmer than this since the underlying ocean caps it), and
-    # ``forcing.stl_am`` for land.
+    # Per-tile surface temperature: boundary SST for water, the saline
+    # freezing point ``ctfreez = 271.38 K`` (ECHAM ``iniphy.f90:71``)
+    # capped by SST for ice, and ``forcing.stl_am`` for land.
     sst_col = physics_data.surface.surface_temperature.reshape(ncols)
     land_temp_col = (forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3
                      else forcing.stl_am).reshape(ncols)
@@ -1117,12 +1113,11 @@ def apply_surface(
     surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
     surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
-    # Per-tile surface temperatures (Bug F3 in PLAN.md). Previously
-    # ``ice_temp`` and ``soil_temp`` were both copies of ``surface_temp``
-    # (= the boundary SST), so the sea-ice and land tiles received the
-    # warm SST as their tile temperature whenever both fractions were
-    # non-zero. Use the SST for ocean, the saline freezing point
-    # (271.38 K) capped by SST for ice, and ``forcing.stl_am`` for land.
+    # Per-tile surface temperatures: boundary SST for ocean, the saline
+    # freezing point (``ctfreez = 271.38 K``, ECHAM ``iniphy.f90:71``)
+    # capped by SST for sea ice, and ``forcing.stl_am`` for land. Sea
+    # ice uses min(SST, ctfreez) because the underlying ocean caps the
+    # ice surface temperature physically.
     ocean_temp = surface_temp
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
     land_temp = (forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3

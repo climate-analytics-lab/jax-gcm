@@ -189,20 +189,14 @@ def compute_exchange_coefficients(
     exchange_coeff_heat = c_h * mixing_length * sqrt_tke
     exchange_coeff_moisture = c_q * mixing_length * sqrt_tke
 
-    # Floor and ceiling — the floor guarantees enough background
-    # mixing for the implicit solver to be well-conditioned, the
-    # ceiling protects against pathological √TKE values the cap on
-    # the TKE update should already prevent (but defence in depth).
-    #
-    # Floor previously was 0.1 m²/s but ECHAM's vdiff uses
-    # ``cmin_kh = 0.01 m²/s`` for the free-troposphere background
-    # — a 10x looser floor. With 0.1 m²/s applied at every
-    # free-troposphere level for many timesteps, the temperature
-    # profile gets dragged around far more than ECHAM does. Tighten
-    # to 0.01 to match ECHAM. The implicit tridiagonal solver is
-    # still well-conditioned at 0.01 m²/s (the conditioning concern
-    # was for elements near machine epsilon, not 0.01 — 8 orders
-    # above eps).
+    # Floor matches ECHAM's free-troposphere background diffusivity
+    # (``cmin_kh = 0.01 m²/s``) — large enough to keep the implicit
+    # tridiagonal solver well-conditioned (8 orders of magnitude above
+    # machine epsilon) but small enough that background mixing does
+    # not drag the free-troposphere temperature profile away from the
+    # ECHAM reference. The ceiling is defence-in-depth against
+    # pathological √TKE values; the cap on the TKE update should
+    # already prevent them.
     min_exchange = 0.01
     max_exchange = 1000.0
     exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
@@ -263,23 +257,19 @@ def compute_surface_exchange_coefficients(
                      (0.5 * (theta_air + theta_surface) * 
                       jnp.maximum(wind_speed_surface**2, 0.01)))
         
-        # Surface-layer stability multiplier on CH (heat exchange).
-        #
-        # Standard Businger-Dyer gives the gradient-to-flux ratio
-        # Φh(ζ) = (1 − 16ζ)^(−1/2) for unstable (ζ<0). The DIFFUSIVITY
-        # (and hence CH) scales as 1/Φh = (1 − 16Ri)^(+1/2) — > 1 for
-        # unstable, enhancing the flux. Stable side: φh = 1 + 5ζ, so
-        # CH ∝ 1/(1 + 5Ri) — < 1 for stable, suppressing.
-        #
-        # The previous expression had ``(1 - 16*Ri)**(-0.5)`` for the
-        # unstable branch — that's Φh itself, NOT 1/Φh. So strongly
-        # unstable conditions (e.g. ΔT = −85 K of cold air over warm
-        # ocean) gave a multiplier of ~0.13 instead of ~7.65,
-        # *suppressing* the surface flux by an order of magnitude
-        # exactly when it should be ~7x enhanced. That's how the
-        # 1-year aquaplanet drifted to T_air = 188 K over 273 K SST
-        # without surface fluxes pulling it back: convective coupling
-        # was effectively shut off.
+        # Surface-layer stability multiplier on the heat exchange
+        # coefficient CH, derived from Businger-Dyer. CH scales as the
+        # inverse of the heat gradient function 1/Φh:
+        #   unstable (Ri < 0): 1/Φh = (1 − 16 Ri)^(+1/2) > 1, so the
+        #     multiplier enhances the turbulent flux when buoyancy
+        #     destabilises the surface layer (e.g. cold air over warm
+        #     ocean).
+        #   stable   (Ri > 0): 1/Φh = 1 / (1 + 5 Ri)         < 1, so
+        #     the multiplier damps the flux as buoyancy suppresses
+        #     turbulence.
+        # Using 1/Φh rather than Φh is essential here: Φh is the
+        # gradient-to-flux ratio, while CH is proportional to the
+        # diffusivity, which is its inverse.
         stability_heat = jnp.where(
             ri_surface < 0,
             (1.0 - 16.0 * ri_surface)**(+0.5),  # Unstable: enhance
