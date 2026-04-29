@@ -1,6 +1,11 @@
 defaults:
   - _self_
-  - model: default
+  - physics: speedy
+  - grid: speedy_t31_l8
+  - run: default
+  - init: isothermal
+  - terrain: aquaplanet
+  - diffusion: default
   - override hydra/help: custom_help
 
 hydra:

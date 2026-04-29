@@ -1,38 +1,44 @@
-import hydra
-from omegaconf import DictConfig
-from jcm.model import Model
-from hydra.core.hydra_config import HydraConfig
+"""Hydra-based CLI entry point for JAX-GCM.
+
+Examples
+--------
+Default 10-day SPEEDY aquaplanet run::
+
+    python -m jcm.main
+
+Switch physics package via Hydra config groups::
+
+    python -m jcm.main physics=icon grid=icon_t85_l47_hybrid run=longrun
+    python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8
+
+Override individual options::
+
+    python -m jcm.main run.total_time=30 run.save_interval=1 run.time_step=20
+    python -m jcm.main physics=icon physics.radiation=rrtmgp init=jw
+
+Multi-run sweep::
+
+    python -m jcm.main -m run.time_step=10,20,30
+"""
+
 from pathlib import Path
 
+import hydra
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf
+
+from jcm.runners import resolve_output_path, run, save_predictions
+
+
 @hydra.main(version_base=None, config_path="config", config_name="config")
-def main(cfg: DictConfig):
-    """Run Speedy Model with adjustable parameters"""
-    model = Model(
-        time_step=cfg.model.time_step,
-        layers=cfg.model.layers
-    )
-    
-    predictions = model.run(
-        save_interval=cfg.model.save_interval,
-        total_time=cfg.model.total_time
-    )
-    
-    ds = predictions.to_xarray()
-    hydra_cfg = HydraConfig.get()
-    print(hydra_cfg.mode)
-    base_dir = Path('outputs') / hydra_cfg.run.dir.split('outputs/')[-1]
-    
-    if str(hydra_cfg.mode) == "RunMode.MULTIRUN":
-        output_dir = base_dir / 'multirun' / str(hydra_cfg.job.num)
-    else:
-        output_dir = base_dir
-    
-    
-    filename = "model_state.nc"
-    output_path = output_dir / filename
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ds.to_netcdf(str(output_path))
+def main(cfg: DictConfig) -> None:
+    """Run a JAX-GCM simulation configured via Hydra."""
+    print(OmegaConf.to_yaml(cfg))
+    predictions = run(cfg)
+    output_path = resolve_output_path(cfg, HydraConfig.get())
+    save_predictions(predictions, output_path)
+    print(f"Saved predictions to {output_path}")
+
 
 if __name__ == "__main__":
     main()

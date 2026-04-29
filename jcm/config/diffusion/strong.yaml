@@ -1,0 +1,3 @@
+# Stronger horizontal diffusion (timescales halved). Useful for stabilising
+# moist runs at high resolution before the level-dependent filter is fixed.
+scale: 0.5

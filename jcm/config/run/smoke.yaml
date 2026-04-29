@@ -1,0 +1,12 @@
+# 1-day smoke test — useful as a quick CI/CLI integration check.
+time_step: 30
+save_interval: 1
+total_time: 1
+output_averages: false
+output: smoke_run.nc
+log_level: INFO
+
+sponge:
+  levels: 0
+  timescale_h: 3.0
+  enspodi: 2.0

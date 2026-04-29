@@ -1,0 +1,14 @@
+# Default run configuration: short integration with daily snapshots.
+time_step: 10              # minutes
+save_interval: 10          # days
+total_time: 10             # days
+output_averages: false
+output: model_state.nc
+log_level: CRITICAL
+
+# Optional upper-sponge layer applied to (u, v) in the topmost ``levels``.
+# Off by default — set ``run.sponge.levels`` to a positive integer to enable.
+sponge:
+  levels: 0
+  timescale_h: 3.0
+  enspodi: 2.0

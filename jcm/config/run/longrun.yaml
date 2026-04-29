@@ -1,0 +1,12 @@
+# Long ICON run: monthly snapshots, conservative timestep, sponge enabled.
+time_step: 12
+save_interval: 30
+total_time: 365
+output_averages: false
+output: longrun.nc
+log_level: INFO
+
+sponge:
+  levels: 5
+  timescale_h: 3.0
+  enspodi: 2.0

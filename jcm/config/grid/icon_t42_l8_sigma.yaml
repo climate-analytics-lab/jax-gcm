@@ -1,0 +1,4 @@
+# Cheap ICON config used by smoke tests: T42 / 8 equidistant sigma layers.
+vertical: sigma
+layers: 8
+spectral_truncation: 42

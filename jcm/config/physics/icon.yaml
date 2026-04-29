@@ -1,0 +1,5 @@
+# ICON atmospheric physics package.
+name: icon
+radiation: grey       # grey | rrtmgp | emulated
+cloud_scheme: 1m      # 1m | 2m
+checkpoint_terms: true

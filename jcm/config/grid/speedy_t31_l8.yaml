@@ -1,0 +1,4 @@
+# Default SPEEDY resolution: T31 spectral, 8 sigma layers.
+vertical: speedy
+layers: 8
+spectral_truncation: 31

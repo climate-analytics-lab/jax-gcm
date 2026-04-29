@@ -1,0 +1,3 @@
+# Jablonowski-Williamson lapse-rate temperature with 60% RH humidity.
+# Better moist-physics initial condition than isothermal-rest.
+kind: jw

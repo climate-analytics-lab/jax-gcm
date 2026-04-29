@@ -1,0 +1,3 @@
+# SPEEDY-default uniform-order hyperdiffusion. ``scale=1`` keeps the
+# original timescales (24h temp, 12h vor_q, 2h div).
+scale: 1.0

@@ -1,0 +1,4 @@
+# Realistic orography + land-sea mask loaded from a netCDF boundary file.
+kind: from_file
+file: ???           # absolute path required at runtime
+interpolate: true

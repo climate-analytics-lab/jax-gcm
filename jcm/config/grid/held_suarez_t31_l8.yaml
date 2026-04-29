@@ -1,0 +1,4 @@
+# Held-Suarez T31 / 8-layer.
+vertical: held_suarez
+layers: 8
+spectral_truncation: 31
