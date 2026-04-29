@@ -150,8 +150,11 @@ class TestBuilders(unittest.TestCase):
 
 
 class TestEndToEnd(unittest.TestCase):
-    """Tiny end-to-end runs at T31/L8 — kept fast so the push CI exercises
-    the full ``runners.run`` + ``Model.run`` path."""
+    """Tiny end-to-end runs at T31/L8.
+
+    Kept fast so the push CI exercises the full ``runners.run`` +
+    ``Model.run`` path.
+    """
 
     def test_run_held_suarez_smoke(self):
         cfg = _compose([
