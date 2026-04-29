@@ -292,9 +292,13 @@ def _apply_radiation_inner(state: PhysicsState,
     )
     
     # Reconstruct RadiationData from vmapped diagnostics
-    # Most fields need to be transposed from [ncols, ...] to [..., ncols]
+    # Most fields need to be transposed from [ncols, ...] to [..., ncols].
+    # ``squeeze(-1)`` (not bare ``squeeze``) drops only the trailing
+    # length-1 dim so a single-column run keeps shape ``[1]`` instead of
+    # collapsing to a scalar (which mismatches the cached path's shape and
+    # breaks the radiation ``lax.cond`` at ``ncols=1``).
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),  # [ncols, 1] -> [ncols]
+        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),  # [ncols, 1] -> [ncols]
         surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
         surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
         surface_emissivity=diagnostics_vmapped.surface_emissivity,
@@ -401,7 +405,7 @@ def _apply_radiation_rrtmgp_inner(
     )
 
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),
+        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),
         surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
         surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
         surface_emissivity=diagnostics_vmapped.surface_emissivity,
@@ -521,10 +525,10 @@ def _apply_radiation_emulated_inner(
     # vmapped output shapes are [ncols, nlev+1] for fluxes and
     # [ncols, nlev] for heating rates.
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(),
-        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis.squeeze(),
-        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir.squeeze(),
-        surface_emissivity=diagnostics_vmapped.surface_emissivity.squeeze(),
+        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),
+        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis.squeeze(-1),
+        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir.squeeze(-1),
+        surface_emissivity=diagnostics_vmapped.surface_emissivity.squeeze(-1),
         sw_flux_up=diagnostics_vmapped.sw_flux_up.T,        # [ncols, nlev+1] -> [nlev+1, ncols]
         sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
         sw_heating_rate=tendencies_vmapped.shortwave_heating.T,

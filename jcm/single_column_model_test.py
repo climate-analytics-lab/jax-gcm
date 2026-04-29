@@ -33,18 +33,15 @@ def _make_column_state(nlev: int) -> PhysicsState:
 class TestSCMConstruction(unittest.TestCase):
     """Cheap tests for the SCM's coord-stub bookkeeping."""
 
-    def test_init_builds_internal_grid_at_lat_lon(self):
-        # The internal grid is padded to ncols=2 (still a single column from
-        # the user's perspective; the duplicate cell sidesteps an ICON cond
-        # shape mismatch — see _make_single_column_coords).
+    def test_init_builds_one_one_grid_at_lat_lon(self):
         scm = SingleColumnModel(
             physics=held_suarez_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=30.0,
             lon_deg=180.0,
         )
-        self.assertEqual(scm.coords.horizontal.nodal_shape, (1, 2))
-        self.assertEqual(scm.coords.nodal_shape, (8, 1, 2))
+        self.assertEqual(scm.coords.horizontal.nodal_shape, (1, 1))
+        self.assertEqual(scm.coords.nodal_shape, (8, 1, 1))
         self.assertAlmostEqual(
             float(scm.coords.horizontal.latitudes[0]),
             float(jnp.deg2rad(30.0)),
@@ -54,15 +51,13 @@ class TestSCMConstruction(unittest.TestCase):
             float(jnp.deg2rad(180.0)),
         )
 
-    def test_init_tiles_single_column_terrain_and_forcing(self):
+    def test_init_defaults_to_single_column_terrain_and_forcing(self):
         scm = SingleColumnModel(
             physics=held_suarez_physics(),
             vertical=SigmaCoordinates.equidistant(8),
         )
-        # User passes single-column terrain / forcing (shape (1, 1));
-        # internally tiled to the (1, 2) grid.
-        self.assertEqual(scm.terrain.orog.shape, (1, 2))
-        self.assertEqual(scm.forcing.sea_surface_temperature.shape, (1, 2))
+        self.assertEqual(scm.terrain.orog.shape, (1, 1))
+        self.assertEqual(scm.forcing.sea_surface_temperature.shape, (1, 1))
 
 
 @pytest.mark.slow

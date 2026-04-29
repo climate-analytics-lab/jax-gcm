@@ -90,21 +90,20 @@ def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
     The SCM's physics packages only read ``coords.vertical``,
     ``coords.horizontal.{latitudes, longitudes, nodal_shape}`` and
     ``coords.nodal_shape`` from whatever they're handed, so a
-    ``SimpleNamespace`` with those attributes is enough — no T21 grid
-    needed.
+    ``SimpleNamespace`` with those attributes is enough — no real
+    horizontal grid needed.
 
-    We pad the latitude axis to length 2 (both copies at the user's
-    latitude) because ICON's radiation sub-stepping uses ``jax.lax.cond``
-    whose branches collapse to mismatching pytree shapes when ``ncols == 1``
-    (separate bug — search the issue tracker for ICON SCM cond). The user
-    only ever sees the 1-D column on input/output; the duplicate cell is
-    hidden inside ``_column_state_to_grid`` / ``_squeeze_*``.
+    The horizontal shape is ``(1, 1)``: a single column at the requested
+    ``(lat_deg, lon_deg)``. ICON's term setup (e.g.
+    ``IconTermBase.cache_coords``) assumes a 3-tuple ``(nlev, nlon, nlat)``
+    nodal shape, so we keep that convention rather than collapsing to
+    ``(nlev, 1)``.
     """
     nlev = _vertical_nlev(vertical)
-    lat_rad = jnp.asarray([float(np.deg2rad(lat_deg))] * 2)
+    lat_rad = jnp.asarray([float(np.deg2rad(lat_deg))])
     lon_rad = jnp.asarray([float(np.deg2rad(lon_deg))])
     horizontal = SimpleNamespace(
-        nodal_shape=(1, 2),
+        nodal_shape=(1, 1),
         latitudes=lat_rad,
         longitudes=lon_rad,
         # ``nodal_axes`` returns (lon, sin(lat)) by convention; included so
@@ -114,22 +113,22 @@ def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
     return SimpleNamespace(
         horizontal=horizontal,
         vertical=vertical,
-        nodal_shape=(nlev, 1, 2),
+        nodal_shape=(nlev, 1, 1),
     )
 
 
 def _expand_field(value: jnp.ndarray, nlev: int) -> jnp.ndarray:
-    """Reshape a 1-D column field to the internal ``(nlev, 1, 2)`` grid."""
+    """Reshape a 1-D column field to ``(nlev, 1, 1)`` (or scalar surface to ``(1, 1)``)."""
     arr = jnp.asarray(value)
     if arr.ndim == 1:
-        return jnp.broadcast_to(arr[:, None, None], (nlev, 1, 2))
+        return arr.reshape(nlev, 1, 1)
     if arr.ndim == 0:
-        return jnp.broadcast_to(arr, (1, 2))
+        return arr.reshape(1, 1)
     return arr
 
 
 def _column_state_to_grid(column_state: PhysicsState, nlev: int) -> PhysicsState:
-    """Reshape a 1-D column ``PhysicsState`` onto the internal ``(nlev, 1, 2)`` grid."""
+    """Reshape a 1-D column ``PhysicsState`` to the internal ``(nlev, 1, 1)`` grid."""
     grid_args = {}
     for field, value in column_state.asdict().items():
         if field == "tracers":
@@ -138,63 +137,18 @@ def _column_state_to_grid(column_state: PhysicsState, nlev: int) -> PhysicsState
             }
         elif field == "normalized_surface_pressure":
             arr = jnp.asarray(value)
-            if arr.ndim == 0:
-                grid_args[field] = jnp.broadcast_to(arr, (1, 2))
-            else:
-                grid_args[field] = arr
+            grid_args[field] = arr.reshape(1, 1) if arr.ndim == 0 else arr
         else:
             grid_args[field] = _expand_field(value, nlev)
     return type(column_state)(**grid_args)
 
 
 def _squeeze_field(value: jnp.ndarray) -> jnp.ndarray:
-    """Pull a single column out of the internal ``(..., 1, 2)`` grid."""
+    """Squeeze the ``(1, 1)`` grid axes off a per-cell array."""
     arr = jnp.asarray(value)
     if arr.ndim >= 2:
         return arr[..., 0, 0]
     return arr
-
-
-_INTERNAL_NLON, _INTERNAL_NLAT = 1, 2
-
-
-def _broadcast_to_internal(arr: jnp.ndarray) -> jnp.ndarray:
-    """Tile a single-cell horizontal field to ``(1, 2)`` (the internal grid)."""
-    arr = jnp.asarray(arr)
-    if arr.ndim < 2:
-        return arr
-    if arr.shape[-2:] == (_INTERNAL_NLON, _INTERNAL_NLAT):
-        return arr
-    if arr.shape[-2:] == (1, 1):
-        return jnp.broadcast_to(arr, arr.shape[:-2] + (_INTERNAL_NLON, _INTERNAL_NLAT))
-    raise ValueError(
-        "single-column SCM expects horizontal field with last two dims (1, 1); "
-        f"got {arr.shape!r}"
-    )
-
-
-def _expand_terrain_to_grid(terrain: TerrainData) -> TerrainData:
-    """Tile a (1, 1) ``TerrainData`` onto the internal grid."""
-    return TerrainData(
-        orog=_broadcast_to_internal(terrain.orog),
-        phis0=_broadcast_to_internal(terrain.phis0),
-        fmask=_broadcast_to_internal(terrain.fmask),
-        lfluxland=terrain.lfluxland,
-    )
-
-
-def _expand_forcing_to_grid(forcing: ForcingData) -> ForcingData:
-    """Tile a (1, 1) ``ForcingData`` onto the internal grid (per-cell fields only)."""
-    fields = forcing.asdict()
-    expanded = {}
-    for name, value in fields.items():
-        arr = jnp.asarray(value)
-        # Per-plume aerosol arrays are 1-D over plumes — leave alone.
-        if name in ("aerosol_year_weight", "aerosol_ann_cycle"):
-            expanded[name] = arr
-            continue
-        expanded[name] = _broadcast_to_internal(arr)
-    return type(forcing)(**expanded)
 
 
 def _squeeze_tendency(tend: PhysicsTendency) -> PhysicsTendency:
@@ -269,12 +223,8 @@ class SingleColumnModel:
         self.relaxation_timescales = dict(relaxation_timescales or {})
 
         self.coords = _make_single_column_coords(vertical, lat_deg, lon_deg)
-        user_terrain = terrain if terrain is not None else TerrainData.single_column()
-        user_forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
-        # Tile single-column terrain/forcing to the internal grid shape (the
-        # padded ncols=2 case explained in ``_make_single_column_coords``).
-        self.terrain = _expand_terrain_to_grid(user_terrain)
-        self.forcing = _expand_forcing_to_grid(user_forcing)
+        self.terrain = terrain if terrain is not None else TerrainData.single_column()
+        self.forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
 
         self.physics.cache_coords(self.coords)
         from jcm.physics.icon.icon_terms import ComposableIconPhysics
