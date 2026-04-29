@@ -81,10 +81,12 @@ def prepare_vertical_diffusion_state(
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
     tke: jnp.ndarray,
-    thv_variance: jnp.ndarray
+    thv_variance: jnp.ndarray,
+    roughness_heat: jnp.ndarray = None,
+    surface_wetness: jnp.ndarray = None,
 ) -> VDiffState:
     """Prepare the vertical diffusion state from input variables.
-    
+
     Args:
         u: Zonal wind [m/s] (ncol, nlev)
         v: Meridional wind [m/s] (ncol, nlev)
@@ -99,12 +101,22 @@ def prepare_vertical_diffusion_state(
         height_half: Half level height [m] (ncol, nlev+1)
         surface_temperature: Surface temperature [K] (ncol, nsfc_type)
         surface_fraction: Surface type fraction [-] (ncol, nsfc_type)
-        roughness_length: Roughness length [m] (ncol, nsfc_type)
+        roughness_length: Momentum roughness z0m [m] (ncol, nsfc_type)
         ocean_u: Ocean u-velocity [m/s] (ncol,)
         ocean_v: Ocean v-velocity [m/s] (ncol,)
         tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
         thv_variance: Variance of theta_v [K²] (ncol, nlev)
-        
+        roughness_heat: Heat roughness z0h [m] (ncol, nsfc_type). When
+            ``None``, defaults to ``0.1·roughness_length`` — a standard
+            ratio that's good enough for the original Businger-Dyer
+            scheme. The ECHAM-Louis scheme expects per-tile values from
+            the boundary forcing; build them at the call site.
+        surface_wetness: Effective surface saturation fraction
+            (ncol, nsfc_type). When ``None``, defaults to ``1.0`` for
+            every tile (open-water / saturated-leaf assumption); the
+            ECHAM-Louis scheme uses this to scale land latent flux from
+            the JSBACH-equivalent ``cair``.
+
     Returns:
         Complete vertical diffusion state
 
@@ -113,10 +125,15 @@ def prepare_vertical_diffusion_state(
     # dp should be positive (higher pressure - lower pressure)
     dp = jnp.diff(pressure_half, axis=1)  # This gives p[k+1] - p[k], which is positive
     air_mass = dp / PHYS_CONST.grav
-    
+
     # Approximate dry air mass (could be more sophisticated)
     dry_air_mass = air_mass * (1.0 - qv)
-    
+
+    if roughness_heat is None:
+        roughness_heat = 0.1 * roughness_length
+    if surface_wetness is None:
+        surface_wetness = jnp.ones_like(roughness_length)
+
     return VDiffState(
         u=u,
         v=v,
@@ -132,6 +149,8 @@ def prepare_vertical_diffusion_state(
         surface_temperature=surface_temperature,
         surface_fraction=surface_fraction,
         roughness_length=roughness_length,
+        roughness_heat=roughness_heat,
+        surface_wetness=surface_wetness,
         height_full=height_full,
         height_half=height_half,
         tke=tke,

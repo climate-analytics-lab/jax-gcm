@@ -568,8 +568,11 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
         pressure_full=pressure_full, pressure_half=pressure_half,
         geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
         surface_temperature=surface_temperature, surface_fraction=surface_fraction,
-        roughness_length=roughness_length, height_full=height_full, height_half=height_half,
-        tke=tke, thv_variance=thv_variance, ocean_u=ocean_u, ocean_v=ocean_v
+        roughness_length=roughness_length,
+        roughness_heat=0.1 * roughness_length,
+        surface_wetness=jnp.ones_like(roughness_length),
+        height_full=height_full, height_half=height_half,
+        tke=tke, thv_variance=thv_variance, ocean_u=ocean_u, ocean_v=ocean_v,
     )
 
 
@@ -639,6 +642,8 @@ class TestTKEStability:
             geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
             surface_temperature=surface_temperature, surface_fraction=surface_fraction,
             roughness_length=roughness_length,
+            roughness_heat=0.1 * roughness_length,
+            surface_wetness=jnp.ones_like(roughness_length),
             height_full=height_full, height_half=height_half,
             tke=tke, thv_variance=thv_variance, ocean_u=ocean_u, ocean_v=ocean_v,
         )

@@ -38,6 +38,14 @@ class VDiffParameters:
     # See ``surface_layer.py`` for both implementations.
     surface_layer_scheme: int
 
+    # ECHAM-Louis surface-layer scheme tunables (used when
+    # ``surface_layer_scheme == SCHEME_ECHAM_LOUIS``). Defaults match
+    # ECHAM ``mo_echam_vdiff_params``.
+    surface_layer_fsl: float   # mid-surface-layer weighting
+                               # (fraction of air; 1-fsl is surface)
+    louis_cb: float            # Louis (1979) near-neutrality parameter
+    louis_cc: float            # Louis (1979) unstable-branch parameter
+
     SCHEME_BUSINGER_DYER = 0
     SCHEME_ECHAM_LOUIS = 1
 
@@ -45,7 +53,9 @@ class VDiffParameters:
     def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
                  totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
                  nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
-                 surface_layer_scheme=0) -> 'VDiffParameters':
+                 surface_layer_scheme=0,
+                 surface_layer_fsl=0.4,
+                 louis_cb=5.0, louis_cc=5.0) -> 'VDiffParameters':
         """Return default vertical diffusion parameters.
 
         ``surface_layer_scheme`` accepts either the int constant
@@ -72,6 +82,9 @@ class VDiffParameters:
             ilnd=ilnd,
             itop=itop,
             surface_layer_scheme=int(surface_layer_scheme),
+            surface_layer_fsl=jnp.array(surface_layer_fsl),
+            louis_cb=jnp.array(louis_cb),
+            louis_cc=jnp.array(louis_cc),
         )
 
 
@@ -100,7 +113,18 @@ class VDiffState(NamedTuple):
     # Surface properties
     surface_temperature: jnp.ndarray  # Surface temperature [K] (ncol, nsfc_type)
     surface_fraction: jnp.ndarray     # Surface type fraction [-] (ncol, nsfc_type)
-    roughness_length: jnp.ndarray     # Roughness length [m] (ncol, nsfc_type)
+    roughness_length: jnp.ndarray     # Momentum roughness z0m [m] (ncol, nsfc_type)
+    roughness_heat: jnp.ndarray       # Heat roughness z0h [m] (ncol, nsfc_type) —
+                                      # tile-specific. ECHAM uses
+                                      # ``exp(2 - 86·z0^0.375)`` over open
+                                      # water, ``z0`` over ice, and the
+                                      # JSBACH ``paz0lh`` over land.
+    surface_wetness: jnp.ndarray      # Effective surface saturation [-]
+                                      # (ncol, nsfc_type). 1.0 means fully
+                                      # saturated (open water / ice); over
+                                      # land it's the JSBACH ``cair`` /
+                                      # ``csat``-style fraction derived from
+                                      # the boundary soil moisture.
     
     # Geometric heights
     height_full: jnp.ndarray       # Full level height [m] (ncol, nlev)

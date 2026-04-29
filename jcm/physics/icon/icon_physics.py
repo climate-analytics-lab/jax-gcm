@@ -753,6 +753,30 @@ def apply_vertical_diffusion(
     surface_temperature = jnp.repeat(surface_temp_col[:, jnp.newaxis], nsfc_type, axis=1)
     roughness = jnp.repeat(roughness_length_col[:, jnp.newaxis], nsfc_type, axis=1)
 
+    # Per-tile heat roughness z0h. ECHAM uses tile-specific forms:
+    # open water gets ``exp(2 - 86·z0^0.375)`` (Charnock-derived), sea
+    # ice keeps ``z0`` (rough = smooth in heat sense), and land uses
+    # the JSBACH ``paz0lh`` from the boundary forcing — for which we
+    # currently fall back to the same ``z0`` since no JSBACH coupling
+    # is wired in yet.
+    z0_water = jnp.exp(2.0 - 86.0 * roughness[:, 0] ** 0.375)
+    z0_ice = roughness[:, 1]
+    z0_land = roughness[:, 2]
+    roughness_heat = jnp.stack([z0_water, z0_ice, z0_land], axis=1)
+
+    # Per-tile surface wetness — fraction of saturation specific
+    # humidity available at the surface for evaporation. Open water
+    # and ice are fully saturated (1.0). Land wetness is taken from
+    # the boundary soil-moisture field ``forcing.soilw_am``, which is
+    # already a 0–1 fraction (1 = saturated soil).
+    soilw_col = forcing.soilw_am.reshape(ncols)
+    soilw_col = jnp.clip(soilw_col, 0.0, 1.0)
+    surface_wetness = jnp.stack([
+        jnp.ones(ncols),         # water — fully saturated
+        jnp.ones(ncols),         # ice — saturated wrt ice
+        soilw_col,               # land — soil-moisture fraction
+    ], axis=1)
+
     # Ocean currents (zero for now)
     ocean_u = jnp.zeros(ncols)
     ocean_v = jnp.zeros(ncols)
@@ -778,6 +802,8 @@ def apply_vertical_diffusion(
         surface_temperature=surface_temperature,
         surface_fraction=surface_fraction,
         roughness_length=roughness,
+        roughness_heat=roughness_heat,
+        surface_wetness=surface_wetness,
         ocean_u=ocean_u,
         ocean_v=ocean_v,
         tke=tke.T,

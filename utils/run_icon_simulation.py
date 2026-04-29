@@ -221,7 +221,6 @@ def inject_realistic_profile(model):
     the default — avoids NaN from the State-based model.run path.
     """
     import jax.numpy as jnp
-    import numpy as np
     from dinosaur.hybrid_coordinates import HybridCoordinates
 
     # First, trigger the default state setup
@@ -255,19 +254,13 @@ def inject_realistic_profile(model):
     # before injecting the T/q profile.
     orog = jnp.asarray(model.terrain.orog)   # (nlon, nlat) in m
     if jnp.any(orog > 1.0):
-        from jcm.constants import p0 as p0_const
         from dinosaur.scales import units
         Rd, grav, T_ref_avg = 287.04, 9.80665, 260.0
         ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (Rd * T_ref_avg))
         # log_surface_pressure stored as ln(P_s in Pa) for hybrid coords.
         # Nondimensionalise via physics_specs to match dycore convention.
-        ps_nd = jnp.array([
-            float(model.physics_specs.nondimensionalize(p_pa * units.pascal))
-            for p_pa in ps_pa_nodal.ravel()
-        ]).reshape(ps_pa_nodal.shape)
-        # Actually simpler — physics_specs.nondimensionalize is a scalar
-        # function, but we can apply it on the array directly if it's
-        # JAX-friendly. Use the scalar form on a per-element basis once.
+        # ``physics_specs.nondimensionalize`` is a scalar function, but we
+        # can apply it on the array as a single per-unit scale factor.
         scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
         ps_nodal = ps_pa_nodal * scale
         log_ps_nodal = jnp.log(ps_nodal)
