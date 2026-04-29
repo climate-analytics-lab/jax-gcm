@@ -69,14 +69,14 @@ def compute_surface_exchange_coefficients_echam_louis(
     Returns CH·|U| and CM·|U| (= sCH, sCM) in m/s, per tile. Caller
     multiplies by ρ to get the flux factor.
     """
-    # Import the constants instance inside the function so that loading
-    # this module does not trigger ``jcm.physics.icon.constants`` —
-    # which sits inside the same partially-initialised ``jcm.physics.icon``
-    # package when this file is reached via the icon → parameters →
-    # tte_tke import chain. Doing the import at trace time keeps it
-    # outside the JIT-compiled XLA program (it runs once during tracing).
-    from jcm.physics.icon.constants.physical_constants import PhysicalConstants
-    PHYS_CONST = PhysicalConstants()
+    # Use the ``physical_constants`` instance already exposed on
+    # ``jcm.physics.icon``. Importing via ``jcm.physics.icon`` (whose
+    # ``__init__`` has already loaded the constants subpackage) avoids
+    # the partial-init problem that hits a bare
+    # ``from jcm.physics.icon.constants.physical_constants import …``
+    # under Python 3.11 + pytest-cov when this function is reached via
+    # the icon → parameters → tte_tke chain.
+    from jcm.physics.icon import physical_constants as PHYS_CONST
 
     Rd = PHYS_CONST.rd
     cp = PHYS_CONST.cp
