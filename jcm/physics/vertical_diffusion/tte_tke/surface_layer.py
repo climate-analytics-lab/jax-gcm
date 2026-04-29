@@ -38,11 +38,8 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
-from jcm.physics.icon.constants.physical_constants import PhysicalConstants
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from .vertical_diffusion_types import VDiffParameters, VDiffState
-
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -72,6 +69,15 @@ def compute_surface_exchange_coefficients_echam_louis(
     Returns CH·|U| and CM·|U| (= sCH, sCM) in m/s, per tile. Caller
     multiplies by ρ to get the flux factor.
     """
+    # Import the constants instance inside the function so that loading
+    # this module does not trigger ``jcm.physics.icon.constants`` —
+    # which sits inside the same partially-initialised ``jcm.physics.icon``
+    # package when this file is reached via the icon → parameters →
+    # tte_tke import chain. Doing the import at trace time keeps it
+    # outside the JIT-compiled XLA program (it runs once during tracing).
+    from jcm.physics.icon.constants.physical_constants import PhysicalConstants
+    PHYS_CONST = PhysicalConstants()
+
     Rd = PHYS_CONST.rd
     cp = PHYS_CONST.cp
     grav = PHYS_CONST.grav
