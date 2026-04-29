@@ -66,14 +66,14 @@ class SCMPredictions:
 class SingleColumnModel:
     """Evolve physics tracers with prescribed atmospheric state.
 
-    Examples
-    --------
-    >>> from jcm.physics.icon.icon_terms import icon_physics
-    >>> from jcm.physics.icon.icon_levels import get_icon_levels
-    >>> from jcm.utils import get_coords
-    >>> coords = get_coords(get_icon_levels(8), spectral_truncation=21)
-    >>> model = SingleColumnModel(physics=icon_physics(), coords=coords)
-    >>> predictions = model.run(prescribed_states, initial_tracers={'qc': ..., 'qi': ...})
+    Example::
+
+        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.icon.icon_levels import get_icon_levels
+        from jcm.utils import get_coords
+        coords = get_coords(get_icon_levels(40), spectral_truncation=21)
+        model = SingleColumnModel(physics=icon_physics(), coords=coords)
+        predictions = model.run(states, initial_tracers={'qc': ..., 'qi': ...})
 
     Args:
         physics: Physics package whose ``compute_tendencies`` will drive evolution.
@@ -102,6 +102,7 @@ class SingleColumnModel:
         apply_tracer_tendencies: bool = True,
         relaxation_timescales: dict[str, float] | None = None,
     ) -> None:
+        """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)

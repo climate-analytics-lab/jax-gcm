@@ -10,7 +10,6 @@ import unittest
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
 
 from jcm.runners import (
     build_coords,

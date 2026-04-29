@@ -15,8 +15,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from jcm.diffusion import DiffusionFilter
 from jcm.model import Model, ModelPredictions
@@ -264,6 +263,97 @@ def run(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
         )
     raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+
+
+def run_chunked(
+    cfg: DictConfig,
+    chunk_days: float,
+    output_prefix: str,
+    model: Model | None = None,
+):
+    """Long-running integration broken into ``chunk_days``-day pieces.
+
+    Each chunk is dumped to ``{output_prefix}_day{N}.nc`` and run through
+    ``jcm.diagnostics.check_health``. The loop stops early on the first
+    failed health check.
+
+    Returns a list of per-chunk health-check reports.
+    """
+    import time
+
+
+    from jcm.diagnostics import check_health, print_report
+
+    if model is None:
+        model = build_model(cfg)
+
+    save_interval = float(cfg.run.save_interval)
+    total_time = float(cfg.run.total_time)
+    n_chunks = int(total_time / chunk_days) + 1
+
+    reports: list[dict] = []
+    elapsed_sim_days = 0.0
+    total_wall = 0.0
+
+    for i in range(n_chunks):
+        remaining = total_time - elapsed_sim_days
+        cur_chunk = min(chunk_days, remaining)
+        if cur_chunk <= 0:
+            break
+
+        t0 = time.perf_counter()
+        if i == 0 and cfg.init.kind == "jw":
+            inject_jw_profile(model)
+            preds = model.resume(
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+            )
+        elif i == 0:
+            preds = model.run(
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+            )
+        else:
+            preds = model.resume(
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+            )
+
+        jax.tree_util.tree_map(
+            lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+            preds._predictions,
+        )
+        chunk_wall = time.perf_counter() - t0
+        total_wall += chunk_wall
+        elapsed_sim_days += cur_chunk
+
+        ds = preds.to_xarray()
+        ok, report = check_health(ds, i, elapsed_sim_days)
+        report["wall_seconds"] = chunk_wall
+        reports.append(report)
+        print_report(report)
+
+        nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
+        ds.to_netcdf(nc_path)
+        print(f"  Saved {nc_path}")
+
+        if not ok:
+            print(
+                f"\n*** STOPPING: atmosphere unhealthy at "
+                f"day {elapsed_sim_days:.0f} ***"
+            )
+            break
+
+        sdph = elapsed_sim_days / (total_wall / 3600)
+        print(
+            f"  Wall: {chunk_wall:.1f}s this chunk, {total_wall:.0f}s total "
+            f"({sdph:.0f} sim days/hr)"
+        )
+
+    return reports
 
 
 def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:

@@ -2,7 +2,6 @@
 
 import unittest
 
-import jax
 import jax.numpy as jnp
 
 from jcm.constants import grav

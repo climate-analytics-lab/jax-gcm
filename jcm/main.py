@@ -19,9 +19,9 @@ Override individual options::
 Multi-run sweep::
 
     python -m jcm.main -m run.time_step=10,20,30
+
 """
 
-from pathlib import Path
 
 import hydra
 from hydra.core.hydra_config import HydraConfig

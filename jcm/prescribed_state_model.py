@@ -69,6 +69,7 @@ class PrescribedStateModel:
         start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
         dt_seconds: float = 1800.0,
     ) -> None:
+        """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
