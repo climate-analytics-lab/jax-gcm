@@ -193,7 +193,17 @@ def compute_exchange_coefficients(
     # mixing for the implicit solver to be well-conditioned, the
     # ceiling protects against pathological √TKE values the cap on
     # the TKE update should already prevent (but defence in depth).
-    min_exchange = 0.1
+    #
+    # Floor previously was 0.1 m²/s but ECHAM's vdiff uses
+    # ``cmin_kh = 0.01 m²/s`` for the free-troposphere background
+    # — a 10x looser floor. With 0.1 m²/s applied at every
+    # free-troposphere level for many timesteps, the temperature
+    # profile gets dragged around far more than ECHAM does. Tighten
+    # to 0.01 to match ECHAM. The implicit tridiagonal solver is
+    # still well-conditioned at 0.01 m²/s (the conditioning concern
+    # was for elements near machine epsilon, not 0.01 — 8 orders
+    # above eps).
+    min_exchange = 0.01
     max_exchange = 1000.0
     exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
     exchange_coeff_heat = jnp.clip(exchange_coeff_heat, min_exchange, max_exchange)
@@ -253,11 +263,27 @@ def compute_surface_exchange_coefficients(
                      (0.5 * (theta_air + theta_surface) * 
                       jnp.maximum(wind_speed_surface**2, 0.01)))
         
-        # Stability function (simplified Businger-Dyer)
+        # Surface-layer stability multiplier on CH (heat exchange).
+        #
+        # Standard Businger-Dyer gives the gradient-to-flux ratio
+        # Φh(ζ) = (1 − 16ζ)^(−1/2) for unstable (ζ<0). The DIFFUSIVITY
+        # (and hence CH) scales as 1/Φh = (1 − 16Ri)^(+1/2) — > 1 for
+        # unstable, enhancing the flux. Stable side: φh = 1 + 5ζ, so
+        # CH ∝ 1/(1 + 5Ri) — < 1 for stable, suppressing.
+        #
+        # The previous expression had ``(1 - 16*Ri)**(-0.5)`` for the
+        # unstable branch — that's Φh itself, NOT 1/Φh. So strongly
+        # unstable conditions (e.g. ΔT = −85 K of cold air over warm
+        # ocean) gave a multiplier of ~0.13 instead of ~7.65,
+        # *suppressing* the surface flux by an order of magnitude
+        # exactly when it should be ~7x enhanced. That's how the
+        # 1-year aquaplanet drifted to T_air = 188 K over 273 K SST
+        # without surface fluxes pulling it back: convective coupling
+        # was effectively shut off.
         stability_heat = jnp.where(
             ri_surface < 0,
-            (1.0 - 16.0 * ri_surface)**(-0.5),  # Unstable
-            1.0 / (1.0 + 5.0 * ri_surface)     # Stable
+            (1.0 - 16.0 * ri_surface)**(+0.5),  # Unstable: enhance
+            1.0 / (1.0 + 5.0 * ri_surface),     # Stable: suppress
         )
         
         # Exchange coefficient: CH = κ² / [ln(z/z0)]²
@@ -421,9 +447,14 @@ def compute_surface_fluxes(
     wind_speed = jnp.sqrt(wind_u**2 + wind_v**2)
     wind_speed = jnp.maximum(wind_speed, 0.1)  # Minimum wind speed
     
-    # Reference height (first model level above surface)
-    z_ref = z_half[:, -1]
-    
+    # Reference height: lowest *full* level above the surface, NOT the
+    # bottom half-level (which is the surface itself = 0 m, giving
+    # ``log(0/z0) = -inf`` → friction-velocity NaN). Pre-existing bug
+    # found via the moist-perturbation diagnostic at day 5; the
+    # diagnostic ``surface_friction_velocity`` had been NaN ever since
+    # the function was added but no production path consumed it.
+    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+
     # Surface roughness lengths (simplified - would come from surface model)
     z0_momentum = jnp.full_like(wind_speed, 0.001)  # 1 mm for momentum
     z0_heat = z0_momentum * 0.1  # Heat roughness length
@@ -522,11 +553,24 @@ def compute_turbulence_diagnostics(
         state.height_full, state.height_half, ri, pbl_height
     )
     
-    # Surface diagnostics
+    # Surface diagnostics — dispatch to the configured scheme via
+    # lax.cond. Both branches are JIT-able and return identically
+    # shaped (ncol, nsfc_type) tensors, so the false-branch tracing
+    # is cheap. The scheme field on ``params`` is a tracer under
+    # JIT, hence cond rather than a Python ``if``.
+    from .surface_layer import compute_surface_exchange_coefficients_echam_louis
+
     wind_speed_surface = jnp.sqrt(state.u[:, -1]**2 + state.v[:, -1]**2)
-    surface_exchange_heat, surface_exchange_moisture = compute_surface_exchange_coefficients(
-        state, params, wind_speed_surface,
-        state.surface_temperature, state.temperature[:, -1]
+    surface_exchange_heat, surface_exchange_moisture = jax.lax.cond(
+        params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
+        lambda: compute_surface_exchange_coefficients_echam_louis(
+            state, params, wind_speed_surface,
+            state.surface_temperature, state.temperature[:, -1],
+        ),
+        lambda: compute_surface_exchange_coefficients(
+            state, params, wind_speed_surface,
+            state.surface_temperature, state.temperature[:, -1],
+        ),
     )
     
     # Air density at surface

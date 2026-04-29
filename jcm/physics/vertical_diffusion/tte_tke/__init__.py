@@ -22,9 +22,13 @@ from .turbulence_coefficients import (
     compute_richardson_number,
     compute_mixing_length,
     compute_exchange_coefficients,
+    compute_surface_exchange_coefficients,
     compute_boundary_layer_height,
     compute_friction_velocity,
     compute_turbulence_diagnostics
+)
+from .surface_layer import (
+    compute_surface_exchange_coefficients_echam_louis,
 )
 
 from .matrix_solver import (
@@ -54,6 +58,8 @@ __all__ = [
     "compute_richardson_number",
     "compute_mixing_length",
     "compute_exchange_coefficients",
+    "compute_surface_exchange_coefficients",
+    "compute_surface_exchange_coefficients_echam_louis",
     "compute_boundary_layer_height",
     "compute_friction_velocity",
     "compute_turbulence_diagnostics",

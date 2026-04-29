@@ -20,8 +20,11 @@ logging.basicConfig(level=logging.INFO)
 
 def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0,
                 jw_ref_temp=False, diffusion_scale=1.0, sponge_levels=0,
-                sponge_timescale_h=3.0, sponge_enspodi=2.0):
-    """Construct ICON Model at T85 x 47 levels with the specified radiation scheme."""
+                sponge_timescale_h=3.0, sponge_enspodi=2.0,
+                nlev=47, spectral_truncation=85,
+                surface_layer_scheme="businger_dyer",
+                terrain_file=None):
+    """Construct ICON Model with the specified resolution and radiation scheme."""
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -32,24 +35,33 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
     from jcm.physics.icon.icon_terms import icon_physics
     from jcm.physics.icon.parameters import Parameters
     from jcm.physics.radiation.radiation_types import RadiationParameters
-    from jcm.physics.radiation.nn_emulator import (
+    from jcm.physics.radiation.rrtmgp_nn import (
         init_emulator_weights,
         InputScaling,
     )
 
     if use_sigma:
         from dinosaur.sigma_coordinates import SigmaCoordinates
-        vertical = SigmaCoordinates.equidistant(47)
-        print("Using 47 equidistant sigma levels")
+        vertical = SigmaCoordinates.equidistant(nlev)
+        print(f"Using {nlev} equidistant sigma levels")
     else:
         # Native ICON hybrid coordinates (a + b*P_s): thick lower layers and
         # thinner upper layers should help CFL vs equidistant sigma at T85.
-        vertical = get_icon_levels(47)
-        print("Using 47 ICON hybrid coordinates")
-    coords = get_coords(vertical, spectral_truncation=85)
+        vertical = get_icon_levels(nlev)
+        print(f"Using {nlev} ICON hybrid coordinates")
+    coords = get_coords(vertical, spectral_truncation=spectral_truncation)
     print(f"Grid: {coords.horizontal.nodal_shape}, "
           f"{coords.nodal_shape[0]} levels, "
           f"{coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]} columns")
+
+    # Surface-layer scheme override applied to the vdiff parameters.
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+        VDiffParameters,
+    )
+    base_params = Parameters.default()
+    vdiff_params_override = VDiffParameters.default(
+        surface_layer_scheme=surface_layer_scheme,
+    )
 
     if radiation_scheme == "emulated":
         # NN emulator radiation with random weights
@@ -60,7 +72,6 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         sw_scaling = InputScaling(x_max=jnp.ones(7))
         lw_scaling = InputScaling(x_max=jnp.ones(7))
 
-        params = Parameters.default()
         rad_params = RadiationParameters.default(
             emulator_weights=emulator_wts,
             sw_scaling=sw_scaling,
@@ -68,16 +79,26 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         )
         params = Parameters(
             radiation=rad_params,
-            convection=params.convection,
-            clouds=params.clouds,
-            microphysics=params.microphysics,
-            gravity_waves=params.gravity_waves,
-            vertical_diffusion=params.vertical_diffusion,
-            surface=params.surface,
-            aerosol=params.aerosol,
+            convection=base_params.convection,
+            clouds=base_params.clouds,
+            microphysics=base_params.microphysics,
+            gravity_waves=base_params.gravity_waves,
+            vertical_diffusion=vdiff_params_override,
+            surface=base_params.surface,
+            aerosol=base_params.aerosol,
         )
     else:
-        params = None  # Use defaults
+        # Even non-emulated runs need to pick up the scheme override
+        params = Parameters(
+            radiation=base_params.radiation,
+            convection=base_params.convection,
+            clouds=base_params.clouds,
+            microphysics=base_params.microphysics,
+            gravity_waves=base_params.gravity_waves,
+            vertical_diffusion=vdiff_params_override,
+            surface=base_params.surface,
+            aerosol=base_params.aerosol,
+        )
 
     physics = icon_physics(
         parameters=params,
@@ -98,17 +119,16 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         print(f"Upper sponge: {sponge_levels} top levels, "
               f"tau_top={sponge_timescale_h:.1f}h, enspodi={sponge_enspodi}")
 
-    # Diffusion: SPEEDY defaults (temp 24h, vor_q 12h, div 2h) with uniform
-    # del² are tuned for T30-T42 physics and severely under-damp T85×47.
-    # At T85 the dynamics are far more energetic and the spectral physics
-    # forcing produces sharp horizontal gradients that excite high-mode
-    # noise; without del⁸ filtering on the upper troposphere the noise
-    # accumulates and blows up the dynamics in 0.4 simulated days. Use
-    # the ``echam_t85_l47`` profile which mirrors ECHAM's level-dependent
-    # hyperdiffusion (del² at TOA → del⁸ in the troposphere) and a 3 h
-    # base timescale.
+    # Diffusion: use uniform-order SPEEDY defaults (temp 24h, vor_q 12h,
+    # div 2h, del²). The level-dependent ``echam_t85_l47`` profile (del² at
+    # TOA → del⁸ in the troposphere) destabilises moist runs at T85×47 —
+    # a 30-day default-state test on dt=3 min NaN'd at day 12 with the
+    # ECHAM profile but lasted to day 26 with the uniform default. The
+    # level-dep path also has a known JIT bug at order ≥ 4 (see
+    # ``jcm.diffusion`` module docstring). Stick with default until the
+    # level-dep filter is debugged and re-tuned.
     from jcm.diffusion import DiffusionFilter
-    base_diff = DiffusionFilter.echam_t85_l47()
+    base_diff = DiffusionFilter.default()
     diffusion = DiffusionFilter(
         div_timescale=base_diff.div_timescale * diffusion_scale,
         div_order=base_diff.div_order,
@@ -116,9 +136,6 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
         vor_q_order=base_diff.vor_q_order,
         temp_timescale=base_diff.temp_timescale * diffusion_scale,
         temp_order=base_diff.temp_order,
-        level_orders_div=base_diff.level_orders_div,
-        level_orders_vor_q=base_diff.level_orders_vor_q,
-        level_orders_temp=base_diff.level_orders_temp,
     )
     if diffusion_scale != 1.0:
         print(f"Diffusion timescales scaled by {diffusion_scale}x "
@@ -126,8 +143,23 @@ def build_model(radiation_scheme="emulated", use_sigma=False, time_step_min=30.0
               f"vor_q {diffusion.vor_q_timescale/3600:.1f}h, "
               f"temp {diffusion.temp_timescale/3600:.1f}h)")
 
-    model = Model(coords=coords, physics=physics, time_step=time_step_min,
-                  diffusion=diffusion, log_level=logging.INFO)
+    # Optional realistic terrain (orography + land-sea mask) loaded from a
+    # bilinear-interpolated boundary-condition file. Default behaviour is
+    # the original aquaplanet (TerrainData.aquaplanet inside Model).
+    if terrain_file is not None:
+        from jcm.terrain import TerrainData
+        terrain = TerrainData.from_coords(
+            coords, terrain_file=terrain_file, interpolate=True,
+        )
+        print(f"Terrain: orog max={float(terrain.orog.max()):.0f} m, "
+              f"fmask sum={float(terrain.fmask.sum()):.0f} cells, "
+              f"lfluxland={bool(terrain.lfluxland)}")
+        model = Model(coords=coords, physics=physics, time_step=time_step_min,
+                      terrain=terrain, diffusion=diffusion,
+                      log_level=logging.INFO)
+    else:
+        model = Model(coords=coords, physics=physics, time_step=time_step_min,
+                      diffusion=diffusion, log_level=logging.INFO)
 
     if jw_ref_temp:
         # Swap the semi-implicit reference temperature from isothermal 288K to
@@ -189,6 +221,8 @@ def inject_realistic_profile(model):
     the default — avoids NaN from the State-based model.run path.
     """
     import jax.numpy as jnp
+    import numpy as np
+    from dinosaur.hybrid_coordinates import HybridCoordinates
 
     # First, trigger the default state setup
     model._final_modal_state = model._prepare_initial_modal_state(
@@ -196,10 +230,13 @@ def inject_realistic_profile(model):
     )
     state = model._final_modal_state
 
-    nlev = len(model.coords.vertical.centers)
     nlon, nlat = model.coords.horizontal.nodal_shape
     p0_pa = 101325.0
-    sigma = jnp.asarray(model.coords.vertical.centers)
+    if isinstance(model.coords.vertical, HybridCoordinates):
+        sigma = jnp.asarray(model.coords.vertical.get_sigma_centers(p0_pa))
+    else:
+        sigma = jnp.asarray(model.coords.vertical.centers)
+    nlev = sigma.size
 
     # Standard-atmosphere T(sigma)
     p = sigma * p0_pa
@@ -208,6 +245,39 @@ def inject_realistic_profile(model):
     z = 8400.0 * jnp.log(p0_pa / p)
     # Cap minimum T to stay within ~40K of reference (288K) for semi-implicit stability
     T_profile = jnp.maximum(T_sfc - gamma * z, 250.0)
+
+    # If the model has nonzero orography, the default isothermal-rest
+    # init (uniform log_surface_pressure) creates a hydrostatic
+    # mismatch — the model thinks there's air below ground level on
+    # tall mountains, producing instant ageostrophic spin-up that
+    # NaN's the run. Adjust log_surface_pressure to the standard-
+    # atmosphere hydrostatic balance ``P_s(x,y) = p0·exp(-g·h/(R·T))``
+    # before injecting the T/q profile.
+    orog = jnp.asarray(model.terrain.orog)   # (nlon, nlat) in m
+    if jnp.any(orog > 1.0):
+        from jcm.constants import p0 as p0_const
+        from dinosaur.scales import units
+        Rd, grav, T_ref_avg = 287.04, 9.80665, 260.0
+        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (Rd * T_ref_avg))
+        # log_surface_pressure stored as ln(P_s in Pa) for hybrid coords.
+        # Nondimensionalise via physics_specs to match dycore convention.
+        ps_nd = jnp.array([
+            float(model.physics_specs.nondimensionalize(p_pa * units.pascal))
+            for p_pa in ps_pa_nodal.ravel()
+        ]).reshape(ps_pa_nodal.shape)
+        # Actually simpler — physics_specs.nondimensionalize is a scalar
+        # function, but we can apply it on the array directly if it's
+        # JAX-friendly. Use the scalar form on a per-element basis once.
+        scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
+        ps_nodal = ps_pa_nodal * scale
+        log_ps_nodal = jnp.log(ps_nodal)
+        state.log_surface_pressure = model.coords.horizontal.to_modal(
+            log_ps_nodal[None, ...]   # add level dim
+        )
+        print(f"Hydrostatic-adjusted P_s: "
+              f"{float(ps_pa_nodal.min()):.0f} – "
+              f"{float(ps_pa_nodal.max()):.0f} Pa "
+              f"(orography max {float(orog.max()):.0f} m)")
 
     # Inject T profile as temperature_variation on top of model ref temperature
     T_ref = jnp.asarray(model.primitive.reference_temperature)

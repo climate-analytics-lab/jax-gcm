@@ -12,31 +12,53 @@ import tree_math
 @tree_math.struct
 class VDiffParameters:
     """Parameters for vertical diffusion scheme."""
-    
+
     # Implicitness factors (following ICON's tpfac1, tpfac2, tpfac3)
     tpfac1: float       # Factor for new timestep (implicit)
     tpfac2: float       # Factor for old timestep (explicit part)
     tpfac3: float       # Factor for time interpolation
-    
+
     # Turbulence parameters
     totte_min: float    # Minimum TTE value
     z0m_min: float      # Minimum roughness length
     cchar: float        # Charnock constant for ocean roughness
-    
+
     # Surface types
     nsfc_type: int      # Number of surface types (water, ice, land)
     iwtr: int           # Index for water surface
     iice: int           # Index for ice surface
     ilnd: int           # Index for land surface
-    
+
     # Vertical structure
     itop: int           # Top level for turbulence calculation
+
+    # Surface-layer scheme selector (int flag — JAX won't trace strings).
+    # 0 = "businger_dyer" (default; preserves original ICON-port behavior)
+    # 1 = "echam_louis"   (faithful port of mo_turbulence_diag)
+    # See ``surface_layer.py`` for both implementations.
+    surface_layer_scheme: int
+
+    SCHEME_BUSINGER_DYER = 0
+    SCHEME_ECHAM_LOUIS = 1
 
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
                  totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
-                 nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1) -> 'VDiffParameters':
-        """Return default vertical diffusion parameters"""
+                 nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
+                 surface_layer_scheme=0) -> 'VDiffParameters':
+        """Return default vertical diffusion parameters.
+
+        ``surface_layer_scheme`` accepts either the int constant
+        (``SCHEME_BUSINGER_DYER`` / ``SCHEME_ECHAM_LOUIS``) or the
+        string aliases ``"businger_dyer"`` / ``"echam_louis"``.
+        """
+        if isinstance(surface_layer_scheme, str):
+            scheme_map = {
+                "businger_dyer": cls.SCHEME_BUSINGER_DYER,
+                "echam_louis":   cls.SCHEME_ECHAM_LOUIS,
+            }
+            surface_layer_scheme = scheme_map[surface_layer_scheme]
+
         return cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
@@ -44,11 +66,12 @@ class VDiffParameters:
             totte_min=jnp.array(totte_min),
             z0m_min=jnp.array(z0m_min),
             cchar=jnp.array(cchar),
-            nsfc_type=nsfc_type,  # Keep as Python int for static shape
-            iwtr=iwtr,  # Keep as Python int for indexing
-            iice=iice,  # Keep as Python int for indexing
-            ilnd=ilnd,  # Keep as Python int for indexing
-            itop=itop   # Keep as Python int for indexing
+            nsfc_type=nsfc_type,
+            iwtr=iwtr,
+            iice=iice,
+            ilnd=ilnd,
+            itop=itop,
+            surface_layer_scheme=int(surface_layer_scheme),
         )
 
 
