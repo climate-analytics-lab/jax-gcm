@@ -148,40 +148,52 @@ def calculate_tendencies(
     geopotential = grav * heights_from_surface
 
     # Dry static energy = cp*T + geopotential
-    # The latent heat is handled separately through lh_source
+    # The latent heat is handled separately through lh_source.
+    # Per Tiedtke (1989) eq. 3.8 and ECHAM ``mo_cuflx``, the convective
+    # tendency in the environment is the divergence of the *deviation*
+    # flux M·(s_par − s̄), NOT M·s_par. The deviation flux carries the
+    # implicit compensating-subsidence contribution: as the updraft
+    # transports parcel DSE upward, an equal mass of environmental air
+    # subsides and warms adiabatically. Without the s̄ subtraction,
+    # the absolute s_par (~3·10⁵ J/kg) dominates and any small dmfu/dz
+    # from entrainment produces unphysical heating of ~10³–10⁴ K/day.
+    dse_env = cp * temperature + geopotential
     dse_up = cp * updraft_state.tu + geopotential
     dse_down = cp * downdraft_state.td + geopotential
 
-    # Fluxes of dry static energy (W/m² equivalent)
-    # pmfus = mfu * (cp*T + phi) in ICON
-    dse_flux_up = dse_up * updraft_state.mfu
-    dse_flux_down = dse_down * downdraft_state.mfd
+    # Deviation fluxes of dry static energy (W/m²)
+    dse_flux_up = (dse_up - dse_env) * updraft_state.mfu
+    dse_flux_down = (dse_down - dse_env) * downdraft_state.mfd
 
-    # Flux divergences (matching ICON exactly: pmfus(k+1) - pmfus(k))
-    # Note: In ICON k=1 is TOA, k=klev is surface
-    # In our arrays, index 0 is TOA, index -1 is surface
-    # So pmfus(k+1) - pmfus(k) is flux_up[k+1] - flux_up[k] in Python
-    # This gives shape (nlev-1,)
-    dse_flux_div = - jnp.diff(dse_flux_up + dse_flux_down, axis=0)
-    q_flux_div = - jnp.diff(updraft_state.qu * updraft_state.mfu + downdraft_state.qd * downdraft_state.mfd, axis=0)
-    lh_source = - alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0) # Include latent heat from condensation/evaporation
+    # ECHAM ``mo_cufluxdts.f90`` writes the convective tendency as
+    #     dT/dt = (g / Δp) · (F(k+1) − F(k)) / cp
+    # where Δp = p_half(k+1) − p_half(k) (signed) and F is the deviation
+    # flux M·(s_par − s̄). Both ``Δp`` and ``F(k+1) − F(k)`` flip sign
+    # together with vertical ordering, so leaving them signed keeps the
+    # formula ordering-agnostic. The previous implementation used
+    # ``-diff(F)`` together with ``abs(Δp)`` — correct for surface-first
+    # inputs but inverted for the TOA-first columns the running ICON
+    # physics actually feeds in, leading to convective *cooling* of the
+    # cloud layer in production runs.
+    dp_signed = jnp.diff(pressure, axis=0)
+    dse_flux_div = jnp.diff(dse_flux_up + dse_flux_down, axis=0)
+    # Moisture deviation flux: same logic — env q is what gets displaced
+    # by the updraft, so the convective drying tendency is governed by
+    # the difference between parcel and env q.
+    q_flux_div = jnp.diff(
+        (updraft_state.qu - humidity) * updraft_state.mfu
+        + (downdraft_state.qd - humidity) * downdraft_state.mfd,
+        axis=0,
+    )
+    # Latent-heat source from condensation flux divergence. The same
+    # signed-dp / signed-diff convention applies.
+    lh_source = alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
 
-    # Layer mass per unit area (kg/m²) - ICON's pmref
-    # For the tendency calculation, we need mass at the levels where tendency is applied (nlev-1)
-    # ICON uses pressure differences at layer interfaces
-    # Approximate: use pressure at current level for normalization
-    # Actually in ICON, pmref is passed in and is the layer mass
-    # For simplicity, use a constant approximation or estimate from pressure
-    # Better: compute from pressure differences
-    dp = jnp.diff(pressure, axis=0)  # Pressure difference  between levels, shape (nlev-1)
-    layer_mass_per_area = jnp.abs(dp) / grav  # kg/m², shape (nlev-1)
+    # Signed layer mass per unit area (sign matches ``dp_signed``); the
+    # division below cancels the sign so the tendency comes out positive
+    # for heating regardless of ordering.
+    layer_mass_per_area = dp_signed / grav  # kg/m² (signed), shape (nlev-1)
 
-    # Convert to tendencies by dividing by layer mass (ICON: zrmref = 1/pmref)
-    # Temperature tendency: (DSE_flux_div + LH_source) / (cp * layer_mass_per_area)
-    # ICON: pq_cnv includes both DSE and LH, but we need to convert DSE flux to temp flux
-    # DSE = cp*T + phi, so dDSE/dt = cp*dT/dt + d(phi)/dt
-    # For a fixed level, d(phi)/dt = 0, so dT/dt = dDSE/dt / cp
-    # All arrays now have shape (nlev-1,)
     dtedt_k_levels = (dse_flux_div + lh_source) / (cp * layer_mass_per_area)
     dqdt_k_levels = q_flux_div / layer_mass_per_area
 
@@ -190,23 +202,25 @@ def calculate_tendencies(
     diff_downdraft = jnp.diff(downdraft_state.mfd, axis=0)
     mass_flux_div = diff_updraft + diff_downdraft
 
-    # Normalization factor for tendencies (1 / layer_mass)
+    # Normalization factor for tendencies (1 / signed layer_mass) — same
+    # ordering-agnostic convention as for the temperature/moisture
+    # tendency above.
     factor = 1.0 / layer_mass_per_area
 
     # Downdraft momentum transport (assumes downdraft winds ~ environmental winds)
-    u_downdraft_flux = - jnp.diff(u_wind * downdraft_state.mfd, axis=0)
-    v_downdraft_flux = - jnp.diff(v_wind * downdraft_state.mfd, axis=0)
+    u_downdraft_flux = jnp.diff(u_wind * downdraft_state.mfd, axis=0)
+    v_downdraft_flux = jnp.diff(v_wind * downdraft_state.mfd, axis=0)
 
     # Enhanced momentum tendencies
     def calculate_momentum_transport():
         # Simplified momentum transport using environmental winds
         # Updrafts and downdrafts carry momentum similar to their source levels
-        
+
         # Updraft momentum transport (assumes updraft winds ~ cloud base winds)
         u_cloud_base = u_wind[kbase, None]
         v_cloud_base = v_wind[kbase, None]
-        u_updraft_flux = - diff_updraft * u_cloud_base
-        v_updraft_flux = - diff_updraft * v_cloud_base
+        u_updraft_flux = diff_updraft * u_cloud_base
+        v_updraft_flux = diff_updraft * v_cloud_base
         
         # Total momentum flux divergence
         u_total_flux = u_updraft_flux + u_downdraft_flux

@@ -233,6 +233,89 @@ class TestCAPE:
             assert cape_stable >= 0, f"Stable atmosphere should have non-negative CAPE, got {cape_stable}"
 
 
+class TestCAPEDeepColumn:
+    """CAPE/CIN bounds for a deep (TOA-reaching) ICON-style column.
+
+    The default ``create_realistic_atmosphere`` only goes up to 200 hPa, so
+    the CIN integral never sees the upper troposphere or stratosphere. The
+    real ICON 47-level grid reaches ~1 Pa, where the parcel-environment
+    buoyancy difference becomes huge negative because the lifted parcel
+    cools to ~100 K while the environmental temperature is held at 200 K.
+    Without a stop above the LFC, those upper-level layers dump hundreds
+    of thousands of J/kg into CIN — physically meaningless and a sign
+    that the integration bounds are wrong.
+
+    All inputs are TOA-first (level 0 = TOA, level nlev-1 = surface) to
+    match the ICON physics convention used inside ``apply_convection``.
+    """
+
+    def _icon_like_column_47(self, surf_T=300.0, surf_q_kgkg=0.018):
+        """Build a TOA-first 47-level column reaching ~1 Pa."""
+        nlev = 47
+        # surface-first sigma → flip to TOA-first
+        sigma = jnp.linspace(1.0, 0.001, nlev)[::-1]
+        pressure = 1.0e5 * sigma  # TOA-first: p[0] ≈ 100 Pa, p[-1] ≈ 1e5 Pa
+        Rd = 287.05
+        # Geopotential height referenced to surface (high at TOA, ~0 at surf)
+        height = -Rd * 250.0 * jnp.log(pressure / pressure[-1]) / 9.81
+        temperature = jnp.where(
+            pressure > 2.0e4,
+            surf_T - 6.5e-3 * height,
+            jnp.maximum(surf_T - 6.5e-3 * height, 200.0),
+        )
+        humidity_profile = surf_q_kgkg * jnp.exp(-height / 2000.0)
+        qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+        humidity = jnp.minimum(humidity_profile, 0.9 * qs)
+        layer_thickness = jnp.abs(jnp.diff(height, append=height[-1]))
+        return {
+            "temperature": temperature,
+            "humidity": humidity,
+            "pressure": pressure,
+            "layer_thickness": layer_thickness,
+        }
+
+    def test_cin_bounded_for_deep_column(self):
+        """CIN must stay physically reasonable when the column reaches TOA.
+
+        Realistic CIN values cap out at a few hundred J/kg even in
+        strong-cap regimes; > 5000 J/kg is non-physical and indicates
+        the integration is sweeping up stratospheric buoyancy noise.
+        """
+        atm = self._icon_like_column_47()
+        config = ConvectionParameters.default()
+        cb, has_cb = find_cloud_base(
+            atm["temperature"], atm["humidity"], atm["pressure"], config,
+        )
+        assert bool(has_cb)
+        cape, cin = calculate_cape_cin(
+            atm["temperature"], atm["humidity"], atm["pressure"],
+            atm["layer_thickness"], cb, config,
+        )
+        cin_v = float(cin)
+        assert 0.0 <= cin_v < 5000.0, (
+            f"CIN={cin_v:.0f} J/kg for a 47-level moist tropical column is "
+            f"non-physical — likely integrating buoyancy across the "
+            f"stratosphere where the parcel has cooled to ~100 K"
+        )
+
+    def test_cape_bounded_for_deep_column(self):
+        """CAPE shouldn't explode either; >5000 J/kg is extreme-storm regime."""
+        atm = self._icon_like_column_47()
+        config = ConvectionParameters.default()
+        cb, _ = find_cloud_base(
+            atm["temperature"], atm["humidity"], atm["pressure"], config,
+        )
+        cape, _ = calculate_cape_cin(
+            atm["temperature"], atm["humidity"], atm["pressure"],
+            atm["layer_thickness"], cb, config,
+        )
+        cape_v = float(cape)
+        assert 50.0 < cape_v < 5000.0, (
+            f"CAPE={cape_v:.0f} J/kg outside physical range for a moist "
+            f"tropical column"
+        )
+
+
 class TestJAXCompatibility:
     """Test JAX transformations"""
     

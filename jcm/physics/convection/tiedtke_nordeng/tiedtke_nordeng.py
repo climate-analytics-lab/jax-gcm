@@ -331,93 +331,138 @@ def calculate_cape_cin(temperature: jnp.ndarray,
                       layer_thickness: jnp.ndarray,
                       cloud_base: int,
                       config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate CAPE and CIN for convective instability
-    
+    """Calculate CAPE and CIN for convective instability.
+
+    Lifts a surface parcel: dry-adiabatic up to cloud base, moist-
+    adiabatic above. CAPE is the positive-buoyancy work done between the
+    LFC (level of free convection) and the EL (equilibrium level); CIN
+    is the magnitude of negative-buoyancy work between cloud base and
+    LFC. Stratospheric layers above the EL — where the parcel cools to
+    absurdly low temperatures and gives massive bogus negative buoyancy
+    — are not counted.
+
+    Works for either input ordering:
+      * TOA-first (level 0 = TOA, ICON/ECHAM convention used by the
+        running model)
+      * surface-first (level 0 = surface, used by some unit tests)
+    Internally we always work in surface-first form so the moist-adiabat
+    scan steps in the natural surface→TOA direction. The output is in
+    the input's ordering for backward compatibility.
+
     Args:
         temperature: Environmental temperature (K) [nlev]
-        humidity: Environmental specific humidity (kg/kg) [nlev]  
+        humidity: Environmental specific humidity (kg/kg) [nlev]
         pressure: Environmental pressure (Pa) [nlev]
-        layer_thickness: Layer thickness (m) [nlev-1]
-        cloud_base: Cloud base level index
+        layer_thickness: Layer thickness (m) [nlev]
+        cloud_base: Cloud base level index in the input ordering
         config: Convection configuration
-        
+
     Returns:
         Tuple of (CAPE, CIN) in J/kg
 
     """
     nlev = len(temperature)
-    
-    # Surface parcel properties
-    surf_idx = jnp.argmax(pressure)  # Surface is at highest pressure
-    surf_temp = temperature[surf_idx]
-    surf_humid = humidity[surf_idx]
-    surf_press = pressure[surf_idx]
-    
-    # Level indices for vectorization
+
+    # Reorder to surface-first: level 0 = surface, level nlev-1 = TOA.
+    # ``flip`` is a no-op when the input is already surface-first.
+    is_surface_first = pressure[0] >= pressure[-1]
+    flip = lambda a: jnp.where(is_surface_first, a, a[::-1])
+    T_sf = flip(temperature)
+    q_sf = flip(humidity)
+    p_sf = flip(pressure)
+    dz_sf = flip(layer_thickness)
+    cb_sf = jnp.where(is_surface_first, cloud_base, nlev - 1 - cloud_base)
+
+    surf_temp = T_sf[0]
+    surf_humid = q_sf[0]
+    surf_press = p_sf[0]
     k_levels = jnp.arange(nlev)
-    
-    # Pressure ratios
-    press_ratios = pressure / surf_press
-    
-    # Below cloud base - dry adiabatic ascent
-    parcel_temp_dry = surf_temp * (press_ratios ** (rd / cp))
-    parcel_humid_dry = jnp.full_like(temperature, surf_humid)
 
-    # Above cloud base - moist adiabatic ascent
-    # Lift parcel from cloud base toward TOA using the moist adiabatic
-    # lapse rate: dT/dp = (1/p)(rd*T + alhc*qs) / (cp + alhc²*qs/(rv*T²))
-    # Index 0 = TOA, so "upward" means decreasing index.
-    # Reverse the pressure array so lax.scan steps from cloud base to TOA.
-    pressure_rev = pressure[::-1]  # now index 0 = surface
-    cloud_base_temp = parcel_temp_dry[cloud_base]
+    # Below cloud base — dry-adiabatic ascent. q is conserved, so the
+    # parcel mixing ratio stays at the surface value.
+    parcel_temp_dry = surf_temp * (p_sf / surf_press) ** (rd / cp)
 
-    def _moist_step(parcel_t, p_pair):
-        """One upward step of the moist adiabat."""
-        p_curr, p_next = p_pair
-        dp = p_next - p_curr  # negative (pressure decreasing)
+    # Above cloud base — moist (pseudoadiabatic) ascent. We scan
+    # surface→TOA (increasing index in surface-first) and only step the
+    # parcel temperature when we are AT or above cloud base; below cb
+    # the parcel just rides the dry adiabat we already computed.
+    #
+    # If the parcel arrives at cb already supersaturated (surf_q >
+    # qsat(parcel_dry_T, p_cb) — common when find_cloud_base picks the
+    # next discrete level above the true LCL), do a one-step saturation
+    # adjustment: condense the excess water and warm the parcel by L/cp
+    # times the condensate. This raises the cloud-base parcel
+    # temperature to its physically meaningful value and prevents
+    # spurious cold biases that crush CAPE for warm tropical columns.
+    parcel_temp_at_cb_dry = parcel_temp_dry[cb_sf]
+    p_cb = p_sf[cb_sf]
+    qsat_at_cb = saturation_mixing_ratio(p_cb, parcel_temp_at_cb_dry)
+    excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
+    cloud_base_temp = parcel_temp_at_cb_dry + (alhc / cp) * excess
+
+    def _step(parcel_t, args):
+        p_curr, p_next, k = args
+        dp = p_next - p_curr  # negative going up
         qs = saturation_mixing_ratio(p_curr, parcel_t)
         dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs) / (
-            cp + alhc**2 * qs / (rv * parcel_t**2)
+            cp + alhc ** 2 * qs / (rv * parcel_t ** 2)
         )
         new_t = parcel_t + dTdp * dp
+        # If we haven't reached cloud base yet, hold the parcel at the
+        # cloud-base temperature so the moist integration starts from
+        # the right pressure when k finally crosses cb.
+        below_cb = k < cb_sf
+        new_t = jnp.where(below_cb, cloud_base_temp, new_t)
         return new_t, new_t
 
-    # Pairs (p_curr, p_next) for each step from cloud_base_rev upward
-    p_pairs = jnp.stack([pressure_rev[:-1], pressure_rev[1:]], axis=-1)
-    _, moist_temps_rev = lax.scan(_moist_step, cloud_base_temp, p_pairs)
+    p_pairs = (p_sf[:-1], p_sf[1:], k_levels[:-1])
+    _, parcel_after = lax.scan(_step, cloud_base_temp, p_pairs)
+    parcel_temp_moist_sf = jnp.concatenate(
+        [cloud_base_temp[jnp.newaxis], parcel_after],
+    )
 
-    # Prepend cloud_base_temp (the starting level) and reverse back to
-    # original ordering (index 0 = TOA)
-    moist_profile_rev = jnp.concatenate([jnp.array([cloud_base_temp]), moist_temps_rev])
-    moist_profile = moist_profile_rev[::-1]
+    is_above_cb = k_levels >= cb_sf
+    parcel_temp_sf = jnp.where(
+        is_above_cb, parcel_temp_moist_sf, parcel_temp_dry,
+    )
+    parcel_qs_sf = jax.vmap(saturation_mixing_ratio)(p_sf, parcel_temp_sf)
+    parcel_q_sf = jnp.where(is_above_cb, parcel_qs_sf, surf_humid)
 
-    # Only levels at and above cloud base use the moist profile;
-    # levels below are masked out by is_below_cb.
-    # For levels below cloud_base_rev in the reversed scan the temperatures
-    # are meaningless, but they'll be masked anyway.
-    parcel_temp_moist = moist_profile
-    parcel_humid_moist = jax.vmap(saturation_mixing_ratio)(pressure, parcel_temp_moist)
+    env_tv_sf = T_sf * (1.0 + 0.61 * q_sf)
+    parcel_tv_sf = parcel_temp_sf * (1.0 + 0.61 * parcel_q_sf)
+    buoyancy_sf = grav * (parcel_tv_sf - env_tv_sf) / env_tv_sf
 
-    # Use dry below cloud base, moist at and above (index 0 = TOA)
-    is_below_cb = k_levels > cloud_base
-    parcel_temp = jnp.where(is_below_cb, parcel_temp_dry, parcel_temp_moist)
-    parcel_humid = jnp.where(is_below_cb, parcel_humid_dry, parcel_humid_moist)
-    
-    # Virtual temperatures
-    env_tv = temperature * (1.0 + 0.61 * humidity)
-    parcel_tv = parcel_temp * (1.0 + 0.61 * parcel_humid)
-    
-    # Buoyancy
-    buoyancy = grav * (parcel_tv - env_tv) / env_tv
-    
-    # Calculate CAPE and CIN contributions at each level
-    cape_contrib = jnp.where(buoyancy > 0, buoyancy * layer_thickness, 0.0)
-    cin_contrib = jnp.where(buoyancy <= 0, -buoyancy * layer_thickness, 0.0)
+    # LFC: lowest-altitude (smallest surface-first index) at-or-above cb
+    #      where buoyancy first becomes positive.
+    pos_above_cb = (buoyancy_sf > 0) & is_above_cb
+    has_lfc = jnp.any(pos_above_cb)
+    # ``argmax`` returns the FIRST True; surface-first means lowest-
+    # altitude True is the smallest index, which is what we want.
+    lfc_sf = jnp.argmax(pos_above_cb)
+    lfc_sf = jnp.where(has_lfc, lfc_sf, nlev)
 
-    # Sum over levels (exclude surface level)
-    cape = jnp.sum(cape_contrib[:-1])
-    cin = jnp.sum(cin_contrib[:-1])
-    
+    # EL: first level above LFC (larger index in surface-first) where
+    # buoyancy turns non-positive again. Without an EL we integrate to
+    # TOA (k = nlev - 1).
+    above_lfc_mask = k_levels > lfc_sf
+    el_candidate_mask = above_lfc_mask & ~(buoyancy_sf > 0)
+    has_el = jnp.any(el_candidate_mask)
+    el_sf = jnp.argmax(el_candidate_mask)
+    el_sf = jnp.where(has_el, el_sf, nlev)
+
+    in_cape_layer = (k_levels >= lfc_sf) & (k_levels < el_sf)
+    in_cin_layer = is_above_cb & (k_levels < lfc_sf)
+
+    cape_contrib = jnp.where(
+        in_cape_layer & (buoyancy_sf > 0), buoyancy_sf * dz_sf, 0.0,
+    )
+    cin_contrib = jnp.where(
+        in_cin_layer & (buoyancy_sf <= 0), -buoyancy_sf * dz_sf, 0.0,
+    )
+
+    cape = jnp.where(has_lfc, jnp.sum(cape_contrib), 0.0)
+    cin = jnp.where(has_lfc, jnp.sum(cin_contrib), 0.0)
+
     return cape, cin
 
 
@@ -505,9 +550,16 @@ def tiedtke_nordeng_convection(
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
-        # Determine cloud top based on CAPE profile
-        # Simplified - full version would search for equilibrium level
-        cloud_depth = lax.cond(conv_type == 2, lambda: 3, lambda: 6)  # Shallow vs deep
+        # Cloud-top scan ceiling. Deep convection in the tropics commonly
+        # reaches the tropopause (~12-15 km, ~15-20 levels above cloud
+        # base on the ICON 47-level grid); shallow convection peaks
+        # around 2-3 km. Set a generous scan range and let the updraft's
+        # dynamic termination (negative buoyancy or mfu < 1% of base —
+        # see ``calculate_updraft``) decide where the cloud actually
+        # ends. The previous values (6 for deep, 3 for shallow) capped
+        # deep convection at ~3 km so it could never properly transport
+        # heat / moisture through the troposphere.
+        cloud_depth = lax.cond(conv_type == 2, lambda: 5, lambda: 15)
 
         # Handle level ordering properly
         pressure_increasing = pressure[0] < pressure[-1]

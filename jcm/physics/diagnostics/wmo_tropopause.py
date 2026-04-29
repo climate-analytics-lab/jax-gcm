@@ -12,7 +12,7 @@ Date: 2025-01-09
 import jax
 import jax.numpy as jnp
 from typing import Optional
-from jcm import constants as physical_constants
+from jcm.constants import physical_constants
 
 # WMO tropopause constants
 GWMO = -0.002  # K/m - The -2°C/km threshold

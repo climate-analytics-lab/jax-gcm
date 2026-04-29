@@ -60,25 +60,26 @@ def water_vapor_continuum(
     #   Band 1: 350-500 cm⁻¹ (CO2 15μm + H2O window)
     #   Band 2: 500-2500 cm⁻¹ (H2O continuum + O3 9.6μm)
 
-    # Self-broadening coefficients (H2O-H2O interactions)
-    # 2x scaling on the continuum bands (far-IR + window + bands) to bring
-    # SFC LW down closer to Earth's ~340 W/m² (was 185 W/m² at 1x). Combined
-    # with hybrid coords + 0.5x diffusion + dt=3min for stability under the
-    # stronger surface forcing that this implies.
+    # Self-broadening coefficients (H2O-H2O interactions).
+    # An earlier 2x boost was added to increase SFC LW down toward Earth's
+    # ~340 W/m², but it also doubled LW emission to space, over-cooling the
+    # stratosphere on T85 × 47 runs and causing rapid (< 30 days) divergence.
+    # Back to 1x here; greenhouse should be retuned via band coefficients
+    # in a more targeted way rather than a global continuum multiplier.
     k_self = jnp.where(
-        band == 0, 0.20,   # Far-IR + rotation: strong H2O absorption
+        band == 0, 0.10,   # Far-IR + rotation: strong H2O absorption
         jnp.where(
-            band == 1, 0.20,   # CO2 + H2O window: moderate
-            0.60               # H2O continuum + bands: strongest
+            band == 1, 0.10,   # CO2 + H2O window: moderate
+            0.30               # H2O continuum + bands: strongest
         )
     )
 
     # Foreign-broadening coefficients (H2O-N2/O2 interactions)
     k_foreign = jnp.where(
-        band == 0, 0.040,  # Far-IR + rotation
+        band == 0, 0.020,  # Far-IR + rotation
         jnp.where(
-            band == 1, 0.050,  # CO2 window
-            0.130              # H2O continuum + bands
+            band == 1, 0.025,  # CO2 window
+            0.065              # H2O continuum + bands
         )
     )
     
@@ -161,9 +162,9 @@ def _calculate_co2_band1(temperature, pressure, co2_vmr):
     P_factor = (pressure / P_ref) * (T_ref / temperature)**n_temp
     
     # Enhanced absorption coefficient based on spectroscopic data
-    # Includes both line absorption and continuum effects
-    # 2x scaling — see comment on k_self above
-    k_ref = 0.30
+    # Includes both line absorption and continuum effects.
+    # Reverted from 2x (0.30) back to 1x — see note on k_self above.
+    k_ref = 0.15
     
     # CO2 mass mixing ratio
     co2_mmr = co2_vmr * (44.0 / 29.0)  # M_CO2 / M_air

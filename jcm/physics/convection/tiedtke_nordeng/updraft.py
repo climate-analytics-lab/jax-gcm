@@ -16,7 +16,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 
 from jcm.constants import (
-    grav, cp, alhc, tmelt, eps
+    grav, cp, alhc, tmelt, eps, rd
 )
 from .tiedtke_nordeng import (
     ConvectionParameters, saturation_mixing_ratio, saturation_vapor_pressure
@@ -184,9 +184,30 @@ def calculate_updraft(
     detr_init = jnp.zeros(nlev)
     buoy_init = jnp.zeros(nlev)
 
-    # Set cloud base values
-    tu_init = tu_init.at[kbase].set(temperature[kbase])
-    qu_init = qu_init.at[kbase].set(humidity[kbase])
+    # Set cloud base values. The parcel arriving at the LCL has the
+    # surface mixing ratio (q is conserved during dry-adiabatic ascent).
+    # Where ``find_cloud_base`` picks the first discrete level above the
+    # true LCL, the parcel is already supersaturated there, and we apply
+    # a one-step ``cuadjtq``-style saturation adjustment so the cloud-
+    # base parcel is warmer than the environment by the latent heat of
+    # the excess condensate. This matches the LCL handling in
+    # ``calculate_cape_cin`` and prevents the updraft from terminating
+    # on the very first interior step due to a too-cold initial parcel.
+    surf_idx = jnp.argmax(pressure)
+    surf_temp = temperature[surf_idx]
+    surf_humid = humidity[surf_idx]
+    surf_press = pressure[surf_idx]
+
+    parcel_T_dry_at_cb = surf_temp * (pressure[kbase] / surf_press) ** (rd / cp)
+    qsat_at_cb = saturation_mixing_ratio(pressure[kbase], parcel_T_dry_at_cb)
+    excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
+    tu_cb = parcel_T_dry_at_cb + (alhc / cp) * excess
+    # The parcel is exactly saturated at the (warmer) cb temperature;
+    # use that as the cloud-base mixing ratio rather than the raw env q.
+    qu_cb = saturation_mixing_ratio(pressure[kbase], tu_cb)
+
+    tu_init = tu_init.at[kbase].set(tu_cb)
+    qu_init = qu_init.at[kbase].set(qu_cb)
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
 
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
@@ -365,7 +386,15 @@ def calculate_updraft(
             )
             # Accumulate integrated positive buoyancy for the next step's
             # organized-entrainment denominator (matches ECHAM `zbuoy`).
-            new_accum = zbuoy_accum + zbuoyz * dz
+            # Use the JUST-COMPUTED ``buoy_new`` rather than ``zbuoyz``
+            # (which is the previous level's buoyancy used as a proxy for
+            # the local rate). Without this, after a positive-buoyancy
+            # step the accumulator stays at zero and the next level's
+            # ``entr_org = zbuoyz·0.5/(1+zbuoy_accum)`` saturates against
+            # the 1.0 floor — diluting the parcel by ~85% on every step
+            # and killing the updraft after 1-2 levels.
+            buoy_pos = jnp.maximum(buoy_new, 0.0)
+            new_accum = zbuoy_accum + buoy_pos * dz
             return (new_state, new_accum)
 
         # Skip calculation if below cloud base: state and accumulator unchanged
