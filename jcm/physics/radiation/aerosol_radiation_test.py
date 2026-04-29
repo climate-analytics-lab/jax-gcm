@@ -311,11 +311,13 @@ def test_aerosol_microphysics_droplet_coupling():
 
 
 def test_higher_cdnc_reduces_autoconversion():
-    """Test physical effect: more droplets → smaller drops → less autoconversion"""
+    """Test physical effect: more droplets → smaller drops → less autoconversion."""
     from jcm.physics.clouds.echam_1m import (
-        autoconversion_kk2000, MicrophysicsParameters
+        autoconversion, MicrophysicsParameters
     )
 
+    # Use the default (Beheng) scheme — both Beheng and KK2000 have the
+    # right Nc monotonicity, but Beheng is the production default.
     config = MicrophysicsParameters.default()
     cloud_water = jnp.array(1e-3)
     cloud_fraction = jnp.array(0.8)
@@ -324,13 +326,13 @@ def test_higher_cdnc_reduces_autoconversion():
 
     # Clean air: fewer, larger droplets
     nc_clean = jnp.array(100e6)
-    rate_clean = autoconversion_kk2000(
+    rate_clean = autoconversion(
         cloud_water, cloud_fraction, air_density, nc_clean, dt, config
     )
 
     # Polluted air: more, smaller droplets
     nc_polluted = jnp.array(300e6)
-    rate_polluted = autoconversion_kk2000(
+    rate_polluted = autoconversion(
         cloud_water, cloud_fraction, air_density, nc_polluted, dt, config
     )
 

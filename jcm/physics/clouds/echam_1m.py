@@ -17,6 +17,7 @@ Based on the ECHAM6/ICON microphysics as described in:
 Date: 2025-01-10
 """
 
+import jax
 import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
@@ -70,14 +71,40 @@ class MicrophysicsParameters:
     epsilon: float       # Small number for numerical stability
     dt_sedi: float       # Sub-timestep for sedimentation (s)
 
+    # Autoconversion scheme selector (int flag — JAX won't trace strings).
+    # 0 = Beheng (1994) implicit form (default; robust at large dt).
+    # 1 = Khairoutdinov & Kogan (2000) explicit form (good fit for 2M
+    #     microphysics with prognostic Nc).
+    # ``ccraut`` is interpreted differently by each scheme: in Beheng
+    # it's the rate prefactor (default 15.0); in KK2000 it's the qc
+    # threshold above which autoconversion fires (a small g/kg-scale
+    # value is appropriate, e.g. 1e-5).
+    autoconversion_scheme: int
+
+    SCHEME_BEHENG = 0
+    SCHEME_KK2000 = 1
+
     @classmethod
     def default(cls, ccraut=15.0, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
                  ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
                  vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
-                 epsilon=1.0e-12, dt_sedi=10.0) -> 'MicrophysicsParameters':
-        """Return default microphysics parameters"""
+                 epsilon=1.0e-12, dt_sedi=10.0,
+                 autoconversion_scheme=0) -> 'MicrophysicsParameters':
+        """Return default microphysics parameters.
+
+        ``autoconversion_scheme`` accepts either the int constant
+        (``SCHEME_BEHENG`` / ``SCHEME_KK2000``) or the string aliases
+        ``"beheng"`` / ``"kk2000"``.
+        """
+        if isinstance(autoconversion_scheme, str):
+            scheme_map = {
+                "beheng": cls.SCHEME_BEHENG,
+                "kk2000": cls.SCHEME_KK2000,
+            }
+            autoconversion_scheme = scheme_map[autoconversion_scheme]
+
         return cls(
             ccraut=jnp.array(ccraut),
             ccracl=jnp.array(ccracl),
@@ -102,7 +129,8 @@ class MicrophysicsParameters:
             vt_rain_b=jnp.array(vt_rain_b),
             base_cdnc=jnp.array(base_cdnc),
             epsilon=jnp.array(epsilon),
-            dt_sedi=jnp.array(dt_sedi)
+            dt_sedi=jnp.array(dt_sedi),
+            autoconversion_scheme=int(autoconversion_scheme),
         )
 
 
@@ -175,7 +203,7 @@ def cloud_droplet_radius(
     return radius
 
 
-def autoconversion_kk2000(
+def autoconversion_beheng(
     cloud_water: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     air_density: jnp.ndarray,
@@ -185,25 +213,19 @@ def autoconversion_kk2000(
 ) -> jnp.ndarray:
     """Autoconversion of cloud water to rain — Beheng (1994) implicit form.
 
-    The function name is kept as ``autoconversion_kk2000`` for callers'
-    backwards compat, but the body now uses the Beheng-1994 formulation
-    that ECHAM ``mo_cloud.f90`` uses (lines 841-863). The original
-    Khairoutdinov-Kogan (2000) explicit-rate form was unstable for
-    realistic post-convection cloud water values: at qc=0.3 g/kg the
-    raw KK2000 rate gives a depletion fraction of ~37500 % per 1800 s
-    timestep, requiring downstream clipping to mass-conservation bounds.
-    The Fortran-cloud-harness comparison surfaced this (Bug E-1: JAX
-    cloud water removal ~20x too fast vs ECHAM).
-
-    Beheng implicit-integration formulation:
+    Mirrors ECHAM ``mo_cloud.f90`` lines 841-863. The implicit integration
+    is what makes this scheme robust at realistic post-convection cloud
+    water values: the depletion fraction stays in [0, 1] even when the
+    instantaneous Beheng rate × dt would overshoot.
 
         zraut_rate = ccraut * 1.2e27 / rho * Nc^-3.3 * rho^4.7 * qc^3.7
         qc_remain  = (1 + zraut_rate * dt * 3.7 * qc^3.7) ^ (-1/3.7)
         autoconv   = qc * (1 - qc_remain) / dt
 
-    This Bernoulli-style integration always produces a
-    physically-bounded depletion fraction in [0, 1], even for very
-    large qc or long dt.
+    Default in the 1M scheme. The KK2000 form
+    (``autoconversion_kk2000``) is also available and may be a better
+    pairing with explicit-Nc 2M microphysics; pick via
+    ``MicrophysicsParameters(autoconversion_scheme="beheng" | "kk2000")``.
 
     Args:
         cloud_water: Grid-mean cloud water mixing ratio (kg/kg)
@@ -244,6 +266,87 @@ def autoconversion_kk2000(
 
     # Convert to grid-mean
     return autoconv_in_cloud * cloud_fraction
+
+
+def autoconversion_kk2000(
+    cloud_water: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    air_density: jnp.ndarray,
+    droplet_number: jnp.ndarray,
+    dt: float,
+    config: MicrophysicsParameters
+) -> jnp.ndarray:
+    """Autoconversion of cloud water to rain — Khairoutdinov & Kogan (2000).
+
+    Explicit-rate form:
+
+        P_aut = 1350 * qc^2.47 * (Nc·1e-6)^(-1.79)   [g/m³/s]
+
+    Activates above the ``ccraut`` threshold. KK2000 was the original
+    1M default and remains a good fit for 2M microphysics where the
+    droplet number ``Nc`` is a prognostic variable. In the 1M context
+    with prescribed ``Nc`` and large dt, the explicit form can produce
+    ``rate × dt > qc`` at high cloud water (~37500 % depletion at
+    qc = 0.3 g/kg, dt = 1800 s); downstream code must clip to mass
+    conservation. ``autoconversion_beheng`` is the more robust 1M
+    default; KK2000 is preferred when paired with prognostic ``Nc``.
+
+    Args:
+        cloud_water: Grid-mean cloud water mixing ratio (kg/kg)
+        cloud_fraction: Cloud fraction (0-1)
+        air_density: Air density (kg/m³)
+        droplet_number: Cloud droplet number concentration (1/m³)
+        dt: Time step (s) — unused (explicit rate); kept in signature
+            for parity with ``autoconversion_beheng``.
+        config: Microphysics configuration (uses ccraut, epsilon)
+
+    Returns:
+        Grid-mean autoconversion rate (kg/kg/s)
+
+    """
+    qc_in_cloud = jnp.where(
+        cloud_fraction > config.epsilon,
+        cloud_water / cloud_fraction,
+        0.0,
+    )
+
+    qc_gm3 = qc_in_cloud * air_density * 1000.0      # g/m³
+    nc_cm3 = droplet_number * air_density * 1e-6     # 1/cm³
+
+    # KK2000 rate. The 1e-3 converts g/m³/s → kg/m³/s, then divide
+    # by air density to recover the kg/kg/s mixing-ratio tendency.
+    autoconv_rate = jnp.where(
+        qc_in_cloud > config.ccraut,
+        1350.0 * qc_gm3 ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79)
+        * 1e-3 / air_density,
+        0.0,
+    )
+
+    return autoconv_rate * cloud_fraction
+
+
+def autoconversion(
+    cloud_water: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    air_density: jnp.ndarray,
+    droplet_number: jnp.ndarray,
+    dt: float,
+    config: MicrophysicsParameters,
+) -> jnp.ndarray:
+    """Dispatcher — picks Beheng or KK2000 by ``config.autoconversion_scheme``.
+
+    Both schemes have the same signature so ``lax.cond`` can switch
+    cleanly between them at runtime.
+    """
+    return jax.lax.cond(
+        config.autoconversion_scheme == MicrophysicsParameters.SCHEME_KK2000,
+        lambda: autoconversion_kk2000(
+            cloud_water, cloud_fraction, air_density, droplet_number, dt, config,
+        ),
+        lambda: autoconversion_beheng(
+            cloud_water, cloud_fraction, air_density, droplet_number, dt, config,
+        ),
+    )
 
 
 def accretion_rain_cloud(
@@ -595,7 +698,7 @@ def cloud_microphysics(
     )
     
     # 1. Autoconversion processes
-    qc_auto = autoconversion_kk2000(
+    qc_auto = autoconversion(
         cloud_water, cloud_fraction, air_density, droplet_number, dt, config
     )
     qi_auto = ice_autoconversion(
