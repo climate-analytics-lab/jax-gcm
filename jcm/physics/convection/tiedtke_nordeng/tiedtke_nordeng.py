@@ -484,8 +484,9 @@ def cloud_depth_for_target_top(
     target_top_pa: float,
     min_layers: int = 2,
 ) -> jnp.ndarray:
-    """Number of model levels between ``cloud_base`` and the level closest
-    to ``target_top_pa`` from above — used as the updraft scan ceiling.
+    """Return the number of model levels between ``cloud_base`` and the
+    level closest to ``target_top_pa`` from above — used as the updraft
+    scan ceiling.
 
     The scan ceiling is a *maximum* depth the updraft is allowed to
     extend to, NOT the actual cloud top. The actual termination is
@@ -535,6 +536,7 @@ def cloud_depth_for_target_top(
     Returns:
         Scan-ceiling depth in *levels* (int32), clipped to
         ``[min_layers, nlev-2]``.
+
     """
     nlev = pressure.shape[0]
     above_target = pressure <= target_top_pa

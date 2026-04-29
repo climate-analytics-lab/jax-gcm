@@ -50,7 +50,6 @@ def _rce_column(klev=47):
     surface-first convention (k=0 top, k=nlev-1 surface).
     """
     grav = 9.80665
-    rd = 287.04
     p0 = 101325.0
     p_top = 1000.0  # 10 hPa
     sigma_bnds = jnp.linspace(p_top / p0, 1.0, klev + 1)

@@ -7,7 +7,7 @@ from jcm.physics.surface.icon.ocean import (
     compute_ocean_surface_fluxes, ocean_physics_step,
 )
 from jcm.physics.surface.icon.surface_types import (
-    SurfaceParameters, AtmosphericForcing, SurfaceFluxes
+    AtmosphericForcing, SurfaceFluxes,
 )
 
 
