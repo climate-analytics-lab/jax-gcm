@@ -18,12 +18,12 @@ def test_parameters_initialization():
     assert params.microphysics is not None
     
     # Check some default values.
-    # ECHAM-matching convention: crs at surface (0.9), crt aloft (0.7);
+    # ECHAM-matching convention: crt at surface (0.9), crs aloft (0.7);
     # ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
     # KK2000 threshold the previous JAX port used).
     assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7
-    assert abs(float(params.clouds.crs) - 0.9) < 1e-7
-    assert abs(float(params.clouds.crt) - 0.7) < 1e-7
+    assert abs(float(params.clouds.crt) - 0.9) < 1e-7
+    assert abs(float(params.clouds.crs) - 0.7) < 1e-7
     assert abs(float(params.microphysics.ccraut) - 15.0) < 1e-5
     
     print("✓ Default parameters initialized correctly")
