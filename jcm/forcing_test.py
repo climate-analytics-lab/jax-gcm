@@ -576,10 +576,12 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         date = self._build_date()
         sliced = forcing.select(date, calendar='gregorian')
 
-        # tyear should match date.tyear (~0.5 for July 2)
-        self.assertAlmostEqual(float(sliced.solar.tyear), float(date.tyear), places=4)
-        # orbital_phase should be ~ 2π * 0.5 = π
-        self.assertAlmostEqual(float(sliced.solar.orbital_phase), float(jnp.pi), places=2)
+        # tyear should match date.tyear (~ 0.5 for July 2 — exactly
+        # 182/365 under non-leap-year gregorian).
+        self.assertAlmostEqual(float(sliced.solar.tyear), float(date.tyear('gregorian')), places=4)
+        # orbital_phase = 2π × tyear, so close to π but not exactly π
+        # because July 2 is a couple days off the year midpoint.
+        self.assertAlmostEqual(float(sliced.solar.orbital_phase), 2.0 * float(jnp.pi) * float(date.tyear('gregorian')), places=4)
 
     def test_time_series_wrap_year_indexing(self):
         """A 12-entry monthly TimeSeries indexed via WRAP_YEAR should pick
@@ -600,7 +602,7 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         date = self._build_date()
         sliced = forcing.select(date, calendar='gregorian')
         self.assertEqual(sliced.sea_surface_temperature.shape, nodal_shape)
-        expected = 280.0 + int(date.tyear * 12) * 0.5
+        expected = 280.0 + int(date.tyear('gregorian') * 12) * 0.5
         self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, expected))
 
     def test_time_series_by_date_indexing(self):

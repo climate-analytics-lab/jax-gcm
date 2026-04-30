@@ -185,8 +185,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx,compute_shortwave=True)
 
-        date_data = DateData.zeros()
-        date_data.tyear = 0.6
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_c)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
@@ -288,7 +289,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         forcing_now = forcing.select(date_data, calendar='gregorian')
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
-        topsr = solar(date_data.tyear, speedy_coords=speedy_coords)
+        topsr = solar(date_data.tyear(), speedy_coords=speedy_coords)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
 
     def test_polar_night_cooling(self):
@@ -321,7 +322,7 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * physics_data.speedy_coords.sia**2 - 0.5
-        expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear + 10.0 / 365.0)))  + 1.8 * flat2)
+        expected_ozone = 0.4 * epssw * (1.0 + jnp.maximum(0.0, jnp.cos(4.0 * jnp.arcsin(1.0) * (date_data.tyear() + 10.0 / 365.0)))  + 1.8 * flat2)
         np.testing.assert_allclose(physics_data.shortwave_rad.ozone[:, 0], physics_data.shortwave_rad.fsol[:, 0] * expected_ozone[0], atol=1e-4)
 
     def test_random_input_consistency(self):
@@ -365,8 +366,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
 
-        date_data = DateData.zeros()
-        date_data.tyear = 0.6
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
@@ -424,8 +426,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
-        date_data = DateData.zeros()
-        date_data.tyear = 0.6
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
@@ -465,8 +468,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx)
-        date_data = DateData.zeros()
-        date_data.tyear = 0.6
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain)
@@ -557,8 +561,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         condensation = CondensationData.zeros(xy, kx, precls=precls)
         sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
 
-        date_data = DateData.zeros()
-        date_data.tyear = 0.6
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
