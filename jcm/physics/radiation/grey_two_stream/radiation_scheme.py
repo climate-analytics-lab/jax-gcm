@@ -18,7 +18,7 @@ from ..radiation_types import (
 from jcm.physics.icon.icon_physics_data import RadiationData
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
-from jax_datetime import Datetime
+from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
 from ..cloud_optics import cloud_optics
@@ -194,7 +194,7 @@ def radiation_scheme(
     surface_albedo_vis: jnp.ndarray,
     surface_albedo_nir: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
-    date: Datetime,
+    solar: SolarGeometry,
     latitude: float,
     longitude: float,
     parameters: RadiationParameters,
@@ -218,7 +218,9 @@ def radiation_scheme(
         surface_albedo_vis: Surface visible albedo
         surface_albedo_nir: Surface near-infrared albedo
         surface_emissivity: Surface emissivity
-        date: Date/time for solar calculations
+        solar: Precomputed solar/orbital geometry — see jcm.forcing.SolarGeometry.
+            Replaces the legacy `date` argument; the radiation scheme no longer
+            needs to know what calendar date it is.
         latitude: Latitude (degrees)
         longitude: Longitude (degrees)
         parameters: Radiation parameters
@@ -303,9 +305,15 @@ def radiation_scheme(
     
     # Now perform the actual radiation calculation
     
-    # Solar radiation calculations
-    toa_flux = radiation_flux(date, longitude, latitude, parameters.solar_constant)
-    sin_altitude = get_solar_sin_altitude(OrbitalTime.from_datetime(date), longitude, latitude)
+    # Solar radiation calculations. `solar` is precomputed by
+    # `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`, so the
+    # radiation scheme stays date-free.
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
+    toa_flux = radiation_flux(orbital_time, longitude, latitude, parameters.solar_constant)
+    sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude) since they are complementary
 
     # Clip pressure to positive so downstream log / divisions don't produce NaN

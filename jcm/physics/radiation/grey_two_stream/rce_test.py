@@ -45,10 +45,19 @@ def _radiation_heating(temperature, pressure, pressure_interfaces,
                        surface_temperature, params, aerosol, date,
                        rh=0.75):
     """Compute radiation heating rate for a single column."""
+    from jcm.forcing import SolarGeometry
+    from jax_solar import OrbitalTime
     nlev = temperature.shape[0]
     specific_humidity = _compute_q_from_rh(temperature, pressure, rh)
     air_density = calculate_air_density(pressure, temperature)
     layer_thickness = calculate_layer_thickness(pressure, temperature)
+
+    ot = OrbitalTime.from_datetime(date)
+    solar = SolarGeometry(
+        tyear=jnp.asarray(ot.orbital_phase / (2.0 * jnp.pi), dtype=jnp.float32),
+        orbital_phase=jnp.asarray(ot.orbital_phase, dtype=jnp.float32),
+        synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
+    )
 
     tend, diag = radiation_scheme(
         temperature=temperature,
@@ -64,7 +73,7 @@ def _radiation_heating(temperature, pressure, pressure_interfaces,
         surface_albedo_vis=jnp.array(0.07),
         surface_albedo_nir=jnp.array(0.07),
         surface_emissivity=jnp.array(0.98),
-        date=date,
+        solar=solar,
         latitude=0.0,
         longitude=0.0,
         parameters=params,

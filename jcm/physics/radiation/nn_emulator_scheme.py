@@ -47,7 +47,7 @@ def radiation_scheme_emulated(
     surface_albedo_vis: jnp.ndarray,
     surface_albedo_nir: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
-    date,
+    solar,
     latitude: float,
     longitude: float,
     parameters: RadiationParameters,
@@ -77,8 +77,12 @@ def radiation_scheme_emulated(
     phys = PhysicalConstants()
 
     # --- Solar geometry ---
-    actual_date = getattr(date, "dt", date)
-    orbital_time = OrbitalTime.from_datetime(actual_date)
+    # `solar` is a `jcm.forcing.SolarGeometry` precomputed by the Model;
+    # the radiation scheme stays date-free.
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
     toa_flux = radiation_flux(
         orbital_time, longitude, latitude, parameters.solar_constant
     )

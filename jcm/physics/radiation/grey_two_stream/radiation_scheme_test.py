@@ -14,8 +14,28 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
 from jcm.physics.icon.icon_physics_data import AerosolData
+from jcm.forcing import SolarGeometry
 import jax_datetime as jdt
 from datetime import datetime
+from jax_solar import OrbitalTime
+
+
+def _solar_from_dt(dt):
+    """Build a `SolarGeometry` from a Datetime, mirroring what
+    `Model._get_step_fn_factory` does at run time. Used by these
+    radiation tests after the radiation scheme stopped consuming `date`
+    directly (#285 follow-up).
+    """
+    ot = OrbitalTime.from_datetime(dt)
+    # `tyear` matches SPEEDY's fraction-of-year convention; here it's only
+    # fed through SolarGeometry, the radiation scheme reads orbital_phase /
+    # synodic_phase. Approximate from orbital_phase for completeness.
+    tyear = ot.orbital_phase / (2.0 * jnp.pi)
+    return SolarGeometry(
+        tyear=jnp.asarray(tyear, dtype=jnp.float32),
+        orbital_phase=jnp.asarray(ot.orbital_phase, dtype=jnp.float32),
+        synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
+    )
 
 def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
     """Create default aerosol data for testing as AerosolData object"""
@@ -186,7 +206,7 @@ def test_radiation_scheme_basic():
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
@@ -260,7 +280,7 @@ def test_radiation_scheme_nighttime():
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=latitude,
         longitude=longitude,
         parameters=parameters,
@@ -320,7 +340,7 @@ def test_radiation_scheme_custom_parameters():
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=0.0,
         longitude=0.0,
         parameters=custom_params,
@@ -382,7 +402,7 @@ def test_radiation_scheme_extreme_conditions():
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
@@ -430,7 +450,7 @@ def test_radiation_scheme_very_cloudy():
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
@@ -479,7 +499,7 @@ def test_radiation_scheme_energy_conservation():
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=0.0,
         longitude=0.0,
         parameters=parameters,
@@ -531,7 +551,7 @@ def test_radiation_scheme_realistic_values():
         cloud_water=atm['cloud_water'],
         cloud_ice=atm['cloud_ice'],
         cloud_fraction=atm['cloud_fraction'],
-        date=date,
+        solar=_solar_from_dt(date),
         latitude=30.0,  # Mid-latitude
         longitude=0.0,
         parameters=parameters,
@@ -608,7 +628,7 @@ def test_radiation_scheme_reproducibility():
             cloud_water=atm['cloud_water'],
             cloud_ice=atm['cloud_ice'],
             cloud_fraction=atm['cloud_fraction'],
-            date=date,
+            solar=_solar_from_dt(date),
             latitude=0.0,
             longitude=0.0,
             parameters=parameters,

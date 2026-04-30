@@ -229,7 +229,10 @@ def _apply_radiation_inner(state: PhysicsState,
     latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
 
     # Get date information for solar calculations
-    date = physics_data.date.dt
+    # Solar geometry comes pre-baked on `forcing.solar` (populated by
+    # `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`). The
+    # radiation scheme stays date-free.
+    solar = forcing.solar
     
     # Get cloud properties from tracers and previous physics
     cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
@@ -272,7 +275,7 @@ def _apply_radiation_inner(state: PhysicsState,
       physics_data.diagnostics.air_density, cloud_water, cloud_ice, cloud_fraction,
       surface_temperature_col, surface_albedo_vis_col,
       surface_albedo_nir_col, surface_emissivity_col,
-      date, latitudes, longitudes,
+      solar, latitudes, longitudes,
       parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr)
     
     # Unpack structured results directly
@@ -344,7 +347,10 @@ def _apply_radiation_rrtmgp_inner(
     )
     latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
 
-    date = physics_data.date.dt
+    # Solar geometry comes pre-baked on `forcing.solar` (populated by
+    # `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`). The
+    # radiation scheme stays date-free.
+    solar = forcing.solar
 
     cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
@@ -389,7 +395,7 @@ def _apply_radiation_rrtmgp_inner(
         cloud_water, cloud_ice, cloud_fraction,
         surface_temperature_col, surface_albedo_vis_col,
         surface_albedo_nir_col, surface_emissivity_col,
-        date, latitudes, longitudes,
+        solar, latitudes, longitudes,
         parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr,
     )
 
@@ -454,7 +460,10 @@ def _apply_radiation_emulated_inner(
     )
     latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
 
-    date = physics_data.date.dt
+    # Solar geometry comes pre-baked on `forcing.solar` (populated by
+    # `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`). The
+    # radiation scheme stays date-free.
+    solar = forcing.solar
 
     cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
     cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
@@ -505,7 +514,7 @@ def _apply_radiation_emulated_inner(
         cloud_water, cloud_ice, cloud_fraction,
         surface_temperature_col, surface_albedo_vis_col,
         surface_albedo_nir_col, surface_emissivity_col,
-        date, latitudes, longitudes,
+        solar, latitudes, longitudes,
         parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr,
         emulator_weights, sw_scaling, lw_scaling,
     )

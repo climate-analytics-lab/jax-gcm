@@ -334,7 +334,7 @@ def radiation_scheme_rrtmgp(
     surface_albedo_vis: jnp.ndarray,
     surface_albedo_nir: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
-    date,
+    solar,
     latitude: float,
     longitude: float,
     parameters: RadiationParameters,
@@ -353,9 +353,12 @@ def radiation_scheme_rrtmgp(
     else:
         cdnc_factor = aerosol_data.cdnc_factor
 
-    # Solar geometry via jax_solar
-    actual_date = getattr(date, "dt", date)
-    orbital_time = OrbitalTime.from_datetime(actual_date)
+    # Solar geometry via jax_solar. `solar` is a `jcm.forcing.SolarGeometry`
+    # precomputed by the Model; the radiation scheme stays date-free.
+    orbital_time = OrbitalTime(
+        orbital_phase=solar.orbital_phase,
+        synodic_phase=solar.synodic_phase,
+    )
     toa_flux = radiation_flux(orbital_time, longitude, latitude, parameters.solar_constant)
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)

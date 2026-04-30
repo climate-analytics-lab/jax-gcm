@@ -189,7 +189,9 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_c)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        forcing = ForcingData.zeros(xy)
+        # Mirror the per-step pipeline: solar geometry comes from
+        # ForcingData.select(date) instead of being read off PhysicsData.date.
+        forcing = ForcingData.zeros(xy).select(date_data, calendar='gregorian')
         physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain_new)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain_new)
         _, physics_data = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing, terrain_new)
@@ -260,7 +262,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
-        forcing = ForcingData.zeros(xy)
+        # Mirror Model._get_step_fn_factory: solar geometry comes off
+        # `forcing.solar`, populated by `select(date)`.
+        forcing = ForcingData.zeros(xy).select(date_data, calendar='gregorian')
 
         new_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
         
@@ -279,8 +283,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-       
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
+
+        forcing_now = forcing.select(date_data, calendar='gregorian')
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         topsr = solar(date_data.tyear, speedy_coords=speedy_coords)
         self.assertTrue(jnp.allclose(physics_data.shortwave_rad.fsol[:, 0], topsr[0]))
@@ -294,8 +299,9 @@ class TestShortWaveRadiation(unittest.TestCase):
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
+
+        forcing_now = forcing.select(date_data, calendar='gregorian')
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         fs0 = 6.0
         self.assertTrue(jnp.all(physics_data.shortwave_rad.stratz >= 0))
@@ -309,7 +315,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
+        forcing_now = forcing.select(date_data, calendar='gregorian')
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
 
         # Expected form for ozone based on the provided formula
         flat2 = 1.5 * physics_data.speedy_coords.sia**2 - 0.5
@@ -323,7 +330,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
         physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
-        physics_data = get_zonal_average_fields(state, physics_data, forcing, terrain)
+        forcing_now = forcing.select(date_data, calendar='gregorian')
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
         
         # Ensure outputs are consistent and within expected ranges
         self.assertTrue(jnp.all(physics_data.shortwave_rad.fsol >= 0))
