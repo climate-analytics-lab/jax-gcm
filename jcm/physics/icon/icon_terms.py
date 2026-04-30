@@ -39,7 +39,9 @@ def _data_from_diagnostics(
 
     data = PhysicsData.zeros(
         col_shape, num_levels,
-        icon_coords=coords, date=date,
+        icon_coords=coords,
+        model_step=date.model_step,
+        dt_seconds=date.dt_seconds,
     )
 
     if "_radiation" in diagnostics:

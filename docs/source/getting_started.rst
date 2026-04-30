@@ -205,22 +205,63 @@ each "month" is a fixed 365/12-day chunk, not aligned to calendar month
 boundaries — so this is mostly an ergonomic shortcut.
 
 For *calendar-aligned* monthly / annual statistics, run the model at a
-daily ``save_interval`` and post-resample the trajectory:
+daily ``save_interval`` and post-resample the trajectory using xarray's
+standard ``resample`` API. The trajectory's ``time`` coord is real
+``datetime64``, so xarray's resampler does the calendar bookkeeping:
 
 .. code-block:: python
 
    predictions = model.run(save_interval='1 day', total_time='1 year')
+   ds = predictions.to_xarray()
 
-   # Calendar-aligned monthly means against the trajectory's real
-   # `datetime64` time coord. Returns an xarray.Dataset.
-   monthly = predictions.resample('1MS').mean()
+   # Calendar-aligned monthly means.
+   monthly = ds.resample(time='1MS').mean()
 
    # Daily total precipitation summed into calendar months, etc.
-   monthly_precip = predictions.resample('1MS')['precipitation'].sum()
+   monthly_precip = ds['precipitation'].resample(time='1MS').sum()
 
-This works because the trajectory carries actual ``datetime64`` timestamps,
-so xarray's resampler does the calendar bookkeeping. The cost is keeping
-daily output in memory for the duration of the run.
+The cost of this pattern is keeping daily output in memory for the
+duration of the run.
+
+Long forcing time-series and chunked runs
+-----------------------------------------
+
+Time-varying forcing is captured at JIT compile time as a closure constant
+(see ``Model._get_step_fn_factory``). Multi-year hourly forcing is therefore
+tractable for runs of a few simulated years; longer or finer-cadence
+forcing should either be resampled before loading, or fed to the model in
+chunks via ``Model.resume``. The chunked pattern avoids inflating the JIT
+closure and lets you stream output to disk year by year:
+
+.. code-block:: python
+
+   import xarray as xr
+   from jcm.forcing import ForcingData
+
+   # Multi-decade ERA5-style forcing with real timestamps.
+   ds = xr.open_dataset('era5_1980_2010.nc')
+
+   # Run one calendar year at a time.
+   for year in range(1980, 2011):
+       year_slice = ds.sel(time=str(year))
+       year_slice.to_netcdf(f"_year_{year}.nc")
+       forcing = ForcingData.from_file(f"_year_{year}.nc", coords=coords)
+
+       if year == 1980:
+           preds = model.run(forcing=forcing, save_interval='1 day',
+                             total_time='1 year')
+       else:
+           preds = model.resume(forcing=forcing, save_interval='1 day',
+                                total_time='1 year')
+
+       preds.to_xarray().to_netcdf(f"output_{year}.nc")
+
+Each ``run``/``resume`` call rebuilds the JIT-compiled step function for
+the new forcing closure (so the first iteration is slow as JAX compiles,
+subsequent iterations reuse the same compilation cache key when the
+forcing's pytree structure is unchanged). For really long campaigns,
+prefer this chunked pattern over loading the entire forcing record into
+one ``ForcingData``.
 
 
 Multi-Device Parallelization

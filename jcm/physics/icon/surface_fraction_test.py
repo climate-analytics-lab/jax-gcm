@@ -47,7 +47,10 @@ def _make_inputs(land_fraction, sea_ice_concentration):
         tracers={'qc': jnp.zeros((NLEV, NCOLS)), 'qi': jnp.zeros((NLEV, NCOLS))},
     )
 
-    physics_data = PhysicsData.zeros((NCOLS,), NLEV, icon_coords=icon_coords, date=date)
+    physics_data = PhysicsData.zeros(
+        (NCOLS,), NLEV, icon_coords=icon_coords,
+        model_step=date.model_step, dt_seconds=date.dt_seconds,
+    )
     # Set realistic surface temperature
     surface_data = physics_data.surface.copy(
         surface_temperature=jnp.ones(NCOLS) * 290.0,

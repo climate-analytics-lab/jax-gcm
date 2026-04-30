@@ -227,7 +227,7 @@ def get_orographic_correction_tendencies(
     # This ensures the same total correction is applied over one integration step.
     
     # Use the actual model timestep from the physics_data for faithful reproduction of SPEEDY
-    model_timestep_seconds = physics_data.date.dt_seconds
+    model_timestep_seconds = physics_data.dt_seconds
     temp_tendency = temp_correction / model_timestep_seconds
     humidity_tendency = humidity_correction / model_timestep_seconds
     

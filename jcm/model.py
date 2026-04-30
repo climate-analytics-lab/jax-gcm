@@ -85,22 +85,6 @@ class ModelPredictions:
     def times(self):
         return self._predictions.times
 
-    def resample(self, freq):
-        """Calendar-aligned resampling of the prediction trajectory.
-
-        Returns the xarray ``Resample`` object so the caller picks the
-        aggregation: ``predictions.resample('1MS').mean()`` for monthly
-        means, ``...sum()`` for accumulation. The ``freq`` string follows
-        pandas's offset alias conventions (``'1MS'``, ``'1YS'``, etc.).
-
-        Useful when the model was run with a daily ``save_interval`` and
-        the user wants real calendar-month / calendar-year statistics —
-        the inner integrator stays fixed-cadence (its ``nnx.scan`` lengths
-        are static at JIT time) but the trajectory has real ``datetime64``
-        timestamps to resample against.
-        """
-        return self.to_xarray().resample(time=freq)
-
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
 
@@ -302,14 +286,6 @@ class Model:
                 Gregorian timestamps in their forcing files.
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
-
-        Notes:
-            Time-varying forcing is captured at JIT compile time as a closure
-            constant (see `_get_step_fn_factory`). Multi-year hourly forcing
-            is therefore tractable for runs of a few simulated years; longer
-            or finer-cadence forcing should be resampled before loading, or
-            we'll need to thread `forcing` through as a runtime argument
-            (a deliberate non-goal of the present refactor).
 
         """
         # Set root logging level to be log_level so it propagates to other modules

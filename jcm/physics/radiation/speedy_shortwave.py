@@ -229,11 +229,9 @@ def get_zonal_average_fields(
 ) -> PhysicsData:
     """Calculate zonal average fields including solar radiation, ozone depth,
     and polar night cooling in the stratosphere using JAX.
-    
-    Parameters
-    ----------
-    tyear : float - physics_data.date.tyear
-        Time as fraction of year (0-1, 0 = 1 Jan)
+
+    Reads the fraction of year off ``forcing.solar.tyear`` (populated by
+    `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`).
 
     Returns
     -------

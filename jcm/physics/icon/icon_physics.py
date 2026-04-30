@@ -140,8 +140,8 @@ def _radiation_with_caching(
     """
     nlev, ncols = state.temperature.shape
     interval = parameters.radiation.radiation_interval
-    dt = physics_data.date.dt_seconds
-    step = physics_data.date.model_step
+    dt = physics_data.dt_seconds
+    step = physics_data.model_step
 
     # interval <= 0 ⇒ compute every step (default)
     steps_per_call = jnp.where(

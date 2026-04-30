@@ -257,7 +257,10 @@ def test_aerosol_microphysics_droplet_coupling():
     forcing = ForcingData.zeros(coords.horizontal.nodal_shape)
 
     # --- Run with clean air (cdnc_factor = 1.0) ---
-    pd_clean = PhysicsData.zeros((ncols,), nlev, icon_coords=icon_coords, date=date)
+    pd_clean = PhysicsData.zeros(
+        (ncols,), nlev, icon_coords=icon_coords,
+        model_step=date.model_step, dt_seconds=date.dt_seconds,
+    )
     cloud_data_clean = pd_clean.clouds.copy(
         cloud_fraction=jnp.where(qc > 0, 0.8, 0.0),
     )
@@ -272,7 +275,10 @@ def test_aerosol_microphysics_droplet_coupling():
     )
 
     # --- Run with polluted air (cdnc_factor = 3.0) ---
-    pd_polluted = PhysicsData.zeros((ncols,), nlev, icon_coords=icon_coords, date=date)
+    pd_polluted = PhysicsData.zeros(
+        (ncols,), nlev, icon_coords=icon_coords,
+        model_step=date.model_step, dt_seconds=date.dt_seconds,
+    )
     cloud_data_polluted = pd_polluted.clouds.copy(
         cloud_fraction=jnp.where(qc > 0, 0.8, 0.0),
     )

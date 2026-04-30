@@ -138,7 +138,8 @@ class TestShortWaveRadiation(unittest.TestCase):
                PhysicsState, PhysicsTendency, get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar, epssw, solc, parameters, forcing, terrain, speedy_coords, \
                convert_to_speedy_latitudes, TerrainData
         from jcm.forcing import ForcingData
-        from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, DateData, PhysicsData
+        from jcm.physics.speedy.physics_data import SurfaceFluxData, HumidityData, ConvectionData, CondensationData, SWRadiationData, PhysicsData
+        from jcm.date import DateData
         from jcm.physics_interface import PhysicsState, PhysicsTendency
         from jcm.physics.radiation.speedy_shortwave import get_clouds, get_zonal_average_fields, get_shortwave_rad_fluxes, solar
         from jcm.physics.speedy.physical_constants import epssw, solc
@@ -187,7 +188,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_c)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_c)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         # Mirror the per-step pipeline: solar geometry comes from
         # ForcingData.select(date) instead of being read off PhysicsData.date.
@@ -260,7 +261,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,model_step=date_data.model_step, dt_seconds=date_data.dt_seconds,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
         # Mirror Model._get_step_fn_factory: solar geometry comes off
         # `forcing.solar`, populated by `select(date)`.
@@ -280,7 +281,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
 
@@ -296,7 +297,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
 
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
 
@@ -313,7 +314,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-04-01 12:00:00'))
 
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data, speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState(jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(zxy), jnp.zeros(xy))
         forcing_now = forcing.select(date_data, calendar='gregorian')
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
@@ -328,7 +329,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         zxy = (kx, ix, il)
         # Provide a date that is equivalent to tyear=0.25
         date_data = DateData.set_date(model_time=jdt.to_datetime('2000-03-21'))
-        physics_data = PhysicsData.zeros(xy,kx,date=date_data,speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,model_step=date_data.model_step, dt_seconds=date_data.dt_seconds,speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy)
         forcing_now = forcing.select(date_data, calendar='gregorian')
         physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain)
@@ -367,7 +368,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
 
         # Calculate gradient
@@ -426,7 +427,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data, speedy_coords=speedy_coords)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         forcing = ForcingData.zeros(xy)
         # Calculate gradient
@@ -466,7 +467,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         sw_data = SWRadiationData.zeros(xy, kx)
         date_data = DateData.zeros()
         date_data.tyear = 0.6
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain)
 
@@ -559,7 +560,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.zeros()
         date_data.tyear = 0.6
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, date=date_data)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, model_step=date_data.model_step, dt_seconds=date_data.dt_seconds)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         forcing = ForcingData.zeros(xy, fmask=fmask)
 

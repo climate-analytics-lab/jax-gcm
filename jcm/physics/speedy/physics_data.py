@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import tree_math
-from jcm.date import DateData
 from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jax import tree_util
 
@@ -467,12 +466,17 @@ class PhysicsData:
     humidity: HumidityData
     condensation: CondensationData
     surface_flux: SurfaceFluxData
-    date: DateData
+    # `model_step` is the integer timestep counter used by the radiation
+    # toggle (`mod nstrad`); `dt_seconds` is the model timestep in seconds.
+    # The wall-clock side of the date is consumed by physics through
+    # `forcing.solar` (populated by `ForcingData.select(date)`).
+    model_step: jnp.int32
+    dt_seconds: float
     land_model: LandModelData
     speedy_coords: SpeedyCoords
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
+    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, model_step=None, dt_seconds=None, land_model=None, speedy_coords=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, num_levels),
@@ -481,13 +485,14 @@ class PhysicsData:
             humidity = humidity if humidity is not None else HumidityData.zeros(nodal_shape, num_levels),
             condensation = condensation if condensation is not None else CondensationData.zeros(nodal_shape, num_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.zeros(nodal_shape),
-            date = date if date is not None else DateData.zeros(),
+            model_step = model_step if model_step is not None else jnp.int32(0),
+            dt_seconds = dt_seconds if dt_seconds is not None else 1800.0,
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
             speedy_coords = speedy_coords,
         )
-    
+
     @classmethod
-    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
+    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, model_step=None, dt_seconds=None, land_model=None, speedy_coords=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, num_levels),
@@ -496,12 +501,13 @@ class PhysicsData:
             humidity = humidity if humidity is not None else HumidityData.ones(nodal_shape, num_levels),
             condensation = condensation if condensation is not None else CondensationData.ones(nodal_shape, num_levels),
             surface_flux = surface_flux if surface_flux is not None else SurfaceFluxData.ones(nodal_shape),
-            date = date if date is not None else DateData.ones(),
+            model_step = model_step if model_step is not None else jnp.int32(0),
+            dt_seconds = dt_seconds if dt_seconds is not None else 1800.0,
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
             speedy_coords = speedy_coords,
         )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, date=None, land_model=None, speedy_coords=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, model_step=None, dt_seconds=None, land_model=None, speedy_coords=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -510,15 +516,17 @@ class PhysicsData:
             humidity=humidity if humidity is not None else self.humidity,
             condensation=condensation if condensation is not None else self.condensation,
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
-            date=date if date is not None else self.date,
+            model_step=model_step if model_step is not None else self.model_step,
+            dt_seconds=dt_seconds if dt_seconds is not None else self.dt_seconds,
             land_model=land_model if land_model is not None else self.land_model,
             speedy_coords=speedy_coords if speedy_coords is not None else self.speedy_coords
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to
-    # a PhysicsData input object, to check if the gradient is valid. We skip the check on the date because the gradient returns NaN in
-    # valid scenarios (due to the use of arccos() in the solar() function) and we would otherwise fail this check in those cases.
-    # We also skip the check on speedy_coords because it's a constant coordinate cache that should not have gradients.
+    # a PhysicsData input object, to check if the gradient is valid. We skip
+    # `model_step`/`dt_seconds` because they are integer/float scalars that
+    # are non-differentiable. We also skip the check on speedy_coords because
+    # it's a constant coordinate cache that should not have gradients.
     def isnan(self):
         return PhysicsData(
             shortwave_rad=self.shortwave_rad.isnan(),
@@ -528,7 +536,8 @@ class PhysicsData:
             humidity=self.humidity.isnan(),
             condensation=self.condensation.isnan(),
             surface_flux=self.surface_flux.isnan(),
-            date=0,
+            model_step=0,
+            dt_seconds=0,
             land_model=self.land_model.isnan(),
             speedy_coords=0
         )

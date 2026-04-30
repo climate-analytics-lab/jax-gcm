@@ -686,7 +686,8 @@ class TestRadiationCaching:
         rad_data = rad_data.copy(sw_heating_rate=sw_rate, lw_heating_rate=lw_rate)
 
         physics_data = PhysicsData.zeros(
-            (ncols,), nlev, icon_coords=None, date=date,
+            (ncols,), nlev, icon_coords=None,
+            model_step=date.model_step, dt_seconds=date.dt_seconds,
         )
         physics_data = physics_data.copy(radiation=rad_data)
 

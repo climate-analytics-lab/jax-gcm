@@ -28,12 +28,6 @@ class ConvectionParameters:
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 
-# ForcingParameters used to carry `increase_co2` and `co2_year_ref` for the
-# date-driven `ablco2 = ablco2_ref * exp(0.005 * (model_year + tyear -
-# co2_year_ref))` ramp in `set_forcing`. CO2 is now a forcing field
-# (`ForcingData.co2_vmr`, see jcm/forcing.py and #285), so the parameter
-# struct has been removed. Callers that previously set `increase_co2=True`
-# should now pass a `co2_vmr` time series via `ForcingData`.
 
 @tree_math.struct
 class CondensationParameters:

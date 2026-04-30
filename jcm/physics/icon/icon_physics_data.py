@@ -8,7 +8,6 @@ Date: 2025-01-11
 
 import jax.numpy as jnp
 import tree_math
-from jcm.date import DateData
 from jcm.physics.icon.icon_coords import IconCoords
 
 
@@ -455,7 +454,12 @@ class ChemistryData:
 class PhysicsData:
     """Main physics data container for ICON physics"""
 
-    date: DateData
+    # `model_step` is the integer step counter used by the radiation toggle;
+    # `dt_seconds` is the model timestep in seconds. The wall-clock side of
+    # the date is consumed by physics through `forcing.solar` (populated by
+    # `ForcingData.select(date)`).
+    model_step: jnp.int32
+    dt_seconds: float
     icon_coords: IconCoords
     diagnostics: DiagnosticData
     radiation: RadiationData
@@ -467,9 +471,10 @@ class PhysicsData:
     chemistry: ChemistryData
 
     @classmethod
-    def zeros(cls, nodal_shape, nlev, icon_coords=None, date=None):
+    def zeros(cls, nodal_shape, nlev, icon_coords=None, model_step=None, dt_seconds=None):
         return cls(
-            date=date if date is not None else DateData.zeros(),
+            model_step=model_step if model_step is not None else jnp.int32(0),
+            dt_seconds=dt_seconds if dt_seconds is not None else 1800.0,
             icon_coords=icon_coords,
             diagnostics=DiagnosticData.zeros(nodal_shape, nlev),
             radiation=RadiationData.zeros(nodal_shape, nlev),
@@ -483,7 +488,8 @@ class PhysicsData:
 
     def copy(self, **kwargs):
         new_data = {
-            'date': self.date,
+            'model_step': self.model_step,
+            'dt_seconds': self.dt_seconds,
             'icon_coords': self.icon_coords,
             'diagnostics': self.diagnostics,
             'radiation': self.radiation,

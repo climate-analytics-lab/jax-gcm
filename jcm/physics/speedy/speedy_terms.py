@@ -49,8 +49,7 @@ def set_physics_flags(
     sub-steps.
     """
     from jcm.physics.speedy.physical_constants import nstrad
-    model_step = physics_data.date.model_step
-    compute_shortwave = (jnp.mod(model_step, nstrad) == 0)
+    compute_shortwave = (jnp.mod(physics_data.model_step, nstrad) == 0)
     shortwave_data = physics_data.shortwave_rad.copy(
         compute_shortwave=compute_shortwave,
     )
@@ -92,7 +91,12 @@ def _data_from_diagnostics(
     """
     date = diagnostics.get("_date", DateData.zeros())
 
-    data = PhysicsData.zeros(nodal_shape, num_levels, date=date, speedy_coords=coords)
+    data = PhysicsData.zeros(
+        nodal_shape, num_levels,
+        model_step=date.model_step,
+        dt_seconds=date.dt_seconds,
+        speedy_coords=coords,
+    )
 
     # Restore any previously populated sub-structs from the diagnostics
     if "_shortwave_rad" in diagnostics:
@@ -201,16 +205,12 @@ class SpeedyForcing(SpeedyTermBase):
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
-        # Forcing arrives already sliced to the current step by
-        # `Model._get_step_fn_factory` → `ForcingData.select(date)`.
         from jcm.physics.forcing.speedy_forcing import set_forcing
         tend, data = set_forcing(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
-        # Downstream terms historically read `_forcing_2d` to get the
-        # day-of-year slice. After the Model-side pre-slice, `forcing`
-        # itself is already that slice — keep the diagnostic key as an
-        # alias so existing consumers don't break.
+        # Downstream terms read the current-step forcing slice off this
+        # diagnostic key.
         diagnostics["_forcing_2d"] = forcing
         return tend, diagnostics
 

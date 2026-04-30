@@ -82,7 +82,8 @@ def _make_icon_state(nlev=40, nlat=32, nlon=64, surface_temp_k=300.0,
 
     nodal_shape = coords.horizontal.nodal_shape  # (nlon, nlat)
     physics_data = PhysicsData.zeros(
-        (ncols,), nlev, icon_coords=icon_coords, date=date
+        (ncols,), nlev, icon_coords=icon_coords,
+        model_step=date.model_step, dt_seconds=date.dt_seconds,
     )
 
     # Set surface temperature
