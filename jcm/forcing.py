@@ -8,7 +8,6 @@ from jcm.date import (
     DateData,
     DEFAULT_CALENDAR,
     absolute_seconds_since_epoch,
-    days_per_year,
 )
 
 # `TimeSeries.align_mode` constants. Stored as ints rather than strings so the
@@ -370,8 +369,8 @@ def _select_time_series(ts: TimeSeries, date: DateData, calendar: str) -> jnp.nd
 
 def _wrap_year_index(n_time: int, date: DateData, calendar: str) -> jnp.ndarray:
     """Climatological wrap: split the year evenly into `n_time` bins."""
-    # `date.tyear` is already in [0, 1) (mod-1 by construction in date.py).
-    idx = jnp.floor(date.tyear * n_time).astype(jnp.int32) % n_time
+    # `date.tyear(calendar)` is in [0, 1) by construction in date.py.
+    idx = jnp.floor(date.tyear(calendar) * n_time).astype(jnp.int32) % n_time
     return idx
 
 
@@ -386,21 +385,19 @@ def _by_date_index(time_seconds: jnp.ndarray, date: DateData) -> jnp.ndarray:
 
 
 def _solar_from_date(date: DateData, calendar: str) -> SolarGeometry:
-    """Build a `SolarGeometry` from a `DateData`, parameterized by calendar."""
-    dpy = days_per_year(calendar)
-    # `jax_solar`-style phases. Replicates the math in
-    # `OrbitalTime.from_datetime(when, days_per_year=dpy)`:
-    #   fraction_of_day  = dt.delta.seconds / 86400
-    #   fraction_of_year = ((dt.delta.days + fraction_of_day) / dpy) % 1
-    #   orbital_phase    = 2π * fraction_of_year
-    #   synodic_phase    = 2π * fraction_of_day
+    """Build a `SolarGeometry` from a `DateData`, parameterized by calendar.
+
+    Calendar-aware fraction of year (Gregorian honours leap years; see
+    `fraction_of_year_elapsed`). The orbital phase tracks the same
+    fraction so the solar declination matches the actual day-of-year
+    (#410). `synodic_phase` is fraction-of-day × 2π, calendar-independent.
+    """
     fraction_of_day = date.dt.delta.seconds / 86400.0
-    days_total = date.dt.delta.days + fraction_of_day
-    fraction_of_year = (days_total / dpy) % 1.0
+    tyear = date.tyear(calendar)
     two_pi = 2.0 * jnp.pi
     return SolarGeometry(
-        tyear=jnp.asarray(date.tyear, dtype=jnp.float32),
-        orbital_phase=jnp.asarray(two_pi * fraction_of_year, dtype=jnp.float32),
+        tyear=jnp.asarray(tyear, dtype=jnp.float32),
+        orbital_phase=jnp.asarray(two_pi * tyear, dtype=jnp.float32),
         synodic_phase=jnp.asarray(two_pi * fraction_of_day, dtype=jnp.float32),
     )
 
