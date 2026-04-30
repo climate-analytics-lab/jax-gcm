@@ -62,9 +62,10 @@ def apply_forcing_data(
     surface_temperature = surface_temperature.reshape(ncols)
     roughness_length = roughness_length.reshape(ncols)
     
-    # Greenhouse gas concentrations (uniform for now)
-    # Fill arrays with constant values to maintain array shapes
-    co2_concentration = 420.0  # ppmv
+    # CO2 mixing ratio (ppmv) is now a forcing input — see jcm.forcing and
+    # #285. CH4 and O3 stay hardcoded for now (their forcing-field equivalents
+    # can land in a follow-up).
+    co2_concentration = forcing.co2_vmr
     ch4_concentration = 1900.0  # ppbv
     o3_concentration = 300.0  # ppbv
 

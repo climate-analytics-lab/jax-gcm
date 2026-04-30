@@ -27,7 +27,6 @@ from jcm.physics.speedy.params import (
     ModRadConParameters,
     SurfaceFluxParameters,
     VerticalDiffusionParameters,
-    ForcingParameters,
 )
 from jcm.utils import tree_index_3d
 
@@ -75,7 +74,6 @@ def _params_with(**overrides) -> Parameters:
         mod_radcon=overrides.get("mod_radcon", p.mod_radcon),
         surface_flux=overrides.get("surface_flux", p.surface_flux),
         vertical_diffusion=overrides.get("vertical_diffusion", p.vertical_diffusion),
-        forcing=overrides.get("forcing", p.forcing),
     )
 
 
@@ -191,13 +189,9 @@ class SpeedyForcing(SpeedyTermBase):
     name: ClassVar[str] = "speedy_forcing"
     category: ClassVar[str] = "forcing"
 
-    def __init__(self, forcing_params=None, mod_radcon_params=None):
+    def __init__(self, mod_radcon_params=None):
         """Initialize SpeedyForcing."""
         super().__init__()
-        # ForcingParameters contains bools/ints — not differentiable, use Variable
-        self.forcing_params = nnx.Variable(
-            forcing_params or ForcingParameters.default()
-        )
         self.mod_radcon_params = nnx.Param(
             mod_radcon_params or ModRadConParameters.default()
         )
@@ -205,7 +199,6 @@ class SpeedyForcing(SpeedyTermBase):
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
         params = _params_with(
-            forcing=self.forcing_params.get_value(),
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
@@ -483,7 +476,6 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
         terms=[
             SpeedyFlags(),
             SpeedyForcing(
-                forcing_params=p.forcing,
                 mod_radcon_params=p.mod_radcon,
             ),
             SpeedyHumidity(),
