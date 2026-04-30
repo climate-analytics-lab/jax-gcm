@@ -157,13 +157,25 @@ class ForcingData:
                   align_mode: str = "auto"):
         """Initialize forcing data from a netCDF file.
 
+        Thin wrapper around `from_dataset`: opens `filename` with xarray
+        and delegates. See `from_dataset` for argument semantics.
+        """
+        import xarray as xr
+        return cls.from_dataset(xr.open_dataset(filename), coords=coords,
+                                align_mode=align_mode)
+
+    @classmethod
+    def from_dataset(cls, ds, coords: CoordinateSystem = None,
+                     align_mode: str = "auto"):
+        """Initialize forcing data from an in-memory xarray Dataset.
+
         Time-varying variables are wrapped as `TimeSeries` leaves so the
         Model can pre-slice them per step via `select(date)`. Static
         variables (`alb`) stay as bare 2-D arrays.
 
         Args:
-            filename: Path to the forcing data file.
-            coords: CoordinateSystem to upscale to. If None, the file's
+            ds: An `xarray.Dataset` carrying the expected forcing fields.
+            coords: CoordinateSystem to upscale to. If None, the dataset's
                 native nodal shape is used.
             align_mode: "auto" (default) chooses `wrap_year` for files that
                 cover at most one calendar year and `by_date` for longer
@@ -173,10 +185,6 @@ class ForcingData:
                 model date.
 
         """
-        import xarray as xr
-
-        ds = xr.open_dataset(filename)
-
         expected_structure = {
             "stl":      ("lon", "lat", "time"),
             "icec":     ("lon", "lat", "time"),

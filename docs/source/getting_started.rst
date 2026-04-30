@@ -226,42 +226,39 @@ duration of the run.
 Long forcing time-series and chunked runs
 -----------------------------------------
 
-Time-varying forcing is captured at JIT compile time as a closure constant
-(see ``Model._get_step_fn_factory``). Multi-year hourly forcing is therefore
-tractable for runs of a few simulated years; longer or finer-cadence
-forcing should either be resampled before loading, or fed to the model in
-chunks via ``Model.resume``. The chunked pattern avoids inflating the JIT
-closure and lets you stream output to disk year by year:
+For multi-year forcing files, it's often convenient to run the model one
+year at a time. This keeps memory bounded and lets you save output as you
+go. Use ``xarray.Dataset.groupby('time.year')`` to slice the forcing,
+then ``Model.run`` for the first year and ``Model.resume`` for subsequent
+years to continue from the previous state:
 
 .. code-block:: python
 
    import xarray as xr
    from jcm.forcing import ForcingData
 
-   # Multi-decade ERA5-style forcing with real timestamps.
    ds = xr.open_dataset('era5_1980_2010.nc')
+   yearly_outputs = []
 
-   # Run one calendar year at a time.
-   for year in range(1980, 2011):
-       year_slice = ds.sel(time=str(year))
-       year_slice.to_netcdf(f"_year_{year}.nc")
-       forcing = ForcingData.from_file(f"_year_{year}.nc", coords=coords)
+   year_iter = iter(ds.groupby('time.year'))
 
-       if year == 1980:
-           preds = model.run(forcing=forcing, save_interval='1 day',
-                             total_time='1 year')
-       else:
-           preds = model.resume(forcing=forcing, save_interval='1 day',
-                                total_time='1 year')
+   year, year_ds = next(year_iter)
+   forcing = ForcingData.from_dataset(year_ds, coords=coords)
+   preds = model.run(forcing=forcing, save_interval='1 day',
+                     total_time='1 year')
+   yearly_outputs.append(preds.to_xarray())
 
-       preds.to_xarray().to_netcdf(f"output_{year}.nc")
+   for year, year_ds in year_iter:
+       forcing = ForcingData.from_dataset(year_ds, coords=coords)
+       preds = model.resume(forcing=forcing, save_interval='1 day',
+                            total_time='1 year')
+       yearly_outputs.append(preds.to_xarray())
 
-Each ``run``/``resume`` call rebuilds the JIT-compiled step function for
-the new forcing closure (so the first iteration is slow as JAX compiles,
-subsequent iterations reuse the same compilation cache key when the
-forcing's pytree structure is unchanged). For really long campaigns,
-prefer this chunked pattern over loading the entire forcing record into
-one ``ForcingData``.
+   trajectory = xr.concat(yearly_outputs, dim='time')
+
+xarray's lazy loading means each year's slice only pulls the data it
+actually needs from disk, so this stays memory-efficient even for very
+long forcing records.
 
 
 Multi-Device Parallelization
