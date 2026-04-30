@@ -257,6 +257,44 @@ class TestAODCalculations:
         # AOD should be higher at plume centers
         assert jnp.all(aod_plume > aod_remote)
 
+    def test_anthropogenic_aod_accepts_2d_ann_cycle(self):
+        """`ann_cycle` arriving as (nfeatures, nplumes) should reduce to the
+        same result the legacy 1-D placeholder produced when both features
+        carry equal weight (i.e. an all-ones placeholder under any feature
+        weighting). This pins the backward-compat collapse path of the
+        feature-axis fix (#437)."""
+        params = AerosolParameters.default()
+        plume_lats = params.plume_lat[:3]
+        plume_lons = params.plume_lon[:3]
+        spatial_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
+
+        year_weight = jnp.ones(params.nplumes)
+        ann_cycle_1d = jnp.ones(params.nplumes)
+        ann_cycle_2d = jnp.ones((params.nfeatures, params.nplumes))
+
+        aod_1d = get_anthropogenic_aod(params, year_weight, ann_cycle_1d, spatial_dist)
+        aod_2d = get_anthropogenic_aod(params, year_weight, ann_cycle_2d, spatial_dist)
+
+        assert jnp.allclose(aod_1d, aod_2d, atol=1e-6)
+
+    def test_anthropogenic_aod_responds_to_per_feature_ann_cycle(self):
+        """A 2-D `ann_cycle` with one feature zeroed should produce a
+        smaller AOD than the all-ones case, demonstrating that the new
+        feature-axis path actually reads the feature dimension."""
+        params = AerosolParameters.default()
+        plume_lats = params.plume_lat[:3]
+        plume_lons = params.plume_lon[:3]
+        spatial_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
+
+        year_weight = jnp.ones(params.nplumes)
+        full = jnp.ones((params.nfeatures, params.nplumes))
+        half = full.at[1, :].set(0.0)  # zero out the second feature
+
+        aod_full = get_anthropogenic_aod(params, year_weight, full, spatial_dist)
+        aod_half = get_anthropogenic_aod(params, year_weight, half, spatial_dist)
+
+        assert jnp.all(aod_half < aod_full)
+
 
 class TestOpticalProperties:
     """Test optical property calculations"""

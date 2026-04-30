@@ -115,73 +115,95 @@ def get_simple_aerosol(
     
     return physics_tendencies, physics_data
 
-def get_plume_spatial_distribution(lats, lons, parameters):
-    """Calculate spatial distribution of aerosol plumes using Gaussian functions
-    
-    Args:
-        lats: Array of latitudes [degrees]
-        lons: Array of longitudes [degrees]
-        parameters: AerosolParameters object
-        
-    Returns:
-        Spatial distribution array of shape (nplumes, ncols)
+def _per_feature_plume_gaussians(lats, lons, parameters):
+    """Per-feature, per-plume Gaussian shapes — `(nfeatures, nplumes, ncols)`.
 
+    Internal helper, used both by `get_plume_spatial_distribution` (which
+    sums features with `ftr_weight`) and by the date-aware AOD path which
+    needs to multiply per-feature time weights by the per-feature gaussian
+    before reducing — exactly mirroring the Fortran `mo_simple_plumes_v1`
+    behavior that the JAX port previously collapsed by treating
+    `ann_cycle` as 1-D.
     """
-    # Expand dimensions for vectorized operations
-    # lats, lons: (ncols,)
-    # parameters.*: (nplumes,) or (nfeatures, nplumes)
-    
-    # get plume-center relative spatial parameters for specifying amplitude of plume at given lat and lon
     delta_lat = lats[jnp.newaxis, :] - parameters.plume_lat[:, jnp.newaxis]  # (nplumes, ncols)
-    delta_lon = lons[jnp.newaxis, :] - parameters.plume_lon[:, jnp.newaxis]  # (nplumes, ncols)
+    delta_lon = lons[jnp.newaxis, :] - parameters.plume_lon[:, jnp.newaxis]
 
     delta_lon_t = jnp.ones_like(parameters.plume_lon) * 180
     delta_lon_t = delta_lon_t.at[0].set(260)  # First plume is different
 
-    # Deal with wrapping
     delta_lon = jnp.where(
-        jnp.abs(delta_lon) > delta_lon_t[:, jnp.newaxis], 
-        jnp.where(delta_lon >= 0, delta_lon - 360, delta_lon + 360), 
-        delta_lon
+        jnp.abs(delta_lon) > delta_lon_t[:, jnp.newaxis],
+        jnp.where(delta_lon >= 0, delta_lon - 360, delta_lon + 360),
+        delta_lon,
     )
 
-    # Vectorized calculation for all features and plumes
-    # parameters.sig_*: (nfeatures, nplumes)
-    # delta_lon: (nplumes, ncols)
-    # Need to broadcast: (nfeatures, nplumes, ncols)
-    
     sig_lon = jnp.where(
-        delta_lon[jnp.newaxis, :, :] > 0.0,  # (1, nplumes, ncols)
-        parameters.sig_lon_E[:, :, jnp.newaxis],  # (nfeatures, nplumes, 1)
-        parameters.sig_lon_W[:, :, jnp.newaxis]   # (nfeatures, nplumes, 1)
+        delta_lon[jnp.newaxis, :, :] > 0.0,
+        parameters.sig_lon_E[:, :, jnp.newaxis],
+        parameters.sig_lon_W[:, :, jnp.newaxis],
     )
-    
     sig_lat = jnp.where(
-        delta_lon[jnp.newaxis, :, :] > 0.0,  # (1, nplumes, ncols)
-        parameters.sig_lat_E[:, :, jnp.newaxis],  # (nfeatures, nplumes, 1)
-        parameters.sig_lat_W[:, :, jnp.newaxis]   # (nfeatures, nplumes, 1)
+        delta_lon[jnp.newaxis, :, :] > 0.0,
+        parameters.sig_lat_E[:, :, jnp.newaxis],
+        parameters.sig_lat_W[:, :, jnp.newaxis],
     )
-    
-    a_plume = 0.5 / (sig_lon**2)
-    b_plume = 0.5 / (sig_lat**2)
+    a_plume = 0.5 / (sig_lon ** 2)
+    b_plume = 0.5 / (sig_lat ** 2)
 
-    # adjust for a plume specific rotation which helps match plume state to climatology.
-    # Rotation per feature and plume
-    cos_theta = jnp.cos(parameters.theta)[:, :, jnp.newaxis]  # (nfeatures, nplumes, 1)
-    sin_theta = jnp.sin(parameters.theta)[:, :, jnp.newaxis]  # (nfeatures, nplumes, 1)
-    
-    lon_rot = (cos_theta * delta_lon[jnp.newaxis, :, :] + 
-               sin_theta * delta_lat[jnp.newaxis, :, :])  # (nfeatures, nplumes, ncols)
-    lat_rot = (-sin_theta * delta_lon[jnp.newaxis, :, :] + 
-               cos_theta * delta_lat[jnp.newaxis, :, :])  # (nfeatures, nplumes, ncols)
+    cos_theta = jnp.cos(parameters.theta)[:, :, jnp.newaxis]
+    sin_theta = jnp.sin(parameters.theta)[:, :, jnp.newaxis]
+    lon_rot = (cos_theta * delta_lon[jnp.newaxis, :, :]
+               + sin_theta * delta_lat[jnp.newaxis, :, :])
+    lat_rot = (-sin_theta * delta_lon[jnp.newaxis, :, :]
+               + cos_theta * delta_lat[jnp.newaxis, :, :])
+    return jnp.exp(-1.0 * (a_plume * lon_rot ** 2 + b_plume * lat_rot ** 2))
 
-    # Calculate Gaussian distribution for each feature
-    gaussian = jnp.exp(-1.0 * (a_plume * (lon_rot**2) + b_plume * (lat_rot**2)))
-    
-    # Weight by feature importance and sum over features
+
+def get_plume_spatial_distribution(lats, lons, parameters):
+    """Calculate spatial distribution of aerosol plumes using Gaussian functions
+
+    Args:
+        lats: Array of latitudes [degrees]
+        lons: Array of longitudes [degrees]
+        parameters: AerosolParameters object
+
+    Returns:
+        Spatial distribution array of shape (nplumes, ncols), with the
+        feature axis already collapsed via `ftr_weight`. For the
+        date-aware path that needs the per-feature gaussians, use
+        `_per_feature_plume_gaussians` directly.
+
+    """
+    gaussian = _per_feature_plume_gaussians(lats, lons, parameters)
     weighted_gaussian = parameters.ftr_weight[:, :, jnp.newaxis] * gaussian
-    
     return jnp.sum(weighted_gaussian, axis=0)  # (nplumes, ncols)
+
+
+def _effective_ann_weight(ann_cycle, parameters):
+    """Reduce a possibly per-feature `ann_cycle` to a per-plume weight.
+
+    Accepts either:
+      * 1-D `(nplumes,)` — the legacy placeholder shape; passed through.
+      * 2-D `(nfeatures, nplumes)` — the proper MACv2-SP shape, reduced
+        with the parameter `ftr_weight` so the resulting per-plume weight
+        is a faithful average of the per-feature annual cycle (the
+        Fortran multiplies feature-by-feature inside the spatial sum;
+        because the feature axis is already collapsed in `spatial_dist`
+        via `ftr_weight`, the equivalent per-plume time weight here is
+        the `ftr_weight`-weighted feature sum).
+    """
+    if ann_cycle.ndim == 1:
+        return ann_cycle
+    if ann_cycle.ndim == 2:
+        ftr_w = parameters.ftr_weight  # (nfeatures, nplumes)
+        # ftr_weights typically sum to 1 over features; if not, normalize so
+        # the legacy "all-ones placeholder" still maps to all-ones.
+        norm = jnp.sum(ftr_w, axis=0)
+        norm = jnp.where(norm > 0.0, norm, 1.0)
+        return jnp.sum(ftr_w * ann_cycle, axis=0) / norm
+    raise ValueError(
+        f"ann_cycle must be 1-D (nplumes,) or 2-D (nfeatures, nplumes); got shape {ann_cycle.shape}"
+    )
 
 
 def get_background_aod(parameters, ann_cycle, spatial_dist, constant_background=0.02):
@@ -189,7 +211,8 @@ def get_background_aod(parameters, ann_cycle, spatial_dist, constant_background=
 
     Args:
         parameters: AerosolParameters object
-        ann_cycle: Annual cycle weights (nplumes,) from forcing data
+        ann_cycle: Annual cycle weights — either (nplumes,) or
+            (nfeatures, nplumes) from forcing data
         spatial_dist: Precomputed plume Gaussian distribution (nplumes, ncols)
         constant_background: Constant background AOD value
 
@@ -197,12 +220,9 @@ def get_background_aod(parameters, ann_cycle, spatial_dist, constant_background=
         Background AOD array of shape (ncols,)
 
     """
-    cw_bg = ann_cycle[:, jnp.newaxis] * parameters.aod_fmbg[:, jnp.newaxis] * spatial_dist
-
-    # calculate contribution to plume from its different features, to get a column weight for the anthropogenic
-    #   (cw_an) and the fine-mode background aerosol (cw_bg)
+    eff_ann = _effective_ann_weight(ann_cycle, parameters)
+    cw_bg = eff_ann[:, jnp.newaxis] * parameters.aod_fmbg[:, jnp.newaxis] * spatial_dist
     aod_PI = jnp.sum(cw_bg, axis=0) + constant_background
-
     return aod_PI
 
 
@@ -212,17 +232,16 @@ def get_anthropogenic_aod(parameters, year_weight, ann_cycle, spatial_dist):
     Args:
         parameters: AerosolParameters object
         year_weight: Year-specific emission weights (nplumes,) from forcing data
-        ann_cycle: Annual cycle weights (nplumes,) from forcing data
+        ann_cycle: Annual cycle weights (nplumes,) or (nfeatures, nplumes)
         spatial_dist: Precomputed plume Gaussian distribution (nplumes, ncols)
 
     Returns:
         Anthropogenic AOD array of shape (ncols,)
 
     """
-    # Use time weights for anthropogenic emissions
-    time_weight = year_weight * ann_cycle
+    eff_ann = _effective_ann_weight(ann_cycle, parameters)
+    time_weight = year_weight * eff_ann
     cw_an = time_weight[:, jnp.newaxis] * parameters.aod_spmx[:, jnp.newaxis] * spatial_dist
-
     aod_anth = jnp.sum(cw_an, axis=0)
     return aod_anth
 
