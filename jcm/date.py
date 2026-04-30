@@ -112,3 +112,59 @@ def absolute_seconds_since_epoch(dt: jdt.Datetime) -> jnp.ndarray:
     """
     delta = dt - jdt.Datetime.from_pydatetime(MODEL_EPOCH)
     return delta.days * 86400.0 + delta.seconds
+
+
+# Mapping of accepted unit aliases to their conversion factor in days. Months
+# and years are calendar-dependent so they're handled separately.
+_FIXED_UNIT_DAYS: dict[str, float] = {
+    "sec": 1.0 / 86400.0, "secs": 1.0 / 86400.0,
+    "second": 1.0 / 86400.0, "seconds": 1.0 / 86400.0,
+    "min": 1.0 / 1440.0, "mins": 1.0 / 1440.0,
+    "minute": 1.0 / 1440.0, "minutes": 1.0 / 1440.0,
+    "h": 1.0 / 24.0, "hr": 1.0 / 24.0, "hrs": 1.0 / 24.0,
+    "hour": 1.0 / 24.0, "hours": 1.0 / 24.0,
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
+}
+_MONTH_ALIASES = {"mo", "mon", "mons", "month", "months"}
+_YEAR_ALIASES = {"y", "yr", "yrs", "year", "years"}
+
+
+def parse_duration_days(value, calendar: str = DEFAULT_CALENDAR) -> float:
+    """Parse a duration spec into a float number of days.
+
+    Numeric input (int / float) is returned as-is — assumed to be days.
+    Strings are parsed as `<number> <unit>`, e.g. `'1 month'`,
+    `'5 years'`, `'30 days'`, `'12 hours'`. Months and years are mapped
+    via the chosen `calendar` (so under ``'365_day'``, '1 month' is
+    365/12 ≈ 30.4167 days; under ``'gregorian'`` it's 365.2425/12).
+
+    This intentionally does *not* align to calendar month/year
+    boundaries — each "month" is a fixed-length chunk. For
+    calendar-aligned aggregation use ``ModelPredictions.resample``.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    import re
+    s = str(value).strip().lower()
+    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z]+)\s*$", s)
+    if not m:
+        raise ValueError(
+            f"Cannot parse duration {value!r}. Expected '<number> <unit>' "
+            "with unit in {seconds, minutes, hours, days, weeks, months, years}."
+        )
+    n = float(m.group(1))
+    unit = m.group(2)
+
+    if unit in _FIXED_UNIT_DAYS:
+        return n * _FIXED_UNIT_DAYS[unit]
+    if unit in _MONTH_ALIASES:
+        return n * days_per_year(calendar) / 12.0
+    if unit in _YEAR_ALIASES:
+        return n * days_per_year(calendar)
+
+    raise ValueError(
+        f"Unknown duration unit {unit!r} in {value!r}. "
+        f"Accepted units: {sorted(_FIXED_UNIT_DAYS) + sorted(_MONTH_ALIASES) + sorted(_YEAR_ALIASES)}"
+    )

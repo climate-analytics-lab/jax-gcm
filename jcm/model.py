@@ -16,7 +16,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.constants import p0
 from jcm.terrain import TerrainData
-from jcm.date import DateData
+from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_terms import speedy_physics
@@ -84,6 +84,22 @@ class ModelPredictions:
     @property
     def times(self):
         return self._predictions.times
+
+    def resample(self, freq):
+        """Calendar-aligned resampling of the prediction trajectory.
+
+        Returns the xarray ``Resample`` object so the caller picks the
+        aggregation: ``predictions.resample('1MS').mean()`` for monthly
+        means, ``...sum()`` for accumulation. The ``freq`` string follows
+        pandas's offset alias conventions (``'1MS'``, ``'1YS'``, etc.).
+
+        Useful when the model was run with a daily ``save_interval`` and
+        the user wants real calendar-month / calendar-year statistics —
+        the inner integrator stays fixed-cadence (its ``nnx.scan`` lengths
+        are static at JIT time) but the trajectory has real ``datetime64``
+        timestamps to resample against.
+        """
+        return self.to_xarray().resample(time=freq)
 
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
@@ -659,9 +675,14 @@ class Model:
             forcing:
                 ForcingData containing forcing conditions for the run.
             save_interval:
-                (float) interval at which to save model outputs in days (default 10.0).
+                Interval at which to save model outputs. Either a number
+                of days (float) or a calendar string like ``'1 month'`` /
+                ``'1 year'``; calendar strings are converted to days via
+                ``Model.calendar`` (so ``'1 month'`` is 365/12 days under
+                ``'365_day'``). Default 10.0 days.
             total_time:
-                (float) total time to run the model in days (default 120.0).
+                Total time to run the model. Same units as ``save_interval``.
+                Default 120.0 days.
             output_averages:
                 Whether to output time-averaged quantities (default False).
 
@@ -669,8 +690,10 @@ class Model:
             A tuple containing (final dinosaur.primitive_equations.State, ModelPredictions object containing trajectory of post-processed model states).
 
         """
+        save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
+        total_time_days = parse_duration_days(total_time, calendar=self.calendar)
         final_modal_state, predictions = self._run_from_state(
-            initial_state, forcing, save_interval, total_time, output_averages
+            initial_state, forcing, save_interval_days, total_time_days, output_averages
         )
         return final_modal_state, ModelPredictions(predictions, self.coords, self.physics)
 
@@ -686,9 +709,11 @@ class Model:
             forcing:
                 ForcingData containing forcing conditions for the run.
             save_interval:
-                Interval at which to save model outputs (float).
+                Interval at which to save model outputs. Number of days
+                (float) or a calendar string like ``'1 month'`` /
+                ``'1 year'`` (resolved against ``Model.calendar``).
             total_time:
-                Total time to run the model (float).
+                Total time to run the model. Same units as ``save_interval``.
             output_averages:
                 Whether to output time-averaged quantities (default False).
 
@@ -727,9 +752,13 @@ class Model:
             forcing:
                 ForcingData containing forcing conditions for the run (default aquaplanet).
             save_interval:
-                (float) interval at which to save model outputs in days (default 10.0).
+                Interval at which to save model outputs. Number of days
+                (float) or a calendar string like ``'1 month'`` /
+                ``'1 year'`` (resolved against ``Model.calendar``).
+                Default 10.0 days.
             total_time:
-                (float) total time to run the model in days (default 120.0).
+                Total time to run the model. Same units as ``save_interval``.
+                Default 120.0 days.
             output_averages:
                 Whether to output time-averaged quantities (default False).
 

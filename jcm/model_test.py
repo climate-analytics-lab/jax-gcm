@@ -336,6 +336,42 @@ class TestModelUnit(unittest.TestCase):
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
 
+class TestCalendarDurationsAndResample(unittest.TestCase):
+    """Calendar-string save_interval / total_time and the
+    `ModelPredictions.resample` post-resampler.
+    """
 
+    def _build_held_suarez_model(self):
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        coords = get_held_suarez_coords()
+        terrain = TerrainData.from_coords(coords)
+        return Model(coords=coords, terrain=terrain, time_step=180,
+                     physics=held_suarez_physics())
+
+    def test_run_with_calendar_strings(self):
+        """`save_interval='1 month'`, `total_time='2 months'` should yield 2 saves."""
+        model = self._build_held_suarez_model()
+        predictions = model.run(save_interval='1 month', total_time='2 months')
+        # Under the default 365_day calendar, '1 month' is 365/12 days,
+        # and total/save = 2 outer steps.
+        self.assertEqual(predictions.dynamics.temperature.shape[0], 2)
+
+    def test_resample_to_monthly(self):
+        """Daily save_interval + `.resample('1MS').mean()` should produce a
+        calendar-aligned monthly trajectory whose length matches the number
+        of distinct calendar months in the run."""
+        model = self._build_held_suarez_model()
+        # 90 days starting 2000-01-01 (the model default) reaches the end
+        # of March, so the trajectory spans 3 calendar months.
+        predictions = model.run(save_interval='1 day', total_time='90 days')
+
+        ds = predictions.to_xarray()
+        self.assertEqual(ds.sizes['time'], 90)
+
+        monthly = predictions.resample('1MS').mean()
+        self.assertEqual(monthly.sizes['time'], 3)
 
 
