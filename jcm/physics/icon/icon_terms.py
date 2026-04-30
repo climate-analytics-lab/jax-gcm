@@ -446,7 +446,9 @@ def _icon_params_with(**overrides) -> Parameters:
         clouds=overrides.get("clouds", p.clouds),
         microphysics=overrides.get("microphysics", p.microphysics),
         microphysics_2m=overrides.get("microphysics_2m", p.microphysics_2m),
-        gravity_waves=overrides.get("gravity_waves", p.gravity_waves),
+        hines=overrides.get("hines", p.hines),
+        sso=overrides.get("sso", p.sso),
+        simple_gwd=overrides.get("simple_gwd", p.simple_gwd),
         radiation=overrides.get("radiation", p.radiation),
         vertical_diffusion=overrides.get(
             "vertical_diffusion", p.vertical_diffusion,

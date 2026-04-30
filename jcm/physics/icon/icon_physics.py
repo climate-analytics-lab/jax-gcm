@@ -26,7 +26,7 @@ from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.icon.parameters import Parameters
 from jcm.physics.surface.icon import surface_physics_step, initialize_surface_state
 from jcm.physics.surface.icon.surface_types import AtmosphericForcing
-from jcm.physics.gravity_waves.hines import gravity_wave_drag
+from jcm.physics.gravity_waves.simple import simple_gwd as gravity_wave_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.icon.icon_physics_data import PhysicsData
 
@@ -1265,7 +1265,7 @@ def apply_gravity_waves(
         out_axes=(0, 0)  # Returns (GWDTendencies, GWDState) per column
     )(state.u_wind, state.v_wind, state.temperature,
         pressure_levels, height_levels, air_density,
-        h_std, dt, parameters.gravity_waves)
+        h_std, dt, parameters.simple_gwd)
     
     # Unpack structured results directly
     gwd_tendencies_all, gwd_states_all = gwd_results

@@ -1,23 +1,19 @@
-"""Gravity wave drag parameterizations for ICON physics
+"""Hines (1997) doppler-spread spectral non-orographic GWD.
 
-This module contains gravity wave parameterizations including orographic
-and non-orographic gravity wave drag schemes.
+Port of ECHAM ``mo_gw_hines.f90``. The real implementation lives in
+:mod:`.hines`. This package init re-exports the public symbols.
 """
 
 from .hines import (
-    gravity_wave_drag,
-    GravityWaveParameters,
-    GravityWaveState,
-    GravityWaveTendencies,
-    brunt_vaisala_frequency,
-    orographic_source
+    HinesParameters,
+    HinesState,
+    HinesTendencies,
+    hines_gwd,
 )
 
 __all__ = [
-    "gravity_wave_drag",
-    "GravityWaveParameters",
-    "GravityWaveState",
-    "GravityWaveTendencies",
-    "brunt_vaisala_frequency",
-    "orographic_source"
+    "HinesParameters",
+    "HinesState",
+    "HinesTendencies",
+    "hines_gwd",
 ]

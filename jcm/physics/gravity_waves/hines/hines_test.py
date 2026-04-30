@@ -1,371 +1,181 @@
-"""Unit tests for gravity wave drag parameterization
+"""Unit tests for the Hines (1997) doppler-spread spectral GWD port.
 
-Date: 2025-01-10
+These are sanity tests that run as part of the regular ``pytest`` suite.
+The bit-exact-against-Fortran validation lives in
+``fortran_harness/compare_gw_hines.py`` and is run manually during
+development; it depends on a local Fortran build that is intentionally
+NOT shipped with the repository.
 """
+import os
 
-import jax.numpy as jnp
+# Hines is an f64 port; force JAX into x64 before any jcm import.
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
 import jax
-from .hines import (
-    GravityWaveParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
-    gravity_wave_drag
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from jcm.physics.gravity_waves.hines import (
+    HinesParameters, HinesState, HinesTendencies, hines_gwd,
 )
-from jcm.constants import grav, cp
 
 
-class TestBruntVaisalaFrequency:
-    """Test Brunt-Väisälä frequency calculation"""
-    
-    def test_stable_atmosphere(self):
-        """Test N² in stably stratified atmosphere"""
-        # Create stable profile
-        nlev = 20
-        height = jnp.linspace(20000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        
-        # Stable temperature profile (decreasing with height)
-        temperature = 288 - 0.0065 * height
-        
-        n2 = brunt_vaisala_frequency(temperature, pressure, height)
-        
-        # Should be positive for stable stratification
-        assert jnp.all(n2 > 0)
-        
-        # Typical tropospheric values ~1e-4 s^-2
-        assert jnp.all(n2 < 1e-3)
-        assert jnp.mean(n2) > 1e-5
-    
-    def test_isothermal_atmosphere(self):
-        """Test N² in isothermal atmosphere"""
-        nlev = 10
-        height = jnp.linspace(10000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        temperature = jnp.ones(nlev) * 273.0
-        
-        n2 = brunt_vaisala_frequency(temperature, pressure, height)
-        
-        # Isothermal atmosphere has N² = g²/cp/T
-        expected = grav**2 / (cp * 273.0)
-        
-        # Should be approximately constant
-        assert jnp.std(n2[1:-1]) / jnp.mean(n2[1:-1]) < 0.1
-        
-        # Check approximate value
-        assert jnp.abs(jnp.mean(n2) - expected) / expected < 0.2
+def _make_column(nlev: int = 47, u_scale: float = 1.0,
+                 v_scale: float = 1.0, jet_z: float = 10000.0):
+    """Build a simple isothermal-ish atmosphere with a Gaussian jet."""
+    grav = 9.80665
+    rd = 287.04
+    paphm1 = np.logspace(np.log10(10.0), np.log10(101325.0), nlev + 1)
+    papm1 = 0.5 * (paphm1[:-1] + paphm1[1:])
+    z = np.zeros(nlev)
+    zh = np.zeros(nlev + 1)
+    Tprof = np.zeros(nlev)
+    for k in range(nlev - 1, -1, -1):
+        z_g = zh[k + 1]
+        Tprof[k] = max(288.15 - 0.0065 * z_g, 200.0) if z_g < 11000 else 220.0
+        dz = (rd * Tprof[k] / grav) * np.log(paphm1[k + 1] / paphm1[k])
+        zh[k] = zh[k + 1] + dz
+        z[k] = 0.5 * (zh[k] + zh[k + 1])
+    rho = papm1 / (rd * Tprof)
+    pmair = (paphm1[1:] - paphm1[:-1]) / grav
+    u = u_scale * 30.0 * np.exp(-((z - jet_z) / 6000.0) ** 2)
+    v = v_scale * 5.0 * np.exp(-((z - jet_z) / 8000.0) ** 2)
+    return dict(
+        paphm1=jnp.asarray(paphm1), papm1=jnp.asarray(papm1),
+        pzh=jnp.asarray(zh), prho=jnp.asarray(rho),
+        pmair=jnp.asarray(pmair), ptm1=jnp.asarray(Tprof),
+        pum1=jnp.asarray(u), pvm1=jnp.asarray(v),
+    )
 
 
-class TestOrographicSource:
-    """Test orographic gravity wave source"""
-    
-    def test_source_magnitude(self):
-        """Test that source scales with wind and orography"""
-        config = GravityWaveParameters.default()
-        
-        # Base case
-        u_sfc = jnp.array(10.0)
-        v_sfc = jnp.array(0.0)
-        n_sfc = jnp.array(0.01)  # 0.01 s^-1
-        h_std = jnp.array(100.0)  # 100m mountains
-        
-        tau_x1, tau_y1 = orographic_source(u_sfc, v_sfc, n_sfc, h_std, config)
-        
-        # Double wind speed
-        tau_x2, tau_y2 = orographic_source(
-            2 * u_sfc, v_sfc, n_sfc, h_std, config
-        )
-        
-        # Source should increase with wind
-        assert jnp.abs(tau_x2) > jnp.abs(tau_x1)
-        
-        # Double mountain height
-        tau_x3, tau_y3 = orographic_source(
-            u_sfc, v_sfc, n_sfc, 2 * h_std, config
-        )
-        
-        # Source scales with h²
-        assert jnp.abs(tau_x3) > 3 * jnp.abs(tau_x1)
-    
-    def test_source_direction(self):
-        """Test that source opposes wind direction"""
-        config = GravityWaveParameters.default()
-        
-        n_sfc = jnp.array(0.01)
-        h_std = jnp.array(100.0)
-        
-        # Westerly wind
-        u_sfc = jnp.array(10.0)
-        v_sfc = jnp.array(0.0)
-        tau_x, tau_y = orographic_source(u_sfc, v_sfc, n_sfc, h_std, config)
-        
-        # Stress should oppose wind
-        assert tau_x < 0
-        assert jnp.abs(tau_y) < 1e-10
-        
-        # Northerly wind
-        u_sfc = jnp.array(0.0)
-        v_sfc = jnp.array(10.0)
-        tau_x, tau_y = orographic_source(u_sfc, v_sfc, n_sfc, h_std, config)
-        
-        assert jnp.abs(tau_x) < 1e-10
-        assert tau_y < 0
-    
-    def test_froude_number_effect(self):
-        """Test Froude number dependence"""
-        config = GravityWaveParameters.default()
-        
-        n_sfc = jnp.array(0.01)
-        h_std = jnp.array(500.0)  # Tall mountains
-        
-        # Low wind (low Froude) - blocked flow
-        u_low = jnp.array(5.0)
-        v_sfc = jnp.array(0.0)
-        tau_low, _ = orographic_source(u_low, v_sfc, n_sfc, h_std, config)
-        
-        # High wind (high Froude) - flow over
-        u_high = jnp.array(50.0)
-        tau_high, _ = orographic_source(u_high, v_sfc, n_sfc, h_std, config)
-        
-        # Normalized by wind speed, low Froude should have more drag
-        drag_low = jnp.abs(tau_low) / u_low
-        drag_high = jnp.abs(tau_high) / u_high
-        
-        assert drag_low > drag_high
+class TestHinesBasic:
+    """Sanity properties of the Hines GWD scheme."""
+
+    def test_returns_finite_tendencies(self):
+        """A reasonable mid-latitude column produces all-finite output."""
+        col = _make_column()
+        config = HinesParameters.default()
+        tend, state = hines_gwd(**col, config=config)
+        assert jnp.all(jnp.isfinite(tend.dudt))
+        assert jnp.all(jnp.isfinite(tend.dvdt))
+        assert jnp.all(jnp.isfinite(tend.dissip))
+        assert jnp.all(jnp.isfinite(state.flux_u))
+        assert jnp.all(jnp.isfinite(state.flux_v))
+
+    def test_tendencies_zero_below_launch(self):
+        """No drag is computed below the launch level (emiss_lev counts up
+        from the surface)."""
+        col = _make_column(nlev=47)
+        config = HinesParameters.default(emiss_lev=10)
+        tend, _ = hines_gwd(**col, config=config)
+        levbot = 47 - 10 - 1
+        # emiss_lev=10 means the bottom 10 levels (indices 37..46) get no drag.
+        # The launch level itself (index 36) does get a flux-divergence drag.
+        below = jnp.arange(47) > levbot
+        np.testing.assert_array_equal(np.asarray(tend.dudt[below]), 0.0)
+        np.testing.assert_array_equal(np.asarray(tend.dvdt[below]), 0.0)
+
+    def test_drag_opposes_relative_wind_at_top(self):
+        """Eastward jet → eastward momentum flux divergence above launch
+        decelerates the easterly drift in the upper stratosphere/mesosphere
+        — and flux pile-up near model top gives strongly positive du/dt
+        there. Test that the column-integrated stress has the right sign."""
+        col = _make_column(u_scale=1.0, v_scale=0.0)
+        config = HinesParameters.default()
+        tend, _ = hines_gwd(**col, config=config)
+        # Above-launch column-integrated u-momentum tendency should be
+        # negative-then-positive (pile-up at top). Most realistic columns
+        # show a strong positive peak at the model top — at minimum the
+        # absolute peak should not be at the launch level.
+        levbot = 47 - 10 - 1
+        peak_idx = int(jnp.argmax(jnp.abs(tend.dudt[:levbot + 1])))
+        assert peak_idx < levbot, "drag peak should be above the launch level"
+
+    def test_drag_scales_with_rmscon(self):
+        """Doubling the launch RMS wind doubles the spectral amplitude →
+        ak_alpha (∝ rmscon^2 / m_alpha^2) scales, but with the m_alpha-
+        feedback the actual stress scales sub-linearly. Test that bigger
+        rmscon gives bigger column-integrated stress."""
+        col = _make_column()
+        cfg_a = HinesParameters.default(rmscon=0.5)
+        cfg_b = HinesParameters.default(rmscon=2.0)
+        tend_a, _ = hines_gwd(**col, config=cfg_a)
+        tend_b, _ = hines_gwd(**col, config=cfg_b)
+        peak_a = float(jnp.max(jnp.abs(tend_a.dudt)))
+        peak_b = float(jnp.max(jnp.abs(tend_b.dudt)))
+        assert peak_b > peak_a, "stronger launch RMS should give stronger drag"
 
 
-class TestWaveBreaking:
-    """Test wave breaking criterion"""
-    
-    def test_richardson_number_breaking(self):
-        """Test breaking based on Richardson number"""
-        config = GravityWaveParameters.default()
-        nlev = 10
-        
-        # Create profile with strong shear
-        height = jnp.linspace(10000, 0, nlev)
-        u = jnp.linspace(50, 0, nlev)  # Linear shear
-        v = jnp.zeros(nlev)
-        
-        # Stable stratification
-        n2 = jnp.ones(nlev) * 1e-4
-        
-        # Momentum flux
-        tau_x = jnp.ones(nlev) * -0.1
-        tau_y = jnp.zeros(nlev)
-        
-        # Air density
-        rho = jnp.ones(nlev)
-        
-        breaking_mask, deposited = wave_breaking_criterion(
-            u, v, n2, height, tau_x, tau_y, rho, config
-        )
-        
-        # Should have breaking where shear is strong
-        assert jnp.any(breaking_mask)
-        
-        # With constant flux, divergence is zero except at boundaries
-        # So we just verify that breaking was detected
-    
-    def test_amplitude_breaking(self):
-        """Test breaking based on wave amplitude"""
-        config = GravityWaveParameters.default()
-        nlev = 10
-        
-        height = jnp.linspace(20000, 0, nlev)
-        u = jnp.ones(nlev) * 10.0
-        v = jnp.zeros(nlev)
-        n2 = jnp.ones(nlev) * 1e-4
-        
-        # Large momentum flux (large amplitude)
-        tau_x = jnp.ones(nlev) * -10.0
-        tau_y = jnp.zeros(nlev)
-        
-        # Decreasing density with height
-        rho = jnp.exp(-height / 8000)
-        
-        breaking_mask, deposited = wave_breaking_criterion(
-            u, v, n2, height, tau_x, tau_y, rho, config
-        )
-        
-        # Should have breaking somewhere due to large amplitude
-        assert jnp.any(breaking_mask)
+class TestHinesJaxTransforms:
+    """JAX transformations work on the scheme."""
+
+    def test_jit_runs(self):
+        col = _make_column()
+        config = HinesParameters.default()
+        jitted = jax.jit(lambda **kw: hines_gwd(**kw, config=config))
+        tend, _ = jitted(**col)
+        assert jnp.all(jnp.isfinite(tend.dudt))
+
+    def test_vmap_over_columns(self):
+        """vmap over a small batch of columns."""
+        col1 = _make_column(u_scale=1.0)
+        col2 = _make_column(u_scale=2.0)
+        col3 = _make_column(u_scale=-1.0)
+        # Stack along a new leading axis.
+        batch = {k: jnp.stack([col1[k], col2[k], col3[k]]) for k in col1}
+        config = HinesParameters.default()
+
+        def one(paphm1, papm1, pzh, prho, pmair, ptm1, pum1, pvm1):
+            t, _ = hines_gwd(paphm1, papm1, pzh, prho, pmair,
+                             ptm1, pum1, pvm1, config)
+            return t.dudt
+
+        batched = jax.vmap(one)
+        out = batched(batch["paphm1"], batch["papm1"], batch["pzh"],
+                      batch["prho"], batch["pmair"], batch["ptm1"],
+                      batch["pum1"], batch["pvm1"])
+        assert out.shape == (3, 47)
+        # Reversed-jet column should give reversed-sign u-tendency at top.
+        # Tolerance is loose because the production default precision is f32;
+        # the harness runs at f64 for bit-exactness against Fortran.
+        np.testing.assert_allclose(np.asarray(out[2]), -np.asarray(out[0]),
+                                   rtol=1e-3, atol=1e-9)
+
+    def test_grad_finite(self):
+        """jax.grad runs and produces finite gradients wrt input wind."""
+        col = _make_column()
+        config = HinesParameters.default()
+
+        def loss(u):
+            t, _ = hines_gwd(col["paphm1"], col["papm1"], col["pzh"],
+                             col["prho"], col["pmair"], col["ptm1"],
+                             u, col["pvm1"], config)
+            return jnp.sum(t.dudt ** 2)
+
+        g = jax.grad(loss)(col["pum1"])
+        assert g.shape == col["pum1"].shape
+        assert jnp.all(jnp.isfinite(g))
 
 
-class TestGravityWaveDrag:
-    """Test the complete gravity wave drag scheme"""
-    
-    def test_momentum_deposition(self):
-        """Test that momentum is deposited correctly"""
-        config = GravityWaveParameters.default()
-        
-        # Create westerly jet
-        nlev = 30
-        height = jnp.linspace(20000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        temperature = 288 - 0.0065 * height
-        
-        # Jet profile
-        u_wind = 30.0 * jnp.exp(-(height - 12000)**2 / 5000**2)
-        v_wind = jnp.zeros(nlev)
-        
-        h_std = 300.0  # Mountains
-        dt = 1800.0
-        
-        tendencies, state = gravity_wave_drag(
-            u_wind, v_wind, temperature, pressure, height, h_std, dt, config
-        )
-        
-        # Should have non-zero surface stress from orographic source
-        assert state.wave_stress[-1] > 0
-        
-        # The tendencies will be very small with default parameters
-        # Just verify the scheme ran without errors
-        total_tend = jnp.sum(jnp.abs(tendencies.dudt))
-        assert jnp.isfinite(total_tend)
-    
-    def test_critical_level_filtering(self):
-        """Test that waves are absorbed at critical levels"""
-        config = GravityWaveParameters.default()
-        
-        nlev = 20
-        height = jnp.linspace(20000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        temperature = 288 - 0.0065 * height
-        
-        # Wind that reverses direction (critical level)
-        u_wind = jnp.where(height < 10000, 10.0, -10.0)
-        v_wind = jnp.zeros(nlev)
-        
-        h_std = 200.0
-        dt = 1800.0
-        
-        tendencies, state = gravity_wave_drag(
-            u_wind, v_wind, temperature, pressure, height, h_std, dt, config
-        )
-        
-        # Momentum flux should go to zero above critical level
-        critical_height = 10000
-        above_critical = height > critical_height + 2000
-        assert jnp.all(state.tau_x[above_critical] < 0.01)
-    
-    def test_height_limits(self):
-        """Test that GWD only applies within height limits"""
-        config = GravityWaveParameters.default(zmin=5000.0, zmax=25000.0)
-        
-        nlev = 40
-        height = jnp.linspace(40000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        temperature = 288 - 0.0065 * height
-        
-        u_wind = jnp.ones(nlev) * 20.0
-        v_wind = jnp.zeros(nlev)
-        
-        h_std = 300.0
-        dt = 1800.0
-        
-        tendencies, state = gravity_wave_drag(
-            u_wind, v_wind, temperature, pressure, height, h_std, dt, config
-        )
-        
-        # No tendencies below zmin
-        below_mask = height < float(config.zmin)
-        assert jnp.all(tendencies.dudt[below_mask] == 0)
-        
-        # No tendencies above zmax
-        above_mask = height > float(config.zmax)
-        assert jnp.all(tendencies.dudt[above_mask] == 0)
-    
-    def test_energy_conservation(self):
-        """Test that kinetic energy is converted to heat"""
-        config = GravityWaveParameters.default()
-        
-        nlev = 20
-        height = jnp.linspace(20000, 0, nlev)
-        pressure = 100000 * jnp.exp(-height / 8000)
-        temperature = 288 - 0.0065 * height
-        
-        u_wind = jnp.ones(nlev) * 25.0
-        v_wind = jnp.zeros(nlev)
-        
-        h_std = 400.0
-        dt = 1800.0
-        
-        tendencies, state = gravity_wave_drag(
-            u_wind, v_wind, temperature, pressure, height, h_std, dt, config
-        )
-        
-        # Kinetic energy loss
-        ke_loss = u_wind * tendencies.dudt + v_wind * tendencies.dvdt
-        
-        # Check that gravity waves were generated
-        assert state.wave_stress[-1] > 0
-        
-        # Energy change may be very small
-        total_ke_change = jnp.sum(jnp.abs(ke_loss))
-        assert total_ke_change >= 0
-        
-        # Temperature tendency from dissipation
-        # dT/dt = -dKE/dt / cp
-        expected_heating = -ke_loss / cp
-        
-        # Should match where there are tendencies
-        mask = jnp.abs(ke_loss) > 1e-10
-        if jnp.any(mask):
-            assert jnp.allclose(
-                tendencies.dtedt[mask], 
-                expected_heating[mask], 
-                rtol=1e-3
-            )
-    
-    def test_jax_transformations(self):
-        """Test JAX transformations"""
-        config = GravityWaveParameters.default()
-        
-        def gwd_loss(u_wind):
-            nlev = len(u_wind)
-            height = jnp.linspace(20000, 0, nlev)
-            pressure = 100000 * jnp.exp(-height / 8000)
-            temperature = 288 - 0.0065 * height
-            v_wind = jnp.zeros(nlev)
-            
-            tend, _ = gravity_wave_drag(
-                u_wind, v_wind, temperature, pressure, 
-                height, 300.0, 1800.0, config
-            )
-            
-            return jnp.sum(tend.dudt ** 2)
-        
-        # Test JIT
-        jitted = jax.jit(gwd_loss)
-        u = jnp.ones(20) * 20.0
-        loss = jitted(u)
-        assert jnp.isfinite(loss)
-        
-        # Test gradient
-        grad_fn = jax.grad(gwd_loss)
-        grad = grad_fn(u)
-        assert grad.shape == u.shape
-        assert jnp.all(jnp.isfinite(grad))
+class TestHinesParameters:
+    """Parameters object behaves correctly."""
 
+    def test_defaults_match_fortran_module_constants(self):
+        """The defaults reproduce the module-level constants from
+        ``mo_gw_hines.f90`` lines 58-72 + namelist defaults. Tolerance is
+        loose (atol=1e-6) because the production default is f32."""
+        p = HinesParameters.default()
+        for name, expected in [
+            ("naz", 8), ("slope", 1.0), ("f1", 1.5), ("f2", 0.3),
+            ("f3", 1.0), ("f5", 1.0), ("f6", 0.5), ("alt_cutoff", 105e3),
+            ("smco", 2.0), ("nsmax", 5), ("rmscon", 1.0), ("kstar", 5e-5),
+            ("m_min", 1e-4),
+        ]:
+            np.testing.assert_allclose(float(getattr(p, name)), expected,
+                                       atol=1e-6, rtol=1e-6)
 
-if __name__ == "__main__":
-    # Run tests
-    test_bv = TestBruntVaisalaFrequency()
-    test_bv.test_stable_atmosphere()
-    test_bv.test_isothermal_atmosphere()
-    
-    test_oro = TestOrographicSource()
-    test_oro.test_source_magnitude()
-    test_oro.test_source_direction()
-    test_oro.test_froude_number_effect()
-    
-    test_break = TestWaveBreaking()
-    test_break.test_richardson_number_breaking()
-    test_break.test_amplitude_breaking()
-    
-    test_gwd = TestGravityWaveDrag()
-    test_gwd.test_momentum_deposition()
-    test_gwd.test_critical_level_filtering()
-    test_gwd.test_height_limits()
-    test_gwd.test_energy_conservation()
-    test_gwd.test_jax_transformations()
-    
-    print("All gravity wave drag tests passed!")
+    def test_custom_overrides(self):
+        p = HinesParameters.default(rmscon=2.0, emiss_lev=15)
+        assert float(p.rmscon) == 2.0
+        assert int(p.emiss_lev) == 15

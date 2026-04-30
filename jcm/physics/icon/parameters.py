@@ -12,7 +12,9 @@ from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.clouds.sundqvist import CloudParameters
 from jcm.physics.clouds.echam_1m import MicrophysicsParameters
 from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
-from jcm.physics.gravity_waves.hines import GravityWaveParameters
+from jcm.physics.gravity_waves.hines import HinesParameters
+from jcm.physics.gravity_waves.simple import SimpleGwdParameters
+from jcm.physics.gravity_waves.sso import SSOParameters
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import VDiffParameters
 from jcm.physics.surface.icon import SurfaceParameters
@@ -31,7 +33,9 @@ class Parameters:
     clouds: CloudParameters
     microphysics: MicrophysicsParameters
     microphysics_2m: CloudParams2M
-    gravity_waves: GravityWaveParameters
+    hines: HinesParameters
+    sso: SSOParameters
+    simple_gwd: SimpleGwdParameters
     radiation: RadiationParameters
     vertical_diffusion: VDiffParameters
     surface: SurfaceParameters
@@ -44,7 +48,9 @@ class Parameters:
             clouds = CloudParameters.default(),
             microphysics = MicrophysicsParameters.default(),
             microphysics_2m = CloudParams2M.default(),
-            gravity_waves = GravityWaveParameters.default(),
+            hines = HinesParameters.default(),
+            sso = SSOParameters.default(),
+            simple_gwd = SimpleGwdParameters.default(),
             radiation = RadiationParameters.default(),
             vertical_diffusion = VDiffParameters.default(),
             surface = SurfaceParameters.default(),
@@ -58,7 +64,9 @@ class Parameters:
             clouds=self.clouds,
             microphysics=self.microphysics,
             microphysics_2m=self.microphysics_2m,
-            gravity_waves=self.gravity_waves,
+            hines=self.hines,
+            sso=self.sso,
+            simple_gwd=self.simple_gwd,
             radiation=self.radiation,
             vertical_diffusion=self.vertical_diffusion,
             surface=self.surface,
@@ -91,10 +99,22 @@ class Parameters:
             microphysics_2m=self.microphysics_2m.__class__(**{**self.microphysics_2m.__dict__, **kwargs})
         )
 
-    def with_gravity_waves(self, **kwargs) -> 'Parameters':
-        """Create new Parameters with updated gravity wave parameters"""
+    def with_hines(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated Hines (non-orographic GW) parameters."""
         return self._replace(
-            gravity_waves=self.gravity_waves.__class__(**{**self.gravity_waves.__dict__, **kwargs})
+            hines=self.hines.__class__(**{**self.hines.__dict__, **kwargs}),
+        )
+
+    def with_sso(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated SSO (sub-grid orography) parameters."""
+        return self._replace(
+            sso=self.sso.__class__(**{**self.sso.__dict__, **kwargs}),
+        )
+
+    def with_simple_gwd(self, **kwargs) -> 'Parameters':
+        """Create new Parameters with updated simple-GWD parameters."""
+        return self._replace(
+            simple_gwd=self.simple_gwd.__class__(**{**self.simple_gwd.__dict__, **kwargs}),
         )
 
     def with_radiation(self, **kwargs) -> 'Parameters':
