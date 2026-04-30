@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
@@ -70,7 +69,7 @@ class SolarGeometry:
 
     @classmethod
     def zero(cls):
-        """A null SolarGeometry for placeholder/static `ForcingData` objects."""
+        """Build a null SolarGeometry for placeholder / static `ForcingData` objects."""
         zero = jnp.zeros((), dtype=jnp.float32)
         return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero)
 
@@ -175,7 +174,6 @@ class ForcingData:
 
         """
         import xarray as xr
-        import pandas as pd
 
         ds = xr.open_dataset(filename)
 
@@ -211,7 +209,8 @@ class ForcingData:
         def _ts(values):
             """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
             time as the leading axis (matching `_select_time_series`'s
-            convention)."""
+            convention).
+            """
             arr = jnp.asarray(values)
             arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
             return make_time_series(arr, time_seconds, align_mode=resolved_align_mode)

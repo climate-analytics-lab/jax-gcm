@@ -24,13 +24,14 @@ LEGACY_REF_YEAR = 1950   # ForcingParameters.co2_year_ref default
 
 
 def _legacy_ablco2(year: float) -> float:
-    """The pre-#285 absorptivity formula, evaluated at a given calendar year."""
+    """Evaluate the pre-#285 absorptivity formula at a given calendar year."""
     return float(ablco2_ref * jnp.exp(DEL_CO2_LEGACY * (year - LEGACY_REF_YEAR)))
 
 
 def _co2_legacy_equivalent(year: float) -> float:
-    """The CO2 trajectory that, under the new linear mapping, reproduces
-    SPEEDY's legacy `ablco2_ref * exp(0.005 * (year - 1950))` exactly.
+    """Return the CO2 ppmv that, under the new linear mapping, reproduces
+    SPEEDY's legacy ``ablco2_ref * exp(0.005 * (year - 1950))`` exactly.
+
     This is the trajectory a user upgrading from `increase_co2=True` should
     feed into `forcing.co2_vmr` to match their previous runs bit-for-bit.
     """

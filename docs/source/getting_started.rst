@@ -107,11 +107,17 @@ For a more realistic simulation with orography and time-varying boundary conditi
    terrain_file = data_dir / "terrain.nc"
    terrain = TerrainData.from_file(terrain_file, coords=coords)
 
-   # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid
+   # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid.
+   # Time-varying variables are wrapped as `TimeSeries` leaves; the Model
+   # picks the right slice each step via `forcing.select(date)`. By default
+   # `from_file` auto-detects climatology vs date-aligned mode from the
+   # netCDF time axis (one-year files wrap, multi-year files align by date).
    forcing_file = data_dir / "forcing.nc"
    forcing = ForcingData.from_file(forcing_file, coords=coords)
 
-   # Create model with realistic configuration
+   # Create model with realistic configuration. SPEEDY assumes a 365-day
+   # no-leap calendar by construction; pass `calendar='gregorian'` if you
+   # want the model clock to advance against real Gregorian timestamps.
    model = Model(
       coords,
       time_step=30.0,
@@ -185,6 +191,36 @@ You can customize various aspects of the model:
        save_interval=1.0,
        total_time=10.0
    )
+
+
+Calendar-aware durations and resampling
+---------------------------------------
+
+``Model.run`` and ``Model.resume`` accept either a numeric day count or a
+calendar-string for ``save_interval`` and ``total_time``. Strings like
+``'1 month'`` and ``'1 year'`` are resolved against the model's calendar
+(``'365_day'`` by default; pass ``Model(calendar='gregorian')`` for the
+365.2425-day approximation). The integrator itself stays fixed-cadence —
+each "month" is a fixed 365/12-day chunk, not aligned to calendar month
+boundaries — so this is mostly an ergonomic shortcut.
+
+For *calendar-aligned* monthly / annual statistics, run the model at a
+daily ``save_interval`` and post-resample the trajectory:
+
+.. code-block:: python
+
+   predictions = model.run(save_interval='1 day', total_time='1 year')
+
+   # Calendar-aligned monthly means against the trajectory's real
+   # `datetime64` time coord. Returns an xarray.Dataset.
+   monthly = predictions.resample('1MS').mean()
+
+   # Daily total precipitation summed into calendar months, etc.
+   monthly_precip = predictions.resample('1MS')['precipitation'].sum()
+
+This works because the trajectory carries actual ``datetime64`` timestamps,
+so xarray's resampler does the calendar bookkeeping. The cost is keeping
+daily output in memory for the duration of the run.
 
 
 Multi-Device Parallelization

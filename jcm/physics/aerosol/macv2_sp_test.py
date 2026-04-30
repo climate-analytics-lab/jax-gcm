@@ -262,7 +262,8 @@ class TestAODCalculations:
         same result the legacy 1-D placeholder produced when both features
         carry equal weight (i.e. an all-ones placeholder under any feature
         weighting). This pins the backward-compat collapse path of the
-        feature-axis fix (#437)."""
+        feature-axis fix (#437).
+        """
         params = AerosolParameters.default()
         plume_lats = params.plume_lat[:3]
         plume_lons = params.plume_lon[:3]
@@ -280,7 +281,8 @@ class TestAODCalculations:
     def test_anthropogenic_aod_responds_to_per_feature_ann_cycle(self):
         """A 2-D `ann_cycle` with one feature zeroed should produce a
         smaller AOD than the all-ones case, demonstrating that the new
-        feature-axis path actually reads the feature dimension."""
+        feature-axis path actually reads the feature dimension.
+        """
         params = AerosolParameters.default()
         plume_lats = params.plume_lat[:3]
         plume_lons = params.plume_lon[:3]

@@ -424,24 +424,25 @@ Forcing and Boundary Conditions
 - Soil moisture
 - Surface albedo
 - Orographic parameters
+- CO₂ mixing ratio
 
-**CO₂ Forcing**: Optional increasing CO₂ concentration over time.
+All time-varying boundary conditions live on :py:class:`jcm.forcing.ForcingData`.
+The :py:class:`jcm.model.Model` collapses each :py:class:`jcm.forcing.TimeSeries`
+leaf to its current-step slice via ``ForcingData.select(date, calendar)``
+before handing the forcing to physics, so individual SPEEDY terms always see
+a 2-D current-step view (no leading time axis). Solar geometry is published
+on ``forcing.solar`` rather than read from a date object — see
+:py:class:`jcm.forcing.SolarGeometry`.
 
-**Configurable Parameters** (:py:class:`ForcingParameters`):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 60 20
-
-   * - Parameter
-     - Description
-     - Default
-   * - ``increase_co2``
-     - Enable time-varying CO₂
-     - True
-   * - ``co2_year_ref``
-     - Reference year for CO₂
-     - 1950
+**CO₂ Forcing**: ``ForcingData.co2_vmr`` carries the CO₂ mixing ratio
+(ppmv). It can be a scalar (constant CO₂) or a
+:py:class:`jcm.forcing.TimeSeries` for historical / scenario forcing.
+``ablco2`` is now derived from ``co2_vmr`` linearly relative to the SPEEDY
+1990s baseline of 360 ppmv (see ``jcm.physics.forcing.speedy_forcing``); the
+old ``ForcingParameters.increase_co2 / co2_year_ref`` ramp has been removed.
+Users upgrading from ``increase_co2=True`` should feed in
+``co2_vmr = 360 * exp(0.005 * (year - 1950))`` to reproduce the legacy
+trajectory bit-for-bit.
 
 Using Custom Parameters
 -----------------------
@@ -585,9 +586,16 @@ Assumptions and Limitations
 
 **Forcing Data**:
 
-- Requires either daily climatological or constant boundary conditions
-- Assumes 365-day year for climatological forcing
-- SST and other boundary conditions are prescribed (not predicted)
+- Climatology files (a single year of e.g. monthly or daily entries) are
+  indexed by fraction-of-year — see ``ForcingData.from_file(..., align_mode="wrap_year")``.
+- Multi-year files are aligned against the model's calendar — see
+  ``align_mode="by_date"`` (default ``"auto"`` picks `wrap_year` for spans
+  ≤1 year, `by_date` otherwise).
+- The model defaults to ``Model(calendar='365_day')`` for SPEEDY, since
+  SPEEDY's climatologies and solar tables assume a no-leap year by
+  construction; ``calendar='gregorian'`` is available for runs that need
+  to align against real Gregorian timestamps.
+- SST and other boundary conditions are prescribed (not predicted).
 
 **Domain**:
 

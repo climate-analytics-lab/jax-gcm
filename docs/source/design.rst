@@ -53,8 +53,13 @@ The :py:class:`jcm.physics_interface.Physics` abstract base class defines a clea
            Args:
                state: Current atmospheric state (temperature, winds, etc.)
                physics_data: Diagnostic data from previous timesteps
-               forcing: Boundary conditions (SST, orography, etc.)
-               terrain: Orography/terrain information
+               forcing: Boundary conditions for the *current step*. The
+                   Model collapses every `TimeSeries` leaf and populates
+                   `forcing.solar` via ``forcing.select(date, calendar)``
+                   before this call, so physics terms see only flat 2-D
+                   spatial fields and a precomputed `SolarGeometry` —
+                   no time axis, no `DateData`.
+               terrain: Orography / land-sea mask information
 
            Returns:
                tendencies: Changes to apply to the state

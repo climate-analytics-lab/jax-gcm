@@ -362,7 +362,8 @@ class TestCalendarDurationsAndResample(unittest.TestCase):
     def test_resample_to_monthly(self):
         """Daily save_interval + `.resample('1MS').mean()` should produce a
         calendar-aligned monthly trajectory whose length matches the number
-        of distinct calendar months in the run."""
+        of distinct calendar months in the run.
+        """
         model = self._build_held_suarez_model()
         # 90 days starting 2000-01-01 (the model default) reaches the end
         # of March, so the trajectory spans 3 calendar months.

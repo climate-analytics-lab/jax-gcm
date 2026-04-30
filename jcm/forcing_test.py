@@ -557,7 +557,8 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
 
     def test_static_forcing_select_is_noop_on_arrays(self):
         """For a forcing with no TimeSeries leaves, select returns arrays
-        unchanged (only `solar` should differ)."""
+        unchanged (only `solar` should differ).
+        """
         from jcm.forcing import ForcingData
         nodal_shape = (32, 16)
         forcing = ForcingData.zeros(nodal_shape)
@@ -582,7 +583,8 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
 
     def test_time_series_wrap_year_indexing(self):
         """A 12-entry monthly TimeSeries indexed via WRAP_YEAR should pick
-        the slice corresponding to floor(tyear * 12)."""
+        the slice corresponding to floor(tyear * 12).
+        """
         from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
         nodal_shape = (4, 4)
         # 12 months of synthetic SST: month i = 280 + i*0.5 K
@@ -603,9 +605,10 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
 
     def test_time_series_by_date_indexing(self):
         """A TimeSeries with absolute timestamps indexed via BY_DATE should
-        pick the entry closest to (and at-or-before) the model date."""
+        pick the entry closest to (and at-or-before) the model date.
+        """
         from jcm.forcing import ForcingData, make_time_series, BY_DATE
-        from jcm.date import DateData, MODEL_EPOCH, absolute_seconds_since_epoch
+        from jcm.date import DateData, absolute_seconds_since_epoch
         import jax_datetime as jdt
 
         # Three entries: 2000-01-01, 2001-01-01, 2002-01-01.
@@ -656,7 +659,7 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         )
 
     def test_select_under_jit(self):
-        """select must be JIT-compatible."""
+        """Select must be JIT-compatible."""
         import jax
         from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
 

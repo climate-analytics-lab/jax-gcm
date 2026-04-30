@@ -152,11 +152,21 @@ class TestGreyVsRRTMGP:
     )
     def test_multiple_conditions(self, lat, lon, month):
         """Both schemes should produce finite results across conditions."""
+        from jcm.forcing import SolarGeometry
+        from jax_solar import OrbitalTime
         inputs = _make_inputs(nlev=10)
         inputs["latitude"] = lat
         inputs["longitude"] = lon
-        inputs["date"] = jdt.Datetime.from_pydatetime(
-            datetime(2024, month, 15, 12, 0)
+        # Build a SolarGeometry from the parameterized date — radiation
+        # schemes consume `solar` instead of `date` since the date-aware
+        # forcing refactor (#285 follow-up).
+        ot = OrbitalTime.from_datetime(
+            jdt.Datetime.from_pydatetime(datetime(2024, month, 15, 12, 0))
+        )
+        inputs["solar"] = SolarGeometry(
+            tyear=jnp.asarray(ot.orbital_phase / (2.0 * jnp.pi), dtype=jnp.float32),
+            orbital_phase=jnp.asarray(ot.orbital_phase, dtype=jnp.float32),
+            synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
         )
 
         tend_grey, _ = radiation_scheme(**inputs)
