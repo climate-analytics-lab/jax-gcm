@@ -43,7 +43,14 @@ class TestDateUnit(unittest.TestCase):
         self.assertAlmostEqual(d3.tyear, 0.25, places=2)
 
     def test_overflow(self):
-        model = Model(coords=get_speedy_coords(), start_date=jdt.to_datetime('1970-01-01'))
+        # Use gregorian calendar so the 365.2425-day-per-year arithmetic in
+        # this test matches the model's internal accounting; SPEEDY's 365-day
+        # default would accumulate the 0.2425-day mismatch across decades.
+        model = Model(
+            coords=get_speedy_coords(),
+            start_date=jdt.to_datetime('1970-01-01'),
+            calendar='gregorian',
+        )
         for i in range(6):
             year = 10**i
             date = model._date_from_sim_time((year+.5) * 365.2425 * 86400)

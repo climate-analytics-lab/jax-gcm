@@ -525,5 +525,140 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             os.remove(temp_file)
 
 
+class TestTimeSeriesAndSelect(unittest.TestCase):
+    """Tests for the new TimeSeries leaf wrapper and ForcingData.select method."""
+
+    def _build_date(self, tyear=0.5, calendar='gregorian'):
+        from jcm.date import DateData
+        import jax_datetime as jdt
+        # Constructed via set_date so tyear/dt agree under the calendar.
+        return DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')),
+            calendar=calendar,
+        )
+
+    def test_static_forcing_select_is_noop_on_arrays(self):
+        """For a forcing with no TimeSeries leaves, select returns arrays
+        unchanged (only `solar` should differ)."""
+        from jcm.forcing import ForcingData
+        nodal_shape = (32, 16)
+        forcing = ForcingData.zeros(nodal_shape)
+        date = self._build_date()
+        sliced = forcing.select(date, calendar='gregorian')
+
+        self.assertTrue(jnp.array_equal(sliced.alb0, forcing.alb0))
+        self.assertTrue(jnp.array_equal(sliced.sea_surface_temperature, forcing.sea_surface_temperature))
+        self.assertTrue(jnp.array_equal(sliced.co2_vmr, forcing.co2_vmr))
+
+    def test_select_populates_solar_geometry(self):
+        """select(date) should populate `solar` with non-zero phases."""
+        from jcm.forcing import ForcingData
+        forcing = ForcingData.zeros((4, 4))
+        date = self._build_date()
+        sliced = forcing.select(date, calendar='gregorian')
+
+        # tyear should match date.tyear (~0.5 for July 2)
+        self.assertAlmostEqual(float(sliced.solar.tyear), float(date.tyear), places=4)
+        # orbital_phase should be ~ 2π * 0.5 = π
+        self.assertAlmostEqual(float(sliced.solar.orbital_phase), float(jnp.pi), places=2)
+
+    def test_time_series_wrap_year_indexing(self):
+        """A 12-entry monthly TimeSeries indexed via WRAP_YEAR should pick
+        the slice corresponding to floor(tyear * 12)."""
+        from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
+        nodal_shape = (4, 4)
+        # 12 months of synthetic SST: month i = 280 + i*0.5 K
+        sst_axis = jnp.arange(12, dtype=jnp.float32)[:, None, None] * 0.5 + 280.0
+        sst_ts = make_time_series(
+            values=jnp.broadcast_to(sst_axis, (12, *nodal_shape)),
+            time_seconds=jnp.arange(12, dtype=jnp.float32),  # ignored for WRAP_YEAR
+            align_mode=WRAP_YEAR,
+        )
+        forcing = ForcingData.zeros(nodal_shape, sea_surface_temperature=sst_ts)
+
+        # 2001-07-02 → tyear ~0.498 under gregorian → month index 5 → SST = 282.5
+        date = self._build_date()
+        sliced = forcing.select(date, calendar='gregorian')
+        self.assertEqual(sliced.sea_surface_temperature.shape, nodal_shape)
+        expected = 280.0 + int(date.tyear * 12) * 0.5
+        self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, expected))
+
+    def test_time_series_by_date_indexing(self):
+        """A TimeSeries with absolute timestamps indexed via BY_DATE should
+        pick the entry closest to (and at-or-before) the model date."""
+        from jcm.forcing import ForcingData, make_time_series, BY_DATE
+        from jcm.date import DateData, MODEL_EPOCH, absolute_seconds_since_epoch
+        import jax_datetime as jdt
+
+        # Three entries: 2000-01-01, 2001-01-01, 2002-01-01.
+        timestamps = [
+            jdt.Datetime.from_pydatetime(jdt.to_datetime(s))
+            for s in ['2000-01-01', '2001-01-01', '2002-01-01']
+        ]
+        time_seconds = jnp.asarray(
+            [float(absolute_seconds_since_epoch(t)) for t in timestamps]
+        )
+        # CO2 = 370, 380, 390 ppmv at those years.
+        co2_ts = make_time_series(
+            values=jnp.array([370.0, 380.0, 390.0]),
+            time_seconds=time_seconds,
+            align_mode=BY_DATE,
+        )
+        nodal_shape = (4, 4)
+        forcing = ForcingData.zeros(nodal_shape, co2_vmr=co2_ts)
+
+        # Mid-2001 → second entry (2001-01-01) → 380 ppmv
+        date_2001 = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')),
+            calendar='gregorian',
+        )
+        self.assertAlmostEqual(
+            float(forcing.select(date_2001, calendar='gregorian').co2_vmr),
+            380.0,
+        )
+
+        # Mid-2000 → first entry → 370 ppmv
+        date_2000 = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2000-07-02')),
+            calendar='gregorian',
+        )
+        self.assertAlmostEqual(
+            float(forcing.select(date_2000, calendar='gregorian').co2_vmr),
+            370.0,
+        )
+
+        # Way before the first entry → still picks first entry (clamp).
+        date_1995 = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('1995-01-01')),
+            calendar='gregorian',
+        )
+        self.assertAlmostEqual(
+            float(forcing.select(date_1995, calendar='gregorian').co2_vmr),
+            370.0,
+        )
+
+    def test_select_under_jit(self):
+        """select must be JIT-compatible."""
+        import jax
+        from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
+
+        nodal_shape = (4, 4)
+        ts = make_time_series(
+            values=jnp.arange(12, dtype=jnp.float32)[:, None, None] *
+                   jnp.ones((12, *nodal_shape), dtype=jnp.float32),
+            time_seconds=jnp.arange(12, dtype=jnp.float32),
+            align_mode=WRAP_YEAR,
+        )
+        forcing = ForcingData.zeros(nodal_shape, sea_surface_temperature=ts)
+
+        @jax.jit
+        def get_sst(forcing, date):
+            return forcing.select(date, calendar='gregorian').sea_surface_temperature
+
+        date = self._build_date()
+        sst_now = get_sst(forcing, date)
+        self.assertEqual(sst_now.shape, nodal_shape)
+
+
 if __name__ == '__main__':
     unittest.main()

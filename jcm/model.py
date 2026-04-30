@@ -259,7 +259,9 @@ class Model:
 
     def __init__(self, coords: CoordinateSystem, time_step=30.0, terrain: TerrainData=None,
                  physics: Physics=None, diffusion: DiffusionFilter=None,
-                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'), log_level=logging.CRITICAL) -> None:
+                 start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'),
+                 calendar: str = "365_day",
+                 log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
 
         Args:
@@ -276,12 +278,27 @@ class Model:
                 DiffusionFilter object describing horizontal diffusion filter params
             start_date:
                 jax_datetime.Datetime object containing start date of the simulation (default January 1, 2000)
+            calendar:
+                Calendar used for `tyear` / `model_year` / forcing-axis alignment.
+                ``"365_day"`` (no leap years) matches SPEEDY's climatology
+                tables and solar lookup; ``"gregorian"`` (365.2425 days/year)
+                is available for ICON-style runs that align against real
+                Gregorian timestamps in their forcing files.
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
+
+        Notes:
+            Time-varying forcing is captured at JIT compile time as a closure
+            constant (see `_get_step_fn_factory`). Multi-year hourly forcing
+            is therefore tractable for runs of a few simulated years; longer
+            or finer-cadence forcing should be resampled before loading, or
+            we'll need to thread `forcing` through as a runtime argument
+            (a deliberate non-goal of the present refactor).
 
         """
         # Set root logging level to be log_level so it propagates to other modules
         logging.getLogger().setLevel(log_level)
+        self.calendar = calendar
 
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)
@@ -504,7 +521,8 @@ class Model:
                 seconds=jnp.round(sim_time % 86400).astype(jnp.int32)
             ),
             model_step=jnp.int32(sim_time / self.dt_si.m),
-            dt_seconds=float(self.dt_si.m)
+            dt_seconds=float(self.dt_si.m),
+            calendar=self.calendar,
         )
 
     def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
@@ -517,18 +535,27 @@ class Model:
             A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
 
         """
-        physics_forcing_eqn = lambda d: ExplicitODE.from_functions(lambda state:
-            get_physical_tendencies(
+        def _step_tendencies(state, diagnostics_collector):
+            date = self._date_from_sim_time(state.sim_time)
+            # Pre-slice the forcing for the current step so physics terms
+            # never see a leading time axis or have to know what date it is.
+            # `select` is a no-op for static fields (the common case for
+            # backward-compatible aquaplanet / climatology runs).
+            forcing_now = forcing.select(date, calendar=self.calendar)
+            return get_physical_tendencies(
                 state=state,
                 dynamics=self.primitive,
                 time_step=self.dt_si.m,
                 physics=self.physics,
-                forcing=forcing,
+                forcing=forcing_now,
                 terrain=self.terrain,
                 diffusion=self.diffusion,
-                date=self._date_from_sim_time(state.sim_time),
-                diagnostics_collector=d
+                date=date,
+                diagnostics_collector=diagnostics_collector,
             )
+
+        physics_forcing_eqn = lambda d: ExplicitODE.from_functions(
+            lambda state: _step_tendencies(state, d)
         )
         primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
@@ -559,7 +586,11 @@ class Model:
         if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
             clamped_physics_state = verify_state(predictions.dynamics)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.terrain, date)
+            # Match the per-step path: hand physics a pre-sliced forcing so
+            # diagnostic recomputation here doesn't accidentally miss the
+            # time axis.
+            forcing_now = forcing.select(date, calendar=self.calendar)
+            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing_now, self.terrain, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
