@@ -33,19 +33,18 @@ def apply_forcing_data(
     # Get expected output shape from physics_data (column format)
     ncols = physics_data.surface.surface_temperature.shape[0]
 
-    # Compute surface properties based on existing masks
+    # Forcing arrives pre-sliced to the current step (`Model.select`), so
+    # spatial fields are 2-D. Sea ice / land temp / SST shape branches that
+    # used to handle a trailing time axis are gone.
     surface_albedo_vis, surface_albedo_nir, surface_emissivity = _compute_surface_properties(
-        terrain.fmask,  # Land fraction
-        forcing.sice_am[..., 0] if forcing.sice_am.ndim == 3 else forcing.sice_am,  # Sea ice
+        terrain.fmask,
+        forcing.sice_am,
     )
 
-    # Surface temperature (use existing SST for ocean, land temperature for land)
-    land_temp = forcing.stl_am[..., 0] if forcing.stl_am.ndim == 3 else forcing.stl_am
-    sst = forcing.sea_surface_temperature[..., 0] if forcing.sea_surface_temperature.ndim == 3 else forcing.sea_surface_temperature
     surface_temperature = jnp.where(
-        terrain.fmask > 0.5,  # Land
-        land_temp,  # Land temp
-        sst  # SST
+        terrain.fmask > 0.5,
+        forcing.stl_am,
+        forcing.sea_surface_temperature,
     )
 
     # Roughness length (higher over land)

@@ -102,15 +102,22 @@ def test_physics_terms_use_parameters():
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
     terrain = TerrainData.aquaplanet(coords)
     physics.cache_coords(coords)
+    # Physics terms now consume forcing that has already been time-sliced by
+    # `Model._get_step_fn_factory` → `ForcingData.select(date)`. Build a
+    # 2-D forcing here (no time axis) so the smoke test mirrors the per-step
+    # contract; for time-varying boundary conditions the Model handles the
+    # slicing.
     forcing = ForcingData.zeros((nlat, nlon),
                                     sea_surface_temperature=jnp.ones((nlat, nlon)) * 288.0,
-                                    sice_am=jnp.zeros((nlat, nlon, 365)))
+                                    sice_am=jnp.zeros((nlat, nlon)))
+    date = DateData.set_date(jdt.Datetime.from_pydatetime(datetime(2020, 6, 21)))
+    forcing = forcing.select(date)
 
     tendencies, physics_data = physics.compute_tendencies(
         state,
         forcing=forcing,
         terrain=terrain,
-        date=DateData.set_date(jdt.Datetime.from_pydatetime(datetime(2020, 6, 21)))
+        date=date,
     )
     
     # Check that tendencies have the right shape

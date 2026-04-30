@@ -347,7 +347,11 @@ class TestForcingDataFromFile(unittest.TestCase):
     """Tests for ForcingData.from_file using actual data files."""
 
     def test_from_file_loads_forcing(self):
-        """from_file should load forcing data from actual NetCDF file."""
+        """from_file should load forcing data from actual NetCDF file.
+
+        Time-varying fields are now wrapped as `TimeSeries` leaves with the
+        time axis at index 0; static `alb0` stays a bare 2-D array.
+        """
         from importlib import resources
         data_dir = resources.files('jcm.data.bc.t30.clim')
 
@@ -355,16 +359,16 @@ class TestForcingDataFromFile(unittest.TestCase):
         forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
         expected_2d_shape = coords.horizontal.nodal_shape
-        expected_3d_shape = (*expected_2d_shape, 365)
+        expected_ts_shape = (365, *expected_2d_shape)
 
-        # 2D field
+        # 2D field (no time dimension)
         self.assertEqual(forcing.alb0.shape, expected_2d_shape)
-        # 3D fields (with time dimension)
-        self.assertEqual(forcing.sice_am.shape, expected_3d_shape)
-        self.assertEqual(forcing.snowc_am.shape, expected_3d_shape)
-        self.assertEqual(forcing.soilw_am.shape, expected_3d_shape)
-        self.assertEqual(forcing.stl_am.shape, expected_3d_shape)
-        self.assertEqual(forcing.sea_surface_temperature.shape, expected_3d_shape)
+        # Time-varying fields: leading time axis
+        self.assertEqual(forcing.sice_am.values.shape, expected_ts_shape)
+        self.assertEqual(forcing.snowc_am.values.shape, expected_ts_shape)
+        self.assertEqual(forcing.soilw_am.values.shape, expected_ts_shape)
+        self.assertEqual(forcing.stl_am.values.shape, expected_ts_shape)
+        self.assertEqual(forcing.sea_surface_temperature.values.shape, expected_ts_shape)
 
     def test_from_file_has_valid_albedo(self):
         """Loaded forcing should have albedo values in valid range [0, 1]."""
@@ -385,8 +389,8 @@ class TestForcingDataFromFile(unittest.TestCase):
         coords = get_speedy_coords(layers=8, spectral_truncation=31)
         forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
-        self.assertTrue(jnp.all(forcing.sice_am >= 0.0))
-        self.assertTrue(jnp.all(forcing.sice_am <= 1.0))
+        self.assertTrue(jnp.all(forcing.sice_am.values >= 0.0))
+        self.assertTrue(jnp.all(forcing.sice_am.values <= 1.0))
 
     def test_from_file_has_valid_sst(self):
         """Loaded forcing should have physically realistic SST values."""
@@ -398,8 +402,8 @@ class TestForcingDataFromFile(unittest.TestCase):
 
         # SST values can be low over sea ice areas (down to ~236 K in this dataset)
         # but should not exceed tropical maximum (~35C = 308K)
-        self.assertTrue(jnp.all(forcing.sea_surface_temperature >= 230.))
-        self.assertTrue(jnp.all(forcing.sea_surface_temperature <= 320.))
+        self.assertTrue(jnp.all(forcing.sea_surface_temperature.values >= 230.))
+        self.assertTrue(jnp.all(forcing.sea_surface_temperature.values <= 320.))
 
     def test_from_file_has_valid_soil_moisture(self):
         """Loaded forcing should have soil moisture in valid range."""
@@ -410,7 +414,7 @@ class TestForcingDataFromFile(unittest.TestCase):
         forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
         # Soil moisture should be non-negative
-        self.assertTrue(jnp.all(forcing.soilw_am >= 0.0))
+        self.assertTrue(jnp.all(forcing.soilw_am.values >= 0.0))
 
     def test_from_file_has_valid_snow_cover(self):
         """Loaded forcing should have snow cover in valid range."""
@@ -421,7 +425,7 @@ class TestForcingDataFromFile(unittest.TestCase):
         forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
 
         # Snow cover should be non-negative
-        self.assertTrue(jnp.all(forcing.snowc_am >= 0.0))
+        self.assertTrue(jnp.all(forcing.snowc_am.values >= 0.0))
 
     def test_from_file_no_nans(self):
         """Loaded forcing should not contain NaN values."""
@@ -466,32 +470,46 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
         finally:
             os.remove(temp_file)
 
-    def test_from_file_validates_time_dimension(self):
-        """from_file should reject datasets with wrong number of time steps."""
+    def test_from_file_accepts_arbitrary_time_length(self):
+        """from_file should accept any time-dimension length (#308). Older
+        versions hard-rejected anything but exactly 365 days; we now wrap
+        the time axis as a `TimeSeries` and let the Model align via
+        `select(date)`.
+        """
+        import pandas as pd
         import xarray as xr
         import tempfile
         import os
 
         valid_shape = (96, 48)  # T31 resolution
-        wrong_time = 360  # Should be 365
+        # Two-year file with 360-day calendar -> 720 daily entries
+        n_times = 720
+        times = pd.date_range("1980-01-01", periods=n_times, freq="D")
 
-        ds = xr.Dataset({
-            'stl': (['lon', 'lat', 'time'], np.zeros((*valid_shape, wrong_time))),
-            'icec': (['lon', 'lat', 'time'], np.zeros((*valid_shape, wrong_time))),
-            'sst': (['lon', 'lat', 'time'], np.zeros((*valid_shape, wrong_time))),
-            'alb': (['lon', 'lat'], np.zeros(valid_shape)),
-            'soilw_am': (['lon', 'lat', 'time'], np.zeros((*valid_shape, wrong_time))),
-            'snowc': (['lon', 'lat', 'time'], np.zeros((*valid_shape, wrong_time))),
-        })
+        ds = xr.Dataset(
+            data_vars={
+                'stl': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'icec': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'sst': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'alb': (['lon', 'lat'], np.zeros(valid_shape)),
+                'soilw_am': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'snowc': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+            },
+            coords={'time': times},
+        )
 
         with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as f:
             ds.to_netcdf(f.name)
             temp_file = f.name
 
         try:
-            with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file)
-            self.assertIn("Expected 365 time steps", str(context.exception))
+            forcing = ForcingData.from_file(temp_file)
+            # Time axis preserved at full length, leading dimension.
+            self.assertEqual(forcing.sst if False else forcing.sea_surface_temperature.values.shape,
+                             (n_times, *valid_shape))
+            # Span > 1 year -> should auto-select BY_DATE alignment.
+            from jcm.forcing import BY_DATE
+            self.assertEqual(int(forcing.sea_surface_temperature.align_mode), BY_DATE)
         finally:
             os.remove(temp_file)
 

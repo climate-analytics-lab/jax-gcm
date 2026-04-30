@@ -154,19 +154,29 @@ class ForcingData:
         )
 
     @classmethod
-    def from_file(cls, filename: str, coords: CoordinateSystem = None):
-        """Initialize forcing data from a file.
+    def from_file(cls, filename: str, coords: CoordinateSystem = None,
+                  align_mode: str = "auto"):
+        """Initialize forcing data from a netCDF file.
+
+        Time-varying variables are wrapped as `TimeSeries` leaves so the
+        Model can pre-slice them per step via `select(date)`. Static
+        variables (`alb`) stay as bare 2-D arrays.
 
         Args:
-            filename: Path to the forcing data file
-
-        Returns:
-            ForcingData: Time-varying forcing data
+            filename: Path to the forcing data file.
+            coords: CoordinateSystem to upscale to. If None, the file's
+                native nodal shape is used.
+            align_mode: "auto" (default) chooses `wrap_year` for files that
+                cover at most one calendar year and `by_date` for longer
+                spans; pass `"wrap_year"` or `"by_date"` to force the
+                choice. `wrap_year` indexes the time axis by fraction of
+                year (climatology mode); `by_date` aligns by absolute
+                model date.
 
         """
         import xarray as xr
+        import pandas as pd
 
-        # Read forcing data from file
         ds = xr.open_dataset(filename)
 
         expected_structure = {
@@ -186,38 +196,61 @@ class ForcingData:
             ix, il, n_times = ds['stl'].shape
             if (ix, il) not in VALID_NODAL_SHAPES:
                 raise ValueError(f"Invalid nodal shape: {(ix, il)}. Must be one of: {VALID_NODAL_SHAPES}.")
-            if n_times != 365:
-                raise ValueError(f"Expected 365 time steps, got {n_times}.")
+            # No assumption that n_times == 365 — multi-year files welcome.
             # FIXME: Consider validating lat/lon values here - would have to construct a coords object to get expected values though
         elif target_resolution not in VALID_TRUNCATIONS:
             raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
         else:
             ds = upsample_forcings_ds(interpolate_to_daily(ds), grid=coords.horizontal)
 
-        # annual-mean surface albedo
+        # Build the shared time axis (seconds since MODEL_EPOCH) for every
+        # time-varying variable in this file, plus the alignment mode.
+        time_seconds = _time_axis_seconds_from_ds(ds)
+        resolved_align_mode = _resolve_align_mode(align_mode, ds)
+
+        def _ts(values):
+            """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
+            time as the leading axis (matching `_select_time_series`'s
+            convention)."""
+            arr = jnp.asarray(values)
+            arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
+            return make_time_series(arr, time_seconds, align_mode=resolved_align_mode)
+
+        # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
 
         # sea ice concentration
-        sice_am = jnp.asarray(ds["icec"])
+        sice_am = _ts(ds["icec"])
 
-        # snow depth
-        snowc_am = jnp.asarray(ds["snowc"])
-        snowc_valid = (0.0 <= snowc_am) & (snowc_am <= 20000.0)
-        # assert jnp.all(snowc_valid | (fmask[:,:,jnp.newaxis] == 0.0)) # FIXME: need to change the forcing.nc file so this passes
-        snowc_am = jnp.where(snowc_valid, snowc_am, 0.0)
+        # snow depth (clip implausible values, same as before)
+        snowc_raw = jnp.asarray(ds["snowc"])
+        snowc_valid = (0.0 <= snowc_raw) & (snowc_raw <= 20000.0)
+        snowc_clean = jnp.where(snowc_valid, snowc_raw, 0.0)
+        snowc_am = _ts(snowc_clean)
 
         # soil moisture
-        soilw_am = jnp.asarray(ds["soilw_am"])
+        soilw_am = _ts(ds["soilw_am"])
 
-        stl_am = jnp.asarray(ds["stl"])
+        stl_am = _ts(ds["stl"])
 
-        # Prescribe SSTs
-        sea_surface_temperature = jnp.asarray(ds["sst"])
+        # Prescribed SSTs
+        sea_surface_temperature = _ts(ds["sst"])
+
+        # Optional CO2: if the netCDF includes it, treat as a scalar (per-time)
+        # series; otherwise keep the default scalar from `ForcingData.zeros`.
+        co2_vmr = None
+        if "co2" in ds.data_vars:
+            co2_arr = jnp.asarray(ds["co2"])
+            if co2_arr.ndim == 0:
+                co2_vmr = co2_arr
+            else:
+                co2_vmr = make_time_series(co2_arr, time_seconds, align_mode=resolved_align_mode)
 
         return cls.zeros(
             nodal_shape=alb0.shape,
-            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am,stl_am=stl_am,
-            soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature
+            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
+            soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
+            co2_vmr=co2_vmr,
         )
 
     def copy(self,alb0=None,
@@ -259,6 +292,41 @@ class ForcingData:
 # ---------------------------------------------------------------------------
 # Time selection helpers
 # ---------------------------------------------------------------------------
+
+
+def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
+    """Convert a netCDF dataset's `time` coordinate to seconds since
+    `MODEL_EPOCH` (1970-01-01 UTC). Returned as a 1-D float array.
+    """
+    import pandas as pd
+    import numpy as np
+    times = pd.DatetimeIndex(ds["time"].values)
+    epoch = pd.Timestamp("1970-01-01")
+    delta = (times - epoch).total_seconds().to_numpy()
+    return jnp.asarray(np.asarray(delta, dtype=float))
+
+
+def _resolve_align_mode(align_mode: str, ds) -> int:
+    """Pick `WRAP_YEAR` vs `BY_DATE` from a string spec ("auto"/"wrap_year"/"by_date").
+
+    `auto` chooses `wrap_year` when the file's time span fits in a single
+    year (climatology) and `by_date` otherwise.
+    """
+    if align_mode == "wrap_year":
+        return WRAP_YEAR
+    if align_mode == "by_date":
+        return BY_DATE
+    if align_mode != "auto":
+        raise ValueError(
+            f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', or 'by_date'"
+        )
+    # Auto-detect: if the time axis spans <= ~1.05 years, treat as climatology.
+    import pandas as pd
+    times = pd.DatetimeIndex(ds["time"].values)
+    if len(times) <= 1:
+        return WRAP_YEAR
+    span_days = (times[-1] - times[0]).days
+    return WRAP_YEAR if span_days <= 380 else BY_DATE
 
 
 def _slice_time_series_leaves(forcing: ForcingData, date: DateData, calendar: str) -> ForcingData:

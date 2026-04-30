@@ -28,7 +28,6 @@ from jcm.physics.speedy.params import (
     SurfaceFluxParameters,
     VerticalDiffusionParameters,
 )
-from jcm.utils import tree_index_3d
 
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -202,17 +201,17 @@ class SpeedyForcing(SpeedyTermBase):
             mod_radcon=self.mod_radcon_params.get_value(),
         )
 
-        # Slice forcing to current day of year
-        date = diagnostics.get("_date", DateData.zeros())
-        model_day_of_year = date.model_day()
-        forcing_2d = tree_index_3d(forcing, model_day_of_year)
-
+        # Forcing arrives already sliced to the current step by
+        # `Model._get_step_fn_factory` → `ForcingData.select(date)`.
         from jcm.physics.forcing.speedy_forcing import set_forcing
-        tend, data = set_forcing(state, data, params, forcing_2d, terrain)
+        tend, data = set_forcing(state, data, params, forcing, terrain)
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
-        # Store the sliced forcing for downstream terms
-        diagnostics["_forcing_2d"] = forcing_2d
+        # Downstream terms historically read `_forcing_2d` to get the
+        # day-of-year slice. After the Model-side pre-slice, `forcing`
+        # itself is already that slice — keep the diagnostic key as an
+        # alias so existing consumers don't break.
+        diagnostics["_forcing_2d"] = forcing
         return tend, diagnostics
 
 
