@@ -5,9 +5,55 @@ Tests for TerrainData struct and get_terrain function.
 
 import unittest
 import jax.numpy as jnp
-from jcm.terrain import TerrainData, get_terrain
+from jcm.terrain import TerrainData, derive_sso_descriptors, get_terrain
 from jcm.constants import grav
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+
+class TestDeriveSSODescriptors(unittest.TestCase):
+    """Tests for the SSO-descriptor derivation heuristic."""
+
+    def test_zero_over_ocean(self):
+        """All six SSO fields should be zero where orog == 0."""
+        orog = jnp.zeros((4, 8))
+        sso = derive_sso_descriptors(orog)
+        for name in ("orostd", "orosig", "orogam",
+                     "orothe", "oropic", "oroval"):
+            self.assertTrue(jnp.allclose(sso[name], 0.0),
+                            msg=f"{name} not zero over ocean")
+
+    def test_nonzero_over_land(self):
+        """SSO fields should populate where orog > 0."""
+        orog = jnp.array([[1500.0]])
+        sso = derive_sso_descriptors(orog)
+        # Heuristic: orostd = 0.25 * orog
+        self.assertTrue(jnp.allclose(sso["orostd"], 375.0))
+        # oropic = orog + 2*orostd, oroval = orog - 2*orostd
+        self.assertTrue(jnp.allclose(sso["oropic"], 2250.0))
+        self.assertTrue(jnp.allclose(sso["oroval"], 750.0))
+        # Anisotropy/orientation/slope are constants over land.
+        self.assertTrue(jnp.allclose(sso["orogam"], 0.5))
+        self.assertTrue(jnp.allclose(sso["orothe"], 0.0))
+        self.assertTrue(jnp.allclose(sso["orosig"], 0.1))
+
+    def test_oroval_clamped_at_zero(self):
+        """Valley elevation should not go below sea level for low hills."""
+        orog = jnp.array([[10.0]])  # 10 m mean → orostd=2.5 → oroval=5
+        sso = derive_sso_descriptors(orog)
+        self.assertTrue(jnp.all(sso["oroval"] >= 0.0))
+        # For tiny hills, the heuristic gives positive valleys.
+        self.assertTrue(jnp.allclose(sso["oroval"], 5.0))
+
+    def test_activation_gate_inactive_over_ocean(self):
+        """The Lott-Miller activation gate (ppic-pmea > gpicmea AND
+        pstd > gstd, both 1m by default) must be inactive for ocean
+        columns derived by the heuristic — otherwise SSO would fire on
+        flat ocean."""
+        orog = jnp.zeros((10,))
+        sso = derive_sso_descriptors(orog)
+        ppic_minus_mea = sso["oropic"] - orog
+        self.assertTrue(jnp.all(ppic_minus_mea <= 1.0))
+        self.assertTrue(jnp.all(sso["orostd"] <= 1.0))
 
 
 class TestGetTerrain(unittest.TestCase):
@@ -102,11 +148,14 @@ class TestTerrainDataCopy(unittest.TestCase):
     def test_copy_no_changes(self):
         """Copy with no arguments should return identical data."""
         nodal_shape = (64, 32)
+        zero = jnp.zeros(nodal_shape)
         terrain = TerrainData(
             orog=jnp.ones(nodal_shape) * 100.,
             phis0=jnp.ones(nodal_shape) * grav * 100.,
             fmask=jnp.ones(nodal_shape) * 0.5,
-            lfluxland=jnp.bool_(True)
+            lfluxland=jnp.bool_(True),
+            orostd=zero, orosig=zero, orogam=zero,
+            orothe=zero, oropic=zero, oroval=zero,
         )
 
         copied = terrain.copy()
@@ -119,11 +168,14 @@ class TestTerrainDataCopy(unittest.TestCase):
     def test_copy_with_changes(self):
         """Copy with arguments should replace those fields."""
         nodal_shape = (64, 32)
+        zero = jnp.zeros(nodal_shape)
         terrain = TerrainData(
             orog=jnp.ones(nodal_shape) * 100.,
             phis0=jnp.ones(nodal_shape) * grav * 100.,
             fmask=jnp.ones(nodal_shape) * 0.5,
-            lfluxland=jnp.bool_(True)
+            lfluxland=jnp.bool_(True),
+            orostd=zero, orosig=zero, orogam=zero,
+            orothe=zero, oropic=zero, oroval=zero,
         )
 
         new_orog = jnp.ones(nodal_shape) * 200.

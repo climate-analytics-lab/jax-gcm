@@ -1336,20 +1336,18 @@ def apply_sso(
     pzf = physics_data.diagnostics.height_full
     pmair = (paphm1[1:, :] - paphm1[:-1, :]) / grav
 
-    # Surface height: terrain.orog (mean orography). Reshape to (ncols,).
+    # SSO descriptors come from the terrain boundary data. Real preprocessed
+    # values from a high-resolution topography product are preferred; when
+    # only mean orography is available, ``derive_sso_descriptors`` in
+    # ``terrain.py`` generates physically-sensible placeholders.
     pzs = terrain.orog.reshape(-1)
-    # SSO descriptors. Real boundary-data plumbing is a follow-up: for now
-    # use modest placeholder values that exercise the scheme without
-    # producing spurious drag in flat regions. Activation gate
-    # (ppic-pmea > gpicmea AND pstd > gstd) keeps drag to zero where the
-    # placeholders look like ocean.
-    pmea = pzs                                       # mean orography
-    pstd = jnp.where(pzs > 1.0, 200.0, 0.0)          # 200 m where land
-    psig = jnp.full((ncols,), 0.05)                  # mild slope
-    pgam = jnp.full((ncols,), 0.5)                   # mild anisotropy
-    pthe = jnp.zeros((ncols,))                       # zonal-aligned principal axis
-    ppic = pzs + jnp.where(pzs > 1.0, 1000.0, 0.0)
-    pval = pzs - jnp.where(pzs > 1.0, 500.0, 0.0)
+    pmea = pzs
+    pstd = terrain.orostd.reshape(-1)
+    psig = terrain.orosig.reshape(-1)
+    pgam = terrain.orogam.reshape(-1)
+    pthe = terrain.orothe.reshape(-1)
+    ppic = terrain.oropic.reshape(-1)
+    pval = terrain.oroval.reshape(-1)
     psftlf = terrain.fmask.reshape(-1)
     # Coriolis is only used by the (unported) mountain-lift branch.
     pcoriol = jnp.zeros((ncols,))

@@ -114,11 +114,11 @@ def _make_test_forcing(shape=(4, 8)):
 
 
 def _make_test_terrain(shape=(4, 8)):
+    zero = jnp.zeros(shape)
     return TerrainData(
-        orog=jnp.zeros(shape),
-        phis0=jnp.zeros(shape),
-        fmask=jnp.zeros(shape),
-        lfluxland=jnp.bool_(False),
+        orog=zero, phis0=zero, fmask=zero, lfluxland=jnp.bool_(False),
+        orostd=zero, orosig=zero, orogam=zero,
+        orothe=zero, oropic=zero, oroval=zero,
     )
 
 
