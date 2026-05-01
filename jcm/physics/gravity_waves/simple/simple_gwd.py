@@ -22,9 +22,7 @@ from typing import NamedTuple, Tuple, Optional
 # from functools import partial  # No longer needed
 import tree_math
 
-from jcm.constants import (
-    grav, rd, cp
-)
+from jcm.constants import grav, rd, cp, p0
 
 
 @tree_math.struct
@@ -114,8 +112,6 @@ def brunt_vaisala_frequency(
         N²: Brunt-Väisälä frequency squared (s⁻²) [nlev]
 
     """
-    # Calculate potential temperature
-    p0 = 100000.0  # Reference pressure
     theta = temperature * (p0 / pressure) ** (rd / cp)
     
     # Calculate vertical gradient of potential temperature
@@ -407,47 +403,3 @@ def simple_gwd(
     )
     
     return tendencies, state
-
-
-def test_simple_gwd():
-    """Simple test of gravity wave drag"""
-    # Create test profile
-    nlev = 30
-    height = jnp.linspace(0, 30000, nlev)[::-1]
-    pressure = 100000 * jnp.exp(-height / 8000)  # Exponential atmosphere
-    temperature = 288 - 0.0065 * height  # Standard lapse rate
-    air_density = pressure / (rd * temperature)  # Ideal gas law
-    
-    # Westerly jet with shear
-    u_wind = 20.0 * jnp.exp(-(height - 10000)**2 / 5000**2)
-    v_wind = jnp.zeros(nlev)
-    
-    # Orography
-    h_std = 500.0  # 500m standard deviation
-    
-    dt = 1800.0
-    
-    # Calculate GWD
-    tendencies, state = simple_gwd(
-        u_wind, v_wind, temperature, pressure, height, air_density, h_std, dt
-    )
-    
-    print(f"Max u-tendency: {jnp.abs(tendencies.dudt).max()*86400:.2f} m/s/day")
-    print(f"Max temperature tendency: {jnp.abs(tendencies.dtedt).max()*86400:.2f} K/day")
-    print(f"Surface wave stress: {state.wave_stress[-1]:.4f} N/m²")
-    
-    # Check that drag opposes flow
-    assert jnp.all(tendencies.dudt * u_wind <= 0)
-    print("✓ Drag opposes flow direction")
-    
-    # Check momentum conservation (approximately)
-    total_momentum_change = jnp.sum(tendencies.dudt * pressure / grav)
-    surface_stress = state.tau_x[-1]
-    print(f"Total momentum change: {total_momentum_change:.4f}")
-    print(f"Surface stress: {surface_stress:.4f}")
-    
-    print("\nGravity wave drag test passed!")
-
-
-if __name__ == "__main__":
-    test_simple_gwd()

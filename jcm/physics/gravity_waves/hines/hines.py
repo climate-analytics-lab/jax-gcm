@@ -1,40 +1,72 @@
 """Hines (1997) Doppler-spread spectral non-orographic gravity-wave drag.
 
-Faithful JAX port of ECHAM ``mo_gw_hines.f90`` (atm_phy_echam version,
-2326 lines). Reference: Hines (1997), J. Atmos. Solar-Terr. Phys.
+Algorithm (column-mode, executed at each grid column):
 
-The port targets the production-default control flow:
+1. **Brunt-Vaisala profile.** From temperature and full-level pressure,
+   compute :math:`N(z)` via a sigma-coordinate finite difference of
+   ``T / Pi^kappa``, then apply a single log-pressure smoother.
 
-- ``naz = 8``  azimuths
-- ``slope = 1``  spectral slope
-- ``lheatcal = .TRUE.``  compute heating + diffusion
-- ``icutoff = 0``  no exponential damping above ``alt_cutoff``
-- ``lfront = lozpr = lrmscon_lat = .FALSE.``  no frontal/precip/lat sources
-- ``sigsqmcw = 0``  orographic-wave coupling off (``sigmatm = sigalpmc = 0``
-  throughout the column, so the ``f2mfac`` correction vanishes and
-  ``n_over_m = f2 * sigma_t``)
+2. **Wave launch.** A spectrum of gravity waves is launched at a fixed
+   "launch level" (counted up from the surface; default 10 levels above
+   ground). The launch wind variance is split equally across 8 azimuths
+   (E, NE, N, NW, W, SW, S, SE) with total RMS wind ``rms_launch_wind``
+   (default 1 m/s).
 
-The four other-slope code paths in the Fortran (``slope=1.5``, ``slope=2``,
-and the orographic-coupling correction) are not implemented; passing
-``slope != 1.0`` to ``HinesParameters.default`` will trigger an assertion at
-trace time.
+3. **Doppler-spread wavenumber sweep.** Working from the launch level
+   upward, at each level we evaluate the cutoff vertical wavenumber
+   :math:`m_\\alpha` per azimuth. The Doppler-spread theory (Hines 1997)
+   sets :math:`m_\\alpha = N / (f_1 \\sigma_\\alpha + f_2 \\sigma_t +
+   v_\\alpha)`, where :math:`\\sigma_\\alpha` is the per-azimuth RMS wind
+   variance from the level below, :math:`\\sigma_t` is the total RMS
+   wind, and :math:`v_\\alpha` is the background wind projected onto the
+   azimuth (relative to the launch level). A floor at ``min_vertical_wavenumber``
+   prevents the cutoff from collapsing to zero. The variances at each
+   level are then recomputed from a closed-form integral of the
+   saturated spectrum.
 
-Subroutine map (Fortran → JAX helper):
+4. **Vertical smoothing.** ``m_alpha`` and ``sigma_t`` are smoothed
+   ``smoothing_passes`` times with a 1-2-1 stencil before the flux
+   calculation, suppressing grid-scale noise.
 
-- ``gw_hines``      → :func:`hines_gwd` (entry point)
-- ``hines_extro``   → ``_hines_extro`` (internal driver)
-- ``hines_wavnum``  → ``_hines_wavnum`` (level-by-level sweep, lax.scan)
-- ``hines_wind``    → ``_hines_wind`` (8-azimuth projection)
-- ``hines_flux``    → ``_hines_flux`` (momentum flux + drag)
-- ``hines_heat``    → ``_hines_heat`` (heating + diffusion)
-- ``hines_sigma``   → ``_hines_sigma`` (azimuthal/total RMS)
-- ``hines_intgrl``  → ``_hines_intgrl`` (i_alpha integral, slope=1)
-- ``vert_smooth``   → ``_vert_smooth`` (1-2-1 passes)
-- ``hines_exp``     → not ported (icutoff=0 in production)
+5. **Flux + drag.** Per-azimuth momentum flux is
+   :math:`F_\\alpha = a_\\alpha k_* (m_\\alpha - m_{\\min})`, weighted by
+   the launch-level density. Zonal and meridional fluxes follow from the
+   azimuth projection. Drag is the negative vertical divergence of flux,
+   normalised by layer mass.
 
-Brunt-Vaisala calculation in :func:`hines_gwd` mirrors lines 286-309 of
-``mo_gw_hines.f90``: pressure-coordinate finite difference of T/Pi^kappa
-plus a single-pass log-pressure smoothing.
+6. **Heating + diffusion** (when ``compute_heating=True``). The energy
+   dissipation rate per unit mass is :math:`-f_5 \\sum_\\alpha
+   d F_\\alpha / d z \\cdot (f_1 \\sigma_\\alpha + N / m_\\text{sub})`,
+   with :math:`m_\\text{sub}` set to the smaller of the turbulence-limited
+   and molecular-viscosity-limited cutoff wavenumbers.
+
+**Implementation choices and gaps:**
+
+- The four optional Hines branches in the ECHAM source are not
+  implemented and intentionally omitted: the latitude-dependent launch
+  variance (``lrmscon_lat``), the precipitation-modulated launch
+  variance (``lozpr``), the frontal source (``lfront``), and the
+  exponential damping above ``alt_cutoff`` (``icutoff``). All four are
+  disabled by default in ECHAM-A configurations.
+
+- The orographic-wave coupling (``sigsqmcw``) is hard-coded to zero —
+  this matches the production ECHAM control flow in which orographic
+  waves are handled by the separate Lott-Miller scheme rather than fed
+  back into the Hines spectrum.
+
+- Only ``slope = 1`` and ``naz = 8`` azimuths are supported. The other
+  permitted spectral slopes (1.5, 2) and 4-azimuth case are not ported.
+
+- ``launch_level``, ``num_azimuths``, and ``smoothing_passes`` are
+  passed as Python integer kwargs to :func:`hines_gwd` rather than
+  living on the parameters tree, because they control loop bounds that
+  must be static at JIT trace time.
+
+- A small handful of bug-for-bug Fortran quirks are preserved (and
+  flagged at the call sites with ``# Fortran-quirk`` comments) so the
+  port is bit-exact against the reference implementation:
+  the leftover-loop-variable in ``mair`` indexing at the top-level
+  heating term, and the 0-based shift of various 1-based loop bounds.
 """
 from typing import NamedTuple, Tuple
 
@@ -43,131 +75,177 @@ import jax.numpy as jnp
 from jax import lax
 import tree_math
 
-# ICON physical constants — match values in mo_physical_constants.f90.
-_GRAV = 9.80665      # m/s^2
-_RD = 287.04         # J/(kg K)
-_CPD = 1004.64       # J/(kg K)
-_COS45 = 0.7071067811865476
+from jcm.constants import grav, rd, cpd
+
+# 8-azimuth case uses cos(45°) projections; precompute as a Python float
+# so it folds into XLA constants.
+_COS_PI_4 = float(jnp.cos(jnp.pi / 4))
 
 
 @tree_math.struct
 class HinesParameters:
     """Tunable parameters for the Hines (1997) GWD scheme.
 
-    These are the *runtime-tunable* namelist knobs that flow through the
-    JAX trace (gradients, vmap, etc. all see them as leaves):
+    All fields below flow through the JAX trace as leaves (gradients,
+    vmap, etc. all see them). Static loop knobs (``launch_level``,
+    ``num_azimuths``, ``smoothing_passes``) live as kwargs on
+    :func:`hines_gwd`.
 
-    - ``rmscon``      — RMS launch wind variance (m/s)
-    - ``kstar``       — typical horizontal wavenumber (1/m)
-    - ``m_min``       — minimum vertical wavenumber (1/m)
-    - ``lheatcal``    — 0/1 switch for heating + diffusion
-    - ``f1`` .. ``f6`` — Hines fudge factors
-    - ``alt_cutoff``  — exponential damping altitude (m)
-    - ``smco``        — vertical smoothing coefficient
+    Attributes:
+        rms_launch_wind: Total RMS wind variance of the launch spectrum
+            (m/s). Main amplitude knob — typical values 0.5-2 m/s.
+            Default 1.0.
+        typical_horizontal_wavenumber: Characteristic horizontal
+            wavenumber :math:`k_*` of the launched spectrum (1/m).
+            Default 5e-5.
+        min_vertical_wavenumber: Lower bound on the cutoff vertical
+            wavenumber :math:`m_{\\min}` (1/m). Default 1e-4.
+        compute_heating: If 1.0, compute heating + diffusion (production
+            default); if 0.0, momentum flux only. Default 1.0.
+        wave_amplitude_factor: :math:`f_1` in Hines (1997) — multiplies
+            :math:`\\sigma_\\alpha` in the cutoff-wavenumber denominator.
+            Controls the wave amplitude at which the doppler-shifted
+            wavenumber saturates. Default 1.5.
+        spectrum_width_factor: :math:`f_2` — multiplies :math:`\\sigma_t`
+            in the same denominator. Controls how the total RMS wind
+            broadens the spectrum. Default 0.3.
+        mol_diffusion_factor: :math:`f_3` — divides the molecular-
+            viscosity-limited cutoff wavenumber. Default 1.0.
+        heating_efficiency: :math:`f_5` — scales the gravity-wave
+            heating rate. Default 1.0.
+        diffusion_efficiency: :math:`f_6` — scales the gravity-wave
+            diffusion coefficient. Default 0.5.
+        cutoff_altitude: Altitude (m) above which an exponential-decay
+            damping is applied if ``cutoff_enabled`` is true. The
+            cutoff is currently never enabled in production; this
+            field is kept for API compatibility. Default 105e3.
+        smoothing_coeff: Centre-weight of the 1-coeff-1 vertical
+            smoother applied to ``m_alpha`` and ``sigma_t``. Default 2.0.
 
-    Static/structural knobs (``naz``, ``slope``, ``emiss_lev``, ``nsmax``,
-    ``icutoff``) are passed as Python keyword arguments to :func:`hines_gwd`
-    rather than living on the parameters tree, because they control loop
-    bounds and switch statements that must be static at JIT trace time.
-    Defaults for these are documented on :func:`hines_gwd`.
     """
 
-    rmscon: jnp.ndarray
-    kstar: jnp.ndarray
-    m_min: jnp.ndarray
-    lheatcal: jnp.ndarray
-    f1: jnp.ndarray
-    f2: jnp.ndarray
-    f3: jnp.ndarray
-    f5: jnp.ndarray
-    f6: jnp.ndarray
-    alt_cutoff: jnp.ndarray
-    smco: jnp.ndarray
+    rms_launch_wind: jnp.ndarray
+    typical_horizontal_wavenumber: jnp.ndarray
+    min_vertical_wavenumber: jnp.ndarray
+    compute_heating: jnp.ndarray
+    wave_amplitude_factor: jnp.ndarray
+    spectrum_width_factor: jnp.ndarray
+    mol_diffusion_factor: jnp.ndarray
+    heating_efficiency: jnp.ndarray
+    diffusion_efficiency: jnp.ndarray
+    cutoff_altitude: jnp.ndarray
+    smoothing_coeff: jnp.ndarray
 
     @classmethod
     def default(
         cls,
-        rmscon: float = 1.0,
-        kstar: float = 5e-5,
-        m_min: float = 1e-4,
-        lheatcal: bool = True,
-        f1: float = 1.5,
-        f2: float = 0.3,
-        f3: float = 1.0,
-        f5: float = 1.0,
-        f6: float = 0.5,
-        alt_cutoff: float = 105e3,
-        smco: float = 2.0,
+        rms_launch_wind: float = 1.0,
+        typical_horizontal_wavenumber: float = 5e-5,
+        min_vertical_wavenumber: float = 1e-4,
+        compute_heating: bool = True,
+        wave_amplitude_factor: float = 1.5,
+        spectrum_width_factor: float = 0.3,
+        mol_diffusion_factor: float = 1.0,
+        heating_efficiency: float = 1.0,
+        diffusion_efficiency: float = 0.5,
+        cutoff_altitude: float = 105e3,
+        smoothing_coeff: float = 2.0,
     ) -> "HinesParameters":
         return cls(
-            rmscon=jnp.asarray(rmscon),
-            kstar=jnp.asarray(kstar),
-            m_min=jnp.asarray(m_min),
-            lheatcal=jnp.asarray(1.0 if lheatcal else 0.0),
-            f1=jnp.asarray(f1),
-            f2=jnp.asarray(f2),
-            f3=jnp.asarray(f3),
-            f5=jnp.asarray(f5),
-            f6=jnp.asarray(f6),
-            alt_cutoff=jnp.asarray(alt_cutoff),
-            smco=jnp.asarray(smco),
+            rms_launch_wind=jnp.asarray(rms_launch_wind),
+            typical_horizontal_wavenumber=jnp.asarray(typical_horizontal_wavenumber),
+            min_vertical_wavenumber=jnp.asarray(min_vertical_wavenumber),
+            compute_heating=jnp.asarray(1.0 if compute_heating else 0.0),
+            wave_amplitude_factor=jnp.asarray(wave_amplitude_factor),
+            spectrum_width_factor=jnp.asarray(spectrum_width_factor),
+            mol_diffusion_factor=jnp.asarray(mol_diffusion_factor),
+            heating_efficiency=jnp.asarray(heating_efficiency),
+            diffusion_efficiency=jnp.asarray(diffusion_efficiency),
+            cutoff_altitude=jnp.asarray(cutoff_altitude),
+            smoothing_coeff=jnp.asarray(smoothing_coeff),
         )
 
 
 class HinesState(NamedTuple):
-    """Diagnostic outputs from the Hines scheme."""
+    """Diagnostic outputs from the Hines scheme.
 
-    flux_u: jnp.ndarray       # zonal momentum flux profile (Pa)
-    flux_v: jnp.ndarray       # meridional momentum flux profile (Pa)
-    diffco: jnp.ndarray       # vertical diffusion coefficient (m^2/s)
+    Attributes:
+        flux_u: zonal momentum flux profile (Pa), full levels.
+        flux_v: meridional momentum flux profile (Pa), full levels.
+        diffco: vertical diffusion coefficient (m^2/s), full levels.
+    """
+
+    flux_u: jnp.ndarray
+    flux_v: jnp.ndarray
+    diffco: jnp.ndarray
 
 
 class HinesTendencies(NamedTuple):
-    """Tendencies from the Hines scheme."""
+    """Tendencies from the Hines scheme (full-level arrays).
 
-    dudt: jnp.ndarray         # m/s^2
-    dvdt: jnp.ndarray         # m/s^2
-    dissip: jnp.ndarray       # energy dissipation rate (W/kg = J/(s*kg))
+    Attributes:
+        dudt: zonal-wind tendency (m/s^2).
+        dvdt: meridional-wind tendency (m/s^2).
+        dissip: energy dissipation rate per unit mass (W/kg = J/(s·kg)).
+            Convert to a temperature tendency via dT/dt = dissip / cp.
+    """
+
+    dudt: jnp.ndarray
+    dvdt: jnp.ndarray
+    dissip: jnp.ndarray
 
 
 # ---------------------------------------------------------------------------
 # Helper: 8-azimuth wind projection
 # ---------------------------------------------------------------------------
 
-def _hines_wind_8(u: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
-    """Project ``(u, v)`` onto 8 azimuths.
+def _project_winds_eight_azimuths(u: jnp.ndarray, v: jnp.ndarray
+                                  ) -> jnp.ndarray:
+    """Project ``(u, v)`` onto 8 azimuthal directions.
 
-    Mirrors ``hines_wind`` (lines 1053-1080) for the ``naz=8`` branch.
-    Output ordering: 1=E, 2=NE, 3=N, 4=NW, 5=W, 6=SW, 7=S, 8=SE.
-    Returns shape ``(nlev, 8)``.
+    Output ordering (counterclockwise from east): 0=E, 1=NE, 2=N, 3=NW,
+    4=W, 5=SW, 6=S, 7=SE. A floor of 1 mm/s is applied to each component
+    and to the diagonal projections so divisions by zero don't appear in
+    later stages. Returns shape ``(nlev, 8)``.
     """
     umin = 0.001
     u = jnp.where(jnp.abs(u) < umin, jnp.copysign(umin, u), u)
     v = jnp.where(jnp.abs(v) < umin, jnp.copysign(umin, v), v)
-    vpu = v + u
-    vpu = jnp.where(jnp.abs(vpu) < umin, jnp.copysign(umin, vpu), vpu)
-    vmu = v - u
-    vmu = jnp.where(jnp.abs(vmu) < umin, jnp.copysign(umin, vmu), vmu)
+    v_plus_u = v + u
+    v_plus_u = jnp.where(jnp.abs(v_plus_u) < umin,
+                         jnp.copysign(umin, v_plus_u), v_plus_u)
+    v_minus_u = v - u
+    v_minus_u = jnp.where(jnp.abs(v_minus_u) < umin,
+                          jnp.copysign(umin, v_minus_u), v_minus_u)
 
-    a1 = u
-    a2 = _COS45 * vpu
-    a3 = v
-    a4 = _COS45 * vmu
-    return jnp.stack([a1, a2, a3, a4, -a1, -a2, -a3, -a4], axis=-1)
+    east = u
+    north_east = _COS_PI_4 * v_plus_u
+    north = v
+    north_west = _COS_PI_4 * v_minus_u
+    return jnp.stack(
+        [east, north_east, north, north_west,
+         -east, -north_east, -north, -north_west],
+        axis=-1,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Helper: total + per-azimuth RMS wind from sigsqh_alpha (8-azimuth case)
 # ---------------------------------------------------------------------------
 
-def _sigma_8(sigsqh_alpha: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute (sigma_t, sigma_alpha) from per-azimuth squared RMS at one level.
+def _rms_total_and_per_azimuth_8(squared_amplitude: jnp.ndarray
+                                 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute total + per-azimuth RMS wind speeds at one level.
 
-    Mirrors ``hines_sigma`` (lines 1492-1528) for ``naz=8``. Input shape is
-    ``(8,)``; returns ``sigma_t`` scalar and ``sigma_alpha`` of shape ``(8,)``.
-    Uses the ECHAM convention where azimuths 5..8 mirror 1..4 in the output.
+    Input ``squared_amplitude`` has shape ``(8,)`` and contains the
+    per-azimuth wind variance contributions. Returns a scalar
+    ``sigma_t`` (total RMS) and an array ``sigma_alpha`` of shape
+    ``(8,)`` with each azimuth's RMS wind. Mirrors the 8-azimuth branch
+    of the ECHAM ``hines_sigma`` routine: opposite-azimuth pairs share
+    the same RMS (5..8 mirror 1..4 in 1-based ordering, i.e. 4..7 mirror
+    0..3 in 0-based).
     """
-    s = sigsqh_alpha
+    s = squared_amplitude
     sum_odd = (s[0] + s[2] + s[4] + s[6]) * 0.5
     sum_even = (s[1] + s[3] + s[5] + s[7]) * 0.5
     sa1 = jnp.sqrt(s[0] + s[4] + sum_even)
@@ -180,121 +258,138 @@ def _sigma_8(sigsqh_alpha: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
 
 
 # ---------------------------------------------------------------------------
-# Helper: Hines integral i_alpha for slope = 1
+# Helper: Hines integral I_alpha (slope = 1)
 # ---------------------------------------------------------------------------
 
-def _i_alpha_slope1(v_alpha: jnp.ndarray, m_alpha: jnp.ndarray,
-                    bvfb: jnp.ndarray, m_min: jnp.ndarray) -> jnp.ndarray:
-    """Compute the Hines integral i_alpha at one level for ``slope=1``.
+def _hines_integral_slope1(
+    azimuth_wind: jnp.ndarray,
+    cutoff_wavenumber: jnp.ndarray,
+    bv_freq_at_launch: jnp.ndarray,
+    min_wavenumber: jnp.ndarray,
+) -> jnp.ndarray:
+    """Hines integral :math:`I_\\alpha` for spectral slope = 1.
 
-    Mirrors ``hines_intgrl`` lines 1629-1716. Vectorised over azimuth (last
-    axis). Returns the integral of (1 - q*m')/(1 - q*m_alpha) - 1 weighted
-    appropriately; positive by construction. Uses the analytic form
-    everywhere except near ``|qm| < qm_min`` or ``|q_alpha| < q_min`` where a
-    4-term Taylor expansion is used (Horner-evaluated, matching the Fortran
-    line 1706-1710).
+    This integral closes the level-by-level recursion in the doppler-
+    spread sweep: the per-azimuth squared amplitude at level l is given
+    by ``sigsqh_alpha[l] = sigfac[l] * ak_alpha * I_alpha``. Two
+    branches: an analytic logarithmic form for typical conditions, and
+    a 4-term Taylor expansion when ``|q*m| < 0.01`` or ``|q| < 1``
+    where the analytic form is numerically unstable.
 
-    The result is forced to zero where ``m_alpha <= m_min`` (the do_alpha
-    mask in the Fortran).
+    The result is forced non-negative and zeroed where ``cutoff_wavenumber
+    <= min_wavenumber`` (which is also where the per-azimuth do_alpha
+    mask in the Fortran reference would be turned off).
+
+    Args:
+        azimuth_wind: background wind projected onto the azimuth (m/s).
+        cutoff_wavenumber: per-azimuth cutoff vertical wavenumber (1/m).
+        bv_freq_at_launch: scalar Brunt-Vaisala frequency at the launch
+            level (rad/s).
+        min_wavenumber: floor on the cutoff wavenumber (1/m).
     """
     q_min = 1.0
     qm_min = 0.01
 
-    rbvfb = 1.0 / bvfb
-    q_alpha = v_alpha * rbvfb
-    qm = q_alpha * m_alpha
-    qmm = q_alpha * m_min
+    inv_bvfb = 1.0 / bv_freq_at_launch
+    q_alpha = azimuth_wind * inv_bvfb
+    qm = q_alpha * cutoff_wavenumber
+    qmm = q_alpha * min_wavenumber
 
-    # Analytic branch (slope=1, line 1683): -(log(1-qm) - (1-qm) - log(1-qmm) + (1-qmm)) / q_alpha^2
-    safe = jnp.maximum(jnp.abs(q_alpha), 1e-30)
+    # Analytic branch (slope=1): -(log(1-qm) - (1-qm) - log(1-qmm) + (1-qmm)) / q^2
     inv_q2 = 1.0 / (q_alpha * q_alpha + 1e-300)
     one_m_qm = 1.0 - qm
     one_m_qmm = 1.0 - qmm
-    ana = -(jnp.log(jnp.maximum(one_m_qm, 1e-300))
-            - one_m_qm
-            - jnp.log(jnp.maximum(one_m_qmm, 1e-300))
-            + one_m_qmm) * inv_q2
+    analytic = -(jnp.log(jnp.maximum(one_m_qm, 1e-300))
+                 - one_m_qm
+                 - jnp.log(jnp.maximum(one_m_qmm, 1e-300))
+                 + one_m_qmm) * inv_q2
 
-    # Taylor branch (line 1706, Horner-form): qm^2 (1/2 + qm(1/3 + qm(1/4 + qm/5))) - same with qmm.
+    # Taylor branch (Horner-evaluated to keep f32 accuracy):
     one_third = 1.0 / 3.0
     poly_qm = qm * qm * (0.5 + qm * (one_third + qm * (0.25 + qm * 0.2)))
     poly_qmm = qmm * qmm * (0.5 + qmm * (one_third + qmm * (0.25 + qmm * 0.2)))
     taylor = jnp.where(
         jnp.abs(q_alpha) < 1e-30,
-        0.5 * (m_alpha * m_alpha - m_min * m_min),
+        0.5 * (cutoff_wavenumber ** 2 - min_wavenumber ** 2),
         (poly_qm - poly_qmm) * inv_q2,
     )
 
-    # Pick branch by condition (Fortran lines 1660-1662).
     use_taylor = (jnp.abs(qm) < qm_min) | (jnp.abs(q_alpha) < q_min)
-    i_alpha = jnp.where(use_taylor, taylor, ana)
+    integral = jnp.where(use_taylor, taylor, analytic)
 
-    # Round-off guard (line 1687) and m_alpha<=m_min mask (line 1644).
-    i_alpha = jnp.maximum(i_alpha, 0.0)
-    i_alpha = jnp.where(m_alpha <= m_min, 0.0, i_alpha)
-    return i_alpha
+    integral = jnp.maximum(integral, 0.0)
+    integral = jnp.where(cutoff_wavenumber <= min_wavenumber, 0.0, integral)
+    return integral
 
 
 # ---------------------------------------------------------------------------
-# Helper: 1-2-1 vertical smoother, applied N times, interior only
+# Helper: 1-coeff-1 vertical smoother, applied N times, interior only
 # ---------------------------------------------------------------------------
 
-def _vert_smooth(arr: jnp.ndarray, coeff: float, nsmooth: int,
-                 lev1: int, lev2: int) -> jnp.ndarray:
-    """Apply the ``vert_smooth`` 1-coeff-1 smoother ``nsmooth`` times.
+def _vertical_smoother(
+    arr: jnp.ndarray,
+    centre_weight: float,
+    num_passes: int,
+    top_index: int,
+    bottom_index: int,
+) -> jnp.ndarray:
+    """Apply a 1-``centre_weight``-1 smoother ``num_passes`` times.
 
-    Mirrors lines 2125-2142 of ``mo_gw_hines.f90``: only indices
-    ``lev1+1 .. lev2-1`` are averaged; ``lev1`` and ``lev2`` stay fixed, and
-    indices outside ``[lev1, lev2]`` are not touched. Index 0 = top.
+    Only indices ``top_index+1 .. bottom_index-1`` are averaged with
+    their immediate neighbours; the boundary cells ``top_index`` and
+    ``bottom_index`` keep their original values, and indices outside
+    ``[top_index, bottom_index]`` are not touched. Index 0 = top.
     """
-    sum_wts = coeff + 2.0
+    sum_wts = centre_weight + 2.0
+    interior = jnp.arange(top_index + 1, bottom_index)
 
     def one_pass(a):
-        # Smooth only the interior (lev1+1 .. lev2-1).
-        idxs = jnp.arange(lev1 + 1, lev2)
-        prev_vals = a[idxs - 1]
-        cur_vals = a[idxs]
-        next_vals = a[idxs + 1]
-        smoothed = (prev_vals + coeff * cur_vals + next_vals) / sum_wts
-        return a.at[idxs].set(smoothed)
+        prev_vals = a[interior - 1]
+        cur_vals = a[interior]
+        next_vals = a[interior + 1]
+        smoothed = (prev_vals + centre_weight * cur_vals + next_vals) / sum_wts
+        return a.at[interior].set(smoothed)
 
     def body(_, a):
         return one_pass(a)
 
-    return lax.fori_loop(0, nsmooth, body, arr)
+    return lax.fori_loop(0, num_passes, body, arr)
 
 
 # ---------------------------------------------------------------------------
 # Helper: Brunt-Vaisala frequency from T profile (column)
 # ---------------------------------------------------------------------------
 
-def _brunt_vaisala(t: jnp.ndarray, p_full: jnp.ndarray, p_sfc: jnp.ndarray
-                   ) -> jnp.ndarray:
-    """Compute Brunt-Vaisala frequency at full levels from T profile.
+def _brunt_vaisala(temperature: jnp.ndarray, pressure_full: jnp.ndarray,
+                   surface_pressure: jnp.ndarray) -> jnp.ndarray:
+    """Brunt-Vaisala frequency at full levels from a single column.
 
-    Direct port of lines 286-309 in ``mo_gw_hines.f90``. The Fortran works in
-    sigma = p/p_sfc and uses a finite difference of T/exner against sigma to
-    estimate dT/dz, then converts to N. Index 0 = top.
+    Works in sigma = p/p_sfc coordinates and uses a finite-difference
+    estimate of dT/dsigma against potential-temperature-like
+    ``T / Pi^kappa``, then converts to N. Index 0 = top. Followed by a
+    single forward log-pressure smoother to suppress noise.
     """
-    rgocp = _RD / _CPD
-    sgj = p_full / p_sfc
-    shxkj = sgj ** rgocp
+    rgocp = rd / cpd
+    sigma = pressure_full / surface_pressure
+    pi_kappa = sigma ** rgocp
 
-    # Layer-centred dT/dsigma (lines 289-291); jk=0 left at jk=1 value.
-    dttdsf = (t[1:] / shxkj[1:] - t[:-1] / shxkj[:-1]) / (sgj[1:] - sgj[:-1])
-    dttdsf = jnp.minimum(dttdsf, -5.0 / sgj[1:])
-    dttdsf = dttdsf * shxkj[1:]
-    bvf2 = -dttdsf * sgj[1:] / _RD
+    # Layer-centred dT/dsigma (lines 289-291 of the Fortran reference).
+    dT_dsigma = ((temperature[1:] / pi_kappa[1:]
+                  - temperature[:-1] / pi_kappa[:-1])
+                 / (sigma[1:] - sigma[:-1]))
+    dT_dsigma = jnp.minimum(dT_dsigma, -5.0 / sigma[1:])
+    dT_dsigma = dT_dsigma * pi_kappa[1:]
+    bvf2 = -dT_dsigma * sigma[1:] / rd
     bvf2 = jnp.maximum(bvf2, 0.0)
-    bvfreq_inner = jnp.sqrt(bvf2) * _GRAV / t[1:]
+    bvfreq_inner = jnp.sqrt(bvf2) * grav / temperature[1:]
 
-    # Pad index 0 with index 1 (line 302).
+    # Pad index 0 with index 1 (Fortran line: ``bvfreq(:,1) = bvfreq(:,2)``).
     bvfreq = jnp.concatenate([bvfreq_inner[:1], bvfreq_inner])
 
-    # Single-pass log-sigma smoothing (lines 304-309).
+    # Single-pass log-sigma smoother (lines 304-309 of the reference).
     def smooth_step(carry, k):
         prev = carry
-        ratio = 5.0 * jnp.log(sgj[k] / sgj[k - 1])
+        ratio = 5.0 * jnp.log(sigma[k] / sigma[k - 1])
         cur = (prev + ratio * bvfreq[k]) / (1.0 + ratio)
         return cur, cur
 
@@ -304,253 +399,286 @@ def _brunt_vaisala(t: jnp.ndarray, p_full: jnp.ndarray, p_sfc: jnp.ndarray
 
 
 # ---------------------------------------------------------------------------
-# Main column algorithm (slope=1, naz=8, lheatcal=true)
+# Main column algorithm (slope=1, naz=8)
 # ---------------------------------------------------------------------------
 
 def _hines_extro_column(
-    bvfreq: jnp.ndarray,         # (nlev,)
-    density: jnp.ndarray,        # (nlev,)
-    mair: jnp.ndarray,           # (nlev,)
-    uhs: jnp.ndarray,            # (nlev,) wind relative to launch
-    vhs: jnp.ndarray,            # (nlev,)
-    rmswind: jnp.ndarray,        # scalar
+    bv_freq: jnp.ndarray,
+    density: jnp.ndarray,
+    layer_mass: jnp.ndarray,
+    u_relative: jnp.ndarray,
+    v_relative: jnp.ndarray,
+    rms_launch: jnp.ndarray,
     config: HinesParameters,
-    levbot: int,
-    naz: int,
-    nsmax: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Column-mode Hines drag algorithm.
+    launch_idx: int,
+    num_azimuths: int,
+    smoothing_passes: int,
+):
+    """Doppler-spread sweep + flux + drag + heating for a single column.
 
-    Returns ``(drag_u, drag_v, heat, diffco, flux_u, flux_v)`` each of shape
-    ``(nlev,)``. All work done assuming ``slope=1, naz=8``.
+    Args:
+        bv_freq: Brunt-Vaisala frequency at full levels (rad/s),
+            shape (nlev,). Index 0 = top.
+        density: full-level air density (kg/m^3), shape (nlev,).
+        layer_mass: full-level air mass per unit area (kg/m^2), shape
+            (nlev,). Used to convert flux divergence into drag.
+        u_relative, v_relative: zonal/meridional wind components
+            relative to their values at the launch level (m/s), shape
+            (nlev,). Above the launch level these carry the wave
+            propagation; below, they are zero.
+        rms_launch: scalar total RMS launch wind variance (m/s).
+        config: tunable Hines parameters.
+        launch_idx: 0-based index of the launch level (lower index =
+            higher in the atmosphere). Static — must be a Python int.
+        num_azimuths: number of azimuthal directions; must be 8.
+        smoothing_passes: number of 1-2-1 smoother passes on m_alpha
+            and sigma_t. Must be a Python int (for the fori_loop).
+
+    Returns:
+        ``(drag_u, drag_v, heating, diffco, flux_u, flux_v)``: all
+        full-level arrays of shape (nlev,). drag in m/s^2, heating in
+        W/kg, diffco in m^2/s, flux in Pa.
     """
-    nlev = bvfreq.shape[0]
-    f1 = config.f1
-    f2 = config.f2
-    f3 = config.f3
-    f5 = config.f5
-    f6 = config.f6
-    kstar = config.kstar
-    m_min = config.m_min
+    nlev = bv_freq.shape[0]
+    f_amp = config.wave_amplitude_factor
+    f_width = config.spectrum_width_factor
+    f_mol = config.mol_diffusion_factor
+    f_heat = config.heating_efficiency
+    f_diff = config.diffusion_efficiency
+    k_horiz = config.typical_horizontal_wavenumber
+    m_min = config.min_vertical_wavenumber
     visc_min = 1.0e-10
 
-    # Visc. molecular profile (line 325); constant in this scheme.
-    visc_mol = jnp.full((nlev,), 1.5e-5)
+    # Molecular viscosity profile — constant in this scheme (production
+    # config never reaches altitudes where the real ν(z) matters).
+    mol_visc = jnp.full((nlev,), 1.5e-5)
 
-    bvfb = bvfreq[levbot]
-    densb = density[levbot]
+    bv_freq_launch = bv_freq[launch_idx]
+    density_launch = density[launch_idx]
 
-    # Project winds onto 8 azimuths (full column).
-    v_alpha = jax.vmap(_hines_wind_8)(uhs, vhs)   # (nlev, 8)
+    # Project winds onto 8 azimuths at every level.
+    azimuth_wind = jax.vmap(_project_winds_eight_azimuths)(
+        u_relative, v_relative)
 
-    # --- Initial conditions at the launch level (lines 794-826) -----------
-    sqr_rms_wind = rmswind * rmswind
-    anis = jnp.full((naz,), 1.0 / naz)
-    sigsqh_launch = anis * sqr_rms_wind                                # (8,)
+    # --- Initial conditions at the launch level --------------------------
+    sqr_rms = rms_launch * rms_launch
+    isotropic_anisotropy = jnp.full((num_azimuths,), 1.0 / num_azimuths)
+    sqamp_launch = isotropic_anisotropy * sqr_rms                 # (8,)
 
-    sigma_t_launch, sigma_alpha_launch = _sigma_8(sigsqh_launch)
-    mmsq = m_min * m_min
-    m_alpha_launch = bvfb / (f1 * sigma_alpha_launch + f2 * sigma_t_launch)
-    ak_alpha = 2.0 * sigsqh_launch / (m_alpha_launch ** 2 - mmsq)
-    mmin_alpha_launch = m_alpha_launch                                  # (8,)
+    sigma_t_launch, sigma_a_launch = _rms_total_and_per_azimuth_8(sqamp_launch)
+    m_min_sq = m_min ** 2
+    m_alpha_launch = bv_freq_launch / (
+        f_amp * sigma_a_launch + f_width * sigma_t_launch)
+    spectral_amplitude = (
+        2.0 * sqamp_launch / (m_alpha_launch ** 2 - m_min_sq))
+    m_alpha_min_running_launch = m_alpha_launch                    # (8,)
 
-    # --- Initial array buffers, indexed top..bottom -----------------------
-    m_alpha = jnp.full((nlev, naz), m_min)
-    m_alpha = m_alpha.at[levbot].set(m_alpha_launch)
-    sigma_alpha = jnp.zeros((nlev, naz))
-    sigma_alpha = sigma_alpha.at[levbot].set(sigma_alpha_launch)
-    sigsqh_alpha = jnp.zeros((nlev, naz))
-    sigsqh_alpha = sigsqh_alpha.at[levbot].set(sigsqh_launch)
+    # Initialise full column buffers, indexed top..bottom.
+    m_alpha = jnp.full((nlev, num_azimuths), m_min)
+    m_alpha = m_alpha.at[launch_idx].set(m_alpha_launch)
+    sigma_alpha = jnp.zeros((nlev, num_azimuths))
+    sigma_alpha = sigma_alpha.at[launch_idx].set(sigma_a_launch)
+    sqamp = jnp.zeros((nlev, num_azimuths))
+    sqamp = sqamp.at[launch_idx].set(sqamp_launch)
     sigma_t = jnp.zeros((nlev,))
-    sigma_t = sigma_t.at[levbot].set(sigma_t_launch)
+    sigma_t = sigma_t.at[launch_idx].set(sigma_t_launch)
 
-    # --- Sweep upward from levbot-1 down to index 0 ------------------------
-    # Process level l using state at lbelow = l + 1.
-    # The scan iterates over step = 0 .. levbot-1; level = levbot-1 - step.
-    # Note: we keep mmin_alpha as a per-step running minimum.
+    # --- Sweep upward from launch_idx-1 down to index 0 ------------------
+    # At each iteration, level l is processed using sigma_t and
+    # sigma_alpha at the level immediately below (already filled by the
+    # previous step or by the launch initialisation).
 
-    def step(carry, idx):
-        m_alpha, sigma_t, sigma_alpha, sigsqh_alpha, mmin_alpha, do_alpha = carry
-        l = idx
-        lbelow = l + 1
+    def step(carry, l):
+        m_alpha, sigma_t, sigma_alpha, sqamp, m_alpha_min_running, do_alpha = carry
+        below = l + 1
 
-        # n_over_m (line 881): with sigmatm=0 throughout, f2mfac=0 →
-        #   n_over_m = f2 * sigma_t[lbelow]
-        n_over_m_turb = f2 * sigma_t[lbelow]
-        # m_sub_m_mol cubic-root branch (line 894).
-        visc = jnp.maximum(visc_mol[l], visc_min)
-        m_sub_m_mol = jnp.cbrt(bvfreq[l] * kstar / visc) / f3
-        # Equivalent rewrite of "if m_sub_m_turb >= m_sub_m_mol" using m_sub_m_turb = bvfreq/n_over_m:
+        # n_over_m: with the orographic-wave coupling switched off, the
+        # ECHAM ``f2mfac`` correction vanishes and this reduces to
+        # f_width * sigma_t at the level below.
+        n_over_m_turb = f_width * sigma_t[below]
+        # Molecular-viscosity-limited cutoff:
+        visc = jnp.maximum(mol_visc[l], visc_min)
+        n_over_m_mol = jnp.cbrt(bv_freq[l] * k_horiz / visc) / f_mol
+        # Take the smaller cutoff (turbulence-limited or molecular-limited).
         n_over_m = jnp.where(
-            bvfreq[l] / n_over_m_turb >= m_sub_m_mol,
-            bvfreq[l] / m_sub_m_mol,
+            bv_freq[l] / n_over_m_turb >= n_over_m_mol,
+            bv_freq[l] / n_over_m_mol,
             n_over_m_turb,
         )
 
-        # m_trial (line 923) — sigalpmc=0, so omitted.
-        m_trial = bvfb / (f1 * sigma_alpha[lbelow] + n_over_m + v_alpha[l])
-        m_trial = jnp.where(m_trial <= 0.0, mmin_alpha, m_trial)
-        m_trial = jnp.minimum(m_trial, mmin_alpha)
+        # Trial cutoff wavenumber at this level:
+        m_trial = bv_freq_launch / (
+            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[l])
+        m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
+        m_trial = jnp.minimum(m_trial, m_alpha_min_running)
         m_trial = jnp.maximum(m_trial, m_min)
         m_alpha_l = jnp.where(do_alpha, m_trial, m_min)
-        mmin_alpha_new = jnp.minimum(mmin_alpha, m_alpha_l)
+        m_alpha_min_running_new = jnp.minimum(m_alpha_min_running, m_alpha_l)
 
-        # Hines integral (line 943).
-        i_alpha = _i_alpha_slope1(v_alpha[l], m_alpha_l, bvfb, m_min)
-        # do_alpha turns false where m_alpha <= m_min (line 1645).
+        # Hines integral, then update per-azimuth amplitude and RMS winds.
+        integral = _hines_integral_slope1(
+            azimuth_wind[l], m_alpha_l, bv_freq_launch, m_min)
         do_alpha_new = do_alpha & (m_alpha_l > m_min)
 
-        # New variances (lines 952-961).
-        sigfac = (densb / density[l]) * (bvfreq[l] / bvfb)
-        sigsqh_new = sigfac * ak_alpha * i_alpha
-        sigma_t_new, sigma_alpha_new = _sigma_8(sigsqh_new)
+        sigfac = (density_launch / density[l]) * (bv_freq[l] / bv_freq_launch)
+        sqamp_new = sigfac * spectral_amplitude * integral
+        sigma_t_new, sigma_a_new = _rms_total_and_per_azimuth_8(sqamp_new)
 
         m_alpha = m_alpha.at[l].set(m_alpha_l)
-        sigsqh_alpha = sigsqh_alpha.at[l].set(sigsqh_new)
+        sqamp = sqamp.at[l].set(sqamp_new)
         sigma_t = sigma_t.at[l].set(sigma_t_new)
-        sigma_alpha = sigma_alpha.at[l].set(sigma_alpha_new)
+        sigma_alpha = sigma_alpha.at[l].set(sigma_a_new)
 
-        new_carry = (m_alpha, sigma_t, sigma_alpha, sigsqh_alpha,
-                     mmin_alpha_new, do_alpha_new)
+        new_carry = (m_alpha, sigma_t, sigma_alpha, sqamp,
+                     m_alpha_min_running_new, do_alpha_new)
         return new_carry, None
 
-    init_do_alpha = jnp.full((naz,), True)
-    indices = jnp.arange(levbot - 1, -1, -1)  # levbot-1, levbot-2, ..., 0
-    init = (m_alpha, sigma_t, sigma_alpha, sigsqh_alpha,
-            mmin_alpha_launch, init_do_alpha)
-    (m_alpha, sigma_t, sigma_alpha, sigsqh_alpha, _, _), _ = lax.scan(
-        step, init, indices,
-    )
+    init_do_alpha = jnp.full((num_azimuths,), True)
+    indices = jnp.arange(launch_idx - 1, -1, -1)
+    init = (m_alpha, sigma_t, sigma_alpha, sqamp,
+            m_alpha_min_running_launch, init_do_alpha)
+    (m_alpha, sigma_t, sigma_alpha, sqamp, _, _), _ = lax.scan(
+        step, init, indices)
 
-    # losigma_t mask (line 970); equivalent to sigma_t > eps.
-    losigma_t = sigma_t > 1e-30
+    # Per-column "is the spectrum still alive at this level?" mask.
+    spectrum_alive = sigma_t > 1e-30
 
-    # --- Vertical smoothing (lines 572-589) -------------------------------
-    # Fortran range is lev1=0 (top) to lev2=levbot inclusive; only the
-    # interior 1..levbot-1 is averaged.
-    smco = config.smco
-    if nsmax > 0:
+    # --- Vertical smoothing -----------------------------------------------
+    # Only the interior between the model top and the launch level is
+    # smoothed; boundaries stay fixed.
+    smoothing_coeff = config.smoothing_coeff
+    if smoothing_passes > 0:
         m_alpha = jnp.stack(
-            [_vert_smooth(m_alpha[:, n], smco, nsmax, 0, levbot)
-             for n in range(naz)],
+            [_vertical_smoother(m_alpha[:, n], smoothing_coeff,
+                                smoothing_passes, 0, launch_idx)
+             for n in range(num_azimuths)],
             axis=-1,
         )
-        sigma_t = _vert_smooth(sigma_t, smco, nsmax, 0, levbot)
+        sigma_t = _vertical_smoother(sigma_t, smoothing_coeff,
+                                     smoothing_passes, 0, launch_idx)
 
-    # --- Flux + drag (lines 1086-1303), slope=1, naz=8 --------------------
-    k_alpha = jnp.full((naz,), kstar)
-    ak_k_alpha = ak_alpha * k_alpha
-    flux_per_az = ak_k_alpha[None, :] * (m_alpha - m_min) * densb
+    # --- Per-azimuth flux + zonal/meridional projection -------------------
+    horiz_wavenumber = jnp.full((num_azimuths,), k_horiz)
+    spectral_amplitude_x_k = spectral_amplitude * horiz_wavenumber
+    flux_per_az = (spectral_amplitude_x_k[None, :] * (m_alpha - m_min)
+                   * density_launch)
     flux_u = (flux_per_az[:, 0] - flux_per_az[:, 4]
-              + _COS45 * (flux_per_az[:, 1] - flux_per_az[:, 3]
-                          - flux_per_az[:, 5] + flux_per_az[:, 7]))
+              + _COS_PI_4 * (flux_per_az[:, 1] - flux_per_az[:, 3]
+                             - flux_per_az[:, 5] + flux_per_az[:, 7]))
     flux_v = (flux_per_az[:, 2] - flux_per_az[:, 6]
-              + _COS45 * (flux_per_az[:, 1] + flux_per_az[:, 3]
-                          - flux_per_az[:, 5] - flux_per_az[:, 7]))
+              + _COS_PI_4 * (flux_per_az[:, 1] + flux_per_az[:, 3]
+                             - flux_per_az[:, 5] - flux_per_az[:, 7]))
 
-    # Drag at intermediate levels: -d(flux)/dmair  (line 1273).
-    # lev1=0 (top): one-sided forward (line 1288): drag = flux/mair.
-    # No level below levbot is processed (since lev2 = levbot, lev2p>nlevs branch skipped).
-    drag_u_int = -(flux_u[:-1] - flux_u[1:]) / mair[1:]
-    drag_v_int = -(flux_v[:-1] - flux_v[1:]) / mair[1:]
-    drag_u_top = flux_u[0] / mair[0]
-    drag_v_top = flux_v[0] / mair[0]
+    # --- Drag from flux divergence ---------------------------------------
+    # Top level uses a one-sided forward difference; below-launch levels
+    # are masked to zero further down.
+    drag_u_int = -(flux_u[:-1] - flux_u[1:]) / layer_mass[1:]
+    drag_v_int = -(flux_v[:-1] - flux_v[1:]) / layer_mass[1:]
+    drag_u_top = flux_u[0] / layer_mass[0]
+    drag_v_top = flux_v[0] / layer_mass[0]
     drag_u = jnp.concatenate([jnp.array([drag_u_top]), drag_u_int])
     drag_v = jnp.concatenate([jnp.array([drag_v_top]), drag_v_int])
 
-    # Below levbot, drag_u/drag_v stay at their initialised zero value.
-    below_launch = jnp.arange(nlev) > levbot
-    drag_u = jnp.where(below_launch, 0.0, drag_u)
-    drag_v = jnp.where(below_launch, 0.0, drag_v)
+    below_launch_mask = jnp.arange(nlev) > launch_idx
+    drag_u = jnp.where(below_launch_mask, 0.0, drag_u)
+    drag_v = jnp.where(below_launch_mask, 0.0, drag_v)
 
-    # --- Heating + diffusion (lines 1374-1424), if lheatcal --------------
-    visc = jnp.maximum(visc_mol, visc_min)
-    m_sub_m_turb = bvfreq / (f2 * jnp.maximum(sigma_t, 1e-30))
-    m_sub_m_mol = jnp.cbrt(bvfreq * kstar / visc) / f3
-    m_sub_m = jnp.minimum(m_sub_m_turb, m_sub_m_mol)
+    # --- Heating + diffusion (when enabled) ------------------------------
+    visc_full = jnp.maximum(mol_visc, visc_min)
+    cutoff_turb = bv_freq / (f_width * jnp.maximum(sigma_t, 1e-30))
+    cutoff_mol = jnp.cbrt(bv_freq * k_horiz / visc_full) / f_mol
+    cutoff_eff = jnp.minimum(cutoff_turb, cutoff_mol)
 
-    # dfdz at intermediate levels (line 1382). For lev1 (top), the Fortran
-    # uses ``mair(i,l)`` where ``l`` is the leftover loop variable from the
-    # prior ``DO l = lev1p, lev2`` loop. With gfortran's standard behaviour
-    # ``l = lev2 + lincr = levbot + 1`` after the loop ends, so the actual
-    # value is ``mair[levbot + 1]`` (1-based) = ``mair[levbot]`` (0-based,
-    # since 1-based indexing offset shifts by one too). ``m_sub_m`` and
-    # ``sigma_alpha`` ARE re-evaluated at lev1 (lines 1390-1393). We mirror
-    # the leftover-loop-variable bug bit-for-bit since it's part of the
-    # reference output.
-    factor = f1 * sigma_alpha + (bvfreq / jnp.maximum(m_sub_m, 1e-30))[:, None]
-    dfdz_int = (flux_per_az[:-1] - flux_per_az[1:]) / mair[1:, None] * factor[1:]
-    # In 0-based indexing, levbot is the launch level and levbot+1 is the
-    # next level down — same as the post-loop l value in 1-based Fortran.
-    dfdz_top = -flux_per_az[0] / mair[levbot + 1] * factor[0]
+    factor = f_amp * sigma_alpha + (
+        bv_freq / jnp.maximum(cutoff_eff, 1e-30))[:, None]
+    dfdz_int = ((flux_per_az[:-1] - flux_per_az[1:])
+                / layer_mass[1:, None] * factor[1:])
+    # Fortran-quirk: the top-level dfdz uses ``mair(i, l)`` where ``l`` is
+    # leftover from the prior loop and equals ``launch_idx + 1`` after gfortran
+    # increments the loop variable past lev2. We mirror the bug for bit-
+    # exactness. ``factor[0]`` (sigma_alpha[0], cutoff_eff[0]) IS recomputed
+    # at the top in the reference, so we use those values.
+    dfdz_top = -flux_per_az[0] / layer_mass[launch_idx + 1] * factor[0]
     dfdz = jnp.concatenate([dfdz_top[None, :], dfdz_int], axis=0)
 
-    heatng = -f5 * jnp.sum(dfdz, axis=-1)
-    heat = jnp.where(losigma_t, heatng, 0.0)
-    # Avoid NaN cube root for non-positive heatng.
-    safe_heat = jnp.maximum(heatng, 0.0)
+    heatng_raw = -f_heat * jnp.sum(dfdz, axis=-1)
+    heating = jnp.where(spectrum_alive, heatng_raw, 0.0)
+    safe_heating = jnp.maximum(heatng_raw, 0.0)
     diffco = jnp.where(
-        losigma_t & (heatng > 0.0),
-        f6 * jnp.cbrt(safe_heat) / jnp.maximum(m_sub_m, 1e-30) ** (4.0 / 3.0),
+        spectrum_alive & (heatng_raw > 0.0),
+        f_diff * jnp.cbrt(safe_heating)
+        / jnp.maximum(cutoff_eff, 1e-30) ** (4.0 / 3.0),
         0.0,
     )
-    # Apply lheatcal switch.
-    heat = jnp.where(config.lheatcal > 0.5, heat, 0.0)
-    diffco = jnp.where(config.lheatcal > 0.5, diffco, 0.0)
+    heating = jnp.where(config.compute_heating > 0.5, heating, 0.0)
+    diffco = jnp.where(config.compute_heating > 0.5, diffco, 0.0)
 
-    return drag_u, drag_v, heat, diffco, flux_u, flux_v
+    return drag_u, drag_v, heating, diffco, flux_u, flux_v
 
 
 def hines_gwd(
-    paphm1: jnp.ndarray,
-    papm1: jnp.ndarray,
-    pzh: jnp.ndarray,
-    prho: jnp.ndarray,
-    pmair: jnp.ndarray,
-    ptm1: jnp.ndarray,
-    pum1: jnp.ndarray,
-    pvm1: jnp.ndarray,
+    pressure_half: jnp.ndarray,
+    pressure_full: jnp.ndarray,
+    height_half: jnp.ndarray,
+    density: jnp.ndarray,
+    layer_mass: jnp.ndarray,
+    temperature: jnp.ndarray,
+    u_wind: jnp.ndarray,
+    v_wind: jnp.ndarray,
     config: HinesParameters,
     *,
-    emiss_lev: int = 10,
-    naz: int = 8,
-    nsmax: int = 5,
+    launch_level: int = 10,
+    num_azimuths: int = 8,
+    smoothing_passes: int = 5,
 ) -> Tuple[HinesTendencies, HinesState]:
-    """Compute Hines GWD tendencies for a single column.
+    """Compute Hines GWD tendencies for a single atmospheric column.
 
-    Mirrors the entry point ``gw_hines`` in ``mo_gw_hines.f90`` line 76. All
-    arrays use the ECHAM convention: index 0 = top, index ``nlev-1`` =
-    surface. ``paphm1`` and ``pzh`` are on half levels (length ``nlev+1``);
-    the rest are on full levels (length ``nlev``).
+    Args:
+        pressure_half: pressure on half levels (Pa), shape (nlev+1,).
+            Index 0 = top, index nlev = surface.
+        pressure_full: pressure on full levels (Pa), shape (nlev,).
+        height_half: half-level geopotential height above sea level
+            (m), shape (nlev+1,).
+        density: full-level air density (kg/m^3), shape (nlev,).
+        layer_mass: full-level air mass per unit area (kg/m^2), shape
+            (nlev,) — i.e. ``Δp / g``.
+        temperature: full-level temperature (K), shape (nlev,).
+        u_wind, v_wind: full-level zonal/meridional wind (m/s), shape
+            (nlev,).
+        config: tunable :class:`HinesParameters`.
+        launch_level: number of levels above the surface from which the
+            wave spectrum is launched (1-based count). Default 10.
+        num_azimuths: must be 8 (only branch implemented).
+        smoothing_passes: number of vertical-smoothing passes applied
+            to ``m_alpha`` and ``sigma_t`` before the flux calculation.
+            Default 5.
 
-    The ``emiss_lev``, ``naz``, ``nsmax`` arguments are *static* (loop
-    bounds and switch statements need them at trace time). Pass them as
-    Python ints; defaults match ``mo_gw_hines.f90``.
+    Returns:
+        ``(tendencies, state)`` — see :class:`HinesTendencies` and
+        :class:`HinesState` for field documentation.
     """
-    nlev = pum1.shape[0]
-    p_sfc = paphm1[-1]
+    nlev = u_wind.shape[0]
+    surface_pressure = pressure_half[-1]
 
-    bvfreq = _brunt_vaisala(ptm1, papm1, p_sfc)
+    bv_freq = _brunt_vaisala(temperature, pressure_full, surface_pressure)
 
-    # Fortran uses 1-based ``levbot = nlev - emiss_lev``; -1 for 0-based.
-    levbot = nlev - emiss_lev - 1
+    # The 1-based ``levbot = nlev - launch_level`` becomes
+    # ``nlev - launch_level - 1`` in 0-based indexing.
+    launch_idx = nlev - launch_level - 1
 
-    uhs = pum1 - pum1[levbot]
-    vhs = pvm1 - pvm1[levbot]
-    # Below the launch the wind difference is unused, but zero it out for
-    # clarity (mirrors the Fortran loop range jk=1..levbot for uhs/vhs).
-    below_launch = jnp.arange(nlev) > levbot
-    uhs = jnp.where(below_launch, 0.0, uhs)
-    vhs = jnp.where(below_launch, 0.0, vhs)
+    u_rel = u_wind - u_wind[launch_idx]
+    v_rel = v_wind - v_wind[launch_idx]
+    below_launch = jnp.arange(nlev) > launch_idx
+    u_rel = jnp.where(below_launch, 0.0, u_rel)
+    v_rel = jnp.where(below_launch, 0.0, v_rel)
 
-    rmswind = config.rmscon
-
-    drag_u, drag_v, heat, diffco, flux_u, flux_v = _hines_extro_column(
-        bvfreq, prho, pmair, uhs, vhs, rmswind, config,
-        levbot, naz, nsmax,
+    drag_u, drag_v, heating, diffco, flux_u, flux_v = _hines_extro_column(
+        bv_freq, density, layer_mass, u_rel, v_rel,
+        config.rms_launch_wind, config,
+        launch_idx, num_azimuths, smoothing_passes,
     )
 
     return (
-        HinesTendencies(dudt=drag_u, dvdt=drag_v, dissip=heat),
+        HinesTendencies(dudt=drag_u, dvdt=drag_v, dissip=heating),
         HinesState(flux_u=flux_u, flux_v=flux_v, diffco=diffco),
     )

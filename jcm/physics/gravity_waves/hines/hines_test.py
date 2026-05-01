@@ -42,10 +42,14 @@ def _make_column(nlev: int = 47, u_scale: float = 1.0,
     u = u_scale * 30.0 * np.exp(-((z - jet_z) / 6000.0) ** 2)
     v = v_scale * 5.0 * np.exp(-((z - jet_z) / 8000.0) ** 2)
     return dict(
-        paphm1=jnp.asarray(paphm1), papm1=jnp.asarray(papm1),
-        pzh=jnp.asarray(zh), prho=jnp.asarray(rho),
-        pmair=jnp.asarray(pmair), ptm1=jnp.asarray(Tprof),
-        pum1=jnp.asarray(u), pvm1=jnp.asarray(v),
+        pressure_half=jnp.asarray(paphm1),
+        pressure_full=jnp.asarray(papm1),
+        height_half=jnp.asarray(zh),
+        density=jnp.asarray(rho),
+        layer_mass=jnp.asarray(pmair),
+        temperature=jnp.asarray(Tprof),
+        u_wind=jnp.asarray(u),
+        v_wind=jnp.asarray(v),
     )
 
 
@@ -64,15 +68,16 @@ class TestHinesBasic:
         assert jnp.all(jnp.isfinite(state.flux_v))
 
     def test_tendencies_zero_below_launch(self):
-        """No drag is computed below the launch level (emiss_lev counts up
-        from the surface)."""
+        """No drag is computed below the launch level (launch_level counts
+        up from the surface)."""
         col = _make_column(nlev=47)
         config = HinesParameters.default()
-        tend, _ = hines_gwd(**col, config=config, emiss_lev=10)
-        levbot = 47 - 10 - 1
-        # emiss_lev=10 means the bottom 10 levels (indices 37..46) get no drag.
-        # The launch level itself (index 36) does get a flux-divergence drag.
-        below = jnp.arange(47) > levbot
+        tend, _ = hines_gwd(**col, config=config, launch_level=10)
+        launch_idx = 47 - 10 - 1
+        # launch_level=10 means the bottom 10 levels (indices 37..46) get no
+        # drag. The launch level itself (index 36) does get a flux-divergence
+        # drag.
+        below = jnp.arange(47) > launch_idx
         np.testing.assert_array_equal(np.asarray(tend.dudt[below]), 0.0)
         np.testing.assert_array_equal(np.asarray(tend.dvdt[below]), 0.0)
 
@@ -88,18 +93,18 @@ class TestHinesBasic:
         # negative-then-positive (pile-up at top). Most realistic columns
         # show a strong positive peak at the model top — at minimum the
         # absolute peak should not be at the launch level.
-        levbot = 47 - 10 - 1
-        peak_idx = int(jnp.argmax(jnp.abs(tend.dudt[:levbot + 1])))
-        assert peak_idx < levbot, "drag peak should be above the launch level"
+        launch_idx = 47 - 10 - 1
+        peak_idx = int(jnp.argmax(jnp.abs(tend.dudt[:launch_idx + 1])))
+        assert peak_idx < launch_idx, \
+            "drag peak should be above the launch level"
 
-    def test_drag_scales_with_rmscon(self):
+    def test_drag_scales_with_rms_launch_wind(self):
         """Doubling the launch RMS wind doubles the spectral amplitude →
-        ak_alpha (∝ rmscon^2 / m_alpha^2) scales, but with the m_alpha-
-        feedback the actual stress scales sub-linearly. Test that bigger
-        rmscon gives bigger column-integrated stress."""
+        with the m_alpha feedback the actual stress scales sub-linearly.
+        Test that a bigger launch wind gives stronger column drag."""
         col = _make_column()
-        cfg_a = HinesParameters.default(rmscon=0.5)
-        cfg_b = HinesParameters.default(rmscon=2.0)
+        cfg_a = HinesParameters.default(rms_launch_wind=0.5)
+        cfg_b = HinesParameters.default(rms_launch_wind=2.0)
         tend_a, _ = hines_gwd(**col, config=cfg_a)
         tend_b, _ = hines_gwd(**col, config=cfg_b)
         peak_a = float(jnp.max(jnp.abs(tend_a.dudt)))
@@ -122,19 +127,15 @@ class TestHinesJaxTransforms:
         col1 = _make_column(u_scale=1.0)
         col2 = _make_column(u_scale=2.0)
         col3 = _make_column(u_scale=-1.0)
-        # Stack along a new leading axis.
-        batch = {k: jnp.stack([col1[k], col2[k], col3[k]]) for k in col1}
+        keys = list(col1.keys())
+        batch = {k: jnp.stack([col1[k], col2[k], col3[k]]) for k in keys}
         config = HinesParameters.default()
 
-        def one(paphm1, papm1, pzh, prho, pmair, ptm1, pum1, pvm1):
-            t, _ = hines_gwd(paphm1, papm1, pzh, prho, pmair,
-                             ptm1, pum1, pvm1, config)
+        def one(*args):
+            t, _ = hines_gwd(*args, config=config)
             return t.dudt
 
-        batched = jax.vmap(one)
-        out = batched(batch["paphm1"], batch["papm1"], batch["pzh"],
-                      batch["prho"], batch["pmair"], batch["ptm1"],
-                      batch["pum1"], batch["pvm1"])
+        out = jax.vmap(one)(*[batch[k] for k in keys])
         assert out.shape == (3, 47)
         # Reversed-jet column should give reversed-sign u-tendency at top.
         # Tolerance is loose because the production default precision is f32;
@@ -148,34 +149,42 @@ class TestHinesJaxTransforms:
         config = HinesParameters.default()
 
         def loss(u):
-            t, _ = hines_gwd(col["paphm1"], col["papm1"], col["pzh"],
-                             col["prho"], col["pmair"], col["ptm1"],
-                             u, col["pvm1"], config)
+            t, _ = hines_gwd(
+                col["pressure_half"], col["pressure_full"],
+                col["height_half"], col["density"], col["layer_mass"],
+                col["temperature"], u, col["v_wind"], config,
+            )
             return jnp.sum(t.dudt ** 2)
 
-        g = jax.grad(loss)(col["pum1"])
-        assert g.shape == col["pum1"].shape
+        g = jax.grad(loss)(col["u_wind"])
+        assert g.shape == col["u_wind"].shape
         assert jnp.all(jnp.isfinite(g))
 
 
 class TestHinesParameters:
     """Parameters object behaves correctly."""
 
-    def test_defaults_match_fortran_module_constants(self):
-        """The tunable-knob defaults reproduce ``mo_gw_hines.f90`` /
-        ``mo_echam_gwd_config``. Static-loop knobs (naz, nsmax, emiss_lev,
-        slope, icutoff) are passed via :func:`hines_gwd` kwargs, not on the
-        parameters tree. Tolerance is loose (atol=1e-6) because the
-        production default is f32."""
+    def test_defaults_match_echam_namelist(self):
+        """The default tunable knobs reproduce ECHAM-A's namelist values.
+        Static loop knobs (launch_level, num_azimuths, smoothing_passes)
+        live as :func:`hines_gwd` kwargs. Tolerance is loose because the
+        project default precision is f32."""
         p = HinesParameters.default()
         for name, expected in [
-            ("f1", 1.5), ("f2", 0.3), ("f3", 1.0), ("f5", 1.0),
-            ("f6", 0.5), ("alt_cutoff", 105e3), ("smco", 2.0),
-            ("rmscon", 1.0), ("kstar", 5e-5), ("m_min", 1e-4),
+            ("wave_amplitude_factor", 1.5),
+            ("spectrum_width_factor", 0.3),
+            ("mol_diffusion_factor", 1.0),
+            ("heating_efficiency", 1.0),
+            ("diffusion_efficiency", 0.5),
+            ("cutoff_altitude", 105e3),
+            ("smoothing_coeff", 2.0),
+            ("rms_launch_wind", 1.0),
+            ("typical_horizontal_wavenumber", 5e-5),
+            ("min_vertical_wavenumber", 1e-4),
         ]:
             np.testing.assert_allclose(float(getattr(p, name)), expected,
                                        atol=1e-6, rtol=1e-6)
 
     def test_custom_overrides(self):
-        p = HinesParameters.default(rmscon=2.0)
-        assert abs(float(p.rmscon) - 2.0) < 1e-6
+        p = HinesParameters.default(rms_launch_wind=2.0)
+        assert abs(float(p.rms_launch_wind) - 2.0) < 1e-6

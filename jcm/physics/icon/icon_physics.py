@@ -1249,15 +1249,13 @@ def apply_simple_gwd(
     terrain: TerrainData,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply the simple monochromatic GWD scheme (cheap fallback)."""
+    diag = physics_data.diagnostics
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    height_levels = physics_data.diagnostics.height_full
-    air_density = physics_data.diagnostics.air_density
 
-    # Placeholder std-dev of sub-grid orography (200 m). Real SSO data
-    # plumbing lives in the SSO scheme below; the simple scheme keeps the
-    # historical fixed value.
+    # Placeholder std-dev of sub-grid orography (200 m). The simple
+    # scheme keeps a single fixed value; the real Lott-Miller SSO
+    # scheme uses the per-column ``terrain.orostd`` instead.
     h_std = jnp.ones(ncols) * 200.0
 
     tend, _state = jax.vmap(
@@ -1265,7 +1263,7 @@ def apply_simple_gwd(
         in_axes=(1, 1, 1, 1, 1, 1, 0, None, None),
         out_axes=(0, 0),
     )(state.u_wind, state.v_wind, state.temperature,
-      pressure_levels, height_levels, air_density,
+      diag.pressure_full, diag.height_full, diag.air_density,
       h_std, dt, parameters.simple_gwd)
 
     physics_tendencies = PhysicsTendency(
@@ -1287,25 +1285,21 @@ def apply_hines(
     terrain: TerrainData,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply the Hines (1997) doppler-spread spectral non-orographic GWD."""
-    cp_air = 1004.64  # cpd, matches mo_physical_constants
-    grav = 9.80665
-
-    paphm1 = physics_data.diagnostics.pressure_half          # (nlev+1, ncols)
-    papm1 = physics_data.diagnostics.pressure_full           # (nlev,   ncols)
-    pzh = physics_data.diagnostics.height_half               # (nlev+1, ncols)
-    prho = physics_data.diagnostics.air_density              # (nlev,   ncols)
-    # pmair = layer mass per unit area = -dp/g (top is index 0).
-    pmair = (paphm1[1:, :] - paphm1[:-1, :]) / grav
+    diag = physics_data.diagnostics
+    # Layer mass per unit area Δp / g, full-level array.
+    layer_mass = (diag.pressure_half[1:, :]
+                  - diag.pressure_half[:-1, :]) / physical_constants.grav
 
     tend, _state = jax.vmap(
         lambda *a: hines_gwd(*a, parameters.hines),
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1),
         out_axes=(0, 0),
-    )(paphm1, papm1, pzh, prho, pmair,
+    )(diag.pressure_half, diag.pressure_full, diag.height_half,
+      diag.air_density, layer_mass,
       state.temperature, state.u_wind, state.v_wind)
 
-    # Hines returns dissip in W/kg = J/(s*kg). Convert to dT/dt = dissip/cp.
-    dt_temperature = tend.dissip / cp_air
+    # Convert energy dissipation (W/kg) to a temperature tendency.
+    dt_temperature = tend.dissip / physical_constants.cpd
 
     physics_tendencies = PhysicsTendency(
         u_wind=tend.dudt.T,
@@ -1326,40 +1320,29 @@ def apply_sso(
     terrain: TerrainData,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Apply the Lott-Miller (1997) sub-grid orographic GW drag."""
-    cp_air = 1004.64
-    grav = 9.80665
-    dt = parameters.convection.dt_conv
-
+    diag = physics_data.diagnostics
     nlev, ncols = state.temperature.shape
-    paphm1 = physics_data.diagnostics.pressure_half
-    papm1 = physics_data.diagnostics.pressure_full
-    pzf = physics_data.diagnostics.height_full
-    pmair = (paphm1[1:, :] - paphm1[:-1, :]) / grav
+    dt = parameters.convection.dt_conv
+    layer_mass = (diag.pressure_half[1:, :]
+                  - diag.pressure_half[:-1, :]) / physical_constants.grav
 
-    # SSO descriptors come from the terrain boundary data. Real preprocessed
-    # values from a high-resolution topography product are preferred; when
-    # only mean orography is available, ``derive_sso_descriptors`` in
-    # ``terrain.py`` generates physically-sensible placeholders.
-    pzs = terrain.orog.reshape(-1)
-    pmea = pzs
-    pstd = terrain.orostd.reshape(-1)
-    psig = terrain.orosig.reshape(-1)
-    pgam = terrain.orogam.reshape(-1)
-    pthe = terrain.orothe.reshape(-1)
-    ppic = terrain.oropic.reshape(-1)
-    pval = terrain.oroval.reshape(-1)
-    psftlf = terrain.fmask.reshape(-1)
-    # Coriolis is only used by the (unported) mountain-lift branch.
-    pcoriol = jnp.zeros((ncols,))
+    # Coriolis is only read by the (unported) mountain-lift branch.
+    coriolis = jnp.zeros((ncols,))
 
-    def _sso_one_col(papm_, paphm_, pmair_, ptm_, pum_, pvm_, pzf_, pzs_,
-                     pmea_, pstd_, psig_, pgam_, pthe_, ppic_, pval_,
-                     pcoriol_, psftlf_):
+    def _sso_one_col(pressure_full, pressure_half, layer_mass_col,
+                     temperature, u_wind, v_wind, height_full,
+                     surface_height, mean_orography, orography_std,
+                     orography_slope, orography_anisotropy,
+                     orography_orientation, peak_elevation,
+                     valley_elevation, coriolis_col, land_fraction):
         return sso_drag(
-            jnp.asarray(dt), pcoriol_, pzf_, pzs_,
-            paphm_, papm_, pmair_, ptm_, pum_, pvm_,
-            pmea_, pstd_, psig_, pgam_, pthe_, ppic_, pval_,
-            psftlf_, parameters.sso,
+            jnp.asarray(dt), coriolis_col, height_full, surface_height,
+            pressure_half, pressure_full, layer_mass_col,
+            temperature, u_wind, v_wind,
+            mean_orography, orography_std, orography_slope,
+            orography_anisotropy, orography_orientation,
+            peak_elevation, valley_elevation,
+            land_fraction, parameters.sso,
             nktopg=1, ntop=1,
         )
 
@@ -1367,10 +1350,15 @@ def apply_sso(
         _sso_one_col,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         out_axes=(0, 0),
-    )(papm1, paphm1, pmair, state.temperature, state.u_wind, state.v_wind,
-      pzf, pzs, pmea, pstd, psig, pgam, pthe, ppic, pval, pcoriol, psftlf)
+    )(diag.pressure_full, diag.pressure_half, layer_mass,
+      state.temperature, state.u_wind, state.v_wind, diag.height_full,
+      terrain.orog.reshape(-1), terrain.orog.reshape(-1),
+      terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
+      terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
+      terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
+      coriolis, terrain.fmask.reshape(-1))
 
-    dt_temperature = tend.dissip / cp_air
+    dt_temperature = tend.dissip / physical_constants.cpd
 
     physics_tendencies = PhysicsTendency(
         u_wind=tend.dudt.T,

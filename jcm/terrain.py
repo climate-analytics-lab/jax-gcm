@@ -28,19 +28,21 @@ from jcm.utils import VALID_NODAL_SHAPES, VALID_TRUNCATIONS, validate_ds, spectr
 #
 # These come from a high-resolution topography product (GMTED2010 or similar)
 # processed onto the model grid by an offline orography preprocessor. When
-# real preprocessed data is not available, :func:`derive_sso_descriptors`
-# generates physically-sensible defaults from the mean orography alone
-# (intended as a placeholder until the user supplies a real SSO dataset).
+# real preprocessed data is not available, two fallbacks live in this
+# module: :func:`derive_sso_descriptors` computes the Baines-Palmer
+# statistics from a high-resolution orography array per target cell, and
+# :func:`get_simplified_sso_descriptors` generates rough defaults from
+# only the mean orography on the target grid.
 
 
-def derive_sso_descriptors(orog: jnp.ndarray) -> dict:
+def get_simplified_sso_descriptors(orog: jnp.ndarray) -> dict:
     """Generate placeholder SSO descriptors from the mean orography field.
 
     These are *educated guesses*, not real preprocessed values. The intent
-    is to give the Lott-Miller scheme reasonable inputs over land
-    (so the column-stable testing works and the scheme exercises its full
-    code path) while letting the activation gate (``ppic-pmea > gpicmea``
-    AND ``pstd > gstd``) automatically disable the scheme over ocean
+    is to give the Lott-Miller scheme reasonable inputs over land (so the
+    scheme exercises its full code path during testing) while letting the
+    activation gate (``ppic-pmea > min_peak_minus_mean_elevation`` AND
+    ``pstd > min_orog_std``) automatically disable the scheme over ocean
     (``orog == 0``).
 
     Heuristic:
@@ -54,9 +56,9 @@ def derive_sso_descriptors(orog: jnp.ndarray) -> dict:
     - ``oropic = orog + 2 * orostd`` (~2σ above mean)
     - ``oroval = max(0, orog - 2 * orostd)`` (~2σ below mean, clamped at 0)
 
-    Replace this with real preprocessed SSO data once available — pass the
-    fields directly to :meth:`TerrainData.from_coords` or load them from a
-    terrain file.
+    Use :func:`derive_sso_descriptors` instead when high-resolution
+    orography data is available — it computes the Baines-Palmer
+    statistics properly per target cell.
     """
     has_orog = orog > 1.0
     orostd = jnp.where(has_orog, 0.25 * orog, 0.0)
@@ -67,6 +69,128 @@ def derive_sso_descriptors(orog: jnp.ndarray) -> dict:
     oroval = jnp.where(has_orog, jnp.maximum(orog - 2.0 * orostd, 0.0), 0.0)
     return dict(orostd=orostd, orosig=orosig, orogam=orogam, orothe=orothe,
                 oropic=oropic, oroval=oroval)
+
+
+def derive_sso_descriptors(
+    highres_orog: jnp.ndarray,
+    highres_lat: jnp.ndarray,
+    highres_lon: jnp.ndarray,
+    target_lat: jnp.ndarray,
+    target_lon: jnp.ndarray,
+) -> dict:
+    """Compute SSO descriptors per target grid cell from high-res orography.
+
+    Implements the Baines & Palmer (1990) preprocessing: for each
+    coarse target cell, gather all high-resolution orography points
+    that fall inside it and compute the six sub-grid statistics needed
+    by the Lott-Miller drag scheme.
+
+    For each target cell:
+
+    - ``orostd`` — standard deviation of high-res elevation in the cell
+    - ``oropic`` — characteristic peak (max elevation in the cell)
+    - ``oroval`` — characteristic valley (min elevation in the cell)
+    - ``orosig`` — RMS slope ``sqrt(mean(K + L))`` from the high-res
+      gradient field, where ``K = mean((dH/dx)^2)`` and
+      ``L = mean((dH/dy)^2)``
+    - ``orogam`` — gradient-tensor anisotropy
+      ``λ_minus / λ_plus``, where ``λ_±`` are the eigenvalues of the
+      symmetric tensor ``[[K, M], [M, L]]`` with ``M = mean(dH/dx · dH/dy)``
+    - ``orothe`` — orientation of the principal axis (degrees from east),
+      ``0.5 * atan2(2*M, K-L)``
+
+    Args:
+        highres_orog: high-resolution orography, shape ``(nx_hr, ny_hr)``
+            with the lat axis last (matches the convention of the t30
+            terrain file). Units: metres above sea level.
+        highres_lat: high-resolution latitudes (degrees), shape
+            ``(ny_hr,)``.
+        highres_lon: high-resolution longitudes (degrees), shape
+            ``(nx_hr,)``.
+        target_lat: target-grid latitudes (degrees), shape ``(ny,)``.
+        target_lon: target-grid longitudes (degrees), shape ``(nx,)``.
+
+    Returns:
+        dict with the six SSO descriptor arrays, each of shape
+        ``(nx, ny)`` matching the target grid.
+    """
+    import numpy as np
+    H = np.asarray(highres_orog)
+    hr_lat = np.asarray(highres_lat)
+    hr_lon = np.asarray(highres_lon)
+    tg_lat = np.asarray(target_lat)
+    tg_lon = np.asarray(target_lon)
+
+    # Build target-cell edges by bisecting between adjacent centres.
+    def _edges(centres):
+        midpoints = 0.5 * (centres[1:] + centres[:-1])
+        return np.concatenate([
+            [centres[0] - 0.5 * (centres[1] - centres[0])],
+            midpoints,
+            [centres[-1] + 0.5 * (centres[-1] - centres[-2])],
+        ])
+
+    lat_edges = _edges(tg_lat)
+    lon_edges = _edges(tg_lon)
+
+    # Assign each high-res point to a target cell (-1 = outside grid).
+    lat_bin = np.searchsorted(lat_edges, hr_lat, side="right") - 1
+    lon_bin = np.searchsorted(lon_edges, hr_lon, side="right") - 1
+    lat_bin = np.where((lat_bin < 0) | (lat_bin >= len(tg_lat)),
+                       -1, lat_bin)
+    lon_bin = np.where((lon_bin < 0) | (lon_bin >= len(tg_lon)),
+                       -1, lon_bin)
+
+    # High-res gradient field. dh/dx in m/m using metres-per-degree at
+    # the equator divided by cos(lat). H is shaped (nx_lon, ny_lat).
+    R_earth = 6.371e6
+    deg_to_m = R_earth * np.pi / 180.0
+    dH_dlon, dH_dlat = np.gradient(H, hr_lon, hr_lat)
+    cos_lat = np.cos(np.deg2rad(hr_lat))[None, :]
+    dH_dy = dH_dlat / deg_to_m
+    dH_dx = dH_dlon / (deg_to_m * np.maximum(cos_lat, 1e-3))
+
+    nx, ny = len(tg_lon), len(tg_lat)
+    orostd = np.zeros((nx, ny))
+    oropic = np.zeros((nx, ny))
+    oroval = np.zeros((nx, ny))
+    orosig = np.zeros((nx, ny))
+    orogam = np.zeros((nx, ny))
+    orothe = np.zeros((nx, ny))
+
+    for j in range(ny):
+        in_lat = lat_bin == j
+        if not in_lat.any():
+            continue
+        for i in range(nx):
+            mask = in_lat[None, :] & (lon_bin == i)[:, None]
+            if not mask.any():
+                continue
+            elev = H[mask]
+            orostd[i, j] = float(np.std(elev))
+            oropic[i, j] = float(np.max(elev))
+            oroval[i, j] = float(np.min(elev))
+
+            gx = dH_dx[mask]
+            gy = dH_dy[mask]
+            K = float(np.mean(gx * gx))
+            L = float(np.mean(gy * gy))
+            M = float(np.mean(gx * gy))
+            orosig[i, j] = float(np.sqrt(max(K + L, 0.0)))
+            disc = np.sqrt(max(0.25 * (K - L) ** 2 + M * M, 0.0))
+            lam_plus = 0.5 * (K + L) + disc
+            lam_minus = 0.5 * (K + L) - disc
+            orogam[i, j] = float(lam_minus / lam_plus) if lam_plus > 1e-30 else 0.0
+            orothe[i, j] = float(0.5 * np.degrees(np.arctan2(2.0 * M, K - L)))
+
+    # Clip to physically-meaningful ranges.
+    orogam = np.clip(orogam, 0.0, 1.0)
+
+    return dict(
+        orostd=jnp.asarray(orostd), orosig=jnp.asarray(orosig),
+        orogam=jnp.asarray(orogam), orothe=jnp.asarray(orothe),
+        oropic=jnp.asarray(oropic), oroval=jnp.asarray(oroval),
+    )
 
 
 def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_shape=None,
@@ -161,8 +285,8 @@ class TerrainData:
     The six ``oro*`` fields drive the Lott & Miller (1997) sub-grid
     orographic gravity-wave drag scheme. They normally come from an
     offline preprocessing of high-resolution topography (GMTED2010 etc.);
-    when only the mean orography is available, :func:`derive_sso_descriptors`
-    generates placeholder values.
+    when only the mean orography is available,
+    :func:`get_simplified_sso_descriptors` generates placeholder values.
 
     """
 
@@ -211,7 +335,7 @@ class TerrainData:
             orostd, orosig, orogam, orothe, oropic, oroval (optional): SSO
                 descriptor arrays, shape (ix, il). If any is provided all
                 six should be; missing ones are derived by
-                :func:`derive_sso_descriptors`. If none provided and
+                :func:`get_simplified_sso_descriptors`. If none provided and
                 ``terrain_file`` includes them, those are used; otherwise
                 all six are derived from the mean orography.
 
@@ -248,7 +372,7 @@ class TerrainData:
 
         sso_from_file = (_load_sso_from_file(terrain_file)
                          if terrain_file is not None else None)
-        sso_derived = derive_sso_descriptors(orog)
+        sso_derived = get_simplified_sso_descriptors(orog)
 
         sso = dict(sso_derived)
         if sso_from_file is not None:
@@ -260,35 +384,71 @@ class TerrainData:
 
     @classmethod
     def from_file(cls, terrain_file, coords: CoordinateSystem, lfluxland=True):
-        """Initialize TerrainData from a given terrain file containing orog and lsm.
+        """Initialize TerrainData from a terrain file containing orog and lsm.
 
-        SSO descriptor fields (``orostd``, ``orosig``, ``orogam``, ``orothe``,
-        ``oropic``, ``oroval``) are read from the file if all are present;
-        otherwise they are derived from the mean orography via
-        :func:`derive_sso_descriptors`.
+        SSO descriptor handling, in order of precedence:
+
+        1. If the file contains all six SSO fields (``orostd``,
+           ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval``),
+           those are loaded directly.
+        2. Else, if the file's orography is at higher resolution than
+           the target grid, the descriptors are derived from the
+           high-resolution orography using :func:`derive_sso_descriptors`
+           (Baines-Palmer statistics per target cell).
+        3. Otherwise the simplified heuristic
+           :func:`get_simplified_sso_descriptors` is applied to the mean
+           orography on the target grid.
 
         Args:
-            terrain_file: Path to a file containing a dataset of orog (orography) and lsm (land-sea mask).
+            terrain_file: Path to a file containing ``orog`` (orography)
+                and ``lsm`` (land-sea mask). May optionally contain the
+                six SSO descriptor fields.
             coords: dinosaur.coordinate_systems.CoordinateSystem object.
-            lfluxland (optional): Whether to compute land surface fluxes (default True).
+            lfluxland: Whether to compute land surface fluxes
+                (default True).
 
         Returns:
-            TerrainData object
+            TerrainData object.
 
         """
-        orography, fmask = get_terrain(terrain_file=terrain_file, grid=coords.horizontal)
+        import xarray as xr
+        target_grid = coords.horizontal
+        target_shape = target_grid.nodal_shape
 
-        # Validate that terrain matches coords
-        if orography.shape != coords.horizontal.nodal_shape:
-            raise ValueError(
-                f"Terrain shape {orography.shape} does not match coords horizontal shape {coords.horizontal.nodal_shape}"
+        # Read raw orography first to inspect its source resolution.
+        with xr.open_dataset(terrain_file) as raw_ds:
+            src_lat_n = raw_ds.sizes.get("lat", 0)
+            src_lon_n = raw_ds.sizes.get("lon", 0)
+            src_lat = jnp.asarray(raw_ds["lat"].values)
+            src_lon = jnp.asarray(raw_ds["lon"].values)
+            src_orog = jnp.asarray(raw_ds["orog"].values)
+            src_has_sso = all(
+                name in raw_ds for name in
+                ("orostd", "orosig", "orogam", "orothe", "oropic", "oroval")
             )
 
+        # Load + interpolate orog/lsm onto the target grid (existing path).
+        orography, fmask = get_terrain(terrain_file=terrain_file, grid=target_grid)
+        if orography.shape != target_shape:
+            raise ValueError(
+                f"Terrain shape {orography.shape} does not match coords "
+                f"horizontal shape {target_shape}"
+            )
         phi0 = grav * orography
-        phis0 = spectral_truncation(coords.horizontal, phi0)
+        phis0 = spectral_truncation(target_grid, phi0)
 
-        sso_from_file = _load_sso_from_file(terrain_file)
-        sso = sso_from_file if sso_from_file is not None else derive_sso_descriptors(orography)
+        # Pick the best available SSO source.
+        if src_has_sso:
+            sso = _load_sso_from_file(terrain_file)
+        elif src_lat_n > target_shape[1] and src_lon_n > target_shape[0]:
+            target_lat_deg = target_grid.latitudes * 180.0 / jnp.pi
+            target_lon_deg = target_grid.longitudes * 180.0 / jnp.pi
+            sso = derive_sso_descriptors(
+                src_orog, src_lat, src_lon,
+                target_lat_deg, target_lon_deg,
+            )
+        else:
+            sso = get_simplified_sso_descriptors(orography)
 
         return cls(orog=orography, phis0=phis0, fmask=fmask,
                    lfluxland=jnp.bool_(lfluxland), **sso)
@@ -324,7 +484,7 @@ class TerrainData:
         """Initialize a TerrainData instance for a single column model.
 
         Any SSO descriptor not explicitly provided is derived from
-        ``orog`` via :func:`derive_sso_descriptors`.
+        ``orog`` via :func:`get_simplified_sso_descriptors`.
 
         Args:
             orog (optional): Orography height in meters (default 0).
@@ -343,7 +503,7 @@ class TerrainData:
             phis0 = grav * orog
 
         orog_arr = jnp.array([[orog]])
-        sso_derived = derive_sso_descriptors(orog_arr)
+        sso_derived = get_simplified_sso_descriptors(orog_arr)
         def _pick(name, value):
             if value is None:
                 return sso_derived[name]

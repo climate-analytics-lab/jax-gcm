@@ -1,37 +1,83 @@
-"""Lott & Miller (1997) + Lott (1999) sub-grid orographic GW drag.
+"""Lott & Miller (1997) sub-grid orographic gravity-wave drag.
 
-Faithful JAX port of ECHAM ``mo_ssodrag.f90`` (atm_phy_echam version,
-1564 lines). References:
+Algorithm (column-mode, executed at each grid column):
 
-- Lott & Miller (1997) QJRMS 123: 101-127 (anisotropic hill drag,
-  blocked flow)
-- Lott (1999) MWR 127: 788-801 (blocking-depth refinement)
+1. **Activation gate.** A column is processed only if its sub-grid
+   orography is large enough — both the peak-minus-mean elevation
+   and the orographic standard deviation must exceed the user-supplied
+   thresholds (``min_peak_minus_mean_elevation`` and ``min_orog_std``).
+   Inactive columns return zero tendencies.
 
-The port targets the production-default control flow:
+2. **Mean low-level flow & geometry** (the ``_orosetup`` helper).
+   Build mass-weighted mean wind and Brunt-Vaisala stratification over
+   a layer running from the surface up to the level that "sees" the
+   mountain peaks. Project the flow onto the orography's principal
+   axis using its anisotropy and orientation angle to obtain a single
+   ``pvph`` magnitude per column. Locate three vertically-stacked
+   levels:
 
-- ``gkdrag = 0.2``  wave drag enabled
-- ``gkwake = 1.0``  blocked-flow wake drag enabled
-- ``gklift = 0.0``  mountain-lift branch DISABLED (skipped entirely)
-- ``nktopg = 1``  top level for orography effects
-- ``ntop   = 1``  top level for stress profile
+   - ``kkenvh`` — top of the blocked-flow layer, where the cumulative
+     non-dim mountain height (Froude integral) crosses ``gfrcrit``
+     going up. Below this level the flow goes around (not over) the
+     mountain.
+   - ``kkcrith`` — top of the low-level wave-trapping layer, where
+     the cumulative wave-action integral crosses pi/2.
+   - ``kcrit`` — critical level above which the projected wind drops
+     below a small floor.
 
-The mountain-lift branch (``orolift``) is NOT ported because the default
-ECHAM config disables it. It can be added later if a non-zero ``gklift``
-becomes interesting.
+3. **Surface gravity-wave stress** (the ``_gwstress`` helper).
+   Stress at the surface follows Phillips (1979) for flow over an
+   anisotropic ellipse, scaled by ``wave_drag_coeff`` and reduced by
+   the effective mountain height (``ppic - pval`` capped at
+   ``gfrcrit · pvph / N``).
 
-Subroutine map (Fortran → JAX):
+4. **Vertical stress profile + wave breaking** (the ``_gwprofil``
+   helper). Below ``kkcrith`` stress is constant (linear-in-pressure
+   between ``ptau0`` at the surface and ``grahilo·ptau0`` at
+   ``kkcrith``). Above ``kkcrith`` a saturation criterion based on the
+   wave Richardson number caps stress to keep the wave amplitude
+   below the breaking threshold; once stress drops below the noise
+   floor or hits the critical level it is zeroed all the way up.
 
-- ``ssodrag``   → :func:`sso_drag` (entry)
-- ``orodrag``   → ``_orodrag`` (driver: setup + stress + profile + tendencies)
-- ``orosetup``  → ``_orosetup`` (geometry, mean low-level flow, blocking)
-- ``gwstress``  → ``_gwstress`` (surface stress)
-- ``gwprofil``  → ``_gwprofil`` (vertical stress profile + saturation)
-- ``orolift``   → not ported (gklift=0 in production)
+5. **Tendencies** (the top-level ``_orodrag``). Wave-drag tendency is
+   the negative vertical divergence of stress in the principal-axis
+   plane, projected back to (u, v). Below ``kkenvh`` the wave drag is
+   replaced by **blocked-flow drag**: form drag from each layer of
+   blocked air being deflected around the obstacle, scaled by
+   ``blocked_flow_drag_coeff``. An overshoot guard caps any
+   tendency at 25% of the local KE per timestep, and a final
+   KE-conservation correction rescales tendencies if the resulting
+   flow gains energy (numerical artefact).
 
-The half-level/full-level convention follows the Fortran: half levels run
-``[0..nlev]`` (length ``nlev+1``); full levels run ``[0..nlev-1]`` (length
-``nlev``). Index 0 = top, index ``nlev`` = surface (half) or
-``nlev-1`` = lowest full level.
+**Implementation choices and gaps:**
+
+- The mountain-lift branch (``orolift`` in the ECHAM source, controlled
+  by ``mountain_lift_coeff``) is **not** implemented. It is disabled by
+  default in production ECHAM-A configurations (``gklift = 0``) and is
+  the only piece of the original scheme intentionally omitted here.
+  Setting ``mountain_lift_coeff`` to non-zero is currently a no-op; if
+  a non-default lift is needed in the future, port the ``orolift``
+  routine alongside the existing helpers.
+
+- The vertical-grid convention follows the convention used elsewhere
+  in JCM: half levels are length ``nlev+1`` indexed top-to-bottom
+  (``[0..nlev]``); full levels are length ``nlev`` (``[0..nlev-1]``).
+  Index 0 = top of the model, index ``nlev`` = surface half level.
+
+- A few internal level-index quantities (``nktopg`` for the top-most
+  level orography may "see"; ``ntop`` for the stress-profile model
+  top) are passed as Python integer kwargs to :func:`sso_drag` rather
+  than living on the parameters tree, because they index into level
+  arrays and must be static at JIT trace time.
+
+- The seven sub-grid orography descriptors required by the scheme
+  (mean elevation, std-dev, slope, anisotropy, orientation, peak,
+  valley) are normally produced by an offline preprocessor from a
+  high-resolution DEM. JCM derives them on the fly from mean
+  orography via :func:`jcm.terrain.derive_sso_descriptors` (Baines-
+  Palmer statistics) or :func:`jcm.terrain.get_simplified_sso_descriptors`
+  (rough heuristic from mean orography only) when real preprocessed
+  data is not available.
 """
 from typing import NamedTuple, Tuple
 
@@ -40,52 +86,70 @@ import jax.numpy as jnp
 from jax import lax
 import tree_math
 
-# ICON physical constants (mo_physical_constants.f90)
-_GRAV = 9.80665
-_RD = 287.04
-_CPD = 1004.64
-_PI = 3.141592653589793
+from jcm.constants import grav, rd, cpd
 
-# Module-level PARAMETER constants from mo_echam_sso_config.
-_GFRCRIT = 0.5     # critical non-dim mountain height
-_GRCRIT = 0.25     # critical Richardson number
-_GRAHILO = 1.0     # trapped-wave fraction
-_GSIGCR = 0.80     # min blocked-flow depth
-_GSSEC = 1.0e-4    # min low-level B-V freq
-_GTSEC = 1.0e-5    # min anisotropy / GW stress
-_GVSEC = 0.10      # min ulow
+# Tunable thresholds taken straight from the ECHAM ``mo_echam_sso_config``
+# PARAMETER block. They protect the algorithm from degenerate inputs
+# (zero stratification, near-singular anisotropy, etc.) and set the
+# critical Froude/Richardson numbers used by the saturation criterion.
+_CRITICAL_FROUDE = 0.5      # critical non-dim mountain height (gfrcrit)
+_CRITICAL_RICHARDSON = 0.25  # critical Richardson number (grcrit)
+_TRAPPED_WAVE_FRAC = 1.0    # fraction of stress trapped at low levels (grahilo)
+_MIN_BLOCKED_DEPTH = 0.80   # security floor on blocked-flow depth (gsigcr)
+_MIN_BV_FREQ = 1.0e-4       # security floor on B-V frequency (gssec)
+_MIN_ANISOTROPY = 1.0e-5    # security floor on anisotropy / stress (gtsec)
+_MIN_LOW_LEVEL_WIND = 0.10  # security floor on low-level wind (gvsec)
 
 
 @tree_math.struct
 class SSOParameters:
     """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
 
-    Static knobs (``nktopg``, ``ntop``) are passed as Python kwargs to
-    :func:`sso_drag` because they index into level arrays and need to be
-    static at JIT trace time.
+    Static loop / level-index knobs (``nktopg`` for the top model level
+    that orography may "see"; ``ntop`` for the stress-profile model
+    top) are passed as Python kwargs to :func:`sso_drag` because they
+    index into level arrays at JIT trace time.
+
+    Attributes:
+        min_peak_minus_mean_elevation: Activation threshold (m). The
+            scheme is inactive in any column where ``peak_elevation -
+            mean_orography`` does not exceed this value. Default 1.0.
+        min_orog_std: Activation threshold (m) on the sub-grid
+            orography standard deviation. The scheme is inactive in
+            any column where ``orography_std`` does not exceed this
+            value. Default 1.0.
+        wave_drag_coeff: Coefficient on the wave-drag branch
+            (``gkdrag`` in the ECHAM source). Default 0.2.
+        blocked_flow_drag_coeff: Coefficient on the low-level
+            blocked-flow form-drag branch (``gkwake``). Default 1.0.
+        mountain_lift_coeff: Coefficient on the mountain-lift branch
+            (``gklift``). The lift branch is **not** ported in this
+            scheme; setting this to non-zero is currently a no-op.
+            Default 0.0.
+
     """
 
-    gpicmea: jnp.ndarray
-    gstd: jnp.ndarray
-    gkdrag: jnp.ndarray
-    gkwake: jnp.ndarray
-    gklift: jnp.ndarray
+    min_peak_minus_mean_elevation: jnp.ndarray
+    min_orog_std: jnp.ndarray
+    wave_drag_coeff: jnp.ndarray
+    blocked_flow_drag_coeff: jnp.ndarray
+    mountain_lift_coeff: jnp.ndarray
 
     @classmethod
     def default(
         cls,
-        gpicmea: float = 1.0,
-        gstd: float = 1.0,
-        gkdrag: float = 0.2,
-        gkwake: float = 1.0,
-        gklift: float = 0.0,
+        min_peak_minus_mean_elevation: float = 1.0,
+        min_orog_std: float = 1.0,
+        wave_drag_coeff: float = 0.2,
+        blocked_flow_drag_coeff: float = 1.0,
+        mountain_lift_coeff: float = 0.0,
     ) -> "SSOParameters":
         return cls(
-            gpicmea=jnp.asarray(gpicmea),
-            gstd=jnp.asarray(gstd),
-            gkdrag=jnp.asarray(gkdrag),
-            gkwake=jnp.asarray(gkwake),
-            gklift=jnp.asarray(gklift),
+            min_peak_minus_mean_elevation=jnp.asarray(min_peak_minus_mean_elevation),
+            min_orog_std=jnp.asarray(min_orog_std),
+            wave_drag_coeff=jnp.asarray(wave_drag_coeff),
+            blocked_flow_drag_coeff=jnp.asarray(blocked_flow_drag_coeff),
+            mountain_lift_coeff=jnp.asarray(mountain_lift_coeff),
         )
 
 
@@ -110,33 +174,74 @@ class SSOTendencies(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def _orosetup(
-    paphm1: jnp.ndarray,    # (nlev+1,) half pressure
-    papm1: jnp.ndarray,     # (nlev,)   full pressure
-    pmair: jnp.ndarray,     # (nlev,)   air mass
-    pum1: jnp.ndarray,      # (nlev,)
-    pvm1: jnp.ndarray,      # (nlev,)
-    ptm1: jnp.ndarray,      # (nlev,)
-    phgeo: jnp.ndarray,     # (nlev,)   height above surface
-    pmea: jnp.ndarray,      # scalar
-    ppic: jnp.ndarray,      # scalar
-    pval: jnp.ndarray,      # scalar
-    ptheta: jnp.ndarray,    # scalar (degrees)
-    pgam: jnp.ndarray,      # scalar
+    pressure_half: jnp.ndarray,           # (nlev+1,)
+    pressure_full: jnp.ndarray,           # (nlev,)
+    layer_mass: jnp.ndarray,              # (nlev,)
+    u_wind: jnp.ndarray,                  # (nlev,)
+    v_wind: jnp.ndarray,                  # (nlev,)
+    temperature: jnp.ndarray,             # (nlev,)
+    height_above_ground: jnp.ndarray,     # (nlev,)
+    mean_orography: jnp.ndarray,          # scalar
+    peak_elevation: jnp.ndarray,          # scalar
+    valley_elevation: jnp.ndarray,        # scalar
+    orography_orientation: jnp.ndarray,   # scalar (degrees)
+    orography_anisotropy: jnp.ndarray,    # scalar
     nktopg: int,
 ):
-    """Set up orographic geometry and low-level flow.
+    """Build the geometric / mean-flow inputs needed for the SSO scheme.
 
-    Returns a dict of intermediate quantities used by ``_gwstress``,
-    ``_gwprofil``, and ``_orodrag``.
+    For one column this routine:
+    1. Identifies the three special vertical levels:
+       - ``layer_seeing_peaks`` — first layer above ground whose
+         geopotential height exceeds the peak-to-valley range.
+       - ``layer_above_mean`` — first layer above the mean orography.
+       - ``layer_above_mean_above_valleys`` — first layer above
+         ``min(peak−mean, mean−valley)``.
+    2. Computes the half-level density and Brunt-Vaisala frequency
+       between adjacent full levels.
+    3. Forms a mass-weighted mean of u, v, density and stratification
+       over the layer running from the surface up to
+       ``layer_seeing_peaks_above_mean``.
+    4. Builds the wave-stress orientation factors (``pd1``, ``pd2``,
+       ``pdmod``) from the orography anisotropy and the angle between
+       the low-level mean wind and the orographic principal axis.
+    5. Projects the full-column wind onto the wave-stress plane,
+       interpolates onto half levels, and computes the per-half-level
+       Richardson number.
+    6. Locates ``kkenvh`` (top of the blocked-flow layer) by integrating
+       N/U upward and finding where it first exceeds the critical
+       Froude number.
+    7. Locates ``kkcrith`` (top of the wave-trapping low-level layer)
+       similarly using a pi/2 threshold.
+    8. Computes ``pzdep`` (the per-layer "leakiness" factor used by the
+       blocked-flow drag).
 
-    Index convention: 0-based, top=0. Fortran's ``klev+1`` (surface half
-    level) maps to index ``nlev`` in 0-based half-level arrays.
+    Returns a dict packing all of the above for later use by
+    ``_gwstress``, ``_gwprofil`` and ``_orodrag``.
+
+    All half-level arrays have length nlev+1 indexed 0=top, nlev=surface;
+    full-level arrays have length nlev.
     """
+    # Local aliases keep the literal port readable below — the original
+    # 8-character Fortran names are still used internally for parts of
+    # the algorithm that mirror the source line-for-line.
+    paphm1 = pressure_half
+    papm1 = pressure_full
+    pmair = layer_mass
+    pum1 = u_wind
+    pvm1 = v_wind
+    ptm1 = temperature
+    phgeo = height_above_ground
+    pmea = mean_orography
+    ppic = peak_elevation
+    pval = valley_elevation
+    ptheta = orography_orientation
+    pgam = orography_anisotropy
     nlev = pum1.shape[0]
     ilevh = nlev // 3   # Fortran's ilevh = klev/3 (integer divide)
 
     # Anisotropy guard (line 647)
-    pgam_safe = jnp.maximum(pgam, _GTSEC)
+    pgam_safe = jnp.maximum(pgam, _MIN_ANISOTROPY)
 
     # ----- Determine levels kknu, kknu2, kknub via 3 separate sweeps -------
     # Fortran scans jk = klev .. ilevh (downward). We work 0-based with
@@ -202,12 +307,12 @@ def _orosetup(
     # loop — they are handled separately (initialised to 0 / 9999, etc.).
     h_idx = jnp.arange(1, nlev)
     zdp_half = papm1[h_idx] - papm1[h_idx - 1]         # (nlev-1,)
-    rho_half = (2.0 * paphm1[h_idx] / _RD
+    rho_half = (2.0 * paphm1[h_idx] / rd
                 / (ptm1[h_idx] + ptm1[h_idx - 1]))
-    stab_half = (2.0 * _GRAV ** 2 / _CPD / (ptm1[h_idx] + ptm1[h_idx - 1])
-                 * (1.0 - _CPD * rho_half * (ptm1[h_idx] - ptm1[h_idx - 1])
+    stab_half = (2.0 * grav ** 2 / cpd / (ptm1[h_idx] + ptm1[h_idx - 1])
+                 * (1.0 - cpd * rho_half * (ptm1[h_idx] - ptm1[h_idx - 1])
                     / zdp_half))
-    stab_half = jnp.maximum(stab_half, _GSSEC)
+    stab_half = jnp.maximum(stab_half, _MIN_BV_FREQ)
     # Pad to length nlev+1 with the surface and top initial values.
     prho = jnp.concatenate([jnp.zeros(1), rho_half, jnp.zeros(1)])
     pstab = jnp.concatenate([jnp.zeros(1), stab_half, jnp.zeros(1)])
@@ -244,14 +349,14 @@ def _orosetup(
     pstab = pstab.at[nlev].set(pstab_sfc)
     prho = prho.at[nlev].set(prho_sfc)
 
-    znorm = jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2), _GVSEC)
+    znorm = jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2), _MIN_LOW_LEVEL_WIND)
     pvph_sfc = znorm
 
     # ----- Anisotropy & wave-stress orientation (lines 802-819) -------------
-    zu = jnp.where((pulow > -_GVSEC) & (pulow < _GVSEC),
-                   pulow + 2.0 * _GVSEC, pulow)
+    zu = jnp.where((pulow > -_MIN_LOW_LEVEL_WIND) & (pulow < _MIN_LOW_LEVEL_WIND),
+                   pulow + 2.0 * _MIN_LOW_LEVEL_WIND, pulow)
     zphi = jnp.arctan(pvlow / zu)
-    psi_sfc = ptheta * _PI / 180.0 - zphi
+    psi_sfc = ptheta * jnp.pi / 180.0 - zphi
     zb = 1.0 - 0.18 * pgam_safe - 0.04 * pgam_safe ** 2
     zc = 0.48 * pgam_safe + 0.30 * pgam_safe ** 2
     pd1 = zb - (zb - zc) * jnp.sin(psi_sfc) ** 2
@@ -282,8 +387,8 @@ def _orosetup(
     # kcrit (line 859): jk where pvph drops below gvsec, but only for jk<klev.
     # Find lowest 0-based half-level h in [1..nlev-1] where pvph[h] < gvsec
     # AND h-as-full-level is < nlev (i.e. h < nlev-1).
-    kcrit_mask = (pvph[1:nlev] < _GVSEC) & (jnp.arange(1, nlev) < nlev - 1)
-    pvph_int_clamped = jnp.maximum(pvph_int, _GVSEC)
+    kcrit_mask = (pvph[1:nlev] < _MIN_LOW_LEVEL_WIND) & (jnp.arange(1, nlev) < nlev - 1)
+    pvph_int_clamped = jnp.maximum(pvph_int, _MIN_LOW_LEVEL_WIND)
     pvph = jnp.concatenate([jnp.zeros(1), pvph_int_clamped,
                             jnp.array([pvph_sfc])])
     has_kcrit = jnp.any(kcrit_mask)
@@ -295,9 +400,9 @@ def _orosetup(
     )
 
     # ----- Richardson number at half levels (lines 866-879) -----------------
-    zdwind = jnp.maximum(jnp.abs(zvpf[h] - zvpf[h - 1]), _GVSEC)
-    pri_int = pstab[1:nlev] * (zdp[1:nlev] / (_GRAV * prho[1:nlev] * zdwind)) ** 2
-    pri_int = jnp.maximum(pri_int, _GRCRIT)
+    zdwind = jnp.maximum(jnp.abs(zvpf[h] - zvpf[h - 1]), _MIN_LOW_LEVEL_WIND)
+    pri_int = pstab[1:nlev] * (zdp[1:nlev] / (grav * prho[1:nlev] * zdwind)) ** 2
+    pri_int = jnp.maximum(pri_int, _CRITICAL_RICHARDSON)
     pri = jnp.concatenate([jnp.zeros(1), pri_int, jnp.array([9999.0])])
 
     # ----- kkenvh: top of envelope/blocked layer (lines 886-910) ------------
@@ -310,16 +415,16 @@ def _orosetup(
         active = k >= kknu
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
                         / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _GVSEC))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _GVSEC)
-        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _GSSEC))
-        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _GSSEC))
+                                      _MIN_LOW_LEVEL_WIND))
+        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
+        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
         zrhop = prho[k + 1]
         increment = pmair[k] * ((zstabp / zrhop + zstabm / zrhom) * 0.5) / zwind
         increment = jnp.where(active, increment, 0.0)
         pnu_new = pnu_prev + increment
-        crossed = (pnu_prev <= _GFRCRIT) & (pnu_new > _GFRCRIT) & (kkenvh == nlev - 1)
+        crossed = (pnu_prev <= _CRITICAL_FROUDE) & (pnu_new > _CRITICAL_FROUDE) & (kkenvh == nlev - 1)
         kkenvh_new = jnp.where(crossed & active, k, kkenvh).astype(jnp.int32)
         return (pnu_new, kkenvh_new), None
 
@@ -334,15 +439,15 @@ def _orosetup(
         znup_prev, kkcrith = carry
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
                         / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _GVSEC))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _GVSEC)
-        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _GSSEC))
-        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _GSSEC))
+                                      _MIN_LOW_LEVEL_WIND))
+        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+        zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
+        zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
         zrhop = prho[k + 1]
         increment = pmair[k] * ((zstabp / zrhop + zstabm / zrhom) * 0.5) / zwind
         znup_new = znup_prev + increment
-        crossed = (znup_prev <= _PI / 2) & (znup_new > _PI / 2) & (kkcrith == nlev - 1)
+        crossed = (znup_prev <= jnp.pi / 2) & (znup_new > jnp.pi / 2) & (kkcrith == nlev - 1)
         kkcrith_new = jnp.where(crossed, k, kkcrith).astype(jnp.int32)
         return (znup_new, kkcrith_new), None
 
@@ -359,10 +464,10 @@ def _orosetup(
 
     # ----- ppsi at all full levels (lines 953-971): blocking direction ------
     # zphi_per_level = atan(v/u) per level, with u guarded by gvsec.
-    zu_per = jnp.where((pum1 > -_GVSEC) & (pum1 < _GVSEC),
-                       pum1 + 2.0 * _GVSEC, pum1)
+    zu_per = jnp.where((pum1 > -_MIN_LOW_LEVEL_WIND) & (pum1 < _MIN_LOW_LEVEL_WIND),
+                       pum1 + 2.0 * _MIN_LOW_LEVEL_WIND, pum1)
     zphi_per = jnp.arctan(pvm1 / zu_per)
-    ppsi_full = ptheta * _PI / 180.0 - zphi_per   # (nlev,)
+    ppsi_full = ptheta * jnp.pi / 180.0 - zphi_per   # (nlev,)
 
     # ----- zzdep (vertical leakiness for blocked drag, lines 975-985) ------
     # Fortran loop range: jk = ilevh..klev (1-based, inclusive) → h in
@@ -398,7 +503,7 @@ def _gwstress(pstd, psig, ppic, pval, prho_sfc, pstab_sfc, pvph_sfc,
     # Effective mountain height above blocked flow.
     zeff_full = ppic - pval
     zeff_blocked = jnp.minimum(
-        _GFRCRIT * pvph_sfc / jnp.sqrt(pstab_sfc),
+        _CRITICAL_FROUDE * pvph_sfc / jnp.sqrt(pstab_sfc),
         zeff_full,
     )
     zeff = jnp.where(kkenvh < nlev - 1, zeff_blocked, zeff_full)
@@ -434,10 +539,10 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     zdelpt = paphm1_kc - paphm1_sfc
     h = jnp.arange(nlev + 1)
     interp = (ptau0
-              + (paphm1 - paphm1_sfc) / zdelpt * (_GRAHILO * ptau0 - ptau0))
+              + (paphm1 - paphm1_sfc) / zdelpt * (_TRAPPED_WAVE_FRAC * ptau0 - ptau0))
     ptau_init = jnp.where(
         h > kkcrith, interp,
-        jnp.where(h > 0, _GRAHILO * ptau0, 0.0),
+        jnp.where(h > 0, _TRAPPED_WAVE_FRAC * ptau0, 0.0),
     )
 
     # ----- Saturation sweep (lines 1191-1231) -------------------------------
@@ -456,23 +561,23 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
         ptau = carry
         # h goes nlev, nlev-1, ..., 1
         znorm = prho[h] * jnp.sqrt(pstab[h]) * pvph[h]
-        zdz2 = ptau[h] / jnp.maximum(znorm, _GSSEC) / zoro
+        zdz2 = ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ) / zoro
 
         # Saturation only for h < kkcrith
         active = h < kkcrith
         # Two break conditions:
-        zero_branch = (ptau[h + 1] < _GTSEC) | (h <= kcrit)
+        zero_branch = (ptau[h + 1] < _MIN_ANISOTROPY) | (h <= kcrit)
         # Else: compute zriw and possibly cap ptau.
         zsqr = jnp.sqrt(jnp.maximum(pri[h], 1e-30))
         zalfa = jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0)) / pvph[h]
         zriw = pri[h] * (1.0 - zalfa) / (1.0 + zalfa * zsqr) ** 2
-        zdel = 4.0 / zsqr / _GRCRIT + 1.0 / _GRCRIT ** 2 + 4.0 / _GRCRIT
-        zb = 1.0 / _GRCRIT + 2.0 / zsqr
+        zdel = 4.0 / zsqr / _CRITICAL_RICHARDSON + 1.0 / _CRITICAL_RICHARDSON ** 2 + 4.0 / _CRITICAL_RICHARDSON
+        zb = 1.0 / _CRITICAL_RICHARDSON + 2.0 / zsqr
         zalpha = 0.5 * (-zb + jnp.sqrt(jnp.maximum(zdel, 0.0)))
-        zdz2n = (pvph[h] * zalpha) ** 2 / jnp.maximum(pstab[h], _GSSEC)
+        zdz2n = (pvph[h] * zalpha) ** 2 / jnp.maximum(pstab[h], _MIN_BV_FREQ)
         ptau_capped = znorm * zdz2n * zoro
         # If zriw < grcrit, replace with capped value; otherwise keep current.
-        ptau_new_uncapped = jnp.where(zriw < _GRCRIT, ptau_capped, ptau[h])
+        ptau_new_uncapped = jnp.where(zriw < _CRITICAL_RICHARDSON, ptau_capped, ptau[h])
         # Limit: ptau[h] = min(ptau[h], ptau[h+1])
         ptau_after_min = jnp.minimum(ptau_new_uncapped, ptau[h + 1])
         # Apply zero_branch
@@ -515,7 +620,7 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     nlev = pum1.shape[0]
     setup = _orosetup(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
                       pmea, ppic, pval, pthe, pgam, nktopg)
-    pgam_safe = jnp.maximum(pgam, _GTSEC)
+    pgam_safe = jnp.maximum(pgam, _MIN_ANISOTROPY)
     prho = setup["prho"]
     pstab = setup["pstab"]
     pri = setup["pri"]
@@ -600,67 +705,110 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
 # ---------------------------------------------------------------------------
 
 def sso_drag(
-    pdtime: jnp.ndarray,
-    pcoriol: jnp.ndarray,
-    pzf: jnp.ndarray,
-    pzs: jnp.ndarray,
-    paphm1: jnp.ndarray,
-    papm1: jnp.ndarray,
-    pmair: jnp.ndarray,
-    ptm1: jnp.ndarray,
-    pum1: jnp.ndarray,
-    pvm1: jnp.ndarray,
-    pmea: jnp.ndarray,
-    pstd: jnp.ndarray,
-    psig: jnp.ndarray,
-    pgam: jnp.ndarray,
-    pthe: jnp.ndarray,
-    ppic: jnp.ndarray,
-    pval: jnp.ndarray,
-    psftlf: jnp.ndarray,
+    dt: jnp.ndarray,
+    coriolis: jnp.ndarray,
+    height_full: jnp.ndarray,
+    surface_height: jnp.ndarray,
+    pressure_half: jnp.ndarray,
+    pressure_full: jnp.ndarray,
+    layer_mass: jnp.ndarray,
+    temperature: jnp.ndarray,
+    u_wind: jnp.ndarray,
+    v_wind: jnp.ndarray,
+    mean_orography: jnp.ndarray,
+    orography_std: jnp.ndarray,
+    orography_slope: jnp.ndarray,
+    orography_anisotropy: jnp.ndarray,
+    orography_orientation: jnp.ndarray,
+    peak_elevation: jnp.ndarray,
+    valley_elevation: jnp.ndarray,
+    land_fraction: jnp.ndarray,
     config: SSOParameters,
     *,
     nktopg: int = 1,
     ntop: int = 1,
 ) -> Tuple[SSOTendencies, SSOState]:
-    """Compute Lott-Miller SSO drag for a single column.
+    """Compute Lott-Miller SSO drag tendencies for a single column.
 
-    Mirrors ``ssodrag`` in ``mo_ssodrag.f90`` line 26. ``pcoriol`` is read
-    by the (unported) mountain-lift branch only. The seven SSO descriptors
-    (``pmea``..``pval``) are scalars per column from boundary data.
+    Args:
+        dt: physics timestep (s).
+        coriolis: Coriolis parameter at this column (1/s). Read only by
+            the (unported) mountain-lift branch — currently a no-op.
+        height_full: full-level geopotential height above sea level
+            (m), shape (nlev,).
+        surface_height: surface elevation (m), scalar.
+        pressure_half: pressure on half levels (Pa), shape (nlev+1,).
+            Index 0 = top, index nlev = surface.
+        pressure_full: pressure on full levels (Pa), shape (nlev,).
+        layer_mass: full-level air mass per unit area (kg/m^2), shape
+            (nlev,) — i.e. ``Δp / g``.
+        temperature: full-level temperature (K), shape (nlev,).
+        u_wind, v_wind: full-level zonal/meridional wind (m/s), shape
+            (nlev,).
+        mean_orography: mean elevation of the column's sub-grid
+            orography (m), scalar.
+        orography_std: standard deviation of the sub-grid orography
+            (m), scalar. Drives both the activation gate and the
+            surface-stress amplitude.
+        orography_slope: mean slope of the sub-grid orography
+            (dimensionless), scalar.
+        orography_anisotropy: anisotropy factor of the sub-grid
+            orographic stress ellipse (0=pure ridge, 1=isotropic),
+            scalar.
+        orography_orientation: orientation angle (deg) of the principal
+            axis of the orographic stress ellipse, measured from east.
+            Scalar.
+        peak_elevation: characteristic peak elevation in the column
+            (m, above sea level), scalar.
+        valley_elevation: characteristic valley elevation in the column
+            (m, above sea level), scalar.
+        land_fraction: fraction of the column over land+lakes (0-1),
+            scalar. Tendencies are scaled by this since SSO descriptors
+            are valid only over land.
+        config: tunable :class:`SSOParameters`.
+        nktopg: top-most 1-based level index that orography is allowed
+            to "see" (Python int, static at trace time). Default 1
+            (orography may extend up to the model top).
+        ntop: 1-based level index above which the wave-stress profile
+            is held constant (Python int, static at trace time).
+            Default 1.
 
-    The ``nktopg`` and ``ntop`` arguments are static (level-index
-    constants); pass as Python ints. Defaults match the echam6 namelist.
+    Returns:
+        ``(tendencies, state)`` — see :class:`SSOTendencies` and
+        :class:`SSOState` for field documentation.
     """
-    nlev = pum1.shape[0]
+    # Activation gate: skip columns whose sub-grid orography is too small
+    # to support meaningful drag.
+    active = ((peak_elevation - mean_orography
+               > config.min_peak_minus_mean_elevation)
+              & (orography_std > config.min_orog_std))
 
-    # Activation criterion (lines 173-180): scheme is active only if
-    # (ppic - pmea) > gpicmea AND pstd > gstd.
-    active = (ppic - pmea > config.gpicmea) & (pstd > config.gstd)
+    # Layer height above ground (full levels).
+    height_above_ground = height_full - surface_height
 
-    # Above-surface height (line 158).
-    phgeo = pzf - pzs
-
-    zdudt, zdvdt, zdis = _orodrag(
-        paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
-        pmea, pstd, psig, pgam, pthe, ppic, pval,
-        pdtime, config.gkdrag, config.gkwake,
+    drag_u, drag_v, dissipation = _orodrag(
+        pressure_half, pressure_full, layer_mass,
+        u_wind, v_wind, temperature, height_above_ground,
+        mean_orography, orography_std, orography_slope,
+        orography_anisotropy, orography_orientation,
+        peak_elevation, valley_elevation,
+        dt, config.wave_drag_coeff, config.blocked_flow_drag_coeff,
         nktopg, ntop,
     )
 
-    # Mask by activation; scale by land fraction (lines 226-244).
-    zero = jnp.zeros_like(zdudt)
-    zdudt = jnp.where(active, zdudt, zero) * psftlf
-    zdvdt = jnp.where(active, zdvdt, zero) * psftlf
-    zdis = jnp.where(active, zdis, zero) * psftlf
+    # Apply activation mask and scale by land fraction (the descriptors
+    # are valid only over the land portion of the cell).
+    zero = jnp.zeros_like(drag_u)
+    drag_u = jnp.where(active, drag_u, zero) * land_fraction
+    drag_v = jnp.where(active, drag_v, zero) * land_fraction
+    dissipation = jnp.where(active, dissipation, zero) * land_fraction
 
-    # Column-integrated stresses and dissipation (lines 223-231).
-    u_stress = jnp.sum(zdudt * pmair)
-    v_stress = jnp.sum(zdvdt * pmair)
-    dissip_total = jnp.sum(zdis * pmair)
+    u_stress = jnp.sum(drag_u * layer_mass)
+    v_stress = jnp.sum(drag_v * layer_mass)
+    dissip_total = jnp.sum(dissipation * layer_mass)
 
     return (
-        SSOTendencies(dudt=zdudt, dvdt=zdvdt, dissip=zdis),
+        SSOTendencies(dudt=drag_u, dvdt=drag_v, dissip=dissipation),
         SSOState(u_stress=u_stress, v_stress=v_stress,
                  dissip_total=dissip_total),
     )

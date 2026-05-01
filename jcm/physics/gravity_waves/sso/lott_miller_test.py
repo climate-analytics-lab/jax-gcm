@@ -13,17 +13,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.constants import grav, rd
 from jcm.physics.gravity_waves.sso import (
     SSOParameters, SSOState, SSOTendencies, sso_drag,
 )
 
 
 def _make_alps_column(nlev: int = 47, **overrides):
-    """Mid-latitude column with Alps-like sub-grid orography."""
-    grav = 9.80665
-    rd = 287.04
-    paphm1 = np.logspace(np.log10(10.0), np.log10(101325.0), nlev + 1)
-    papm1 = 0.5 * (paphm1[:-1] + paphm1[1:])
+    """Mid-latitude column with Alps-like sub-grid orography.
+
+    Returns a dict suitable for ``sso_drag(**col, config=...)``.
+    """
+    pressure_half = np.logspace(np.log10(10.0), np.log10(101325.0), nlev + 1)
+    pressure_full = 0.5 * (pressure_half[:-1] + pressure_half[1:])
     z = np.zeros(nlev)
     zh = np.zeros(nlev + 1)
     Tprof = np.zeros(nlev)
@@ -35,24 +37,32 @@ def _make_alps_column(nlev: int = 47, **overrides):
             Tprof[k] = max(220.0 - 0.001 * (z_g - 20000.0), 200.0)
         else:
             Tprof[k] = max(270.0 - 0.0035 * (z_g - 50000.0), 180.0)
-        dz = (rd * Tprof[k] / grav) * np.log(paphm1[k + 1] / paphm1[k])
+        dz = (rd * Tprof[k] / grav) * np.log(pressure_half[k + 1]
+                                             / pressure_half[k])
         zh[k] = zh[k + 1] + dz
         z[k] = 0.5 * (zh[k] + zh[k + 1])
-    pmair = (paphm1[1:] - paphm1[:-1]) / grav
+    layer_mass = (pressure_half[1:] - pressure_half[:-1]) / grav
     u = 30.0 * np.exp(-((z - 10000.0) / 6000.0) ** 2) + 5.0
     v = 5.0 * np.exp(-((z - 10000.0) / 8000.0) ** 2) + 1.0
     inputs = dict(
-        pdtime=jnp.asarray(1800.0),
-        pcoriol=jnp.asarray(1.0e-4),
-        pzf=jnp.asarray(z), pzs=jnp.asarray(500.0),
-        paphm1=jnp.asarray(paphm1), papm1=jnp.asarray(papm1),
-        pmair=jnp.asarray(pmair), ptm1=jnp.asarray(Tprof),
-        pum1=jnp.asarray(u), pvm1=jnp.asarray(v),
-        pmea=jnp.asarray(1500.0), pstd=jnp.asarray(400.0),
-        psig=jnp.asarray(0.07), pgam=jnp.asarray(0.4),
-        pthe=jnp.asarray(30.0), ppic=jnp.asarray(2500.0),
-        pval=jnp.asarray(900.0),
-        psftlf=jnp.asarray(1.0),
+        dt=jnp.asarray(1800.0),
+        coriolis=jnp.asarray(1.0e-4),
+        height_full=jnp.asarray(z),
+        surface_height=jnp.asarray(500.0),
+        pressure_half=jnp.asarray(pressure_half),
+        pressure_full=jnp.asarray(pressure_full),
+        layer_mass=jnp.asarray(layer_mass),
+        temperature=jnp.asarray(Tprof),
+        u_wind=jnp.asarray(u),
+        v_wind=jnp.asarray(v),
+        mean_orography=jnp.asarray(1500.0),
+        orography_std=jnp.asarray(400.0),
+        orography_slope=jnp.asarray(0.07),
+        orography_anisotropy=jnp.asarray(0.4),
+        orography_orientation=jnp.asarray(30.0),
+        peak_elevation=jnp.asarray(2500.0),
+        valley_elevation=jnp.asarray(900.0),
+        land_fraction=jnp.asarray(1.0),
     )
     inputs.update({k: jnp.asarray(v) for k, v in overrides.items()})
     return inputs
@@ -63,18 +73,17 @@ class TestSSOBasic:
 
     def test_returns_finite_tendencies(self):
         col = _make_alps_column()
-        config = SSOParameters.default()
-        tend, _ = sso_drag(**col, config=config)
+        tend, _ = sso_drag(**col, config=SSOParameters.default())
         assert jnp.all(jnp.isfinite(tend.dudt))
         assert jnp.all(jnp.isfinite(tend.dvdt))
         assert jnp.all(jnp.isfinite(tend.dissip))
 
     def test_inactive_when_orography_below_threshold(self):
-        """Activation criterion: (ppic - pmea) > gpicmea AND pstd > gstd.
-        Setting pstd very small should disable the scheme."""
-        col = _make_alps_column(pstd=0.5, ppic=600.0)  # below thresholds
-        config = SSOParameters.default()
-        tend, _ = sso_drag(**col, config=config)
+        """Activation gate: setting std-dev below ``min_orog_std`` and
+        peak below ``min_peak_minus_mean_elevation`` should disable the
+        scheme entirely."""
+        col = _make_alps_column(orography_std=0.5, peak_elevation=600.0)
+        tend, _ = sso_drag(**col, config=SSOParameters.default())
         np.testing.assert_array_equal(np.asarray(tend.dudt), 0.0)
         np.testing.assert_array_equal(np.asarray(tend.dvdt), 0.0)
         np.testing.assert_array_equal(np.asarray(tend.dissip), 0.0)
@@ -82,29 +91,22 @@ class TestSSOBasic:
     def test_drag_opposes_low_level_wind(self):
         """The column-integrated zonal stress should oppose the mean wind."""
         col = _make_alps_column()
-        config = SSOParameters.default()
-        _, state = sso_drag(**col, config=config)
-        # Westerly column → negative u-stress (drag opposes wind).
-        assert float(state.u_stress) < 0.0
+        _, state = sso_drag(**col, config=SSOParameters.default())
+        assert float(state.u_stress) < 0.0   # westerly column
 
     def test_dissipation_non_negative(self):
         """Energy dissipation should be non-negative (KE → heat). Tolerance
-        is loose because the project default is f32 precision."""
+        is loose because the project default precision is f32."""
         col = _make_alps_column()
-        config = SSOParameters.default()
-        tend, _ = sso_drag(**col, config=config)
+        tend, _ = sso_drag(**col, config=SSOParameters.default())
         peak_dissip = float(jnp.max(jnp.abs(tend.dissip)))
-        # Allow noise up to relative-1e-4 of the peak (f32 epsilon ≈ 1e-7
-        # times typical column-mean amplification).
         assert jnp.all(tend.dissip >= -1e-4 * peak_dissip)
 
-    def test_psftlf_scaling(self):
-        """Halving land fraction halves the tendencies."""
-        col = _make_alps_column()
+    def test_land_fraction_scaling(self):
+        """Halving land_fraction halves the tendencies."""
         config = SSOParameters.default()
-        tend_full, _ = sso_drag(**col, config=config)
-        col_half = dict(col)
-        col_half["psftlf"] = jnp.asarray(0.5)
+        tend_full, _ = sso_drag(**_make_alps_column(), config=config)
+        col_half = _make_alps_column(land_fraction=0.5)
         tend_half, _ = sso_drag(**col_half, config=config)
         np.testing.assert_allclose(np.asarray(tend_half.dudt),
                                    0.5 * np.asarray(tend_full.dudt),
@@ -121,23 +123,19 @@ class TestSSOJaxTransforms:
 
     def test_vmap_over_columns(self):
         col1 = _make_alps_column()
-        col2 = _make_alps_column(ppic=1500.0)   # smaller peak
-        col3 = _make_alps_column(ppic=4000.0)   # larger peak
-        batch = {k: jnp.stack([col1[k], col2[k], col3[k]]) for k in col1}
+        col2 = _make_alps_column(peak_elevation=1500.0)   # smaller peak
+        col3 = _make_alps_column(peak_elevation=4000.0)   # larger peak
+        keys = list(col1.keys())
+        batch = {k: jnp.stack([col1[k], col2[k], col3[k]]) for k in keys}
         config = SSOParameters.default()
 
         def one(*args):
             t, _ = sso_drag(*args, config=config)
             return t.dudt
 
-        keys = list(col1.keys())
         out = jax.vmap(one)(*[batch[k] for k in keys])
         assert out.shape == (3, 47)
-        # Taller mountain peaks → bigger zeff → bigger surface stress.
-        # Note: gwstress goes like (ppic-pval)^2 when zeff isn't blocked,
-        # but zeff caps at gfrcrit*pvph/sqrt(stab) once the column is
-        # blocked. With a strong westerly column the cap is well above
-        # ppic-pval = 600 m, so the small-peak case really is smaller.
+        # Taller peaks → bigger surface stress (when not Froude-blocked).
         peak1 = float(jnp.max(jnp.abs(out[0])))
         peak2 = float(jnp.max(jnp.abs(out[1])))
         assert peak1 > peak2, (
@@ -152,8 +150,11 @@ class TestSSOParameters:
         live as :func:`sso_drag` kwargs."""
         p = SSOParameters.default()
         for name, expected in [
-            ("gpicmea", 1.0), ("gstd", 1.0), ("gkdrag", 0.2),
-            ("gkwake", 1.0), ("gklift", 0.0),
+            ("min_peak_minus_mean_elevation", 1.0),
+            ("min_orog_std", 1.0),
+            ("wave_drag_coeff", 0.2),
+            ("blocked_flow_drag_coeff", 1.0),
+            ("mountain_lift_coeff", 0.0),
         ]:
             np.testing.assert_allclose(float(getattr(p, name)), expected,
                                        atol=1e-6, rtol=1e-6)

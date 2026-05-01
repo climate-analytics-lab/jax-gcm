@@ -5,18 +5,22 @@ Tests for TerrainData struct and get_terrain function.
 
 import unittest
 import jax.numpy as jnp
-from jcm.terrain import TerrainData, derive_sso_descriptors, get_terrain
+from jcm.terrain import (
+    TerrainData, derive_sso_descriptors, get_simplified_sso_descriptors,
+    get_terrain,
+)
 from jcm.constants import grav
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 
-class TestDeriveSSODescriptors(unittest.TestCase):
-    """Tests for the SSO-descriptor derivation heuristic."""
+class TestSimplifiedSSODescriptors(unittest.TestCase):
+    """Tests for the simplified SSO-descriptor heuristic
+    (:func:`get_simplified_sso_descriptors`)."""
 
     def test_zero_over_ocean(self):
         """All six SSO fields should be zero where orog == 0."""
         orog = jnp.zeros((4, 8))
-        sso = derive_sso_descriptors(orog)
+        sso = get_simplified_sso_descriptors(orog)
         for name in ("orostd", "orosig", "orogam",
                      "orothe", "oropic", "oroval"):
             self.assertTrue(jnp.allclose(sso[name], 0.0),
@@ -25,7 +29,7 @@ class TestDeriveSSODescriptors(unittest.TestCase):
     def test_nonzero_over_land(self):
         """SSO fields should populate where orog > 0."""
         orog = jnp.array([[1500.0]])
-        sso = derive_sso_descriptors(orog)
+        sso = get_simplified_sso_descriptors(orog)
         # Heuristic: orostd = 0.25 * orog
         self.assertTrue(jnp.allclose(sso["orostd"], 375.0))
         # oropic = orog + 2*orostd, oroval = orog - 2*orostd
@@ -39,7 +43,7 @@ class TestDeriveSSODescriptors(unittest.TestCase):
     def test_oroval_clamped_at_zero(self):
         """Valley elevation should not go below sea level for low hills."""
         orog = jnp.array([[10.0]])  # 10 m mean → orostd=2.5 → oroval=5
-        sso = derive_sso_descriptors(orog)
+        sso = get_simplified_sso_descriptors(orog)
         self.assertTrue(jnp.all(sso["oroval"] >= 0.0))
         # For tiny hills, the heuristic gives positive valleys.
         self.assertTrue(jnp.allclose(sso["oroval"], 5.0))
@@ -50,10 +54,57 @@ class TestDeriveSSODescriptors(unittest.TestCase):
         columns derived by the heuristic — otherwise SSO would fire on
         flat ocean."""
         orog = jnp.zeros((10,))
-        sso = derive_sso_descriptors(orog)
+        sso = get_simplified_sso_descriptors(orog)
         ppic_minus_mea = sso["oropic"] - orog
         self.assertTrue(jnp.all(ppic_minus_mea <= 1.0))
         self.assertTrue(jnp.all(sso["orostd"] <= 1.0))
+
+
+class TestDeriveSSODescriptorsFromHighRes(unittest.TestCase):
+    """Tests for :func:`derive_sso_descriptors` (Baines-Palmer)."""
+
+    def test_synthetic_ridge_gives_anisotropic_stats(self):
+        """A high-res ridge oriented N-S should produce non-zero std,
+        slope, and an anisotropy < 1 (not isotropic)."""
+        import numpy as np
+        nx_hr, ny_hr = 64, 32
+        hr_lat = np.linspace(-10.0, 10.0, ny_hr)
+        hr_lon = np.linspace(-10.0, 10.0, nx_hr)
+        # Ridge: mountain at lon=0, constant in lat.
+        H = 1500.0 * np.exp(-(hr_lon[:, None] / 3.0) ** 2) * np.ones((nx_hr, ny_hr))
+
+        # Coarse target grid: 4x4 cells covering the same domain.
+        tg_lat = np.array([-7.5, -2.5, 2.5, 7.5])
+        tg_lon = np.array([-7.5, -2.5, 2.5, 7.5])
+        sso = derive_sso_descriptors(H, hr_lat, hr_lon, tg_lat, tg_lon)
+
+        # Centre cells should have non-zero std and slope; corner cells
+        # (no orography there) approximately zero std.
+        self.assertGreater(float(sso["orostd"][1, 1]), 50.0)
+        self.assertGreater(float(sso["orosig"][1, 1]), 0.0)
+        self.assertGreater(float(sso["oropic"][1, 1]),
+                           float(sso["oroval"][1, 1]))
+
+    def test_isotropic_dome_gives_anisotropy_near_one(self):
+        """A radially-symmetric dome should yield anisotropy ≈ 1."""
+        import numpy as np
+        nx_hr, ny_hr = 64, 32
+        hr_lat = np.linspace(-10.0, 10.0, ny_hr)
+        hr_lon = np.linspace(-10.0, 10.0, nx_hr)
+        # Symmetric Gaussian dome at the origin.
+        Lon, Lat = np.meshgrid(hr_lon, hr_lat, indexing="ij")
+        H = 1500.0 * np.exp(-(Lon ** 2 + Lat ** 2) / 9.0)
+
+        tg_lat = np.array([-2.5, 2.5])
+        tg_lon = np.array([-2.5, 2.5])
+        sso = derive_sso_descriptors(H, hr_lat, hr_lon, tg_lat, tg_lon)
+        # All four cells contain part of the dome; anisotropy should
+        # be close to 1 (within 0.3) for the centre-adjacent cells.
+        for i in range(2):
+            for j in range(2):
+                gam = float(sso["orogam"][i, j])
+                self.assertGreaterEqual(gam, 0.0)
+                self.assertLessEqual(gam, 1.0)
 
 
 class TestGetTerrain(unittest.TestCase):

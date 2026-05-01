@@ -9,7 +9,26 @@ from .simple_gwd import (
     SimpleGwdParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
     simple_gwd
 )
-from jcm.constants import grav, cp
+from jcm.constants import grav, cp, rd
+
+
+def test_simple_gwd_smoke():
+    """Smoke test: build a westerly-jet column, run the scheme, and check
+    that drag opposes the wind direction."""
+    nlev = 30
+    height = jnp.linspace(0, 30000, nlev)[::-1]
+    pressure = 100000 * jnp.exp(-height / 8000)
+    temperature = 288 - 0.0065 * height
+    air_density = pressure / (rd * temperature)
+    u_wind = 20.0 * jnp.exp(-(height - 10000) ** 2 / 5000 ** 2)
+    v_wind = jnp.zeros(nlev)
+
+    tend, _state = simple_gwd(
+        u_wind, v_wind, temperature, pressure,
+        height, air_density, 500.0, 1800.0,
+    )
+    assert jnp.all(jnp.isfinite(tend.dudt))
+    assert jnp.all(tend.dudt * u_wind <= 0.0)
 
 
 class TestBruntVaisalaFrequency:
