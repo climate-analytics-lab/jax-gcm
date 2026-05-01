@@ -52,74 +52,65 @@ _COS45 = 0.7071067811865476
 
 @tree_math.struct
 class HinesParameters:
-    """Parameters for the Hines (1997) Doppler-spread non-orographic GWD scheme.
+    """Tunable parameters for the Hines (1997) GWD scheme.
 
-    Field-by-field provenance:
+    These are the *runtime-tunable* namelist knobs that flow through the
+    JAX trace (gradients, vmap, etc. all see them as leaves):
 
-    Namelist (``mo_echam_gwd_config``):
-        ``rmscon``, ``emiss_lev``, ``kstar``, ``m_min``, ``lheatcal``.
+    - ``rmscon``      — RMS launch wind variance (m/s)
+    - ``kstar``       — typical horizontal wavenumber (1/m)
+    - ``m_min``       — minimum vertical wavenumber (1/m)
+    - ``lheatcal``    — 0/1 switch for heating + diffusion
+    - ``f1`` .. ``f6`` — Hines fudge factors
+    - ``alt_cutoff``  — exponential damping altitude (m)
+    - ``smco``        — vertical smoothing coefficient
 
-    Module-level constants (``mo_gw_hines.f90`` lines 58-72):
-        ``naz``, ``slope``, ``f1``, ``f2``, ``f3``, ``f5``, ``f6``,
-        ``icutoff``, ``alt_cutoff``, ``smco``, ``nsmax``.
+    Static/structural knobs (``naz``, ``slope``, ``emiss_lev``, ``nsmax``,
+    ``icutoff``) are passed as Python keyword arguments to :func:`hines_gwd`
+    rather than living on the parameters tree, because they control loop
+    bounds and switch statements that must be static at JIT trace time.
+    Defaults for these are documented on :func:`hines_gwd`.
     """
 
     rmscon: jnp.ndarray
-    emiss_lev: jnp.ndarray
     kstar: jnp.ndarray
     m_min: jnp.ndarray
     lheatcal: jnp.ndarray
-    naz: jnp.ndarray
-    slope: jnp.ndarray
     f1: jnp.ndarray
     f2: jnp.ndarray
     f3: jnp.ndarray
     f5: jnp.ndarray
     f6: jnp.ndarray
-    icutoff: jnp.ndarray
     alt_cutoff: jnp.ndarray
     smco: jnp.ndarray
-    nsmax: jnp.ndarray
 
     @classmethod
     def default(
         cls,
         rmscon: float = 1.0,
-        emiss_lev: int = 10,
         kstar: float = 5e-5,
         m_min: float = 1e-4,
         lheatcal: bool = True,
-        naz: int = 8,
-        slope: float = 1.0,
         f1: float = 1.5,
         f2: float = 0.3,
         f3: float = 1.0,
         f5: float = 1.0,
         f6: float = 0.5,
-        icutoff: int = 0,
         alt_cutoff: float = 105e3,
         smco: float = 2.0,
-        nsmax: int = 5,
     ) -> "HinesParameters":
-        # Let JAX pick the default dtype — tests/production run at f32 by
-        # default; the Fortran-comparison harness enables x64 explicitly.
         return cls(
             rmscon=jnp.asarray(rmscon),
-            emiss_lev=jnp.asarray(emiss_lev),
             kstar=jnp.asarray(kstar),
             m_min=jnp.asarray(m_min),
             lheatcal=jnp.asarray(1.0 if lheatcal else 0.0),
-            naz=jnp.asarray(naz),
-            slope=jnp.asarray(slope),
             f1=jnp.asarray(f1),
             f2=jnp.asarray(f2),
             f3=jnp.asarray(f3),
             f5=jnp.asarray(f5),
             f6=jnp.asarray(f6),
-            icutoff=jnp.asarray(icutoff),
             alt_cutoff=jnp.asarray(alt_cutoff),
             smco=jnp.asarray(smco),
-            nsmax=jnp.asarray(nsmax),
         )
 
 
@@ -325,6 +316,8 @@ def _hines_extro_column(
     rmswind: jnp.ndarray,        # scalar
     config: HinesParameters,
     levbot: int,
+    naz: int,
+    nsmax: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Column-mode Hines drag algorithm.
 
@@ -332,7 +325,6 @@ def _hines_extro_column(
     ``(nlev,)``. All work done assuming ``slope=1, naz=8``.
     """
     nlev = bvfreq.shape[0]
-    naz = 8
     f1 = config.f1
     f2 = config.f2
     f3 = config.f3
@@ -436,8 +428,7 @@ def _hines_extro_column(
     # --- Vertical smoothing (lines 572-589) -------------------------------
     # Fortran range is lev1=0 (top) to lev2=levbot inclusive; only the
     # interior 1..levbot-1 is averaged.
-    nsmax = int(config.nsmax)
-    smco = float(config.smco)
+    smco = config.smco
     if nsmax > 0:
         m_alpha = jnp.stack(
             [_vert_smooth(m_alpha[:, n], smco, nsmax, 0, levbot)
@@ -520,6 +511,10 @@ def hines_gwd(
     pum1: jnp.ndarray,
     pvm1: jnp.ndarray,
     config: HinesParameters,
+    *,
+    emiss_lev: int = 10,
+    naz: int = 8,
+    nsmax: int = 5,
 ) -> Tuple[HinesTendencies, HinesState]:
     """Compute Hines GWD tendencies for a single column.
 
@@ -527,32 +522,32 @@ def hines_gwd(
     arrays use the ECHAM convention: index 0 = top, index ``nlev-1`` =
     surface. ``paphm1`` and ``pzh`` are on half levels (length ``nlev+1``);
     the rest are on full levels (length ``nlev``).
+
+    The ``emiss_lev``, ``naz``, ``nsmax`` arguments are *static* (loop
+    bounds and switch statements need them at trace time). Pass them as
+    Python ints; defaults match ``mo_gw_hines.f90``.
     """
     nlev = pum1.shape[0]
     p_sfc = paphm1[-1]
 
     bvfreq = _brunt_vaisala(ptm1, papm1, p_sfc)
 
-    # levbot is a Python int so the scan loop length is static. Fortran uses
-    # 1-based ``levbot = nlev - emiss_lev``; subtract one for 0-based.
-    levbot = nlev - int(config.emiss_lev) - 1
-    levbot_arr = jnp.asarray(levbot)
+    # Fortran uses 1-based ``levbot = nlev - emiss_lev``; -1 for 0-based.
+    levbot = nlev - emiss_lev - 1
 
-    uhs = pum1 - pum1[levbot_arr]
-    vhs = pvm1 - pvm1[levbot_arr]
-    # Above the launch level the relative wind is what propagates upward;
-    # below the launch level, gw_hines zeros out the drag (we mask later).
-    # The Fortran loops only over jk=1..levbot for uhs/vhs (line 343-346);
-    # below that the array is uninitialised but is never read by hines_extro
-    # which uses lev2 = levbot. We zero below for clarity.
+    uhs = pum1 - pum1[levbot]
+    vhs = pvm1 - pvm1[levbot]
+    # Below the launch the wind difference is unused, but zero it out for
+    # clarity (mirrors the Fortran loop range jk=1..levbot for uhs/vhs).
     below_launch = jnp.arange(nlev) > levbot
     uhs = jnp.where(below_launch, 0.0, uhs)
     vhs = jnp.where(below_launch, 0.0, vhs)
 
-    rmswind = config.rmscon  # constant per-column in production path
+    rmswind = config.rmscon
 
     drag_u, drag_v, heat, diffco, flux_u, flux_v = _hines_extro_column(
-        bvfreq, prho, pmair, uhs, vhs, rmswind, config, levbot,
+        bvfreq, prho, pmair, uhs, vhs, rmswind, config,
+        levbot, naz, nsmax,
     )
 
     return (

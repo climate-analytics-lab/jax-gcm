@@ -72,14 +72,19 @@ class TestIconComposablePhysics(unittest.TestCase):
         from jcm.physics.icon.icon_terms import icon_physics
 
         physics = icon_physics(checkpoint_terms=False)
-        # Cloud fraction and microphysics are now separate terms.
-        self.assertEqual(len(physics.terms), 11)
+        # Cloud fraction and microphysics are separate terms; the GWD
+        # category split adds Hines + SSO (the simple-GWD scheme is kept
+        # available but excluded from the default factory).
+        self.assertEqual(len(physics.terms), 12)
         categories = [t.category for t in physics.terms]
         self.assertIn("radiation", categories)
         self.assertIn("convection", categories)
         self.assertIn("surface", categories)
         self.assertIn("cloud_fraction", categories)
         self.assertIn("clouds", categories)
+        self.assertIn("hines", categories)
+        self.assertIn("sso", categories)
+        self.assertNotIn("simple_gwd", categories)
         # Cloud fraction must precede microphysics so the microphysics term
         # can read the post-condensation qc/qi/cloud_fraction diagnostics.
         self.assertLess(
@@ -138,7 +143,7 @@ class TestIconComposablePhysics(unittest.TestCase):
         # Verify split/merge roundtrip works
         graphdef, state = nnx.split(composable)
         restored = nnx.merge(graphdef, state)
-        self.assertEqual(len(restored.terms), 11)
+        self.assertEqual(len(restored.terms), 12)
 
 
 if __name__ == "__main__":

@@ -417,17 +417,53 @@ class IconSurface(IconTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
-class IconGravityWaves(IconTermBase):
-    """Orographic gravity wave drag."""
+class IconHines(IconTermBase):
+    """Hines (1997) doppler-spread spectral non-orographic GWD."""
 
-    name: ClassVar[str] = "icon_gravity_waves"
-    category: ClassVar[str] = "gravity_waves"
+    name: ClassVar[str] = "icon_hines"
+    category: ClassVar[str] = "hines"
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute gravity wave drag tendencies."""
+        """Compute Hines GWD tendencies."""
         data = self._build_data(diagnostics)
-        from jcm.physics.icon.icon_physics import apply_gravity_waves
-        tend, data = apply_gravity_waves(
+        from jcm.physics.icon.icon_physics import apply_hines
+        tend, data = apply_hines(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
+class IconSSO(IconTermBase):
+    """Lott-Miller (1997) sub-grid orographic gravity-wave drag."""
+
+    name: ClassVar[str] = "icon_sso"
+    category: ClassVar[str] = "sso"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute SSO drag tendencies."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import apply_sso
+        tend, data = apply_sso(
+            state, data,
+            self._get_params(diagnostics), forcing, terrain,
+        )
+        return tend, _diagnostics_from_data(diagnostics, data)
+
+
+class IconSimpleGwd(IconTermBase):
+    """Simple monochromatic GWD (cheap fallback). Kept available but not
+    included in the default ``icon_physics()`` factory; pass it explicitly
+    to ``ComposableIconPhysics`` if you want the cheap scheme."""
+
+    name: ClassVar[str] = "icon_simple_gwd"
+    category: ClassVar[str] = "simple_gwd"
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Compute simple-GWD tendencies."""
+        data = self._build_data(diagnostics)
+        from jcm.physics.icon.icon_physics import apply_simple_gwd
+        tend, data = apply_simple_gwd(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -641,7 +677,8 @@ def icon_physics(
             micro_term,
             IconVerticalDiffusion(),
             IconSurface(),
-            IconGravityWaves(),
+            IconHines(),
+            IconSSO(),
         ],
         checkpoint_terms=checkpoint_terms,
         parameters=p,

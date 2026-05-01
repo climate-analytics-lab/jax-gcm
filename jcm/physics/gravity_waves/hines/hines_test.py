@@ -67,8 +67,8 @@ class TestHinesBasic:
         """No drag is computed below the launch level (emiss_lev counts up
         from the surface)."""
         col = _make_column(nlev=47)
-        config = HinesParameters.default(emiss_lev=10)
-        tend, _ = hines_gwd(**col, config=config)
+        config = HinesParameters.default()
+        tend, _ = hines_gwd(**col, config=config, emiss_lev=10)
         levbot = 47 - 10 - 1
         # emiss_lev=10 means the bottom 10 levels (indices 37..46) get no drag.
         # The launch level itself (index 36) does get a flux-divergence drag.
@@ -162,20 +162,20 @@ class TestHinesParameters:
     """Parameters object behaves correctly."""
 
     def test_defaults_match_fortran_module_constants(self):
-        """The defaults reproduce the module-level constants from
-        ``mo_gw_hines.f90`` lines 58-72 + namelist defaults. Tolerance is
-        loose (atol=1e-6) because the production default is f32."""
+        """The tunable-knob defaults reproduce ``mo_gw_hines.f90`` /
+        ``mo_echam_gwd_config``. Static-loop knobs (naz, nsmax, emiss_lev,
+        slope, icutoff) are passed via :func:`hines_gwd` kwargs, not on the
+        parameters tree. Tolerance is loose (atol=1e-6) because the
+        production default is f32."""
         p = HinesParameters.default()
         for name, expected in [
-            ("naz", 8), ("slope", 1.0), ("f1", 1.5), ("f2", 0.3),
-            ("f3", 1.0), ("f5", 1.0), ("f6", 0.5), ("alt_cutoff", 105e3),
-            ("smco", 2.0), ("nsmax", 5), ("rmscon", 1.0), ("kstar", 5e-5),
-            ("m_min", 1e-4),
+            ("f1", 1.5), ("f2", 0.3), ("f3", 1.0), ("f5", 1.0),
+            ("f6", 0.5), ("alt_cutoff", 105e3), ("smco", 2.0),
+            ("rmscon", 1.0), ("kstar", 5e-5), ("m_min", 1e-4),
         ]:
             np.testing.assert_allclose(float(getattr(p, name)), expected,
                                        atol=1e-6, rtol=1e-6)
 
     def test_custom_overrides(self):
-        p = HinesParameters.default(rmscon=2.0, emiss_lev=15)
-        assert float(p.rmscon) == 2.0
-        assert int(p.emiss_lev) == 15
+        p = HinesParameters.default(rmscon=2.0)
+        assert abs(float(p.rmscon) - 2.0) < 1e-6

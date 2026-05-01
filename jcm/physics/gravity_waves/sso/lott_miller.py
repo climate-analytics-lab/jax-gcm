@@ -58,15 +58,18 @@ _GVSEC = 0.10      # min ulow
 
 @tree_math.struct
 class SSOParameters:
-    """Parameters for the Lott & Miller (1997) SSO drag scheme."""
+    """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
+
+    Static knobs (``nktopg``, ``ntop``) are passed as Python kwargs to
+    :func:`sso_drag` because they index into level arrays and need to be
+    static at JIT trace time.
+    """
 
     gpicmea: jnp.ndarray
     gstd: jnp.ndarray
     gkdrag: jnp.ndarray
     gkwake: jnp.ndarray
     gklift: jnp.ndarray
-    nktopg: jnp.ndarray
-    ntop: jnp.ndarray
 
     @classmethod
     def default(
@@ -76,8 +79,6 @@ class SSOParameters:
         gkdrag: float = 0.2,
         gkwake: float = 1.0,
         gklift: float = 0.0,
-        nktopg: int = 1,
-        ntop: int = 1,
     ) -> "SSOParameters":
         return cls(
             gpicmea=jnp.asarray(gpicmea),
@@ -85,8 +86,6 @@ class SSOParameters:
             gkdrag=jnp.asarray(gkdrag),
             gkwake=jnp.asarray(gkwake),
             gklift=jnp.asarray(gklift),
-            nktopg=jnp.asarray(nktopg),
-            ntop=jnp.asarray(ntop),
         )
 
 
@@ -620,16 +619,20 @@ def sso_drag(
     pval: jnp.ndarray,
     psftlf: jnp.ndarray,
     config: SSOParameters,
+    *,
+    nktopg: int = 1,
+    ntop: int = 1,
 ) -> Tuple[SSOTendencies, SSOState]:
     """Compute Lott-Miller SSO drag for a single column.
 
     Mirrors ``ssodrag`` in ``mo_ssodrag.f90`` line 26. ``pcoriol`` is read
     by the (unported) mountain-lift branch only. The seven SSO descriptors
     (``pmea``..``pval``) are scalars per column from boundary data.
+
+    The ``nktopg`` and ``ntop`` arguments are static (level-index
+    constants); pass as Python ints. Defaults match the echam6 namelist.
     """
     nlev = pum1.shape[0]
-    nktopg = int(config.nktopg)
-    ntop = int(config.ntop)
 
     # Activation criterion (lines 173-180): scheme is active only if
     # (ppic - pmea) > gpicmea AND pstd > gstd.
@@ -641,7 +644,8 @@ def sso_drag(
     zdudt, zdvdt, zdis = _orodrag(
         paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
         pmea, pstd, psig, pgam, pthe, ppic, pval,
-        pdtime, config.gkdrag, config.gkwake, nktopg, ntop,
+        pdtime, config.gkdrag, config.gkwake,
+        nktopg, ntop,
     )
 
     # Mask by activation; scale by land fraction (lines 226-244).

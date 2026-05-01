@@ -148,11 +148,12 @@ class TestSSOJaxTransforms:
 
 class TestSSOParameters:
     def test_defaults_match_echam_namelist(self):
+        """Tunable knobs match echam6 defaults. Static knobs (nktopg, ntop)
+        live as :func:`sso_drag` kwargs."""
         p = SSOParameters.default()
         for name, expected in [
             ("gpicmea", 1.0), ("gstd", 1.0), ("gkdrag", 0.2),
             ("gkwake", 1.0), ("gklift", 0.0),
-            ("nktopg", 1), ("ntop", 1),
         ]:
             np.testing.assert_allclose(float(getattr(p, name)), expected,
                                        atol=1e-6, rtol=1e-6)
