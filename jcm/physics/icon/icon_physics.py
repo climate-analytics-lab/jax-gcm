@@ -806,10 +806,17 @@ def apply_microphysics_2m(
     qr = state.tracers.get('qr', zeros)
     qs = state.tracers.get('qs', zeros)
 
-    # Aerosol-activated CDNC from MACv2-SP (same formula as 1M path).
-    base_cdnc = parameters.microphysics.base_cdnc
-    cdnc_factor = physics_data.aerosol.cdnc_factor
-    activated_cdnc = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
+    # Aerosol-activated CDNC floor from the MACv2-SP plume CCN
+    # concentration via the SPA sublinear power-law (Lin et al. 2025;
+    # #374). Output is per-level `(nlev, ncols)` in m^-3 — the column-
+    # mean Nccn is broadcast to every level (vertical aerosol structure
+    # is not resolved by the simple-plumes scheme).
+    from jcm.physics.aerosol.spa import spa_activated_cdnc
+    Nccn = physics_data.aerosol.Nccn  # (ncols,), units cm^-3
+    activated_cdnc = spa_activated_cdnc(
+        Nccn=Nccn[jnp.newaxis, :],
+        cloud_fraction=cloud_fraction,
+    )
 
     tend_all = jax.vmap(
         cloud_microphysics_2m,

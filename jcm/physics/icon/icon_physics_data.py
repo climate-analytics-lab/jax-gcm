@@ -361,6 +361,12 @@ class AerosolData:
     # For Twomey effect (cloud-aerosol interactions)
     cdnc_factor: jnp.ndarray         # CDNC modification factor [1] (ncols,)
 
+    # Cloud condensation nuclei number concentration [cm^-3] (ncols,).
+    # Derived from MACv2-SP plumes (anthropogenic + background AOD via the
+    # AEROCOM-P1 Twomey relation) and consumed by the SPA-style activation
+    # in the 2M microphysics path. See `jcm.physics.aerosol.spa`.
+    Nccn: jnp.ndarray
+
     # Spectral scaling
     angstrom: jnp.ndarray            # Angstrom exponent [1] (ncols,)
 
@@ -374,6 +380,7 @@ class AerosolData:
             aod_anthropogenic=jnp.zeros(nodal_shape),
             aod_background=jnp.zeros(nodal_shape),
             cdnc_factor=jnp.ones(nodal_shape),  # Start with factor of 1.0
+            Nccn=jnp.zeros(nodal_shape),
             angstrom=jnp.ones(nodal_shape) * 1.5,  # Typical fine-mode aerosol
         )
 
@@ -386,6 +393,7 @@ class AerosolData:
             'aod_anthropogenic': self.aod_anthropogenic,
             'aod_background': self.aod_background,
             'cdnc_factor': self.cdnc_factor,
+            'Nccn': self.Nccn,
             'angstrom': self.angstrom,
         }
         new_data.update(kwargs)

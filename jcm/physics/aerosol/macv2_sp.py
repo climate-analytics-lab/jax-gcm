@@ -95,6 +95,12 @@ def get_simple_aerosol(
     # Calculate Twomey effect using proper CDNC relationship
     cdnc_factor = get_CDNC(aod_anthropogenic) / get_CDNC(jnp.zeros_like(aod_anthropogenic))
 
+    # CCN concentration [cm^-3] for the SPA-style activation floor used by
+    # the two-moment microphysics. Both anthropogenic and background plume
+    # contributions feed in — i.e. the column AOD is the source. See
+    # `jcm.physics.aerosol.spa.spa_activated_cdnc` for the consumer.
+    Nccn = get_CDNC(aod_anthropogenic + aod_background)
+
     # Update aerosol data
     aerosol_data = physics_data.aerosol.copy(
         aod_profile=aod_profile,
@@ -104,6 +110,7 @@ def get_simple_aerosol(
         aod_anthropogenic=aod_anthropogenic,
         aod_background=aod_background,
         cdnc_factor=cdnc_factor,
+        Nccn=Nccn,
         angstrom=angstrom
     )
     

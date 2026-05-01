@@ -281,6 +281,47 @@ Cloud Microphysics
    ICON-A uses the Lohmann & Roeckner (1996) single-moment scheme with refinements from Lohmann (2004). A two-moment scheme (Seifert & Beheng, 2006) is available as an option but not default. The JAX-GCM implementation uses the KK2000 autoconversion, which is more modern than the original Sundqvist (1978) autoconversion in ECHAM6/ICON-A. This is a deliberate choice to improve aerosol-cloud sensitivity.
 
 
+Cloud–Aerosol Coupling (SPA activation)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The two-moment microphysics scheme tracks the cloud droplet number ``Nc``
+as a prognostic variable. Every step has processes that *remove* droplets
+(autoconversion, freezing, …), so the scheme also needs a way to *make*
+new ones — i.e. an aerosol activation step.
+
+A textbook activation scheme would compute the local supersaturation from
+the cloud-base updraft velocity and step through Köhler theory for the
+local aerosol size distribution. JAX-GCM has neither: MACv2-SP gives
+column AOD, not aerosol numbers, and the hydrostatic core doesn't resolve
+sub-grid updrafts. So instead of "compute activation", we apply a
+calibrated *droplet-number floor* and let the microphysics deplete from
+there. Following Lin et al. (2025):
+
+.. math::
+
+   N_c^\mathrm{min} = 2000 \cdot (N_\mathrm{CCN} \cdot C_f)^{0.55}
+
+where ``Nccn`` is the cloud condensation nuclei concentration and ``Cf``
+is the cloud fraction. The microphysics then enforces
+``Nc ← max(Nc, Nc_min)`` at each step.
+
+We get ``Nccn`` from MACv2-SP's column AOD via a Twomey-style empirical
+fit, so an anthropogenic-plume increase translates into more cloud
+droplets, smaller effective radius, and brighter clouds — the Twomey
+indirect aerosol effect, with the right sign and roughly the right
+magnitude.
+
+Two things to keep in mind:
+
+- The 0.55 exponent matters. A linear ``Nc ∝ Nccn`` overestimates the
+  indirect effect by roughly half; observations constrain
+  ``d ln Nc / d ln Nccn`` to the 0.3–0.8 band, and 0.55 sits in the
+  middle of that.
+- This is a calibrated floor, not a resolved activation. It captures
+  first-order cloud-aerosol sensitivity but won't reproduce the details
+  a HAM-style aerosol scheme would.
+
+
 Vertical Diffusion
 ^^^^^^^^^^^^^^^^^^
 
@@ -690,6 +731,8 @@ The ICON physics parameterizations are based on the following key publications:
 10. **Hines, C. O.** (1997). Doppler-spread parameterization of gravity-wave momentum deposition in the middle atmosphere. Part 1: Basic formulation. *Journal of Atmospheric and Solar-Terrestrial Physics*, 59, 371--386.
 
 11. **Stevens, B., Fiedler, S., Kinne, S., et al.** (2017). MACv2-SP: a parameterization of anthropogenic aerosol optical properties and an associated Twomey effect for use in CMIP6. *Geoscientific Model Development*, 10, 433--452.
+
+12. **Lin, G., et al.** (2025). Simple Prescribed Aerosol scheme for E3SMv3. *Atmospheric Chemistry and Physics*, 25, 15105--15129. https://acp.copernicus.org/articles/25/15105/2025/
 
 
 Assumptions and Limitations
