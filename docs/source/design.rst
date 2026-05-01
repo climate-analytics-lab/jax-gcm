@@ -316,7 +316,7 @@ beside existing ones without nesting:
    ├── vertical_diffusion/
    │   ├── tte_tke/              # TTE-TKE closure
    │   └── speedy_vdiff.py
-   ├── gravity_waves/hines/
+   ├── gravity_waves/             # hines/ (Hines 1997), sso/ (Lott-Miller 1997), simple/
    ├── aerosol/macv2_sp.py       # Stevens MACv2-SP simple plumes
    ├── chemistry/simple_chemistry.py
    ├── surface/                  # speedy + icon (multi-tile bundle in icon/)

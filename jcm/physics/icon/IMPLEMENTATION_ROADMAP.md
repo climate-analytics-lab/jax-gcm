@@ -263,30 +263,27 @@ tracers = {
 
 ---
 
-## Phase 7: Gravity Wave Drag (1 month)
+## Phase 7: Gravity Wave Drag — DONE (PR #350/#351)
 
-**Goal:** Complete Hines GWD scheme.
+### 7.1 Hines (1997) non-orographic GWD — COMPLETE
+- **Fortran source:** `mo_gw_hines.f90` (atm_phy_echam, 2326 lines)
+- **JAX port:** `jcm/physics/gravity_waves/hines/hines.py`
+- **Status:** Bit-exact against Fortran reference on 8 column scenarios.
+  Targets the production control flow (8 azimuths, slope=1, lheatcal=true,
+  no front/precip/lat-dependent sources, no orographic-wave coupling).
+- **Wired as:** ``IconHines`` term in default ``icon_physics()`` factory.
 
-### 7.1 Current Status
-- Basic framework implemented
-- Missing full spectral treatment
-
-### 7.2 Hines Scheme Completion
-- **Fortran:** `mo_gw_hines.f90` (2326 lines)
-- **Features to add:**
-  - Full wave spectrum discretization
-  - Critical level filtering
-  - Wave saturation with spectral density
-  - Azimuthal dependence
-- **Files:** `gravity_waves/hines.py`
-
-### 7.3 Sub-grid Orography (SSO)
-- **Fortran:** `mo_ssodrag.f90` (1564 lines)
-- **Features:**
-  - Orographic variance and anisotropy
-  - Low-level blocking
-  - Gravity wave launching from orography
-- **Files to create:** `gravity_waves/sso_drag.py`
+### 7.2 Lott & Miller (1997) sub-grid orographic drag — COMPLETE
+- **Fortran source:** `mo_ssodrag.f90` (atm_phy_echam, 1564 lines)
+- **JAX port:** `jcm/physics/gravity_waves/sso/lott_miller.py`
+- **Status:** Bit-exact against Fortran reference on 4 column scenarios.
+  Includes orodrag (wave drag) + orosetup + gwstress + gwprofil (saturation).
+  Mountain-lift branch (``orolift``, gklift=0 in production) NOT ported.
+- **Wired as:** ``IconSSO`` term in default ``icon_physics()`` factory.
+- **Known gap:** SSO descriptor data (orostd, orosig, etc.) not yet
+  plumbed through ``TerrainData``; current wiring uses placeholders
+  derived from terrain.orog and terrain.fmask. Ocean is auto-disabled
+  by the activation gate.
 
 ---
 

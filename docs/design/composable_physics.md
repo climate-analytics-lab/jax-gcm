@@ -566,7 +566,8 @@ tightened in three ways:
    ported from. Examples: `convection/tiedtke_nordeng/`,
    `clouds/sundqvist.py`, `clouds/echam_1m.py`, `aerosol/macv2_sp.py`,
    `radiation/grey_two_stream/`, `radiation/rrtmgp.py`,
-   `vertical_diffusion/tte_tke/`, `gravity_waves/hines/`. New ports of the
+   `vertical_diffusion/tte_tke/`, `gravity_waves/{hines,sso,simple}/`.
+   New ports of the
    same scheme from a different model (e.g. CAM Tiedtke) drop in beside the
    existing one without an extra `cam/` subfolder. Model-specific
    *infrastructure* (parameter containers, coordinate caches, data
