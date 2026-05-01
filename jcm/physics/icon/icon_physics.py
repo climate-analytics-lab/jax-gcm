@@ -29,6 +29,7 @@ from jcm.physics.surface.icon.surface_types import AtmosphericForcing
 from jcm.physics.gravity_waves.hines import gravity_wave_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.icon.icon_physics_data import PhysicsData
+from jcm.physics.aerosol.spa import spa_activated_cdnc
 
 logger = logging.getLogger(__name__)
 
@@ -813,7 +814,6 @@ def apply_microphysics_2m(
     # is not resolved by the simple-plumes scheme). The fit's prefactor
     # and exponent come from `parameters.aerosol` so they remain
     # differentiable for calibration work.
-    from jcm.physics.aerosol.spa import spa_activated_cdnc
     Nccn = physics_data.aerosol.Nccn  # (ncols,), units cm^-3
     activated_cdnc = spa_activated_cdnc(
         Nccn=Nccn[jnp.newaxis, :],
