@@ -261,6 +261,66 @@ actually needs from disk, so this stays memory-efficient even for very
 long forcing records.
 
 
+Nudging the model toward an external state
+-------------------------------------------
+
+The model can be relaxed toward an external reference state ("nudging")
+to suppress internal variability that's unrelated to the question you're
+asking — useful for comparing model fields to specific dates of
+observations, or for reducing noise in calibration runs.
+
+Nudging is implemented as a Newtonian relaxation in spectral space:
+
+.. math::
+
+   \frac{\mathrm{d}X}{\mathrm{d}t}\bigg|_\mathrm{nudge}
+   = \frac{X_\mathrm{ref} - X}{\tau}
+
+where ``X`` is one of the dycore state variables (vorticity, divergence,
+temperature, log surface pressure) and ``τ`` is the relaxation timescale.
+The most common pattern is to nudge winds above the boundary layer and
+let everything else evolve freely, so the model gets the right
+synoptic-scale circulation while its physics still has the freedom to
+respond:
+
+.. code-block:: python
+
+   import xarray as xr
+   from jcm.model import Model
+   from jcm.nudging import Nudging, NudgingTarget, NudgingConfig
+
+   ref_ds = xr.open_dataset('era5_2010.nc')   # u, v, T, ps on (time, lev, lat, lon)
+
+   # Build a temporary Model so we can pull `reference_temperature` and
+   # `physics_specs` (both needed to align the target with the dycore's
+   # internal representation).
+   probe = Model(coords=coords, terrain=terrain, physics=physics)
+   target = NudgingTarget.from_dataset(
+       ref_ds, coords,
+       reference_temperature=probe.primitive.reference_temperature,
+       physics_specs=probe.primitive.physics_specs,
+   )
+   config = NudgingConfig.winds_only(
+       nlev=coords.vertical.layers,
+       tau_seconds=21600.0,        # 6 h relaxation
+       pbl_levels=2,               # leave the bottom 2 levels free
+       physics_specs=probe.primitive.physics_specs,
+   )
+
+   nudged = Model(
+       coords=coords, terrain=terrain, physics=physics,
+       nudging=Nudging(target, config),
+   )
+   predictions = nudged.run(save_interval='1 day', total_time='1 month')
+
+The reference data can be a single climatology (passed with
+``time_var=None``) or a multi-year time series; the latter aligns
+against the model's calendar through the same machinery the regular
+forcing uses.
+
+Nudging is physics-agnostic — it acts on the dynamical core state, so
+the same setup works under SPEEDY, ICON, or any other physics package.
+
 Multi-Device Parallelization
 -----------------------------
 

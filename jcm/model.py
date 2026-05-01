@@ -18,6 +18,7 @@ from jcm.constants import p0
 from jcm.terrain import TerrainData
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
+from jcm.nudging import Nudging
 from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
@@ -261,6 +262,7 @@ class Model:
                  physics: Physics=None, diffusion: DiffusionFilter=None,
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'),
                  calendar: str = "365_day",
+                 nudging: Nudging | None = None,
                  log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
 
@@ -284,6 +286,14 @@ class Model:
                 tables and solar lookup; ``"gregorian"`` (365.2425 days/year)
                 is available for ICON-style runs that align against real
                 Gregorian timestamps in their forcing files.
+            nudging:
+                Optional :class:`jcm.nudging.Nudging` handle. When provided,
+                the dycore time integration is augmented with a Newtonian
+                relaxation tendency toward the configured reference state
+                (``dX/dt|_nudge = (X_ref − X) / τ``). Physics-agnostic — it
+                acts on the dycore state, so the same nudging works under
+                SPEEDY, ICON, or any future physics package. Default
+                ``None`` (no nudging, no extra cost).
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
@@ -291,6 +301,7 @@ class Model:
         # Set root logging level to be log_level so it propagates to other modules
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
+        self.nudging = nudging
 
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)
@@ -549,8 +560,24 @@ class Model:
         physics_forcing_eqn = lambda d: ExplicitODE.from_functions(
             lambda state: _step_tendencies(state, d)
         )
-        primitive_with_speedy = lambda d: dinosaur.time_integration.compose_equations([self.primitive, physics_forcing_eqn(d)])
-        unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
+
+        def _composed_eqn(d):
+            equations = [self.primitive, physics_forcing_eqn(d)]
+            if self.nudging is not None:
+                # Newtonian relaxation toward the (possibly time-varying)
+                # reference state. The tendency is built directly in
+                # spectral space so no per-step nodal round-trip is needed.
+                nudging_eqn = ExplicitODE.from_functions(
+                    lambda state: self.nudging.tendency(
+                        state,
+                        date=self._date_from_sim_time(state.sim_time),
+                        calendar=self.calendar,
+                    )
+                )
+                equations.append(nudging_eqn)
+            return dinosaur.time_integration.compose_equations(equations)
+
+        unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(_composed_eqn(d), self.dt)
         return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
     def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
