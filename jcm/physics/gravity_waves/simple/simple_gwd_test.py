@@ -14,7 +14,8 @@ from jcm.constants import grav, cp, rd
 
 def test_simple_gwd_smoke():
     """Smoke test: build a westerly-jet column, run the scheme, and check
-    that drag opposes the wind direction."""
+    that drag opposes the wind direction.
+    """
     nlev = 30
     height = jnp.linspace(0, 30000, nlev)[::-1]
     pressure = 100000 * jnp.exp(-height / 8000)

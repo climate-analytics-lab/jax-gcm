@@ -113,6 +113,7 @@ def derive_sso_descriptors(
     Returns:
         dict with the six SSO descriptor arrays, each of shape
         ``(nx, ny)`` matching the target grid.
+
     """
     import numpy as np
     H = np.asarray(highres_orog)

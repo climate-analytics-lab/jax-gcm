@@ -81,7 +81,6 @@ Algorithm (column-mode, executed at each grid column):
 """
 from typing import NamedTuple, Tuple
 
-import jax
 import jax.numpy as jnp
 from jax import lax
 import tree_math
@@ -776,6 +775,7 @@ def sso_drag(
     Returns:
         ``(tendencies, state)`` — see :class:`SSOTendencies` and
         :class:`SSOState` for field documentation.
+
     """
     # Activation gate: skip columns whose sub-grid orography is too small
     # to support meaningful drag.

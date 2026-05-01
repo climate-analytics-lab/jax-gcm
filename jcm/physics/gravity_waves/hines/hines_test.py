@@ -14,10 +14,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from jcm.physics.gravity_waves.hines import (
-    HinesParameters, HinesState, HinesTendencies, hines_gwd,
+    HinesParameters, hines_gwd,
 )
 
 
@@ -69,7 +68,8 @@ class TestHinesBasic:
 
     def test_tendencies_zero_below_launch(self):
         """No drag is computed below the launch level (launch_level counts
-        up from the surface)."""
+        up from the surface).
+        """
         col = _make_column(nlev=47)
         config = HinesParameters.default()
         tend, _ = hines_gwd(**col, config=config, launch_level=10)
@@ -85,7 +85,8 @@ class TestHinesBasic:
         """Eastward jet → eastward momentum flux divergence above launch
         decelerates the easterly drift in the upper stratosphere/mesosphere
         — and flux pile-up near model top gives strongly positive du/dt
-        there. Test that the column-integrated stress has the right sign."""
+        there. Test that the column-integrated stress has the right sign.
+        """
         col = _make_column(u_scale=1.0, v_scale=0.0)
         config = HinesParameters.default()
         tend, _ = hines_gwd(**col, config=config)
@@ -101,7 +102,8 @@ class TestHinesBasic:
     def test_drag_scales_with_rms_launch_wind(self):
         """Doubling the launch RMS wind doubles the spectral amplitude →
         with the m_alpha feedback the actual stress scales sub-linearly.
-        Test that a bigger launch wind gives stronger column drag."""
+        Test that a bigger launch wind gives stronger column drag.
+        """
         col = _make_column()
         cfg_a = HinesParameters.default(rms_launch_wind=0.5)
         cfg_b = HinesParameters.default(rms_launch_wind=2.0)
@@ -123,7 +125,7 @@ class TestHinesJaxTransforms:
         assert jnp.all(jnp.isfinite(tend.dudt))
 
     def test_vmap_over_columns(self):
-        """vmap over a small batch of columns."""
+        """Vmap over a small batch of columns."""
         col1 = _make_column(u_scale=1.0)
         col2 = _make_column(u_scale=2.0)
         col3 = _make_column(u_scale=-1.0)
@@ -168,7 +170,8 @@ class TestHinesParameters:
         """The default tunable knobs reproduce ECHAM-A's namelist values.
         Static loop knobs (launch_level, num_azimuths, smoothing_passes)
         live as :func:`hines_gwd` kwargs. Tolerance is loose because the
-        project default precision is f32."""
+        project default precision is f32.
+        """
         p = HinesParameters.default()
         for name, expected in [
             ("wave_amplitude_factor", 1.5),

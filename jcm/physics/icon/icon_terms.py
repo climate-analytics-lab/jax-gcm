@@ -454,7 +454,8 @@ class IconSSO(IconTermBase):
 class IconSimpleGwd(IconTermBase):
     """Simple monochromatic GWD (cheap fallback). Kept available but not
     included in the default ``icon_physics()`` factory; pass it explicitly
-    to ``ComposableIconPhysics`` if you want the cheap scheme."""
+    to ``ComposableIconPhysics`` if you want the cheap scheme.
+    """
 
     name: ClassVar[str] = "icon_simple_gwd"
     category: ClassVar[str] = "simple_gwd"

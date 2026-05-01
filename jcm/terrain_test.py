@@ -15,7 +15,8 @@ from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 class TestSimplifiedSSODescriptors(unittest.TestCase):
     """Tests for the simplified SSO-descriptor heuristic
-    (:func:`get_simplified_sso_descriptors`)."""
+    (:func:`get_simplified_sso_descriptors`).
+    """
 
     def test_zero_over_ocean(self):
         """All six SSO fields should be zero where orog == 0."""
@@ -52,7 +53,8 @@ class TestSimplifiedSSODescriptors(unittest.TestCase):
         """The Lott-Miller activation gate (ppic-pmea > gpicmea AND
         pstd > gstd, both 1m by default) must be inactive for ocean
         columns derived by the heuristic — otherwise SSO would fire on
-        flat ocean."""
+        flat ocean.
+        """
         orog = jnp.zeros((10,))
         sso = get_simplified_sso_descriptors(orog)
         ppic_minus_mea = sso["oropic"] - orog
@@ -65,7 +67,8 @@ class TestDeriveSSODescriptorsFromHighRes(unittest.TestCase):
 
     def test_synthetic_ridge_gives_anisotropic_stats(self):
         """A high-res ridge oriented N-S should produce non-zero std,
-        slope, and an anisotropy < 1 (not isotropic)."""
+        slope, and an anisotropy < 1 (not isotropic).
+        """
         import numpy as np
         nx_hr, ny_hr = 64, 32
         hr_lat = np.linspace(-10.0, 10.0, ny_hr)

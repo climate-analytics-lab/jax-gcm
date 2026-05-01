@@ -15,7 +15,7 @@ import numpy as np
 
 from jcm.constants import grav, rd
 from jcm.physics.gravity_waves.sso import (
-    SSOParameters, SSOState, SSOTendencies, sso_drag,
+    SSOParameters, sso_drag,
 )
 
 
@@ -81,7 +81,8 @@ class TestSSOBasic:
     def test_inactive_when_orography_below_threshold(self):
         """Activation gate: setting std-dev below ``min_orog_std`` and
         peak below ``min_peak_minus_mean_elevation`` should disable the
-        scheme entirely."""
+        scheme entirely.
+        """
         col = _make_alps_column(orography_std=0.5, peak_elevation=600.0)
         tend, _ = sso_drag(**col, config=SSOParameters.default())
         np.testing.assert_array_equal(np.asarray(tend.dudt), 0.0)
@@ -96,7 +97,8 @@ class TestSSOBasic:
 
     def test_dissipation_non_negative(self):
         """Energy dissipation should be non-negative (KE → heat). Tolerance
-        is loose because the project default precision is f32."""
+        is loose because the project default precision is f32.
+        """
         col = _make_alps_column()
         tend, _ = sso_drag(**col, config=SSOParameters.default())
         peak_dissip = float(jnp.max(jnp.abs(tend.dissip)))
@@ -147,7 +149,8 @@ class TestSSOJaxTransforms:
 class TestSSOParameters:
     def test_defaults_match_echam_namelist(self):
         """Tunable knobs match echam6 defaults. Static knobs (nktopg, ntop)
-        live as :func:`sso_drag` kwargs."""
+        live as :func:`sso_drag` kwargs.
+        """
         p = SSOParameters.default()
         for name, expected in [
             ("min_peak_minus_mean_elevation", 1.0),

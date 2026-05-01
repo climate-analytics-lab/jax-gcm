@@ -1,4 +1,4 @@
-"""Hines (1997) Doppler-spread spectral non-orographic gravity-wave drag.
+r"""Hines (1997) Doppler-spread spectral non-orographic gravity-wave drag.
 
 Algorithm (column-mode, executed at each grid column):
 
@@ -84,7 +84,7 @@ _COS_PI_4 = float(jnp.cos(jnp.pi / 4))
 
 @tree_math.struct
 class HinesParameters:
-    """Tunable parameters for the Hines (1997) GWD scheme.
+    r"""Tunable parameters for the Hines (1997) GWD scheme.
 
     All fields below flow through the JAX trace as leaves (gradients,
     vmap, etc. all see them). Static loop knobs (``launch_level``,
@@ -173,6 +173,7 @@ class HinesState(NamedTuple):
         flux_u: zonal momentum flux profile (Pa), full levels.
         flux_v: meridional momentum flux profile (Pa), full levels.
         diffco: vertical diffusion coefficient (m^2/s), full levels.
+
     """
 
     flux_u: jnp.ndarray
@@ -188,6 +189,7 @@ class HinesTendencies(NamedTuple):
         dvdt: meridional-wind tendency (m/s^2).
         dissip: energy dissipation rate per unit mass (W/kg = J/(s·kg)).
             Convert to a temperature tendency via dT/dt = dissip / cp.
+
     """
 
     dudt: jnp.ndarray
@@ -267,7 +269,7 @@ def _hines_integral_slope1(
     bv_freq_at_launch: jnp.ndarray,
     min_wavenumber: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Hines integral :math:`I_\\alpha` for spectral slope = 1.
+    r"""Hines integral :math:`I_\alpha` for spectral slope = 1.
 
     This integral closes the level-by-level recursion in the doppler-
     spread sweep: the per-azimuth squared amplitude at level l is given
@@ -286,6 +288,7 @@ def _hines_integral_slope1(
         bv_freq_at_launch: scalar Brunt-Vaisala frequency at the launch
             level (rad/s).
         min_wavenumber: floor on the cutoff wavenumber (1/m).
+
     """
     q_min = 1.0
     qm_min = 0.01
@@ -438,6 +441,7 @@ def _hines_extro_column(
         ``(drag_u, drag_v, heating, diffco, flux_u, flux_v)``: all
         full-level arrays of shape (nlev,). drag in m/s^2, heating in
         W/kg, diffco in m^2/s, flux in Pa.
+
     """
     nlev = bv_freq.shape[0]
     f_amp = config.wave_amplitude_factor
@@ -488,27 +492,27 @@ def _hines_extro_column(
     # sigma_alpha at the level immediately below (already filled by the
     # previous step or by the launch initialisation).
 
-    def step(carry, l):
+    def step(carry, level):
         m_alpha, sigma_t, sigma_alpha, sqamp, m_alpha_min_running, do_alpha = carry
-        below = l + 1
+        below = level + 1
 
         # n_over_m: with the orographic-wave coupling switched off, the
         # ECHAM ``f2mfac`` correction vanishes and this reduces to
         # f_width * sigma_t at the level below.
         n_over_m_turb = f_width * sigma_t[below]
         # Molecular-viscosity-limited cutoff:
-        visc = jnp.maximum(mol_visc[l], visc_min)
-        n_over_m_mol = jnp.cbrt(bv_freq[l] * k_horiz / visc) / f_mol
+        visc = jnp.maximum(mol_visc[level], visc_min)
+        n_over_m_mol = jnp.cbrt(bv_freq[level] * k_horiz / visc) / f_mol
         # Take the smaller cutoff (turbulence-limited or molecular-limited).
         n_over_m = jnp.where(
-            bv_freq[l] / n_over_m_turb >= n_over_m_mol,
-            bv_freq[l] / n_over_m_mol,
+            bv_freq[level] / n_over_m_turb >= n_over_m_mol,
+            bv_freq[level] / n_over_m_mol,
             n_over_m_turb,
         )
 
         # Trial cutoff wavenumber at this level:
         m_trial = bv_freq_launch / (
-            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[l])
+            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level])
         m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
         m_trial = jnp.minimum(m_trial, m_alpha_min_running)
         m_trial = jnp.maximum(m_trial, m_min)
@@ -517,17 +521,18 @@ def _hines_extro_column(
 
         # Hines integral, then update per-azimuth amplitude and RMS winds.
         integral = _hines_integral_slope1(
-            azimuth_wind[l], m_alpha_l, bv_freq_launch, m_min)
+            azimuth_wind[level], m_alpha_l, bv_freq_launch, m_min)
         do_alpha_new = do_alpha & (m_alpha_l > m_min)
 
-        sigfac = (density_launch / density[l]) * (bv_freq[l] / bv_freq_launch)
+        sigfac = ((density_launch / density[level])
+                  * (bv_freq[level] / bv_freq_launch))
         sqamp_new = sigfac * spectral_amplitude * integral
         sigma_t_new, sigma_a_new = _rms_total_and_per_azimuth_8(sqamp_new)
 
-        m_alpha = m_alpha.at[l].set(m_alpha_l)
-        sqamp = sqamp.at[l].set(sqamp_new)
-        sigma_t = sigma_t.at[l].set(sigma_t_new)
-        sigma_alpha = sigma_alpha.at[l].set(sigma_a_new)
+        m_alpha = m_alpha.at[level].set(m_alpha_l)
+        sqamp = sqamp.at[level].set(sqamp_new)
+        sigma_t = sigma_t.at[level].set(sigma_t_new)
+        sigma_alpha = sigma_alpha.at[level].set(sigma_a_new)
 
         new_carry = (m_alpha, sigma_t, sigma_alpha, sqamp,
                      m_alpha_min_running_new, do_alpha_new)
@@ -656,6 +661,7 @@ def hines_gwd(
     Returns:
         ``(tendencies, state)`` — see :class:`HinesTendencies` and
         :class:`HinesState` for field documentation.
+
     """
     nlev = u_wind.shape[0]
     surface_pressure = pressure_half[-1]
