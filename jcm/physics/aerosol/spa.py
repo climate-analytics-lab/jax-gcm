@@ -13,18 +13,16 @@ The SPA paper found that a *linear* CCN→Nc activation overestimates the
 indirect aerosol effect; their analysis of E3SMv3 climatology yields a
 sublinear power-law with exponent ~0.55:
 
-    Nc_min [cm^-3] = SPA_PREFACTOR * (Nccn * cloud_fraction) ** SPA_EXPONENT
+    Nc_min [cm^-3] = prefactor * (Nccn * cloud_fraction) ** exponent
 
-with SPA_PREFACTOR = 2000 and SPA_EXPONENT = 0.55. The slope falls in the
-0.3 ≤ d ln Nc / d ln Nccn ≤ 0.8 range constrained by observations.
+The fit values from Lin (2025) are ``prefactor = 2000`` and
+``exponent = 0.55`` — those live as defaults on
+:class:`jcm.physics.aerosol.macv2_sp_params.AerosolParameters` so they are
+differentiable through ``jax.grad`` (for calibration / sensitivity work).
 """
 
 import jax.numpy as jnp
 
-
-# Lin et al. (2025) sublinear fit to E3SMv3 climatology.
-SPA_PREFACTOR: float = 2000.0
-SPA_EXPONENT: float = 0.55
 
 # Conversion factor from cm^-3 (the units of `Nccn` and the SPA fit output)
 # to m^-3 (the convention used inside the two-moment microphysics).
@@ -32,8 +30,7 @@ _CM3_TO_M3: float = 1.0e6
 
 
 def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
-                       prefactor: float = SPA_PREFACTOR,
-                       exponent: float = SPA_EXPONENT) -> jnp.ndarray:
+                       prefactor: jnp.ndarray, exponent: jnp.ndarray) -> jnp.ndarray:
     """Per-cell SPA-style cloud-droplet floor `Nc_min`, in m^-3.
 
     Args:
@@ -43,8 +40,11 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
             shape can be either ``(..., ncols)`` or ``(..., nlev, ncols)``.
         cloud_fraction: Cloud fraction in [0, 1], same shape as the
             broadcast target.
-        prefactor: SPA fit coefficient (default 2000, matches Lin 2025).
-        exponent: SPA fit exponent (default 0.55).
+        prefactor: SPA fit coefficient. Lin (2025) gives 2000 — typically
+            sourced from ``AerosolParameters.spa_prefactor`` so that it
+            is differentiable.
+        exponent: SPA fit exponent. Lin (2025) gives 0.55 — typically
+            sourced from ``AerosolParameters.spa_exponent``.
 
     Returns:
         `Nc_min` in m^-3, ready to be passed as `activated_cdnc` to

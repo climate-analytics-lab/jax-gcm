@@ -52,9 +52,17 @@ class AerosolParameters:
     
     # Natural background AOD
     background_aod: jnp.ndarray   # Background AOD at 550nm (scalar)
-    
+
+    # SPA-style activation fit (Lin et al. 2025) used by the 2M micro-
+    # physics: ``Nc_min[cm^-3] = spa_prefactor * (Nccn * Cf)^spa_exponent``.
+    # Stored on parameters (not a module-level constant) so they're
+    # differentiable through `jax.grad` for sensitivity / calibration.
+    spa_prefactor: jnp.ndarray    # default 2000.0 (Lin 2025, fit to E3SMv3)
+    spa_exponent: jnp.ndarray     # default 0.55  (sublinear; observational band 0.3–0.8)
+
     @classmethod
-    def default(cls, background_aod=0.02) -> 'AerosolParameters':
+    def default(cls, background_aod=0.02,
+                spa_prefactor=2000.0, spa_exponent=0.55) -> 'AerosolParameters':
         """Create default MACv2-SP aerosol parameters
         
         These values are representative of the MACv2-SP climatology
@@ -198,6 +206,8 @@ class AerosolParameters:
             theta=theta,
             ftr_weight=ftr_weight,
             background_aod=jnp.array(background_aod),
+            spa_prefactor=jnp.array(spa_prefactor),
+            spa_exponent=jnp.array(spa_exponent),
         )
     
     def isnan(self):

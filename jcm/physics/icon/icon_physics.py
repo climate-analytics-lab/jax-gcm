@@ -810,12 +810,16 @@ def apply_microphysics_2m(
     # concentration via the SPA sublinear power-law (Lin et al. 2025;
     # #374). Output is per-level `(nlev, ncols)` in m^-3 — the column-
     # mean Nccn is broadcast to every level (vertical aerosol structure
-    # is not resolved by the simple-plumes scheme).
+    # is not resolved by the simple-plumes scheme). The fit's prefactor
+    # and exponent come from `parameters.aerosol` so they remain
+    # differentiable for calibration work.
     from jcm.physics.aerosol.spa import spa_activated_cdnc
     Nccn = physics_data.aerosol.Nccn  # (ncols,), units cm^-3
     activated_cdnc = spa_activated_cdnc(
         Nccn=Nccn[jnp.newaxis, :],
         cloud_fraction=cloud_fraction,
+        prefactor=parameters.aerosol.spa_prefactor,
+        exponent=parameters.aerosol.spa_exponent,
     )
 
     tend_all = jax.vmap(
