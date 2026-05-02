@@ -1,7 +1,7 @@
 # Composable Physics Design
 
 **Status:** Implemented (Phases 1–4 complete). Per PR #429 review the legacy
-`SpeedyPhysics` / `IconPhysics` orchestrator classes were removed and the
+`SpeedyPhysics` / `EchamPhysics` orchestrator classes were removed and the
 process directories were flattened to scheme-named files (e.g.
 `convection/tiedtke_nordeng/`, `clouds/sundqvist.py`); see "Post-PR-#429
 state" at the bottom of this document. The historical narrative below
@@ -29,7 +29,7 @@ The discussion on #206 converged on **Option 1** from duncanwp's enumeration:
 This document describes a concrete design for Option 1 that:
 
 1. Preserves numerical equivalence with the existing `SpeedyPhysics` and
-   `IconPhysics` classes on `feature/icon-physics-v1`.
+   `EchamPhysics` classes on `feature/icon-physics-v1`.
 2. Preserves end-to-end differentiability of physics data outputs with respect
    to physics parameters at the `Model` level — a non-negotiable requirement
    for gradient-based calibration and hybrid physics-ML workflows.
@@ -41,7 +41,7 @@ This document describes a concrete design for Option 1 that:
 
 ## Current State (on `feature/icon-physics-v1`)
 
-Both `SpeedyPhysics` and `IconPhysics` already share the same core pattern:
+Both `SpeedyPhysics` and `EchamPhysics` already share the same core pattern:
 
 - A `Physics` base class with a `compute_tendencies` method.
 - An ordered list of callable **terms** (`self.terms`) iterated in
@@ -85,7 +85,7 @@ gradient tests.
 
 A `jit`-compile-cache consequence: two physics configurations that produce
 different diagnostic-key sets will compile separately. This matches current
-behavior (swapping `SpeedyPhysics` for `IconPhysics` already recompiles) and is
+behavior (swapping `SpeedyPhysics` for `EchamPhysics` already recompiles) and is
 fine in practice — teams running a fixed physics stack get one compilation per
 stack.
 
@@ -328,7 +328,7 @@ Priority order for wrapping, driven by the primary use cases raised on #206:
 4. **Vertical diffusion, clouds, microphysics.** Fill in the remaining ICON
    schemes.
 
-Existing monolithic classes `SpeedyPhysics` and `IconPhysics` remain functional
+Existing monolithic classes `SpeedyPhysics` and `EchamPhysics` remain functional
 during the migration. Once all terms are wrapped, they become factory functions
 that return a `ComposablePhysics`:
 
@@ -374,9 +374,9 @@ jcm/physics/
 │   ├── speedy_terms.py          # Composable wrappers + speedy_physics() factory
 │   ├── params.py, speedy_coords.py, physics_data.py, physical_constants.py
 ├── icon/                        # ICON infrastructure only
-│   ├── icon_physics.py          # Legacy orchestrator
-│   ├── icon_terms.py            # Composable wrappers + icon_physics() factory
-│   ├── parameters.py, icon_coords.py, icon_physics_data.py, constants/
+│   ├── echam_physics.py          # Legacy orchestrator
+│   ├── echam_terms.py            # Composable wrappers + echam_physics() factory
+│   ├── parameters.py, echam_coords.py, echam_physics_data.py, constants/
 ├── radiation/
 │   ├── speedy_shortwave.py      # SPEEDY shortwave radiation
 │   ├── speedy_longwave.py       # SPEEDY longwave radiation
@@ -402,7 +402,7 @@ jcm/physics/
 ├── orographic_correction/speedy_orographic.py
 ├── packages/                    # Pre-built physics factories
 │   ├── speedy.py                # Re-exports speedy_physics()
-│   └── icon.py                  # Re-exports icon_physics()
+│   └── icon.py                  # Re-exports echam_physics()
 └── held_suarez/                 # Stays as-is (intentionally simple)
 ```
 
@@ -427,7 +427,7 @@ jcm/physics/
 | 1. `PhysicsTerm` as `nnx.Module`, `diagnostics` dict convention | **Complete** | `physics_term.py` |
 | 2. `ComposablePhysics` with `__add__` / `replace` / `remove` | **Complete** | `composable_physics.py` |
 | 2b. **Differentiability gate** — bit-identical gradient check | **Complete** | `composable_physics_test.py` |
-| 3. Wrap existing SPEEDY and ICON terms | **Complete** | `speedy_terms.py`, `icon_terms.py` |
+| 3. Wrap existing SPEEDY and ICON terms | **Complete** | `speedy_terms.py`, `echam_terms.py` |
 | 4. Reorganize directories by process | **Complete** | 18 commits, 603 tests pass |
 
 ## What stays the same
@@ -437,7 +437,7 @@ jcm/physics/
 - The `Physics` base class interface (`compute_tendencies`, `cache_coords`,
   `get_empty_data`) — `ComposablePhysics` implements it, so `Model` and
   `get_physical_tendencies` need no changes.
-- `SpeedyPhysics` and `IconPhysics` remain valid entry points during the
+- `SpeedyPhysics` and `EchamPhysics` remain valid entry points during the
   migration and are re-implemented as factory functions once Phase 3 lands.
 - The ordering-dependency problem duncanwp raised is unchanged but unblocked:
   users specify order, pre-built packages encode sensible defaults, and
@@ -456,7 +456,7 @@ the surface flux scheme reads radiation fluxes, so radiation must run first.
 
 The composable design encodes these dependencies in two ways:
 
-1. **Pre-built factories** (`speedy_physics()`, `icon_physics()`) encode
+1. **Pre-built factories** (`speedy_physics()`, `echam_physics()`) encode
    validated orderings as their default term lists. Users who don't need
    custom configurations get correct orderings for free.
 
@@ -480,7 +480,7 @@ translates between its package's typed structs and the dict:
 
 - SPEEDY wrappers (`speedy_terms.py`) store SPEEDY `PhysicsData` sub-structs
   under keys like `"_shortwave_rad"`, `"_convection"`, etc.
-- ICON wrappers (`icon_terms.py`) store ICON `PhysicsData` sub-structs
+- ICON wrappers (`echam_terms.py`) store ICON `PhysicsData` sub-structs
   under keys like `"_radiation"`, `"_convection"`, etc.
 
 This means mixing a SPEEDY and ICON term that need to share data
@@ -512,21 +512,21 @@ between the composable and legacy physics implementations.
 ### ICON column vectorization
 
 ICON terms operate in column-vectorized format `(nlev, ncols)` rather than
-3D grid format `(nlev, nlon, nlat)`. The `ComposableIconPhysics` subclass
+3D grid format `(nlev, nlon, nlat)`. The `ComposableEchamPhysics` subclass
 handles this reshaping transparently — it reshapes the state to columns before
 iterating terms and reshapes accumulated tendencies back to 3D afterward.
-This matches the optimized pattern from the original `IconPhysics` class.
+This matches the optimized pattern from the original `EchamPhysics` class.
 
 ### Backward compatibility
 
-The legacy `SpeedyPhysics` and `IconPhysics` classes remain functional and
+The legacy `SpeedyPhysics` and `EchamPhysics` classes remain functional and
 unchanged. Existing code that uses `SpeedyPhysics(parameters=...)` or
-`IconPhysics(parameters=...)` continues to work. The composable API is
-opt-in via `speedy_physics()` and `icon_physics()` factory functions.
+`EchamPhysics(parameters=...)` continues to work. The composable API is
+opt-in via `speedy_physics()` and `echam_physics()` factory functions.
 
 The directory reorganization moved process-specific modules but kept all
 infrastructure (params, coords, orchestrators) in their original locations.
-All external imports from `jcm.physics.speedy.*` and `jcm.physics.icon.*`
+All external imports from `jcm.physics.speedy.*` and `jcm.physics.echam.*`
 infrastructure modules are unchanged.
 
 ## Resolved questions
@@ -539,7 +539,7 @@ infrastructure modules are unchanged.
    soft check. Terms with empty `requires`/`provides` are always accepted.
    Strict validation is opt-in and may be tightened in future.
 
-3. **Back-compat shim.** Both `SpeedyPhysics` and `IconPhysics` remain
+3. **Back-compat shim.** Both `SpeedyPhysics` and `EchamPhysics` remain
    as standalone classes (not shims). The composable path is a parallel API,
    not a replacement.
 
@@ -551,14 +551,14 @@ infrastructure modules are unchanged.
 After review on PR #429 (`composable-physics-206`), the design above was
 tightened in three ways:
 
-1. **Removed legacy orchestrator classes** (`SpeedyPhysics`, `IconPhysics`,
+1. **Removed legacy orchestrator classes** (`SpeedyPhysics`, `EchamPhysics`,
    `HeldSuarezPhysics`). The composable path is no longer "parallel" — it
    is the only physics API. Users must instantiate via the
-   `speedy_physics()`, `icon_physics()`, or `held_suarez_physics()`
+   `speedy_physics()`, `echam_physics()`, or `held_suarez_physics()`
    factories. This is a breaking change appropriate to a major version.
 
 2. **Removed `jcm/physics/packages/`.** Factory functions live alongside
-   their schemes in `speedy_terms.py` / `icon_terms.py`; the extra
+   their schemes in `speedy_terms.py` / `echam_terms.py`; the extra
    re-export layer added no value.
 
 3. **Flattened process directories to scheme-named files.** Files are

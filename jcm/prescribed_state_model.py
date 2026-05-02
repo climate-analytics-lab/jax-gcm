@@ -76,8 +76,8 @@ class PrescribedStateModel:
         self.start_date = start_date
         self.dt_seconds = float(dt_seconds)
         self.physics.cache_coords(coords)
-        from jcm.physics.icon.icon_terms import ComposableIconPhysics
-        if isinstance(self.physics, ComposableIconPhysics):
+        from jcm.physics.echam.echam_terms import ComposableEchamPhysics
+        if isinstance(self.physics, ComposableEchamPhysics):
             self.physics.apply_timestep(self.dt_seconds)
 
     def _date_from_time_index(self, time_index) -> DateData:

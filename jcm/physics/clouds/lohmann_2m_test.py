@@ -1223,9 +1223,9 @@ class TestIcon2MPipeline:
     """End-to-end checks that the 2M term composes into a runnable Model."""
 
     def test_factory_declares_six_tracers(self):
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
-        physics = icon_physics(cloud_scheme="2m")
+        physics = echam_physics(cloud_scheme="2m")
         names = {spec.name for spec in physics.required_tracers()}
         assert names == {"qc", "qi", "qnc", "qni", "qr", "qs"}
         nondim_flags = {
@@ -1238,11 +1238,11 @@ class TestIcon2MPipeline:
 
     def test_model_runs_with_2m_and_stays_finite(self):
         """Short SPEEDY-grid run with the 2M composable physics; no NaNs."""
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        physics = icon_physics(cloud_scheme="2m", checkpoint_terms=False)
+        physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
         preds = model.run(save_interval=(1 / 24.0), total_time=(2 / 24.0))
 

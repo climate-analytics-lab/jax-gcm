@@ -1,4 +1,4 @@
-"""Cloud microphysics scheme for ICON physics
+"""Cloud microphysics scheme for ECHAM physics
 
 This module implements comprehensive cloud microphysics including:
 - Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)

@@ -18,7 +18,7 @@ Contents
 
    getting_started
    speedy_physics
-   icon_physics
+   echam_physics
    speedy_translation
    api
    design

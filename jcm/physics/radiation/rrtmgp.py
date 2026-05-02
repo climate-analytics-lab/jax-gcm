@@ -1,4 +1,4 @@
-"""RRTMGP-based radiation scheme for ICON physics.
+"""RRTMGP-based radiation scheme for ECHAM physics.
 
 This module integrates jax-rrtmgp with ICON's radiation interface, handling:
 - Location-specific solar geometry via jax_solar (OrbitalTime, radiation_flux,
@@ -27,7 +27,7 @@ from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
 )
-from jcm.physics.icon.icon_physics_data import RadiationData
+from jcm.physics.echam.echam_physics_data import RadiationData
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radiation_state
 from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,

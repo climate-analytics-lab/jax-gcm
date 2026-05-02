@@ -1,0 +1,12 @@
+# ICON atmospheric physics package.
+name: echam
+radiation: grey       # grey | rrtmgp | emulated
+cloud_scheme: 1m      # 1m | 2m
+checkpoint_terms: true
+
+# Free-form override map applied to ``Parameters.default()`` at build time.
+# Sub-groups: convection, clouds, microphysics, microphysics_2m,
+# gravity_waves, radiation, vertical_diffusion, surface, aerosol.
+# Override individual fields from the CLI without editing this file::
+#     python -m jcm.main physics=echam physics.params.clouds.crt=0.85
+params: {}

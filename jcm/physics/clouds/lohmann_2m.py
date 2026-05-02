@@ -1,4 +1,4 @@
-"""Two-moment cloud microphysics scheme for ICON physics
+"""Two-moment cloud microphysics scheme for ECHAM physics
 
 This module implements a two-moment bulk cloud microphysics scheme, predicting both mass mixing ratios and number 
 concentrations of hydrometeor species. 

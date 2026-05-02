@@ -18,7 +18,7 @@ from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
 )
-from jcm.physics.icon.icon_physics_data import RadiationData
+from jcm.physics.echam.echam_physics_data import RadiationData
 from jcm.physics.radiation.nn_emulator import (
     EmulatorWeights,
     InputScaling,
@@ -67,7 +67,7 @@ def radiation_scheme_emulated(
 
     Additional Args:
         emulator_weights: Trained NN weights (``EmulatorWeights``). Must be
-            provided; passed through the parameters mechanism in IconPhysics.
+            provided; passed through the parameters mechanism in EchamPhysics.
         sw_scaling: Input normalization for SW network.
         lw_scaling: Input normalization for LW network.
     """

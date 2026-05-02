@@ -18,7 +18,7 @@ from datetime import datetime
 
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_scheme
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.icon.unit_conversions import (
+from jcm.physics.echam.unit_conversions import (
     calculate_air_density,
     calculate_layer_thickness,
 )

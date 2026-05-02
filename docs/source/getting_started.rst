@@ -39,11 +39,11 @@ module or directly::
 
    ./jcm/main.py                                               # direct invocation
    python -m jcm.main                                          # equivalent module form
-   ./jcm/main.py physics=icon grid=icon_t85_l47_hybrid         # ICON T85x47
-   python -m jcm.main physics=icon grid=icon_t85_l47_hybrid    # equivalent
+   ./jcm/main.py physics=echam grid=echam_t85_l47_hybrid         # ICON T85x47
+   python -m jcm.main physics=echam grid=echam_t85_l47_hybrid    # equivalent
    python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
        run.total_time=30 run.save_interval=1
-   python -m jcm.main physics=icon physics.params.convection.entrpen=4e-4
+   python -m jcm.main physics=echam physics.params.convection.entrpen=4e-4
    python -m jcm.main run=longrun                              # chunked health-check run
    python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
        run.column.lat_deg=0 run.column.lon_deg=180
@@ -52,7 +52,7 @@ Inspect the available config groups and the fully-composed config::
 
    python -m jcm.main --help                                   # config-group choices
    python -m jcm.main --cfg job                                # composed config
-   python -m jcm.main --cfg job grid=icon_t85_l47_hybrid       # with overrides
+   python -m jcm.main --cfg job grid=echam_t85_l47_hybrid       # with overrides
 
 Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
 ``init``, ``terrain``, ``forcing``, ``diffusion``.

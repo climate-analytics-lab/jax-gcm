@@ -1,6 +1,6 @@
-# ICON Aerosol Physics - Simple Aerosol Scheme
+# ECHAM Aerosol Physics - Simple Aerosol Scheme
 
-This module implements the MACv2-SP (Simple Plumes) aerosol scheme for the ICON physics package in JAX-GCM.
+This module implements the MACv2-SP (Simple Plumes) aerosol scheme for the ECHAM physics package in JAX-GCM.
 
 ## Overview
 
@@ -51,8 +51,8 @@ Aerosol plumes are represented as rotated Gaussian distributions:
 ## Usage
 
 ```python
-from jcm.physics.icon.aerosol.simple_aerosol import get_simple_aerosol
-from jcm.physics.icon.aerosol.aerosol_params import AerosolParameters
+from jcm.physics.echam.aerosol.simple_aerosol import get_simple_aerosol
+from jcm.physics.echam.aerosol.aerosol_params import AerosolParameters
 
 # Create parameters
 params = AerosolParameters.default()
@@ -77,7 +77,7 @@ Comprehensive test suite covers:
 
 Run tests with:
 ```bash
-pytest jcm/physics/icon/aerosol/test_simple_aerosol.py -v
+pytest jcm/physics/echam/aerosol/test_simple_aerosol.py -v
 ```
 
 ## Performance

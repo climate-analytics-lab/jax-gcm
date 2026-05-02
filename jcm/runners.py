@@ -61,14 +61,14 @@ def build_coords(cfg: DictConfig):
         # ICON ships pre-tuned hybrid tables for 40 / 47 levels; for any
         # other count the user has to drop the table in by hand. Keep the
         # error chatty so the failure mode is obvious.
-        from jcm.physics.icon.icon_levels import get_icon_levels
+        from jcm.physics.echam.echam_levels import get_echam_levels
         try:
-            vert = get_icon_levels(layers)
+            vert = get_echam_levels(layers)
         except ValueError as exc:
             raise ValueError(
                 f"hybrid coords with {layers} levels are not pre-configured. "
                 "Use one of the supported counts (40, 47) or extend "
-                "jcm.physics.icon.icon_levels.get_icon_levels."
+                "jcm.physics.echam.echam_levels.get_echam_levels."
             ) from exc
         return get_coords(
             vertical_coords=vert,
@@ -90,7 +90,7 @@ def _apply_param_overrides(base, overrides: dict | None):
     Works for any ``tree_math.struct``-style container whose subgroups are
     themselves field-based dataclasses (which covers both
     ``jcm.physics.speedy.params.Parameters`` and
-    ``jcm.physics.icon.parameters.Parameters``). Unknown subgroups raise
+    ``jcm.physics.echam.parameters.Parameters``). Unknown subgroups raise
     ``ValueError`` so typos don't silently no-op.
     """
     if not overrides:
@@ -146,11 +146,11 @@ def build_physics(cfg: DictConfig):
             )
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         return held_suarez_physics()
-    if name == "icon":
-        from jcm.physics.icon.icon_terms import icon_physics
-        from jcm.physics.icon.parameters import Parameters as IconParameters
-        params = _apply_param_overrides(IconParameters.default(), overrides)
-        return icon_physics(
+    if name == "echam":
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.parameters import Parameters as EchamParameters
+        params = _apply_param_overrides(EchamParameters.default(), overrides)
+        return echam_physics(
             parameters=params,
             radiation_scheme=cfg.physics.radiation,
             cloud_scheme=cfg.physics.get("cloud_scheme", "1m"),

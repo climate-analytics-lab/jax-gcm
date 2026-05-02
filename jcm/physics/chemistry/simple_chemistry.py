@@ -1,4 +1,4 @@
-"""Simple chemistry schemes for ICON physics
+"""Simple chemistry schemes for ECHAM physics
 
 This module implements basic chemistry parameterizations including
 fixed ozone distribution and basic methane oxidation.

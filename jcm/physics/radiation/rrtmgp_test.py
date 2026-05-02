@@ -17,7 +17,7 @@ from jcm.physics.radiation.rrtmgp import (
     radiation_scheme_rrtmgp,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.icon.unit_conversions import (
+from jcm.physics.echam.unit_conversions import (
     calculate_air_density,
     calculate_layer_thickness,
 )

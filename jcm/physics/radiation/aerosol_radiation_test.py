@@ -202,10 +202,10 @@ def test_temporal_weights_scale_aod():
 def test_aerosol_microphysics_droplet_coupling():
     """Test that apply_clouds_and_microphysics uses aerosol cdnc_factor for droplet number."""
     import numpy as np
-    from jcm.physics.icon.icon_physics import apply_clouds_and_microphysics, _prepare_common_physics_state
-    from jcm.physics.icon.icon_physics_data import PhysicsData
-    from jcm.physics.icon.icon_coords import IconCoords
-    from jcm.physics.icon.parameters import Parameters
+    from jcm.physics.echam.echam_physics import apply_clouds_and_microphysics, _prepare_common_physics_state
+    from jcm.physics.echam.echam_physics_data import PhysicsData
+    from jcm.physics.echam.echam_coords import EchamCoords
+    from jcm.physics.echam.parameters import Parameters
     from jcm.physics_interface import PhysicsState
     from jcm.date import DateData
     from jcm.forcing import ForcingData
@@ -216,7 +216,7 @@ def test_aerosol_microphysics_droplet_coupling():
     ncols = nlat * nlon
     sigma_boundaries = np.linspace(0, 1, nlev + 1)
     coords = get_coords(sigma_boundaries, nodal_shape=(nlon, nlat))
-    icon_coords = IconCoords.from_coordinate_system(coords)
+    echam_coords = EchamCoords.from_coordinate_system(coords)
 
     # Build a warm profile with cloud water so microphysics has work to do
     sigma_mid = (sigma_boundaries[:-1] + sigma_boundaries[1:]) / 2
@@ -258,7 +258,7 @@ def test_aerosol_microphysics_droplet_coupling():
 
     # --- Run with clean air (cdnc_factor = 1.0) ---
     pd_clean = PhysicsData.zeros(
-        (ncols,), nlev, icon_coords=icon_coords,
+        (ncols,), nlev, echam_coords=echam_coords,
         model_step=date.model_step, dt_seconds=date.dt_seconds,
     )
     cloud_data_clean = pd_clean.clouds.copy(
@@ -276,7 +276,7 @@ def test_aerosol_microphysics_droplet_coupling():
 
     # --- Run with polluted air (cdnc_factor = 3.0) ---
     pd_polluted = PhysicsData.zeros(
-        (ncols,), nlev, icon_coords=icon_coords,
+        (ncols,), nlev, echam_coords=echam_coords,
         model_step=date.model_step, dt_seconds=date.dt_seconds,
     )
     cloud_data_polluted = pd_polluted.clouds.copy(

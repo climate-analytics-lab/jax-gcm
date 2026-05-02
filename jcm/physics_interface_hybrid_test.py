@@ -7,8 +7,8 @@ Regression tests covering the bugs we hit when switching from sigma to hybrid:
 - Initial-state geopotential monotonically decreasing from TOA to surface
 
 Full model-run smoke tests (multi-day T31 / T85) live in the manual
-validation scripts — they're too heavy for CI. ``TestIconPhysicsIntegration``
-in ``jcm/physics/icon/icon_physics_test.py`` already covers the "full
+validation scripts — they're too heavy for CI. ``TestEchamPhysicsIntegration``
+in ``jcm/physics/echam/echam_physics_test.py`` already covers the "full
 pipeline doesn't blow up" question at T31+sigma.
 """
 
@@ -17,22 +17,22 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.utils import get_coords
-from jcm.physics.icon.icon_levels import get_icon_levels
+from jcm.physics.echam.echam_levels import get_echam_levels
 
 
 def _build_test_model(use_hybrid=True):
-    """Build a small T31 model with hybrid or sigma coords, IconPhysics."""
+    """Build a small T31 model with hybrid or sigma coords, EchamPhysics."""
     import logging
     from dinosaur.sigma_coordinates import SigmaCoordinates
     from jcm.model import Model
-    from jcm.physics.icon.icon_terms import icon_physics
+    from jcm.physics.echam.echam_terms import echam_physics
 
     if use_hybrid:
-        vertical = get_icon_levels(47)
+        vertical = get_echam_levels(47)
     else:
         vertical = SigmaCoordinates.equidistant(47)
     coords = get_coords(vertical, spectral_truncation=31)
-    physics = icon_physics(radiation_scheme="grey", checkpoint_terms=False)
+    physics = echam_physics(radiation_scheme="grey", checkpoint_terms=False)
     return Model(coords=coords, physics=physics, time_step=3.0,
                  log_level=logging.CRITICAL)
 

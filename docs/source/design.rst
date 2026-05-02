@@ -29,7 +29,7 @@ The :py:class:`jcm.model.Model` class serves as the central orchestrator, linkin
    │  │   ComposablePhysics                    │  │
    │  │   (ordered list of PhysicsTerm)        │  │
    │  │   built by speedy_physics(),           │  │
-   │  │   icon_physics(), held_suarez_physics()│  │
+   │  │   echam_physics(), held_suarez_physics()│  │
    │  └────────────────────────────────────────┘  │
    └──────────────────────────────────────────────┘
 
@@ -130,19 +130,19 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
 .. code-block:: python
 
    from jcm.physics.speedy.speedy_terms import speedy_physics
-   from jcm.physics.icon.icon_terms import icon_physics, IconRadiationRRTMGP
+   from jcm.physics.echam.echam_terms import echam_physics, EchamRadiationRRTMGP
 
    # Use pre-built SPEEDY defaults
    physics = speedy_physics()
 
    # Use ICON with NN radiation emulator
-   physics = icon_physics(radiation_scheme="emulated")
+   physics = echam_physics(radiation_scheme="emulated")
 
    # Replace SPEEDY's shortwave radiation with an ICON scheme
-   physics = speedy_physics().replace("radiation_sw", IconRadiationRRTMGP())
+   physics = speedy_physics().replace("radiation_sw", EchamRadiationRRTMGP())
 
    # Remove a term
-   physics = icon_physics().remove("gravity_waves")
+   physics = echam_physics().remove("gravity_waves")
 
 Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parameters as ``nnx.Param`` attributes and coordinate caches as ``nnx.Variable``. Terms communicate through a ``diagnostics`` dict threaded through the term list. The dict serves a dual role: keys without a leading underscore are exposed as user-facing diagnostic output (written to xarray); keys prefixed with ``_`` (e.g. ``_radiation``, ``_convection``) are internal inter-term state and are filtered out of the user-facing output.
 

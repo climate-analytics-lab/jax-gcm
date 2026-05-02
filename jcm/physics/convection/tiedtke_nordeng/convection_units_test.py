@@ -246,10 +246,10 @@ class TestCAPEDeepColumn:
     that the integration bounds are wrong.
 
     All inputs are TOA-first (level 0 = TOA, level nlev-1 = surface) to
-    match the ICON physics convention used inside ``apply_convection``.
+    match the ECHAM physics convention used inside ``apply_convection``.
     """
 
-    def _icon_like_column_47(self, surf_T=300.0, surf_q_kgkg=0.018):
+    def _echam_like_column_47(self, surf_T=300.0, surf_q_kgkg=0.018):
         """Build a TOA-first 47-level column reaching ~1 Pa."""
         nlev = 47
         # surface-first sigma → flip to TOA-first
@@ -281,7 +281,7 @@ class TestCAPEDeepColumn:
         strong-cap regimes; > 5000 J/kg is non-physical and indicates
         the integration is sweeping up stratospheric buoyancy noise.
         """
-        atm = self._icon_like_column_47()
+        atm = self._echam_like_column_47()
         config = ConvectionParameters.default()
         cb, has_cb = find_cloud_base(
             atm["temperature"], atm["humidity"], atm["pressure"], config,
@@ -300,7 +300,7 @@ class TestCAPEDeepColumn:
 
     def test_cape_bounded_for_deep_column(self):
         """CAPE shouldn't explode either; >5000 J/kg is extreme-storm regime."""
-        atm = self._icon_like_column_47()
+        atm = self._echam_like_column_47()
         config = ConvectionParameters.default()
         cb, _ = find_cloud_base(
             atm["temperature"], atm["humidity"], atm["pressure"], config,

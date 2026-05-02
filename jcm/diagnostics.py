@@ -1,7 +1,7 @@
 """Atmosphere health checks for long-running integrations.
 
 ``check_health`` and ``print_report`` lift the chunked-run watchdog out of
-``utils/run_icon_longrun.py`` so any harness (or notebook, or test) can
+``utils/run_echam_longrun.py`` so any harness (or notebook, or test) can
 inspect the ``ModelPredictions.to_xarray()`` output for the usual NaN /
 extreme-value failure modes.
 """

@@ -10,13 +10,13 @@ Default 10-day SPEEDY aquaplanet run::
 
 Switch physics package via Hydra config groups::
 
-    python -m jcm.main physics=icon grid=icon_t85_l47_hybrid run=longrun
+    python -m jcm.main physics=echam grid=echam_t85_l47_hybrid run=longrun
     python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8
 
 Override individual options::
 
     python -m jcm.main run.total_time=30 run.save_interval=1 run.time_step=20
-    python -m jcm.main physics=icon physics.radiation=rrtmgp init=jw
+    python -m jcm.main physics=echam physics.radiation=rrtmgp init=jw
 
 Multi-run sweep::
 

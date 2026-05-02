@@ -1,4 +1,4 @@
-"""Shallow cloud scheme for ICON physics
+"""Shallow cloud scheme for ECHAM physics
 
 This module implements a simplified cloud scheme focusing on:
 - Cloud fraction diagnosis based on relative humidity

@@ -95,7 +95,7 @@ def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
 
     The horizontal shape is ``(1, 1)``: a single column at the requested
     ``(lat_deg, lon_deg)``. ICON's term setup (e.g.
-    ``IconTermBase.cache_coords``) assumes a 3-tuple ``(nlev, nlon, nlat)``
+    ``EchamTermBase.cache_coords``) assumes a 3-tuple ``(nlev, nlon, nlat)``
     nodal shape, so we keep that convention rather than collapsing to
     ``(nlev, 1)``.
     """
@@ -167,9 +167,9 @@ class SingleColumnModel:
     Example::
 
         from dinosaur.sigma_coordinates import SigmaCoordinates
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
         scm = SingleColumnModel(
-            physics=icon_physics(),
+            physics=echam_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0, lon_deg=180.0,
         )
@@ -227,8 +227,8 @@ class SingleColumnModel:
         self.forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
 
         self.physics.cache_coords(self.coords)
-        from jcm.physics.icon.icon_terms import ComposableIconPhysics
-        if isinstance(self.physics, ComposableIconPhysics):
+        from jcm.physics.echam.echam_terms import ComposableEchamPhysics
+        if isinstance(self.physics, ComposableEchamPhysics):
             self.physics.apply_timestep(self.dt_seconds)
 
     # ------------------------------------------------------------------

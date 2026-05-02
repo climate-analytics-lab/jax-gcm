@@ -1,6 +1,6 @@
 # Long ICON run: chunked into 90-day pieces with health checks between each
 # chunk, monthly snapshots inside each chunk, conservative timestep, sponge
-# enabled. Replaces the old ``utils/run_icon_longrun.py`` script.
+# enabled. Replaces the old ``utils/run_echam_longrun.py`` script.
 time_step: 12
 save_interval: 30
 total_time: 365

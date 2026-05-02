@@ -70,13 +70,13 @@ def compute_surface_exchange_coefficients_echam_louis(
     multiplies by ρ to get the flux factor.
     """
     # Use the ``physical_constants`` instance already exposed on
-    # ``jcm.physics.icon``. Importing via ``jcm.physics.icon`` (whose
+    # ``jcm.physics.echam``. Importing via ``jcm.physics.echam`` (whose
     # ``__init__`` has already loaded the constants subpackage) avoids
     # the partial-init problem that hits a bare
-    # ``from jcm.physics.icon.constants.physical_constants import …``
+    # ``from jcm.physics.echam.constants.physical_constants import …``
     # under Python 3.11 + pytest-cov when this function is reached via
-    # the icon → parameters → tte_tke chain.
-    from jcm.physics.icon import physical_constants as PHYS_CONST
+    # the echam → parameters → tte_tke chain.
+    from jcm.physics.echam import physical_constants as PHYS_CONST
 
     Rd = PHYS_CONST.rd
     cp = PHYS_CONST.cp

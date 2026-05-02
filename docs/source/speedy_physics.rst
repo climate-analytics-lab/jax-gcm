@@ -496,8 +496,8 @@ The SPEEDY physics is also available as composable ``PhysicsTerm`` instances:
    physics = speedy_physics(parameters=params)
 
    # Replace radiation with a different scheme
-   from jcm.physics.icon.icon_terms import IconRadiationRRTMGP
-   physics = speedy_physics().replace("radiation_sw", IconRadiationRRTMGP())
+   from jcm.physics.echam.echam_terms import EchamRadiationRRTMGP
+   physics = speedy_physics().replace("radiation_sw", EchamRadiationRRTMGP())
 
    # Remove a term
    physics = speedy_physics().remove("vertical_diffusion")

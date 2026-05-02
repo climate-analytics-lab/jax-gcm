@@ -12,8 +12,8 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     radiation_scheme
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
-from jcm.physics.icon.icon_physics_data import AerosolData
+from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
+from jcm.physics.echam.echam_physics_data import AerosolData
 from jcm.forcing import SolarGeometry
 import jax_datetime as jdt
 from datetime import datetime
@@ -125,7 +125,7 @@ def test_prepare_radiation_state():
     cos_zenith = jnp.array(0.5)
 
     # Calculate layer thickness and air density as required by prepare_radiation_state
-    from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
+    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
 
@@ -182,7 +182,7 @@ def test_radiation_scheme_basic():
     atm = create_test_atmosphere(nlev=8)
     
     # Calculate layer thickness and air density as required by radiation_scheme
-    from jcm.physics.icon.unit_conversions import calculate_air_density, calculate_layer_thickness
+    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
     
@@ -659,8 +659,8 @@ class TestRadiationCaching:
     def _make_physics_args(self, nlev=10, radiation_interval=0.0,
                            model_step=0, dt_seconds=30.0):
         """Build minimal args for the radiation wrapper."""
-        from jcm.physics.icon.icon_physics_data import PhysicsData, RadiationData
-        from jcm.physics.icon.parameters import Parameters
+        from jcm.physics.echam.echam_physics_data import PhysicsData, RadiationData
+        from jcm.physics.echam.parameters import Parameters
         from jcm.physics_interface import PhysicsState
         from jcm.date import DateData
 
@@ -687,7 +687,7 @@ class TestRadiationCaching:
         rad_data = rad_data.copy(sw_heating_rate=sw_rate, lw_heating_rate=lw_rate)
 
         physics_data = PhysicsData.zeros(
-            (ncols,), nlev, icon_coords=None,
+            (ncols,), nlev, echam_coords=None,
             model_step=date.model_step, dt_seconds=date.dt_seconds,
         )
         physics_data = physics_data.copy(radiation=rad_data)
@@ -706,7 +706,7 @@ class TestRadiationCaching:
 
     def test_no_caching_when_interval_zero(self):
         """Default radiation_interval=0 always computes."""
-        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics.echam.echam_physics import _radiation_with_caching
 
         state, physics_data, params = self._make_physics_args(
             radiation_interval=0.0, model_step=1)
@@ -734,7 +734,7 @@ class TestRadiationCaching:
 
     def test_caching_returns_cached_tendency(self):
         """On a non-radiation step the cached sw+lw rates are returned."""
-        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics.echam.echam_physics import _radiation_with_caching
         from jcm.physics_interface import PhysicsTendency
 
         state, physics_data, params = self._make_physics_args(
@@ -761,7 +761,7 @@ class TestRadiationCaching:
 
     def test_caching_computes_on_interval(self):
         """Radiation computes at step 0, 4, 8, ... for 120s interval / 30s dt."""
-        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics.echam.echam_physics import _radiation_with_caching
         from jcm.physics_interface import PhysicsTendency
 
         call_count = []
@@ -789,7 +789,7 @@ class TestRadiationCaching:
 
     def test_first_step_always_computes(self):
         """Step 0 always triggers radiation regardless of interval."""
-        from jcm.physics.icon.icon_physics import _radiation_with_caching
+        from jcm.physics.echam.echam_physics import _radiation_with_caching
         from jcm.physics_interface import PhysicsTendency
 
         state, physics_data, params = self._make_physics_args(

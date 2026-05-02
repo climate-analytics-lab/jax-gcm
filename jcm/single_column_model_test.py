@@ -8,7 +8,7 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-from jcm.physics.icon.icon_terms import icon_physics
+from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics_interface import PhysicsState
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers, create_single_column_state
@@ -92,13 +92,13 @@ class TestSCMHeldSuarez(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
 
 
-class TestSCMICON(unittest.TestCase):
-    """ICON-grey SCM run — exercises tracer evolution."""
+class TestSCMEcham(unittest.TestCase):
+    """ECHAM-grey SCM run — exercises tracer evolution."""
 
-    def test_icon_run_smoke(self):
+    def test_echam_run_smoke(self):
         column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=icon_physics(radiation_scheme='grey'),
+            physics=echam_physics(radiation_scheme='grey'),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0,
             lon_deg=0.0,
@@ -135,5 +135,5 @@ class TestSCMHeldSuarezSlow(TestSCMHeldSuarez):
 
 
 @pytest.mark.slow
-class TestSCMICONSlow(TestSCMICON):
+class TestSCMEchamSlow(TestSCMEcham):
     pass

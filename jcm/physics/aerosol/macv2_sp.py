@@ -1,6 +1,6 @@
 from typing import Tuple
 import jax.numpy as jnp
-from jcm.physics.icon.icon_physics_data import PhysicsData
+from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -33,8 +33,8 @@ def get_simple_aerosol(
     
     # Get grid coordinates from cached coordinates
     lat, lon = jax.numpy.meshgrid(
-        physics_data.icon_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
-        physics_data.icon_coords.lon * 180.0 / jnp.pi,  # degrees
+        physics_data.echam_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
+        physics_data.echam_coords.lon * 180.0 / jnp.pi,  # degrees
     )
     # Then reshape to (ncols,) to match column format
     lats = lat.reshape(ncols)

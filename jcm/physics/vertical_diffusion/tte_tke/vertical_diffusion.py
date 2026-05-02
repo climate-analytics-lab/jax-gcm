@@ -1,4 +1,4 @@
-"""Main vertical diffusion scheme for ICON physics.
+"""Main vertical diffusion scheme for ECHAM physics.
 
 This module provides the main interface for vertical diffusion and boundary layer
 physics, integrating turbulence coefficient calculations with the matrix solver.

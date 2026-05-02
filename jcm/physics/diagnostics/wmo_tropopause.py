@@ -1,4 +1,4 @@
-"""WMO Tropopause Diagnostic for ICON Physics
+"""WMO Tropopause Diagnostic for ECHAM Physics
 
 This module implements the WMO (1957) tropopause definition following the
 ICON mo_tropopause.f90 implementation. The tropopause is defined as the

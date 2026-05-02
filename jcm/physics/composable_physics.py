@@ -43,7 +43,7 @@ class ComposablePhysics(nnx.Module, Physics):
     When ``vectorize_columns=True``, the 3D state ``(nlev, nlon, nlat)`` is
     reshaped to column format ``(nlev, ncols)`` before iterating terms, and
     accumulated tendencies are reshaped back to 3D afterward. This is the
-    standard pattern for column-based physics schemes (ICON, and most
+    standard pattern for column-based physics schemes (ECHAM, and most
     comprehensive physics packages). SPEEDY operates directly on 3D arrays
     because its low resolution makes the reshape overhead not worthwhile.
 
@@ -65,7 +65,7 @@ class ComposablePhysics(nnx.Module, Physics):
                 efficiency during backpropagation (default True).
             vectorize_columns: Whether to reshape state from 3D to column
                 format before iterating terms. Use True for column-based
-                physics (ICON, etc.), False for grid-based (SPEEDY).
+                physics (ECHAM, etc.), False for grid-based (SPEEDY).
 
         """
         self.terms = nnx.List(terms)
@@ -237,8 +237,8 @@ class ComposablePhysics(nnx.Module, Physics):
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_date",
         "_forcing_2d",
-        "_icon_params",
-        "_icon_coords",
+        "_echam_params",
+        "_echam_coords",
         "_speedy_coords",
     })
 
@@ -253,8 +253,8 @@ class ComposablePhysics(nnx.Module, Physics):
         - Typed sub-structs of arrays stashed under ``_<name>`` for inter-term
           communication (``_radiation``, ``_humidity``, ...) — flattened into
           ``<name>.<field>`` user-facing keys (matches the legacy SPEEDY /
-          ICON ``PhysicsData`` xarray layout).
-        - Infrastructure objects (``_date``, ``_icon_params``, ...) that are
+          ECHAM ``PhysicsData`` xarray layout).
+        - Infrastructure objects (``_date``, ``_echam_params``, ...) that are
           listed in :attr:`_INTERNAL_DIAGNOSTIC_KEYS` or that fail array-only
           flattening — silently dropped from user output.
         """

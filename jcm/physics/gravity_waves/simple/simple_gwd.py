@@ -1,4 +1,4 @@
-"""Gravity wave drag parameterization for ICON physics
+"""Gravity wave drag parameterization for ECHAM physics
 
 This module implements the orographic and non-orographic gravity wave drag
 parameterizations. The scheme accounts for momentum deposition from breaking

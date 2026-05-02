@@ -112,7 +112,7 @@ class ModelPredictions:
         times = jax.device_get(self.times)
         coords = jax.device_get(self._coords)
 
-        # get additional coords from physics-specific cached coords (e.g. SpeedyCoords, IconCoords)
+        # get additional coords from physics-specific cached coords (e.g. SpeedyCoords, EchamCoords)
         additional_coords = {}
         if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
             additional_coords = self._physics.cached_coords.xarray_additional_coords()
@@ -324,9 +324,9 @@ class Model:
         self.physics = physics or speedy_physics()
         self.physics.cache_coords(self.coords)
 
-        # Ensure ComposableIconPhysics uses the correct timestep for all parameterizations
-        from jcm.physics.icon.icon_terms import ComposableIconPhysics
-        if isinstance(self.physics, ComposableIconPhysics):
+        # Ensure ComposableEchamPhysics uses the correct timestep for all parameterizations
+        from jcm.physics.echam.echam_terms import ComposableEchamPhysics
+        if isinstance(self.physics, ComposableEchamPhysics):
             self.physics.apply_timestep(self.dt_si.m)
 
         self.diffusion = diffusion or DiffusionFilter.default()

@@ -1,7 +1,7 @@
 """Slow integration tests for composable physics.
 
 These tests exercise the composable physics API through the full model
-pipeline, verifying that speedy_physics() and icon_physics() factories
+pipeline, verifying that speedy_physics() and echam_physics() factories
 produce working physics that can run simulations and compute gradients.
 
 Marked @pytest.mark.slow so they run in PR CI coverage checks.
@@ -120,8 +120,8 @@ class TestComposableSpeedyIntegration(unittest.TestCase):
         )
 
 
-class TestComposableIconIntegration(unittest.TestCase):
-    """Integration tests for composable ICON physics."""
+class TestComposableEchamIntegration(unittest.TestCase):
+    """Integration tests for composable ECHAM physics."""
 
     def setUp(self):
         sigma_boundaries = np.linspace(0, 1, 9)  # 8 levels
@@ -132,12 +132,12 @@ class TestComposableIconIntegration(unittest.TestCase):
         self.forcing = ForcingData.zeros((64, 32))
 
     @pytest.mark.slow
-    def test_icon_composable_model_run(self):
-        """Composable ICON runs a short simulation through the Model."""
+    def test_echam_composable_model_run(self):
+        """Composable ECHAM runs a short simulation through the Model."""
         from jcm.model import Model
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
-        physics = icon_physics()
+        physics = echam_physics()
         model = Model(
             coords=self.coords,
             terrain=self.terrain,
@@ -151,12 +151,12 @@ class TestComposableIconIntegration(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     @pytest.mark.slow
-    def test_icon_composable_remove_and_run(self):
-        """Remove a term from ICON physics and run."""
+    def test_echam_composable_remove_and_run(self):
+        """Remove a term from ECHAM physics and run."""
         from jcm.model import Model
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
-        physics = icon_physics().remove("gravity_waves")
+        physics = echam_physics().remove("gravity_waves")
         model = Model(
             coords=self.coords,
             terrain=self.terrain,
@@ -170,8 +170,8 @@ class TestComposableIconIntegration(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     @pytest.mark.slow
-    def test_icon_2m_composable_model_run(self):
-        """Composable ICON with 2-moment microphysics runs through Model.
+    def test_echam_2m_composable_model_run(self):
+        """Composable ECHAM with 2-moment microphysics runs through Model.
 
         Exercises ``cloud_microphysics_2m`` (and the cloud_utils helpers)
         end-to-end so the slow-test coverage gate sees them. The ``qc``,
@@ -179,9 +179,9 @@ class TestComposableIconIntegration(unittest.TestCase):
         ``apply_microphysics_2m`` if the initial state doesn't supply them.
         """
         from jcm.model import Model
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
-        physics = icon_physics(cloud_scheme="2m")
+        physics = echam_physics(cloud_scheme="2m")
         model = Model(
             coords=self.coords,
             terrain=self.terrain,
@@ -198,12 +198,12 @@ class TestComposableIconIntegration(unittest.TestCase):
     def test_packages_factories(self):
         """Package factory re-exports work end-to-end."""
         from jcm.physics.speedy.speedy_terms import speedy_physics
-        from jcm.physics.icon.icon_terms import icon_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
         sp = speedy_physics()
         self.assertGreater(len(sp.terms), 0)
 
-        ip = icon_physics()
+        ip = echam_physics()
         self.assertGreater(len(ip.terms), 0)
 
     def _make_state(self):

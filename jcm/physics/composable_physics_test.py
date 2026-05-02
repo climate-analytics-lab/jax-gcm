@@ -646,9 +646,9 @@ class TestPackagesImport(unittest.TestCase):
         from jcm.physics.speedy.speedy_terms import speedy_physics
         self.assertTrue(callable(speedy_physics))
 
-    def test_packages_icon_import(self):
-        from jcm.physics.icon.icon_terms import icon_physics
-        self.assertTrue(callable(icon_physics))
+    def test_packages_echam_import(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        self.assertTrue(callable(echam_physics))
 
 
 class TestTracerSpec(unittest.TestCase):

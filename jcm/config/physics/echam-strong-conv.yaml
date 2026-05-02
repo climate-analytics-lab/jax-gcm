@@ -1,0 +1,16 @@
+# Example curated physics preset — ECHAM with stronger convection
+# entrainment / detrainment than the Tiedtke-Nordeng default.
+#
+# This file demonstrates the "config group" pattern (option B) for grouping
+# Parameter overrides into reusable presets. Use it as::
+#
+#     python -m jcm.main physics=echam-strong-conv
+#
+# Add more presets here as patterns recur (e.g. echam-rrtmgp, echam-2m, ...).
+defaults:
+  - echam
+
+params:
+  convection:
+    entrpen: 4.0e-4         # entrainment rate for penetrative convection
+    entrscv: 4.0e-4         # entrainment rate for shallow convection

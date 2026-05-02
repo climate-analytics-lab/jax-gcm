@@ -47,14 +47,14 @@ def get_coords(
     vertical coordinates:
     - jcm.physics.speedy.utils.get_speedy_coords()
     - jcm.physics.held_suarez.utils.get_held_suarez_coords()
-    - jcm.physics.icon.icon_levels.get_icon_levels()
+    - jcm.physics.echam.echam_levels.get_echam_levels()
 
     Args:
         vertical_coords: Vertical coordinate specification. Can be one of:
             - An array of sigma layer boundaries (wrapped in SigmaCoordinates).
             - A SigmaCoordinates instance (passed through).
             - A HybridCoordinates instance (passed through), e.g. from
-              jcm.physics.icon.icon_levels.get_icon_levels().
+              jcm.physics.echam.echam_levels.get_echam_levels().
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
         spmd_mesh: Optional tuple ``(x, y, z)`` describing the SPMD device mesh

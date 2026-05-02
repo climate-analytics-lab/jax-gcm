@@ -1,4 +1,4 @@
-"""Main radiation scheme interface for ICON physics
+"""Main radiation scheme interface for ECHAM physics
 
 This module provides the main entry point for radiation calculations,
 coordinating shortwave and longwave radiation computations.
@@ -15,7 +15,7 @@ from ..radiation_types import (
     RadiationTendencies,
     OpticalProperties
 )
-from jcm.physics.icon.icon_physics_data import RadiationData
+from jcm.physics.echam.echam_physics_data import RadiationData
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry

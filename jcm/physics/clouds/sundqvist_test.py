@@ -458,7 +458,7 @@ class TestAerosolPrecipitationCoupling:
     def _run_column(self, cdnc_value):
         """Run the combined cloud+microphysics column with given CDNC."""
         from jcm.physics.clouds.echam_1m import MicrophysicsParameters
-        from jcm.physics.icon.icon_physics import _cloud_and_microphysics_column
+        from jcm.physics.echam.echam_physics import _cloud_and_microphysics_column
         from jcm.constants import rd
 
         nlev = 20

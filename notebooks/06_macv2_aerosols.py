@@ -48,8 +48,8 @@ from jcm.forcing import (
 )
 from jcm.model import Model
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
-from jcm.physics.icon.icon_terms import icon_physics
-from jcm.physics.icon.parameters import Parameters
+from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.parameters import Parameters
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -170,15 +170,15 @@ def build_forcing(ds: xr.Dataset, nodal_shape: tuple[int, int]) -> ForcingData:
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — wire AerosolParameters into the ICON physics
+# Step 5 — wire AerosolParameters into the ECHAM physics
 # ---------------------------------------------------------------------------
 
 def build_physics_with_real_aerosols(ds: xr.Dataset):
-    """Construct ICON physics with the AerosolParameters from the file."""
+    """Construct ECHAM physics with the AerosolParameters from the file."""
     params = Parameters.default()._replace(
         aerosol=aerosol_parameters_from_macv2(ds),
     )
-    return icon_physics(parameters=params)
+    return echam_physics(parameters=params)
 
 
 # ---------------------------------------------------------------------------

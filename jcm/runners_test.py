@@ -2,7 +2,7 @@
 
 Verifies that each config-group combination resolves to a sensible model and
 that a short integration step runs without raising. Kept deliberately cheap
-so it can run in the regular pytest sweep — we do not test the full ICON
+so it can run in the regular pytest sweep — we do not test the full ECHAM
 T85x47 grid here.
 """
 
@@ -43,12 +43,12 @@ class TestConfigComposition(unittest.TestCase):
         self.assertEqual(cfg.forcing.kind, "default")
         self.assertEqual(float(cfg.diffusion.scale), 1.0)
 
-    def test_icon_compose(self):
+    def test_echam_compose(self):
         cfg = _compose([
-            "physics=icon",
-            "grid=icon_t42_l8_sigma",
+            "physics=echam",
+            "grid=echam_t42_l8_sigma",
         ])
-        self.assertEqual(cfg.physics.name, "icon")
+        self.assertEqual(cfg.physics.name, "echam")
         self.assertEqual(cfg.physics.radiation, "grey")
         self.assertEqual(cfg.grid.vertical, "sigma")
 
@@ -75,8 +75,8 @@ class TestBuilders(unittest.TestCase):
         coords = build_coords(cfg)
         self.assertEqual(coords.horizontal.nodal_shape, (96, 48))
 
-    def test_build_coords_icon_sigma(self):
-        cfg = _compose(["grid=icon_t42_l8_sigma"])
+    def test_build_coords_echam_sigma(self):
+        cfg = _compose(["grid=echam_t42_l8_sigma"])
         coords = build_coords(cfg)
         self.assertEqual(coords.horizontal.nodal_shape, (128, 64))
 
@@ -91,11 +91,11 @@ class TestBuilders(unittest.TestCase):
         self.assertIsNotNone(physics)
 
     def test_build_physics_param_overrides(self):
-        # Override an ICON convection parameter via the cfg.physics.params
+        # Override an ECHAM convection parameter via the cfg.physics.params
         # path; the resulting Parameters should pick up the new value.
         cfg = _compose([
-            "physics=icon",
-            "grid=icon_t42_l8_sigma",
+            "physics=echam",
+            "grid=echam_t42_l8_sigma",
             "+physics.params.convection.entrpen=4e-4",
         ])
         physics = build_physics(cfg)
@@ -105,19 +105,19 @@ class TestBuilders(unittest.TestCase):
 
     def test_build_physics_unknown_subgroup_raises(self):
         cfg = _compose([
-            "physics=icon",
-            "grid=icon_t42_l8_sigma",
+            "physics=echam",
+            "grid=echam_t42_l8_sigma",
             "+physics.params.not_a_subgroup.foo=1.0",
         ])
         with self.assertRaisesRegex(ValueError, "Unknown physics parameter subgroup"):
             build_physics(cfg)
 
     def test_build_physics_curated_preset(self):
-        # The icon-strong-conv preset should bump entrpen via the same
+        # The echam-strong-conv preset should bump entrpen via the same
         # override pipeline.
         cfg = _compose([
-            "physics=icon-strong-conv",
-            "grid=icon_t42_l8_sigma",
+            "physics=echam-strong-conv",
+            "grid=echam_t42_l8_sigma",
         ])
         physics = build_physics(cfg)
         self.assertAlmostEqual(
