@@ -1,0 +1,8 @@
+# T63 / 47 hybrid (a + b·P_s) levels — matches ECHAM standard production
+# grid (192 lon × 96 lat). Use this when running with the ECHAM
+# T63GR15_jan_surf.nc + T63_amip{sst,sic}_1979-2008_mean.nc boundary files
+# so no orography-statistic interpolation is needed.
+vertical: hybrid
+layers: 47
+spectral_truncation: 63
+spmd_mesh: null

@@ -283,6 +283,29 @@ class ComposablePhysics(nnx.Module, Physics):
                 for sk, sv in sub.items():
                     items[f"{out_key}{sep}{sk}"] = sv
 
+        # Reshape column-vectorized diagnostics (a flattened ncols axis,
+        # produced when ``vectorize_columns=True``) back to ``(lon, lat)``
+        # before xarray sees them. The ``nodal_shape`` argument from
+        # ``Predictions.to_xarray`` may include leading non-spatial axes
+        # (level, time, ...); the spatial portion is the trailing pair.
+        if nodal_shape is not None and len(nodal_shape) >= 2:
+            spatial_shape = tuple(nodal_shape[-2:])
+            ncols = spatial_shape[0] * spatial_shape[1]
+            for k in list(items.keys()):
+                v = items[k]
+                if not isinstance(v, jax.Array):
+                    continue
+                if ncols not in v.shape:
+                    continue
+                # Find the (single) ncols axis and unflatten it.
+                ncols_axes = [i for i, n in enumerate(v.shape) if n == ncols]
+                if len(ncols_axes) != 1:
+                    continue
+                axis = ncols_axes[0]
+                new_shape = (v.shape[:axis] + spatial_shape
+                             + v.shape[axis + 1:])
+                items[k] = v.reshape(new_shape)
+
         # Expand multi-channel fields (trailing dim beyond nodal_shape)
         if nodal_shape is not None:
             original_keys = list(items.keys())
@@ -296,6 +319,8 @@ class ComposablePhysics(nnx.Module, Physics):
                     and s[1:-1] == nodal_shape
                     or len(s) == 4
                     and s[1:-1] == nodal_shape[1:]
+                    or len(s) == 3
+                    and s[:-1] == nodal_shape
                 ):
                     items.update(
                         {f"{k}{sep}{i}": v[..., i] for i in range(s[-1])}

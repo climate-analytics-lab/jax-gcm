@@ -22,6 +22,7 @@ TRUNCATION_FOR_NODAL_SHAPE = {
     (64, 32): 21,
     (96, 48): 31,
     (128, 64): 42,
+    (192, 96): 63,    # T63 — ECHAM standard production grid
     (256, 128): 85,
     (320, 160): 106,
     (360, 180): 119,
@@ -74,7 +75,19 @@ def get_coords(
         spectral_truncation = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
     elif spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
-    horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
+    # Most truncations have a dedicated dinosaur factory (Grid.T31, T42, …);
+    # T63 doesn't, so build it directly via Grid.construct with
+    # gaussian_nodes=(max_wavenumber+1)/2-rounded so the nodal grid matches
+    # the ECHAM T63 file (192 lon × 96 lat). For all other supported
+    # truncations the dedicated Grid.T* factory uses the same convention,
+    # so we use it where available.
+    if spectral_truncation == 63:
+        def horizontal_grid(**kwargs):
+            return dinosaur.spherical_harmonic.Grid.construct(
+                max_wavenumber=63, gaussian_nodes=48, **kwargs)
+    else:
+        horizontal_grid = getattr(
+            dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
 
     physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
 
@@ -255,6 +268,30 @@ def _infer_dims_shape_and_coords(
     ) + NODAL_AXES_NAMES
     basic_shape_to_dims[nodal_shape] = NODAL_AXES_NAMES
     basic_shape_to_dims[modal_shape] = MODAL_AXES_NAMES
+    # Column-vectorized layout: physics terms running under
+    # ``ComposablePhysics(vectorize_columns=True)`` write per-column
+    # scalars and profiles in flattened ``(ncols,)`` / ``(nlev, ncols)``
+    # shape rather than ``(lon, lat)`` / ``(nlev, lon, lat)``. Map the
+    # flat shapes back to the same xarray dims so downstream reshape is
+    # a no-op axis relabel.
+    nlon, nlat = nodal_shape
+    nlev = coords.vertical.layers
+    basic_shape_to_dims[(nlon * nlat,)] = NODAL_AXES_NAMES
+    basic_shape_to_dims[(nlev, nlon * nlat)] = (
+        XR_LEVEL_NAME,
+    ) + NODAL_AXES_NAMES
+    # Half-level fields (e.g. fluxes, half-pressure) — emit them on a
+    # ``level_i`` (interface) axis so they don't clash with the full-level
+    # ``level`` coord, which has length nlev.
+    XR_LEVEL_INTERFACE_NAME = 'level_i'
+    if XR_LEVEL_INTERFACE_NAME not in all_xr_coords:
+        all_xr_coords[XR_LEVEL_INTERFACE_NAME] = np.arange(nlev + 1)
+    basic_shape_to_dims[(nlev + 1,) + nodal_shape] = (
+        XR_LEVEL_INTERFACE_NAME,
+    ) + NODAL_AXES_NAMES
+    basic_shape_to_dims[(nlev + 1, nlon * nlat)] = (
+        XR_LEVEL_INTERFACE_NAME,
+    ) + NODAL_AXES_NAMES
     basic_shape_to_dims[(coords.vertical.layers,)] = (XR_LEVEL_NAME,)
     basic_shape_to_dims[sin_lat.shape] = (XR_LAT_NAME,)
     # Add unconventional shape for nodal covariate surface data, which have dim=2
@@ -338,6 +375,17 @@ def data_to_xarray(
 
   if additional_coords is None:
     additional_coords = {}
+
+  def _maybe_reshape_to_dims(value, dims, all_coords):
+    """If ``value`` has a flattened ncols axis but ``dims`` calls for
+    separate (lon, lat) axes, reshape it. Otherwise pass through.
+    """
+    if 'lon' not in dims or 'lat' not in dims:
+      return value
+    expected = tuple(len(all_coords[d]) for d in dims)
+    if value.shape == expected:
+      return value
+    return value.reshape(expected)
   # if XR_SURFACE_NAME is not specified manually, set by default.
   if (coords.vertical.layers != 1) and (
       XR_SURFACE_NAME not in additional_coords
@@ -357,6 +405,7 @@ def data_to_xarray(
       )
     else:
       dims = shape_to_dims[value.shape]
+      value = _maybe_reshape_to_dims(value, dims, all_coords)
       data_vars[key] = (dims, value)
       dims_in_state.update(set(dims))
 
@@ -366,6 +415,7 @@ def data_to_xarray(
       raise ValueError(f'Value of shape {value.shape} is not recognized.')
     else:
       dims = shape_to_dims[value.shape]
+      value = _maybe_reshape_to_dims(value, dims, all_coords)
       data_vars[key] = (dims, value)
       dims_in_state.update(set(dims))
 
@@ -375,6 +425,7 @@ def data_to_xarray(
       raise ValueError(f'Value of shape {value.shape} is not recognized.')
     else:
       dims = shape_to_dims[value.shape]
+      value = _maybe_reshape_to_dims(value, dims, all_coords)
       data_vars[key] = (dims, value)
       dims_in_state.update(set(dims))
 
