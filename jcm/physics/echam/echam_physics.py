@@ -35,6 +35,12 @@ from jcm.physics.aerosol.spa import spa_activated_cdnc
 
 logger = logging.getLogger(__name__)
 
+
+def _column_vector(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
+    """Return a vmapped scalar diagnostic as one value per column."""
+    return jnp.reshape(value, (ncols,))
+
+
 @jit
 def _prepare_common_physics_state(
     state: PhysicsState,
@@ -297,30 +303,27 @@ def _apply_radiation_inner(state: PhysicsState,
         tracers={}
     )
     
-    # Reconstruct RadiationData from vmapped diagnostics
-    # Most fields need to be transposed from [ncols, ...] to [..., ncols].
-    # ``squeeze(-1)`` (not bare ``squeeze``) drops only the trailing
-    # length-1 dim so a single-column run keeps shape ``[1]`` instead of
-    # collapsing to a scalar (which mismatches the cached path's shape and
-    # breaks the radiation ``lax.cond`` at ``ncols=1``).
+    # Reconstruct RadiationData from vmapped diagnostics. Scalar
+    # diagnostics are reshaped to [ncols] so compute/cache branches
+    # preserve identical shapes for single-column and global runs.
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),  # [ncols, 1] -> [ncols]
-        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
-        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
-        surface_emissivity=diagnostics_vmapped.surface_emissivity,
+        cos_zenith=_column_vector(diagnostics_vmapped.cos_zenith, ncols),  # [ncols, 1] -> [ncols]
+        surface_albedo_vis=_column_vector(diagnostics_vmapped.surface_albedo_vis, ncols),
+        surface_albedo_nir=_column_vector(diagnostics_vmapped.surface_albedo_nir, ncols),
+        surface_emissivity=_column_vector(diagnostics_vmapped.surface_emissivity, ncols),
         sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),  # [nlev+1, ncols] (summed over bands)
         sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
         sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
         lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
         lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
         lw_heating_rate=tendencies_vmapped.longwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
-        surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
-        surface_lw_down=diagnostics_vmapped.surface_lw_down,
-        surface_sw_up=diagnostics_vmapped.surface_sw_up,
-        surface_lw_up=diagnostics_vmapped.surface_lw_up,
-        toa_sw_up=diagnostics_vmapped.toa_sw_up,
-        toa_lw_up=diagnostics_vmapped.toa_lw_up,
-        toa_sw_down=diagnostics_vmapped.toa_sw_down
+        surface_sw_down=_column_vector(diagnostics_vmapped.surface_sw_down, ncols),  # Already [ncols]
+        surface_lw_down=_column_vector(diagnostics_vmapped.surface_lw_down, ncols),
+        surface_sw_up=_column_vector(diagnostics_vmapped.surface_sw_up, ncols),
+        surface_lw_up=_column_vector(diagnostics_vmapped.surface_lw_up, ncols),
+        toa_sw_up=_column_vector(diagnostics_vmapped.toa_sw_up, ncols),
+        toa_lw_up=_column_vector(diagnostics_vmapped.toa_lw_up, ncols),
+        toa_sw_down=_column_vector(diagnostics_vmapped.toa_sw_down, ncols)
     )
     
     updated_physics_data = physics_data.copy(radiation=rad_out)
@@ -414,23 +417,23 @@ def _apply_radiation_rrtmgp_inner(
     )
 
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),
-        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
-        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
-        surface_emissivity=diagnostics_vmapped.surface_emissivity,
+        cos_zenith=_column_vector(diagnostics_vmapped.cos_zenith, ncols),
+        surface_albedo_vis=_column_vector(diagnostics_vmapped.surface_albedo_vis, ncols),
+        surface_albedo_nir=_column_vector(diagnostics_vmapped.surface_albedo_nir, ncols),
+        surface_emissivity=_column_vector(diagnostics_vmapped.surface_emissivity, ncols),
         sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),
         sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
         sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
         lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
         lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
         lw_heating_rate=tendencies_vmapped.longwave_heating.T,
-        surface_sw_down=diagnostics_vmapped.surface_sw_down,
-        surface_lw_down=diagnostics_vmapped.surface_lw_down,
-        surface_sw_up=diagnostics_vmapped.surface_sw_up,
-        surface_lw_up=diagnostics_vmapped.surface_lw_up,
-        toa_sw_up=diagnostics_vmapped.toa_sw_up,
-        toa_lw_up=diagnostics_vmapped.toa_lw_up,
-        toa_sw_down=diagnostics_vmapped.toa_sw_down,
+        surface_sw_down=_column_vector(diagnostics_vmapped.surface_sw_down, ncols),
+        surface_lw_down=_column_vector(diagnostics_vmapped.surface_lw_down, ncols),
+        surface_sw_up=_column_vector(diagnostics_vmapped.surface_sw_up, ncols),
+        surface_lw_up=_column_vector(diagnostics_vmapped.surface_lw_up, ncols),
+        toa_sw_up=_column_vector(diagnostics_vmapped.toa_sw_up, ncols),
+        toa_lw_up=_column_vector(diagnostics_vmapped.toa_lw_up, ncols),
+        toa_sw_down=_column_vector(diagnostics_vmapped.toa_sw_down, ncols),
     )
 
     updated_physics_data = physics_data.copy(radiation=rad_out)
@@ -537,23 +540,23 @@ def _apply_radiation_emulated_inner(
     # vmapped output shapes are [ncols, nlev+1] for fluxes and
     # [ncols, nlev] for heating rates.
     rad_out = RadiationData(
-        cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),
-        surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis.squeeze(-1),
-        surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir.squeeze(-1),
-        surface_emissivity=diagnostics_vmapped.surface_emissivity.squeeze(-1),
+        cos_zenith=_column_vector(diagnostics_vmapped.cos_zenith, ncols),
+        surface_albedo_vis=_column_vector(diagnostics_vmapped.surface_albedo_vis, ncols),
+        surface_albedo_nir=_column_vector(diagnostics_vmapped.surface_albedo_nir, ncols),
+        surface_emissivity=_column_vector(diagnostics_vmapped.surface_emissivity, ncols),
         sw_flux_up=diagnostics_vmapped.sw_flux_up.T,        # [ncols, nlev+1] -> [nlev+1, ncols]
         sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
         sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
         lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
         lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
         lw_heating_rate=tendencies_vmapped.longwave_heating.T,
-        surface_sw_down=diagnostics_vmapped.surface_sw_down.squeeze(),
-        surface_lw_down=diagnostics_vmapped.surface_lw_down.squeeze(),
-        surface_sw_up=diagnostics_vmapped.surface_sw_up.squeeze(),
-        surface_lw_up=diagnostics_vmapped.surface_lw_up.squeeze(),
-        toa_sw_up=diagnostics_vmapped.toa_sw_up.squeeze(),
-        toa_lw_up=diagnostics_vmapped.toa_lw_up.squeeze(),
-        toa_sw_down=diagnostics_vmapped.toa_sw_down.squeeze(),
+        surface_sw_down=_column_vector(diagnostics_vmapped.surface_sw_down, ncols),
+        surface_lw_down=_column_vector(diagnostics_vmapped.surface_lw_down, ncols),
+        surface_sw_up=_column_vector(diagnostics_vmapped.surface_sw_up, ncols),
+        surface_lw_up=_column_vector(diagnostics_vmapped.surface_lw_up, ncols),
+        toa_sw_up=_column_vector(diagnostics_vmapped.toa_sw_up, ncols),
+        toa_lw_up=_column_vector(diagnostics_vmapped.toa_lw_up, ncols),
+        toa_sw_down=_column_vector(diagnostics_vmapped.toa_sw_down, ncols),
     )
 
     updated_physics_data = physics_data.copy(radiation=rad_out)

@@ -629,7 +629,7 @@ class ComposableEchamPhysics(ComposablePhysics):
 def echam_physics(
     parameters: Parameters | None = None,
     checkpoint_terms: bool = True,
-    radiation_scheme: str = "grey",
+    radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
 ):
     """Create a ComposableEchamPhysics with standard ECHAM ordering.
@@ -637,7 +637,8 @@ def echam_physics(
     Args:
         parameters: Optional ECHAM Parameters. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms.
-        radiation_scheme: "grey" (default), "rrtmgp", or "emulated".
+        radiation_scheme: "grey" (default), "rrtmgp", "emulated", or a
+            custom ``PhysicsTerm`` with category "radiation".
         cloud_scheme: "1m" (default, single-moment) or "2m" (two-moment
             warm-rain; see issue #341 for ongoing scheme completion).
 
@@ -647,7 +648,14 @@ def echam_physics(
     """
     p = parameters or Parameters.default()
 
-    if radiation_scheme == "rrtmgp":
+    if isinstance(radiation_scheme, PhysicsTerm):
+        if radiation_scheme.category != "radiation":
+            raise ValueError(
+                "Custom radiation_scheme terms must have category "
+                "'radiation'."
+            )
+        rad_term = radiation_scheme
+    elif radiation_scheme == "rrtmgp":
         rad_term = EchamRadiationRRTMGP()
     elif radiation_scheme == "grey":
         rad_term = EchamRadiation()
@@ -656,7 +664,8 @@ def echam_physics(
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
-            "Choose 'grey', 'rrtmgp', or 'emulated'."
+            "Choose 'grey', 'rrtmgp', 'emulated', or pass a radiation "
+            "PhysicsTerm."
         )
 
     if cloud_scheme == "1m":
