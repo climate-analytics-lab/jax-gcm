@@ -1,0 +1,4 @@
+# Isothermal-rest atmosphere with hydrostatic ps balanced against
+# orography. Equivalent to the legacy ``isothermal`` init for flat
+# terrain; over real topography it avoids placing air below ground.
+kind: balanced_isothermal

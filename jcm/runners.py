@@ -187,6 +187,12 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
             terrain_file=terrain_cfg.file,
             interpolate=terrain_cfg.get("interpolate", True),
         )
+    if kind == "from_file_enveloped":
+        return TerrainData.from_file(
+            terrain_cfg.file, coords=coords,
+            orog_envelope_wavenumber=terrain_cfg.get(
+                "orog_envelope_wavenumber", None),
+        )
     raise ValueError(f"Unknown terrain.kind={kind!r}")
 
 
@@ -233,6 +239,42 @@ _T0_C = 273.15   # K, melting point reference
 
 # Tropopause cap above which we set RH = 0 in the JW humidity profile.
 _RH_CAP_PRESSURE_PA = 20000.0   # 200 hPa
+
+
+def inject_balanced_isothermal_profile(model: Model) -> None:
+    """Inject an isothermal-rest atmosphere with orography-balanced ``ps``.
+
+    Same ps-rebalance logic as :func:`inject_jw_profile` (so air doesn't
+    end up below ground over tall topography), but keeps the temperature
+    field at a uniform 288 K and humidity at zero. Useful as a robust
+    starting state for moist-physics runs over real terrain when the
+    full JW lapse-rate profile is unstable at the chosen resolution.
+
+    Mutates ``model._final_modal_state`` in place. Follow with
+    ``model.resume(...)`` rather than ``model.run(...)``.
+    """
+    from dinosaur.scales import units
+    from jcm.constants import grav, p0s1_bg, rd
+
+    model._final_modal_state = model._prepare_initial_modal_state(
+        physics_state=None, random_seed=0,
+    )
+    state = model._final_modal_state
+    p0_pa = p0s1_bg
+
+    orog = jnp.asarray(model.terrain.orog)
+    if jnp.any(orog > 1.0):
+        # Hydrostatic balance with the actual isothermal T (288 K), not
+        # ``_HYDROSTATIC_T_REF`` (260 K which is appropriate for the
+        # JW lapse-rate profile). Using the matching T avoids an
+        # initial-step pressure-temperature inconsistency.
+        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _JW_T_SFC))
+        scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
+        log_ps_nodal = jnp.log(ps_pa_nodal * scale)
+        state.log_surface_pressure = model.coords.horizontal.to_modal(
+            log_ps_nodal[None, ...]
+        )
+    model._final_modal_state = state
 
 
 def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
@@ -351,6 +393,14 @@ def build_forcing(cfg: DictConfig, coords):
     if forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
         return ForcingData.from_file(forcing_cfg.file, coords=coords)
+    if forcing_cfg.kind == "echam_amip":
+        from jcm.forcing import ForcingData
+        return ForcingData.from_echam_files(
+            sst_path=forcing_cfg.sst_file,
+            sic_path=forcing_cfg.sic_file,
+            surface_path=forcing_cfg.surface_file,
+            coords=coords,
+        )
     raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
 
 
@@ -408,6 +458,14 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
     if cfg.init.kind == "jw":
         inject_jw_profile(model)
+        return model.resume(
+            forcing=forcing,
+            save_interval=cfg.run.save_interval,
+            total_time=cfg.run.total_time,
+            output_averages=cfg.run.output_averages,
+        )
+    if cfg.init.kind == "balanced_isothermal":
+        inject_balanced_isothermal_profile(model)
         return model.resume(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
@@ -556,6 +614,14 @@ def run_chunked(
         t0 = time.perf_counter()
         if i == 0 and cfg.init.kind == "jw":
             inject_jw_profile(model)
+            preds = model.resume(
+                forcing=forcing,
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+            )
+        elif i == 0 and cfg.init.kind == "balanced_isothermal":
+            inject_balanced_isothermal_profile(model)
             preds = model.resume(
                 forcing=forcing,
                 save_interval=save_interval,

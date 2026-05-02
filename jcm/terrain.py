@@ -233,8 +233,10 @@ def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_
             if target_resolution not in VALID_TRUNCATIONS:
                 raise ValueError(f"Invalid target resolution: {target_resolution}. Must be one of: {VALID_TRUNCATIONS}.")
             ds = upsample_terrain_ds(ds, grid=grid)
-        elif orography.shape not in VALID_NODAL_SHAPES:
-            raise ValueError(f"Invalid terrain data shape: {orography.shape}. Must be one of: {VALID_NODAL_SHAPES}.")
+        else:
+            file_shape = (ds.sizes["lon"], ds.sizes["lat"])
+            if file_shape not in VALID_NODAL_SHAPES:
+                raise ValueError(f"Invalid terrain data shape: {file_shape}. Must be one of: {VALID_NODAL_SHAPES}.")
 
         # set orography and fmask after upsampling happens
         orography, fmask = jnp.asarray(ds['orog']), jnp.asarray(ds['lsm'])
@@ -442,7 +444,8 @@ class TerrainData:
                    lfluxland=jnp.bool_(lfluxland), **sso)
 
     @classmethod
-    def from_file(cls, terrain_file, coords: CoordinateSystem, lfluxland=True):
+    def from_file(cls, terrain_file, coords: CoordinateSystem, lfluxland=True,
+                  orog_envelope_wavenumber: int = None):
         """Initialize TerrainData from a terrain file containing orog and lsm.
 
         SSO descriptor handling, in order of precedence:
@@ -495,7 +498,20 @@ class TerrainData:
                 f"horizontal shape {target_shape}"
             )
         phi0 = grav * orography
-        phis0 = spectral_truncation(target_grid, phi0)
+        if orog_envelope_wavenumber is not None:
+            # Envelope orography: low-pass filter the orographic geopotential
+            # to a lower spectral wavenumber than the model truncation, to
+            # suppress Gibbs oscillations near sharp coast/mountain edges
+            # that would otherwise produce negative effective elevations.
+            modal = target_grid.to_modal(phi0)
+            nx, mx = modal.shape
+            n_idx, m_idx = jnp.meshgrid(jnp.arange(nx), jnp.arange(mx),
+                                        indexing='ij')
+            total_wn = m_idx + n_idx
+            modal = jnp.where(total_wn > orog_envelope_wavenumber, 0.0, modal)
+            phis0 = target_grid.to_nodal(modal)
+        else:
+            phis0 = spectral_truncation(target_grid, phi0)
 
         # Pick the best available SSO source.
         if src_has_sso:
