@@ -393,14 +393,6 @@ def build_forcing(cfg: DictConfig, coords):
     if forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
         return ForcingData.from_file(forcing_cfg.file, coords=coords)
-    if forcing_cfg.kind == "echam_amip":
-        from jcm.forcing import ForcingData
-        return ForcingData.from_echam_files(
-            sst_path=forcing_cfg.sst_file,
-            sic_path=forcing_cfg.sic_file,
-            surface_path=forcing_cfg.surface_file,
-            coords=coords,
-        )
     raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
 
 

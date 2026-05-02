@@ -227,7 +227,6 @@ def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_
         import xarray as xr
         from jcm.data.bc.interpolate import upsample_terrain_ds
         ds = xr.open_dataset(terrain_file)
-        ds = _normalize_echam_dataset(ds)
         validate_ds(ds, expected_structure={"lsm": ("lon", "lat"), "orog": ("lon", "lat")})
         if target_resolution is not None:
             if target_resolution not in VALID_TRUNCATIONS:
@@ -255,76 +254,22 @@ def get_terrain(orography: jnp.ndarray = None, fmask: jnp.ndarray = None, nodal_
     return orography, fmask
 
 
-# Mapping from ECHAM uppercase variable names to JCM lowercase. ECHAM uses
-# OROMEA / OROSTD / … plus SLM (sea-land mask). This is the only place we
-# need to know about the ECHAM convention; downstream code sees only
-# normalized lowercase names.
-_ECHAM_TO_JCM_NAMES = {
-    "SLM": "lsm",        # sea-land mask (binary 0/1)
-    "SLF": "lsm",        # land fraction (preferred when both present)
-    "OROMEA": "orog",    # mean orography in metres above sea level
-    "OROSTD": "orostd",
-    "OROSIG": "orosig",
-    "OROGAM": "orogam",
-    "OROTHE": "orothe",
-    "OROPIC": "oropic",
-    "OROVAL": "oroval",
-}
-
-
-def _normalize_echam_dataset(ds):
-    """Translate an ECHAM-style boundary-data dataset into JCM conventions.
-
-    ECHAM gridded files differ from the existing JCM T30 convention in three
-    ways that this function fixes:
-
-    1. Variable names are uppercase (``OROSTD`` etc.) — rename to
-       lowercase. ``SLF`` (fractional land mask, 0..1) is preferred over
-       ``SLM`` (binary 0/1) when both are present.
-    2. Dimensions are ordered ``(lat, lon)`` rather than ``(lon, lat)`` —
-       transpose.
-    3. Latitudes run north-to-south (descending) — flip so they run
-       south-to-north (ascending), which is what dinosaur grids use.
-
-    Returns the normalized xarray Dataset (or the original, if it already
-    follows JCM conventions). The function is a no-op for files that
-    don't contain any of the ECHAM uppercase fields.
-    """
-    rename = {
-        echam: jcm for echam, jcm in _ECHAM_TO_JCM_NAMES.items()
-        if echam in ds
-    }
-    # When both SLF (fractional) and SLM (binary) exist, prefer SLF.
-    if "SLF" in ds and "SLM" in ds:
-        rename.pop("SLM", None)
-        ds = ds.drop_vars("SLM")
-    if rename:
-        ds = ds.rename(rename)
-
-    # Reorder dims to (lon, lat) and flip lat to ascending. Apply this
-    # regardless of whether any ECHAM-uppercase fields were present so
-    # that companion files (SST, sea-ice etc.) read with the same convention.
-    if "lat" in ds.dims and "lon" in ds.dims:
-        ds = ds.transpose("lon", "lat", ...)
-        if float(ds["lat"][0]) > float(ds["lat"][-1]):
-            ds = ds.isel(lat=slice(None, None, -1))
-    return ds
+_SSO_NAMES = ("orostd", "orosig", "orogam", "orothe", "oropic", "oroval")
 
 
 def _load_sso_from_file(terrain_file):
-    """Load SSO descriptor fields from a terrain file if present.
+    """Load SSO descriptor fields from a JCM-canonical terrain file if present.
 
-    Returns a dict of the six SSO arrays, or ``None`` if the file lacks
-    any of them. Accepts the standard ECHAM-style names
-    (``orostd``/``orosig``/``orogam``/``orothe``/``oropic``/``oroval``).
+    Returns a dict of the six SSO arrays, or ``None`` if the file lacks any
+    of them. Use ``utils/convert_echam_bc.py`` to translate ECHAM-style
+    boundary files (uppercase ``OROSTD``/…, ``(lat, lon)``-ordered) into
+    the canonical JCM layout that this loader expects.
     """
     import xarray as xr
     ds = xr.open_dataset(terrain_file)
-    ds = _normalize_echam_dataset(ds)
-    sso_names = ("orostd", "orosig", "orogam", "orothe", "oropic", "oroval")
-    if not all(name in ds for name in sso_names):
+    if not all(name in ds for name in _SSO_NAMES):
         return None
-    return {name: jnp.asarray(ds[name]) for name in sso_names}
+    return {name: jnp.asarray(ds[name]) for name in _SSO_NAMES}
 
 
 @tree_math.struct
@@ -446,7 +391,13 @@ class TerrainData:
     @classmethod
     def from_file(cls, terrain_file, coords: CoordinateSystem, lfluxland=True,
                   orog_envelope_wavenumber: int = None):
-        """Initialize TerrainData from a terrain file containing orog and lsm.
+        """Initialize TerrainData from a JCM-canonical terrain file.
+
+        Expects the canonical layout: lowercase variables (``orog``,
+        ``lsm``, optional ``orostd``/…), ``(lon, lat)`` axis order,
+        ascending latitudes. ECHAM-style files (uppercase ``OROMEA``,
+        ``(lat, lon)``-ordered) must be pre-converted with
+        ``utils/convert_echam_bc.py``.
 
         SSO descriptor handling, in order of precedence:
 
@@ -479,16 +430,12 @@ class TerrainData:
 
         # Read raw orography first to inspect its source resolution.
         with xr.open_dataset(terrain_file) as raw_ds:
-            ds_norm = _normalize_echam_dataset(raw_ds)
-            src_lat_n = ds_norm.sizes.get("lat", 0)
-            src_lon_n = ds_norm.sizes.get("lon", 0)
-            src_lat = jnp.asarray(ds_norm["lat"].values)
-            src_lon = jnp.asarray(ds_norm["lon"].values)
-            src_orog = jnp.asarray(ds_norm["orog"].values)
-            src_has_sso = all(
-                name in ds_norm for name in
-                ("orostd", "orosig", "orogam", "orothe", "oropic", "oroval")
-            )
+            src_lat_n = raw_ds.sizes.get("lat", 0)
+            src_lon_n = raw_ds.sizes.get("lon", 0)
+            src_lat = jnp.asarray(raw_ds["lat"].values)
+            src_lon = jnp.asarray(raw_ds["lon"].values)
+            src_orog = jnp.asarray(raw_ds["orog"].values)
+            src_has_sso = all(name in raw_ds for name in _SSO_NAMES)
 
         # Load + interpolate orog/lsm onto the target grid (existing path).
         orography, fmask = get_terrain(terrain_file=terrain_file, grid=target_grid)

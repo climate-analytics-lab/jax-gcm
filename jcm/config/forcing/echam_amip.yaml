@@ -1,8 +1,0 @@
-# ECHAM-style AMIP boundary forcing: monthly SST + monthly sea-ice
-# concentration + a static ECHAM surface file (for ALB/WS/SN). Combined
-# by ``ForcingData.from_echam_files``. The three paths must be provided
-# at the command line.
-kind: echam_amip
-sst_file: ???
-sic_file: ???
-surface_file: ???
