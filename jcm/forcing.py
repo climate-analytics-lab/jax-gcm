@@ -231,8 +231,11 @@ class ForcingData:
         # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
 
-        # sea ice concentration
-        sice_am = _ts(ds["icec"])
+        # Sea-ice concentration. Clip to [0, 1] — spectral interpolation
+        # of a near-zero field can leave float-precision negatives (~1e-18),
+        # which downstream scheme guards (e.g. ``sqrt(1 - sice)``) treat
+        # as NaNs.
+        sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
 
         # snow depth (clip implausible values, same as before)
         snowc_raw = jnp.asarray(ds["snowc"])
