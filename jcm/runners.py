@@ -668,8 +668,6 @@ def run_chunked(
 
     return reports
 
-    return reports
-
 
 def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:
     """Compute the netCDF output path, mirroring the legacy main.py behaviour."""

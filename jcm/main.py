@@ -37,9 +37,15 @@ def main(cfg: DictConfig) -> None:
     """Run a JAX-GCM simulation configured via Hydra."""
     print(OmegaConf.to_yaml(cfg))
     predictions = run(cfg)
-    output_path = resolve_output_path(cfg, HydraConfig.get())
-    save_predictions(predictions, output_path)
-    print(f"Saved predictions to {output_path}")
+    # Chunked runs save each chunk to its own ``{output_prefix}_day{N}.nc``
+    # inside ``run_chunked`` and return per-chunk health reports — there's
+    # no merged ``ModelPredictions`` to write a final NetCDF from.
+    if isinstance(predictions, list):
+        print(f"Chunked run finished — {len(predictions)} chunks saved.")
+    else:
+        output_path = resolve_output_path(cfg, HydraConfig.get())
+        save_predictions(predictions, output_path)
+        print(f"Saved predictions to {output_path}")
 
 
 if __name__ == "__main__":
