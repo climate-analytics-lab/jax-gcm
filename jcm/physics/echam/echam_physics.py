@@ -1120,9 +1120,10 @@ def apply_surface(
     nlev, ncols = state.temperature.shape
     dt = parameters.convection.dt_conv
     pressure_levels = physics_data.diagnostics.pressure_full
-    # Get surface properties from boundaries (now guaranteed to be present)
-    # Reshape boundary fields to column format
-    surface_temp = physics_data.surface.surface_temperature.reshape(ncols)
+    # Per-tile surface temperatures are read directly from forcing below
+    # (``ocean_temp``, ``land_temp``, ``ice_surface_temp``); the upstream-
+    # blended ``physics_data.surface.surface_temperature`` is no longer
+    # consulted here — see comment by ``ocean_temp`` for the reason.
 
     # Surface tile fractions: water (0), sea ice (1), land (2).
     # Sea ice fraction is taken from prescribed boundary conditions and
