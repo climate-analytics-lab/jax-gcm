@@ -163,9 +163,11 @@ def sea_ice_physics_step(
                            (surface_temp - PHYS_CONST.t0 + 237.3))
     q_sat_surface = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
 
-    # Temperature and humidity differences
-    delta_temp = atmospheric_state.temperature - surface_temp
-    delta_humidity = atmospheric_state.humidity - q_sat_surface
+    # Temperature and humidity differences. Positive convention: flux UP
+    # from surface into the atmosphere when the surface is warmer / wetter
+    # than the air. Same convention as the ocean tile and ``apply_surface``.
+    delta_temp = surface_temp - atmospheric_state.temperature
+    delta_humidity = q_sat_surface - atmospheric_state.humidity
 
     # Turbulent fluxes (latent uses ``alhs`` for sublimation over ice)
     sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
