@@ -594,11 +594,28 @@ def apply_convection(
     
     # Unpack structured results directly (no tuple unpacking needed)
     conv_tendencies_all, conv_states_all = conv_results
-    
+
+    # Hard limit on the convective T tendency: 5 K / hr, applied symmetrically.
+    # Healthy deep convection over the warmest tropical SSTs gives ~1 K/hr at
+    # the most active level; the cap only fires when the column's parcel-vs-
+    # environment energy balance has gone pathological. Specifically, T63L47
+    # columns over the Tibetan Plateau (orog ~ 5 km, ps ~ 540 hPa) develop a
+    # localised supersaturation (q ~ 38 g/kg at L40) that the Tiedtke-Nordeng
+    # scheme then unloads as a 320 K hot spot at the ~800-hPa level, before
+    # spreading to a global NaN around step 1800. The same q-overload + thin
+    # column combination shows up in ECHAM's own ``mo_cumastr.f90`` as the
+    # ``zheat_flx`` /  ``zenh`` limiter. Until the moisture-balance side is
+    # tracked down, this cap stops the column NaN-cascade without distorting
+    # the well-behaved 99 % of grid points.
+    _DTDT_MAX = 5.0 / 3600.0  # K/s
+    dt_conv_capped = jnp.clip(
+        conv_tendencies_all.dtedt, -_DTDT_MAX, _DTDT_MAX,
+    )
+
     physics_tendencies = PhysicsTendency(
         u_wind=conv_tendencies_all.dudt.T,
-        v_wind=conv_tendencies_all.dvdt.T, 
-        temperature=conv_tendencies_all.dtedt.T,
+        v_wind=conv_tendencies_all.dvdt.T,
+        temperature=dt_conv_capped.T,
         specific_humidity=conv_tendencies_all.dqdt.T,
         tracers={
             'qc': conv_tendencies_all.dqc_dt.T,
