@@ -1141,12 +1141,19 @@ def apply_surface(
     # capped by SST for sea ice, and ``forcing.stl_am`` for land. Sea
     # ice uses min(SST, ctfreez) because the underlying ocean caps the
     # ice surface temperature physically.
-    ocean_temp = surface_temp
+    #
+    # Read ``ocean_temp`` and ``land_temp`` straight from the forcing rather
+    # than the upstream-blended ``physics_data.surface.surface_temperature``,
+    # which is snapped to one-or-the-other via ``where(fmask>0.5)`` in
+    # ``EchamForcing`` and would feed the wrong T into the minority tile
+    # (e.g. the 40% ocean fraction of a fmask=0.6 cell would otherwise
+    # use ``stl_am`` instead of ``sst``).
+    ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
     land_temp = forcing.stl_am.reshape(ncols)
     ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
-                                 jnp.minimum(surface_temp, ctfreez),
-                                 surface_temp)
+                                 jnp.minimum(ocean_temp, ctfreez),
+                                 ocean_temp)
     ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)  # 2 ice layers
     soil_temp = jnp.repeat(land_temp[:, jnp.newaxis], 4, axis=1)         # 4 soil layers
     
@@ -1204,17 +1211,40 @@ def apply_surface(
     
     # Air density at surface
     rho_sfc = pressure_levels[-1, :] / (physical_constants.rd * state.temperature[-1, :])
-    
+
     # Layer thickness at surface (approximate, clamp to minimum 50m to avoid
     # enormous tendencies from thin uniform sigma layers)
     dp_sfc = pressure_levels[-1, :] - pressure_levels[-2, :]
     dz_sfc = jnp.maximum(dp_sfc / (rho_sfc * physical_constants.grav), 50.0)
-    
-    # Surface flux tendencies (applied to lowest level only)
-    temp_tend_sfc = sensible_heat / (rho_sfc * physical_constants.cp * dz_sfc)
-    qv_tend_sfc = evaporation / (rho_sfc * dz_sfc)
-    u_tend_sfc = -tau_u / (rho_sfc * dz_sfc)
-    v_tend_sfc = -tau_v / (rho_sfc * dz_sfc)
+
+    # The surface-flux divergence at the bottom level is a linear relaxation
+    # toward the surface value with timescale ``dz_sfc / K`` (K = exchange
+    # velocity in m/s). An *explicit* time step of size ``dt`` is unstable
+    # whenever ``K * dt / dz_sfc > 2`` — and over rough terrain at the
+    # ECHAM-tuned exchange coefficients this CFL is easily violated, with
+    # the wind flipping sign each step until the column blows up. ECHAM
+    # itself avoids this by handling the surface as an implicit BC of the
+    # vdiff tridiagonal solve. JCM's explicit pipeline can't do that
+    # directly, but we can damp each explicit tendency by the same factor
+    # an implicit Euler step would — ``1 / (1 + K*dt/dz_sfc)``. This is
+    # exact for the simple linear-relaxation form, recovers the explicit
+    # tendency in the small-K*dt limit, and is unconditionally stable.
+    #
+    # ``surface_fractions`` and ``exchange_coeff_*`` are per-tile (ocean,
+    # ice, land); the grid-box-mean exchange velocity is the area-weighted
+    # sum.
+    ch_grid = jnp.sum(surface_fractions * exchange_coeff_heat, axis=1)
+    cm_grid = jnp.sum(surface_fractions * exchange_coeff_momentum, axis=1)
+    ce_grid = jnp.sum(surface_fractions * exchange_coeff_moisture, axis=1)
+    imp_heat = 1.0 / (1.0 + ch_grid * dt / dz_sfc)
+    imp_mom = 1.0 / (1.0 + cm_grid * dt / dz_sfc)
+    imp_moist = 1.0 / (1.0 + ce_grid * dt / dz_sfc)
+
+    # Surface flux tendencies (applied to lowest level only).
+    temp_tend_sfc = imp_heat * sensible_heat / (rho_sfc * physical_constants.cp * dz_sfc)
+    qv_tend_sfc = imp_moist * evaporation / (rho_sfc * dz_sfc)
+    u_tend_sfc = imp_mom * (-tau_u) / (rho_sfc * dz_sfc)
+    v_tend_sfc = imp_mom * (-tau_v) / (rho_sfc * dz_sfc)
     
     # Initialize tendencies (only surface level affected)
     temp_tend = jnp.zeros_like(state.temperature)

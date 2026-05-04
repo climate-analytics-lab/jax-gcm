@@ -557,6 +557,29 @@ class ComposableEchamPhysics(ComposablePhysics):
             parameters=self._echam_parameters.get_value(),
         )
 
+    def __add__(self, other):
+        """Append term(s), preserving ComposableEchamPhysics type.
+
+        Without this override the parent ``ComposablePhysics.__add__``
+        returns a plain ``ComposablePhysics``; ``Model.__init__`` would
+        then skip the ``apply_timestep`` call (it's gated on
+        ``isinstance(..., ComposableEchamPhysics)``) and ECHAM terms
+        would silently keep the default ``dt_conv = 3600 s`` regardless
+        of the actual model timestep — corrupting any flux that uses
+        ``dt_conv`` (e.g. surface implicit damping factor).
+        """
+        if hasattr(other, "terms"):
+            other_terms = list(other.terms)
+        elif hasattr(other, "category") and callable(other):
+            other_terms = [other]
+        else:
+            return NotImplemented
+        return ComposableEchamPhysics(
+            terms=list(self.terms) + other_terms,
+            checkpoint_terms=self.checkpoint_terms,
+            parameters=self._echam_parameters.get_value(),
+        )
+
     def apply_timestep(self, dt_seconds: float):
         """Update timestep on the shared ECHAM parameters.
 
