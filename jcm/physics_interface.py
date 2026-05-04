@@ -572,21 +572,56 @@ def filter_tendencies(dynamics_tendency: State,
         Filtered dynamics tendencies in dinosaur.primitive_equations.State format
 
     """
-    tau = diffusion.div_timescale
-    order = diffusion.div_order
-    scale = time_step / (tau * abs(grid.laplacian_eigenvalues[-1]) ** order)
+    # Hyperdiffuse every spectral prognostic, with the timescale + order
+    # ECHAM uses for each (divergence shortest, vorticity / specific
+    # humidity intermediate, temperature longest). The previous version
+    # only filtered ``divergence`` — vorticity, T', log_ps and all tracers
+    # passed through unfiltered, so high-wavenumber spectral content from
+    # sharp gradients (in particular the surface-evap PBL profile)
+    # accumulated step after step. For ``specific_humidity`` on T63L47
+    # hybrid + real terrain that grew the round-off (~1e-24 g/kg) into a
+    # 1e-3 g/kg negative-q hole within ~20 steps, which drove the supersat
+    # / convective-heating runaway. Microphysics tracers (qc, qi, qr, qs,
+    # qnc, qni) are deliberately NOT filtered — they live on cloud bases /
+    # fronts and hyperdiffusion would over-smear them.
+    eig_max_abs = abs(grid.laplacian_eigenvalues[-1])
 
-    filter_fn = horizontal_diffusion_filter(grid, scale=scale, order=order)
-    filtered_div = filter_fn(dynamics_tendency)
+    div_scale = time_step / (
+        diffusion.div_timescale * eig_max_abs ** diffusion.div_order
+    )
+    div_filter = horizontal_diffusion_filter(
+        grid, scale=div_scale, order=int(diffusion.div_order),
+    )
+    vor_q_scale = time_step / (
+        diffusion.vor_q_timescale * eig_max_abs ** diffusion.vor_q_order
+    )
+    vor_q_filter = horizontal_diffusion_filter(
+        grid, scale=vor_q_scale, order=int(diffusion.vor_q_order),
+    )
+    temp_scale = time_step / (
+        diffusion.temp_timescale * eig_max_abs ** diffusion.temp_order
+    )
+    temp_filter = horizontal_diffusion_filter(
+        grid, scale=temp_scale, order=int(diffusion.temp_order),
+    )
+
+    # Each filter is a tree_map of `scale * x` over leaves with the matching
+    # spectral shape. We apply each to the appropriate variable explicitly,
+    # ignoring the filtered values for the other fields.
+    filtered_div = div_filter(dynamics_tendency).divergence
+    filtered_vor = vor_q_filter(dynamics_tendency).vorticity
+    filtered_temp = temp_filter(dynamics_tendency).temperature_variation
+
+    filtered_tracers = dict(dynamics_tendency.tracers)
+    if "specific_humidity" in filtered_tracers:
+        filtered_q = vor_q_filter(dynamics_tendency).tracers["specific_humidity"]
+        filtered_tracers["specific_humidity"] = filtered_q
 
     return State(
-        vorticity=dynamics_tendency.vorticity,
-        divergence=filtered_div.divergence,
-        temperature_variation=dynamics_tendency.temperature_variation,
+        vorticity=filtered_vor,
+        divergence=filtered_div,
+        temperature_variation=filtered_temp,
         log_surface_pressure=dynamics_tendency.log_surface_pressure,
         sim_time=dynamics_tendency.sim_time,
-        # Pass every tracer tendency through — the filter only modifies
-        # divergence. Dropping other tracer tendencies here silently zeros
-        # microphysics tracers (qc, qi, qnc, ...).
-        tracers=dict(dynamics_tendency.tracers),
+        tracers=filtered_tracers,
     )

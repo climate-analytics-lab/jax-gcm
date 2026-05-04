@@ -1,0 +1,223 @@
+"""Column-level moisture-balance tests for the ECHAM physics over high orography.
+
+These tests pin down the moisture-cycle bugs that drove the day-15 NaN in
+``echam_t63_land_repro_test.py`` — specifically the runaway over the
+Tibetan Plateau column where ``q`` exceeded ``q_sat`` by 2× at L40 / 800 hPa.
+Each test isolates one piece of the cycle on a single Tibetan-like column
+(``ps ≈ 540 hPa``, ``orog = 2800 m``, land tile) so that future regressions
+can be triaged without a full T63L47 GPU run.
+
+What we know so far (from bisection in the parent commit):
+
+* Surface evaporation is the moisture source. Without it, ``q`` stays at 0
+  and the runaway never starts.
+* The first negative ``q`` shows up at step 4 around L38 / 520 hPa — well
+  above the surface tendency level (L46) — and grows roughly in proportion
+  to the bottom-level ``q`` magnitude. Pattern is consistent with spectral
+  ringing of the steep PBL gradient propagated into the upper troposphere.
+* ``filter_tendencies`` originally only filtered ``divergence``; vorticity,
+  T', log_ps and tracers passed through unfiltered. The fix (also in this
+  commit) routes each prognostic through the appropriate filter using
+  ``DiffusionFilter``'s separate ``div`` / ``vor_q`` / ``temp`` settings.
+
+Open: even with proper hyperdiffusion of ``q`` the upper-troposphere
+ringing isn't fully suppressed at the default ``vor_q`` settings on
+T63L47 hybrid. The convective-T cap in ``apply_convection`` continues to
+bound the resulting heating runaway. Tightening ``vor_q_timescale`` or
+adding positive-definite tracer advection are follow-up paths.
+"""
+from __future__ import annotations
+
+import os
+import unittest
+from pathlib import Path
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from jcm.forcing import ForcingData
+from jcm.model import Model
+from jcm.physics.echam.echam_levels import get_echam_levels
+from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics_interface import dynamics_state_to_physics_state
+from jcm.runners import inject_balanced_isothermal_profile
+from jcm.terrain import TerrainData
+from jcm.utils import get_coords
+
+
+_T63_BC_DIR = Path("jcm/data/bc/t63")
+_GPU_ENV = "JCM_RUN_GPU_INTEGRATION_TESTS"
+_TIBET_I, _TIBET_J = 154, 40   # orog ≈ 2800 m, fmask = 1.0
+
+
+def _gpu_required():
+    if os.environ.get(_GPU_ENV) != "1":
+        pytest.skip(f"set {_GPU_ENV}=1 to run; T63L47 is too heavy for CPU CI")
+    for fname in ("terrain.nc", "forcing.nc"):
+        if not (_T63_BC_DIR / fname).exists():
+            pytest.skip(
+                f"{_T63_BC_DIR / fname} missing; run "
+                f"utils/convert_echam_bc.py to generate it"
+            )
+
+
+def _e_sat(T):
+    """Tetens saturation vapor pressure [Pa]."""
+    return 611.2 * np.exp(17.62 * (T - 273.15) / (T - 30.03))
+
+
+def _q_sat(T, p):
+    """Saturation specific humidity [kg/kg]."""
+    e = _e_sat(T)
+    return 0.622 * e / (p - (1.0 - 0.622) * e)
+
+
+def _build_model_and_step(physics_factory, n_steps: int):
+    """Build the standard T63L47 + real terrain + sponge model with the
+    given physics package and step it forward ``n_steps`` × 12 min.
+    Returns the column profile at the Tibetan grid point at every step.
+    """
+    coords = get_coords(get_echam_levels(47), spectral_truncation=63)
+    terrain = TerrainData.from_file(_T63_BC_DIR / "terrain.nc", coords=coords)
+    forcing = ForcingData.from_file(_T63_BC_DIR / "forcing.nc", coords=coords)
+    physics = physics_factory()
+    model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
+    model._final_modal_state = model._prepare_initial_modal_state()
+    inject_balanced_isothermal_profile(model)
+
+    levels = get_echam_levels(47)
+    a = np.asarray(levels.a_boundaries)
+    b = np.asarray(levels.b_boundaries)
+    tracer_specs = {sp.name: sp for sp in physics.required_tracers()}
+    dt_days = 12.0 / (60.0 * 24.0)
+
+    history = []  # list of (step, T_col, q_col, p_full)
+    for step in range(1, n_steps + 1):
+        model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
+        s = dynamics_state_to_physics_state(
+            model._final_modal_state, model.primitive, tracer_specs=tracer_specs,
+        )
+        T = np.asarray(s.temperature[:, _TIBET_I, _TIBET_J])
+        q = np.asarray(s.specific_humidity[:, _TIBET_I, _TIBET_J])
+        ps = float(s.normalized_surface_pressure[_TIBET_I, _TIBET_J]) * 1e5
+        p_half = a + b * ps
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+        history.append((step, T, q, p_full))
+    return history
+
+
+def _full_physics():
+    from jcm.physics.dissipation import UpperSponge
+    return echam_physics(radiation_scheme="grey") + UpperSponge(
+        n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+    )
+
+
+def _no_surface_physics():
+    from jcm.physics.dissipation import UpperSponge
+    return echam_physics(radiation_scheme="grey").remove("surface") + UpperSponge(
+        n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+    )
+
+
+@pytest.mark.slow
+class TestTibetanColumnMoisture(unittest.TestCase):
+    """Single-column moisture-balance regressions over the Tibetan Plateau."""
+
+    def test_no_surface_means_no_q(self):
+        """Sanity: without the surface scheme there's no moisture source,
+        so ``q`` must remain identically 0 in this column for the first
+        12 hours.
+        """
+        _gpu_required()
+        history = _build_model_and_step(_no_surface_physics, n_steps=60)
+        for step, _T, q, _p in history:
+            self.assertEqual(float(q.max()), 0.0,
+                             msg=f"step {step}: surface-removed run leaked q")
+            self.assertEqual(float(q.min()), 0.0,
+                             msg=f"step {step}: surface-removed run produced negative q")
+
+    def test_q_stays_non_negative(self):
+        """``q`` at the Tibetan column must stay non-negative over the
+        first 12 hours of full physics.
+
+        Currently fails: the spectral integration of the bottom-level
+        surface-evap source produces small negative ``q`` at the upper
+        levels (first appears at L38 around step 4; reaches O(1e-3 g/kg)
+        by step 20). XFAIL pending the upper-troposphere ringing fix.
+        """
+        _gpu_required()
+        history = _build_model_and_step(_full_physics, n_steps=60)
+        for step, _T, q, _p in history:
+            q_min = float(q.min())
+            self.assertGreaterEqual(
+                q_min, -1e-12,
+                msg=f"step {step}: q_min = {q_min:+.3e} kg/kg (negative)",
+            )
+
+    def test_q_stays_subsaturated(self):
+        """``q`` at the Tibetan column must not exceed ``q_sat`` over the
+        first 12 hours of full physics. The Sundqvist + 1-moment cloud
+        scheme is supposed to condense any supersaturation each step.
+
+        Currently fails: q exceeds q_sat by ~10 % at L35-L38 by step 60.
+        XFAIL pending the cloud / convection moisture-balance fix.
+        """
+        _gpu_required()
+        history = _build_model_and_step(_full_physics, n_steps=60)
+        for step, T, q, p in history:
+            qsat = np.array([_q_sat(T[k], p[k]) for k in range(len(T))])
+            rh_max = float(np.nanmax(q / np.maximum(qsat, 1e-12)))
+            self.assertLessEqual(
+                rh_max, 1.01,
+                msg=f"step {step}: RH_max = {rh_max*100:.1f} % (>101 %)",
+            )
+
+    def test_full_physics_q_grows_smoothly(self):
+        """Bottom-level ``q`` must grow monotonically while the surface
+        scheme is providing a positive evap flux, with no jumps that
+        would indicate an unbounded numerical instability.
+
+        Detects e.g. the early sign-flip bug (where land flux convention
+        was upside-down) which gave ``q`` jumps of >5 g/kg in a single
+        step over high orography.
+        """
+        _gpu_required()
+        history = _build_model_and_step(_full_physics, n_steps=60)
+        prev_qbot = 0.0
+        max_jump = 0.0
+        for step, _T, q, _p in history:
+            qbot = float(q[-1])
+            jump = abs(qbot - prev_qbot)
+            max_jump = max(max_jump, jump)
+            prev_qbot = qbot
+        # 5 g/kg in a single step is the threshold the original land sign
+        # bug crossed; healthy spinup gives < 0.1 g/kg jumps.
+        self.assertLess(
+            max_jump, 5e-3,
+            msg=f"max single-step jump in bottom-level q = {max_jump*1000:.3f} g/kg",
+        )
+
+
+@pytest.mark.slow
+class TestTibetanColumnMoisture_xfailing(unittest.TestCase):
+    """Tests expected to fail until the residual upper-troposphere q-ringing
+    is fixed. Re-promote to ``TestTibetanColumnMoisture`` once they pass.
+    """
+
+    @pytest.mark.xfail(
+        reason="upper-troposphere q ringing — see module docstring",
+        strict=False,  # the magnitude varies run-to-run; passes occasionally
+    )
+    def test_q_stays_non_negative_strict(self):
+        _gpu_required()
+        history = _build_model_and_step(_full_physics, n_steps=120)
+        worst = 0.0
+        for _step, _T, q, _p in history:
+            worst = min(worst, float(q.min()))
+        self.assertGreaterEqual(worst, -1e-12)
+
+
+if __name__ == "__main__":
+    unittest.main()
