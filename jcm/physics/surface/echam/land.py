@@ -378,16 +378,22 @@ def land_surface_physics_step(
     q_sat_surface = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
     q_surface = soil_beta * q_sat_surface  # Reduced by soil dryness
     
-    # Temperature and humidity differences
-    delta_temp = atmospheric_state.temperature - surface_temp
-    delta_humidity = atmospheric_state.humidity - q_surface
-    
+    # Temperature and humidity differences. Positive convention: flux UP
+    # from surface into the atmosphere when the surface is warmer / wetter
+    # than the air. This matches the ocean tile and ``apply_surface`` (which
+    # interprets ``sensible_heat`` as a positive-upward flux). The original
+    # ``atm - surf`` ordering produced a positive-feedback runaway over
+    # high-altitude cold land — see commit message for the bisection.
+    delta_temp = surface_temp - atmospheric_state.temperature
+    delta_humidity = q_surface - atmospheric_state.humidity
+
     # Turbulent fluxes
     sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
-    
-    # Evaporation from soil
+
+    # Evaporation from soil. ``maximum(.., 0)`` enforces "no condensation
+    # onto land" (a standard simplification; dew is not modelled here).
     evaporation = air_density * exchange_coeff_moisture * delta_humidity
-    evaporation = jnp.maximum(evaporation, 0.0)  # No condensation on land
+    evaporation = jnp.maximum(evaporation, 0.0)
     
     # Transpiration from vegetation
     net_radiation = atmospheric_state.sw_downward + atmospheric_state.lw_downward

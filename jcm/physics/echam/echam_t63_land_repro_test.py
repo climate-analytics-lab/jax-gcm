@@ -1,18 +1,21 @@
-r"""Reproduction: ECHAM physics on T63L47 hybrid + real terrain NaNs at step 34.
+r"""Regression: ECHAM physics on T63L47 hybrid + real terrain stays finite.
 
-This file holds the *failing* test for the production-config land
-failure described in ``echam_with_land_test.py``. T63L47 hybrid is too
-heavy to compile on CPU within the regular test budget, so this module
-is gated behind ``JCM_RUN_GPU_INTEGRATION_TESTS=1`` and only meaningful
-when an accelerator is available.
+Originally a failing reproduction of the surface-scheme runaway over
+real orography. The fix landed alongside this file: ``land.py`` and
+``sea_ice.py`` now use the same ``surface - atmosphere`` flux convention
+as ``ocean.py`` and as ``apply_surface``'s positive-upward formula. The
+old ``atmosphere - surface`` convention produced a positive-feedback
+runaway over high-altitude land (NaN by step 34 on T63L47) — see the
+commit message for the bisection trail.
+
+T63L47 hybrid is too heavy to compile on CPU within the regular test
+budget, so this module is gated behind ``JCM_RUN_GPU_INTEGRATION_TESTS=1``
+and only meaningful when an accelerator is available.
 
 Run with::
 
     JCM_RUN_GPU_INTEGRATION_TESTS=1 CUDA_VISIBLE_DEVICES=4 \\
       pytest jcm/physics/echam/echam_t63_land_repro_test.py -v
-
-Once the underlying issue is fixed, ``test_real_terrain_does_not_nan_at_step40``
-should start passing without any other change.
 """
 from __future__ import annotations
 
@@ -94,11 +97,6 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         )
         self.assertTrue(_state_is_finite(final))
 
-    @pytest.mark.xfail(
-        reason="ECHAM surface scheme + real T63 orography NaNs at ~step 34"
-        " — see module docstring",
-        strict=True,
-    )
     def test_real_terrain_does_not_nan_at_step60(self):
         """Failing reproduction: T63L47 + real terrain NaNs by step 34.
 
@@ -121,11 +119,6 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         final = _run_steps(physics, self.terrain_real, self.forcing, n_steps=60)
         self.assertTrue(_state_is_finite(final))
 
-    @pytest.mark.xfail(
-        reason="orog × surface NaN — same root cause as the real-terrain"
-        " test above; expected to flip green together with that test",
-        strict=True,
-    )
     def test_real_orog_zero_fmask_does_not_nan(self):
         """Even with ``fmask=0`` (no land tiles), real orography + surface
         scheme blows up — currently between steps 60 and 120. Documents
