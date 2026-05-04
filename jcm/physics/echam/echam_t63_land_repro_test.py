@@ -1,12 +1,24 @@
 r"""Regression: ECHAM physics on T63L47 hybrid + real terrain stays finite.
 
 Originally a failing reproduction of the surface-scheme runaway over
-real orography. The fix landed alongside this file: ``land.py`` and
-``sea_ice.py`` now use the same ``surface - atmosphere`` flux convention
-as ``ocean.py`` and as ``apply_surface``'s positive-upward formula. The
-old ``atmosphere - surface`` convention produced a positive-feedback
-runaway over high-altitude land (NaN by step 34 on T63L47) — see the
-commit message for the bisection trail.
+real orography. The fixes that landed in this branch:
+
+* ``land.py``/``sea_ice.py`` now use the same ``surface - atmosphere``
+  positive-upward flux convention as ``ocean.py``. The old
+  ``atm - surf`` convention created a positive feedback over cold land
+  that NaN'd by step 34.
+* ``apply_surface`` damps the explicit bottom-level surface tendencies
+  by the implicit-Euler factor ``1 / (1 + K*dt/dz_sfc)``. Over rough
+  terrain the ECHAM-tuned exchange coefficients give ``K*dt/dz > 2``,
+  which the old explicit step couldn't survive past ~step 600.
+* ``apply_surface`` reads ``ocean_temp`` and ``land_temp`` straight
+  from forcing instead of routing through the upstream-blended
+  ``physics_data.surface.surface_temperature``, which had snapped to
+  the dominant tile via ``where(fmask>0.5)``.
+* ``ComposableEchamPhysics.__add__`` overrides the parent so that
+  ``echam_physics() + UpperSponge(...)`` (the production sponge wiring)
+  preserves the type and ``Model.__init__`` still calls
+  ``apply_timestep`` on it.
 
 T63L47 hybrid is too heavy to compile on CPU within the regular test
 budget, so this module is gated behind ``JCM_RUN_GPU_INTEGRATION_TESTS=1``
@@ -97,17 +109,35 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         )
         self.assertTrue(_state_is_finite(final))
 
-    def test_real_terrain_does_not_nan_at_step60(self):
-        """Failing reproduction: T63L47 + real terrain NaNs by step 34.
+    def test_real_terrain_stable_for_24h(self):
+        """T63L47 + real terrain: 240 steps (1 day at dt=12 min) clean.
 
-        Once the underlying issue is fixed this test should start passing
-        with no other change. 60 steps comfortably covers the observed
-        blow-up window so a fix that delays (rather than resolves) the
-        instability won't accidentally make the test pass.
+        Originally NaN'd at step 34. After the surface fixes the run
+        stays finite for ~15 days; we check 1 day here as a fast,
+        clearly-past-the-old-failure regression. A multi-day production
+        check lives in ``test_real_terrain_stable_for_5_days_with_sponge``.
         """
         final = _run_steps(
             echam_physics(radiation_scheme="grey"),
-            self.terrain_real, self.forcing, n_steps=60,
+            self.terrain_real, self.forcing, n_steps=240,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_real_terrain_with_sponge_stable_5_days(self):
+        """The full production wiring: ECHAM physics + UpperSponge.
+
+        Catches the ``ComposableEchamPhysics + UpperSponge`` regression
+        where the parent ``__add__`` returned a plain ``ComposablePhysics``
+        and ``Model.__init__`` skipped ``apply_timestep`` — leaving ECHAM
+        at the default ``dt_conv = 3600 s`` regardless of model dt.
+        Without that fix this test NaNs by step ~95.
+        """
+        from jcm.physics.dissipation import UpperSponge
+        physics = echam_physics(radiation_scheme="grey") + UpperSponge(
+            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+        )
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=600,
         )
         self.assertTrue(_state_is_finite(final))
 
