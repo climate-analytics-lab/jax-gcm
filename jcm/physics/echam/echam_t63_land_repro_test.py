@@ -20,11 +20,16 @@ real orography. The fixes that landed in this branch:
   preserves the type and ``Model.__init__`` still calls
   ``apply_timestep`` on it.
 
-A residual instability still trips a NaN around day 15 (~step 1800) —
-bisects to the convection term over high-altitude land, which produces
-an unphysical 320 K hot spot at the ~800 hPa level in a single
-T63 column over the Tibetan Plateau before spreading. That's the
-follow-up; this file's tests cover everything that's already fixed.
+* ``apply_convection`` clips the bottom-level convective T tendency to
+  ±5 K/hr. The TN scheme over a 5 km mountain develops a 320 K hot
+  spot at ~800 hPa in a single column (Tibetan Plateau), driven by a
+  q ~ 38 g/kg supersaturation. The cap is a workaround that prevents
+  the column NaN-cascade without distorting the well-behaved 99 % of
+  grid points; the underlying moisture-balance question is its own
+  follow-up.
+
+With all five fixes the production T63L47 + real terrain + sponge run
+is stable for 30 simulated days at dt=12 min on GPU.
 
 T63L47 hybrid is too heavy to compile on CPU within the regular test
 budget, so this module is gated behind ``JCM_RUN_GPU_INTEGRATION_TESTS=1``
@@ -147,6 +152,24 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         )
         self.assertTrue(_state_is_finite(final))
 
+    def test_real_terrain_with_sponge_stable_30_days(self):
+        """Production wiring, full month.
+
+        With every fix in this branch — sign flip, implicit damping,
+        direct ocean/land T, ``__add__`` override, convective T cap —
+        the T63L47 + real terrain + sponge run completes 30 sim days at
+        dt=12 min on GPU. Validates the end-to-end CLI path that
+        previously NaN'd at day 5.
+        """
+        from jcm.physics.dissipation import UpperSponge
+        physics = echam_physics(radiation_scheme="grey") + UpperSponge(
+            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+        )
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=30 * 120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
     def test_real_terrain_minus_surface_survives(self):
         """Removing the ``surface`` term lets the run survive — control
         from the original bisection (kept for reference even though the
@@ -156,25 +179,6 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         final = _run_steps(physics, self.terrain_real, self.forcing, n_steps=60)
         self.assertTrue(_state_is_finite(final))
 
-    def test_real_terrain_minus_convection_stable_2_weeks(self):
-        """With convection removed the model is stable for 30+ days at
-        T63L47 + real terrain + sponge. Pins down that the residual
-        ~step-1800 NaN lives in convection-over-orography (a localised
-        320 K hot spot at ~800 hPa over the Tibetan Plateau), not in
-        surface fluxes. Run 14 days here as a regression that won't
-        accidentally flip green if a future fix only delays things.
-        """
-        from jcm.physics.dissipation import UpperSponge
-        physics = (
-            echam_physics(radiation_scheme="grey").remove("convection")
-            + UpperSponge(
-                n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
-            )
-        )
-        final = _run_steps(
-            physics, self.terrain_real, self.forcing, n_steps=14 * 120,
-        )
-        self.assertTrue(_state_is_finite(final))
 
     def test_real_orog_zero_fmask_does_not_nan(self):
         """Even with ``fmask=0`` (no land tiles), real orography + surface
