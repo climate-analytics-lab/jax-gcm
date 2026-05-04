@@ -34,7 +34,6 @@ import os
 import unittest
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
