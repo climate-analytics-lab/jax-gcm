@@ -341,6 +341,16 @@ class EchamCloudsAndMicrophysics2M(EchamTermBase):
 class EchamCloudsAndMicrophysics1M(EchamTermBase):
     """ECHAM 1-moment cloud microphysics (autoconversion + precipitation).
 
+    Declares ``qc`` and ``qi`` as prognostic tracers via
+    :meth:`required_tracers` so the dynamics carries them between
+    physics calls. Without that declaration the underlying
+    ``apply_microphysics_1m`` reads ``state.tracers.get('qc', zeros)``
+    and silently falls back to zero each step — meaning cloud water
+    condensed in one step is thrown away before the next, autoconversion
+    sees no source, and precipitation never spins up. q then accumulates
+    in the column unchecked and the convection cap is the only thing
+    preventing a single-step blow-up.
+
     Reads post-condensation ``qc``/``qi``/``cloud_fraction`` from the
     diagnostics dict; must be composed downstream of an
     :class:`SundqvistCloudFraction` term.
@@ -348,6 +358,23 @@ class EchamCloudsAndMicrophysics1M(EchamTermBase):
 
     name: ClassVar[str] = "echam_clouds_microphysics_1m"
     category: ClassVar[str] = "clouds"
+
+    @classmethod
+    def required_tracers(cls):
+        """Qc and qi are prognostic; qr/qs are in-step diagnostic fluxes.
+
+        ICON's ``mo_cloud.f90`` (atm_phy_echam) treats rain (``zrfl``)
+        and snow (``zsfl``) as downward column fluxes that reset to 0 at
+        TOA at the start of every call (lines 267-268). They are NOT
+        prognostic — the per-step autoconversion / accretion sources
+        and the sedimentation sink are integrated within a single
+        timestep, with the column-bottom value becoming the surface
+        precipitation flux. We mirror that design.
+        """
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+        )
 
     def __call__(self, state, diagnostics, forcing, terrain):
         """Compute microphysics tendencies."""

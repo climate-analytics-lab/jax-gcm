@@ -108,6 +108,7 @@ def cuadjtq(
     Returns:
         ``(T_adj, q_adj, condensate)``: adjusted temperature and vapour
         with ``condensate = q - q_adj`` reflecting the moist exchange.
+
     """
     L_cp = alhc / cp
 
@@ -165,6 +166,7 @@ def saturation_adjustment(
 
     Returns:
         Adjusted ``(T, q, qc, qi)``.
+
     """
     # The proper Newton step uses specific humidity directly (matches
     # what cuadjtq does); the previous mixing-ratio detour was unnecessary.
@@ -303,7 +305,6 @@ def test_saturation_adjustment():
     pressure = jnp.array(90000.0)    # Pa
     
     # Get saturation mixing ratio
-    from .tiedtke_nordeng import saturation_mixing_ratio
     rs = saturation_mixing_ratio(pressure, temperature)
     qs = rs / (1 + rs)  # Convert to specific humidity
     

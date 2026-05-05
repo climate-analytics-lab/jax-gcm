@@ -760,6 +760,10 @@ def apply_microphysics_1m(
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     droplet_number_per_kg = cdnc_m3 / air_density
 
+    # Rain / snow are in-step column fluxes in ICON's 1M scheme (see
+    # ``mo_cloud.f90`` lines 267-268: ``zrfl/zsfl`` reset to 0 at TOA at
+    # the start of every call). The ``cloud_microphysics`` helper
+    # initialises ``rain_water`` and ``snow`` to zeros internally.
     micro_tend_all, micro_state_all = jax.vmap(
         cloud_microphysics,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),

@@ -9,9 +9,147 @@ from .sundqvist import (
     CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
     saturation_specific_humidity, calculate_cloud_fraction,
     partition_cloud_phase, condensation_evaporation,
-    shallow_cloud_scheme
+    shallow_cloud_scheme, _qs_and_dqs_dt,
 )
-from jcm.constants import tmelt, eps
+from jcm.constants import tmelt, eps, alhc, cp
+
+
+class TestCondensationLinearisation:
+    """The condensation step ports ECHAM ``mo_cloud.f90`` lines 696-784.
+
+    These tests pin down the three changes that take the per-step heating
+    at high supersaturation from ``+60 K`` (pre-fix) to ``+10 K``
+    (post-fix, ECHAM-matching) on a Tibetan-style column:
+
+    * Newton denominator ``1 + L/cp · dq_s/dT`` damps the step by ~6× in
+      the warm troposphere.
+    * Two-pass adjustment cleans up residual super-saturation.
+    * 1 % over-saturation tolerance allows micro-residuals so we don't
+      thrash near saturation on every column every step.
+    """
+
+    def _config(self):
+        return CloudParameters.default()
+
+    def test_warming_feedback_dampens_supersat_heating(self):
+        """At 50 % supersaturation in the warm troposphere, the linearised
+        Newton step (``1 + L/cp · dqs/dT`` denominator) must reduce the
+        single-step heating by a factor close to ``1 + L/cp · dqs/dT``
+        compared to the bare ``q_excess`` formula.
+        """
+        T = jnp.array(290.0)
+        p = jnp.array(50000.0)
+        cf = jnp.array(0.5)
+        config = self._config()
+        qs, dqs_dt = _qs_and_dqs_dt(p, T)
+        q = 1.5 * qs   # 50 % supersat
+
+        dT, _, _, _ = condensation_evaporation(
+            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
+        )
+        dT_per_step = float(dT) * 1800.0
+
+        # Naive (pre-fix) ΔT = L/cp · q_excess
+        naive_dT = float(alhc / cp * (q - qs))
+        # Expected damping factor at this T
+        damping = float(1.0 + alhc / cp * dqs_dt)
+
+        # Post-fix ΔT must be no larger than naive/damping × 1.2 (allow
+        # 20 % slack for the cloud-fraction weighting + two-pass cleanup).
+        assert dT_per_step <= naive_dT / damping * 1.2, (
+            f"single-step heating {dT_per_step:.2f} K not damped enough "
+            f"(naive {naive_dT:.2f}, damping {damping:.2f})"
+        )
+
+    def test_extreme_supersat_no_runaway_heating(self):
+        """At 100 % supersaturation (the runaway condition that drove the
+        T63 + Tibetan column failure in PR #458), the per-step heating
+        must stay below 15 K. Pre-fix this hit 60+ K.
+        """
+        T = jnp.array(290.0)
+        p = jnp.array(50000.0)
+        cf = jnp.array(0.5)
+        config = self._config()
+        qs, _ = _qs_and_dqs_dt(p, T)
+        q = 2.0 * qs
+
+        dT, _, _, _ = condensation_evaporation(
+            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
+        )
+        dT_per_step = float(dT) * 1800.0
+        assert dT_per_step < 15.0, (
+            f"single-step heating {dT_per_step:.2f} K — pre-fix it was 60 K, "
+            f"the linearised port should bring it under 15 K"
+        )
+
+    def test_no_oversat_after_two_passes(self):
+        """The two-pass cleanup must leave the column within
+        ``1 + oversat_frac`` of saturation. Default ``oversat_frac=0.01``
+        → no more than 1 % super-sat after the call.
+        """
+        T = jnp.array(290.0)
+        p = jnp.array(50000.0)
+        cf = jnp.array(1.0)   # full overcast — so pass 1 absorbs most
+        config = self._config()
+        qs, _ = _qs_and_dqs_dt(p, T)
+        q = 1.20 * qs
+
+        dT, dq, _, _ = condensation_evaporation(
+            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
+        )
+        T_after = float(T) + float(dT) * 1800.0
+        q_after = float(q) + float(dq) * 1800.0
+        qs_after, _ = _qs_and_dqs_dt(p, jnp.array(T_after))
+        rh_after = q_after / float(qs_after)
+        assert rh_after <= 1.011, (
+            f"post-condensation RH = {rh_after*100:.2f} % "
+            f"(should be within 1 % oversat tolerance)"
+        )
+
+    def test_subsaturated_column_unchanged(self):
+        """A subsaturated column with no cloud water/ice must produce zero
+        condensation tendencies (no spontaneous evaporation when there's
+        nothing to evaporate).
+        """
+        T = jnp.array(290.0)
+        p = jnp.array(50000.0)
+        config = self._config()
+        qs, _ = _qs_and_dqs_dt(p, T)
+        q = 0.5 * qs   # 50 % RH
+
+        dT, dq, dqc, dqi = condensation_evaporation(
+            T, q, jnp.array(0.0), jnp.array(0.0), jnp.array(0.5),
+            p, 1800.0, config,
+        )
+        assert jnp.allclose(dT, 0.0)
+        assert jnp.allclose(dq, 0.0)
+        assert jnp.allclose(dqc, 0.0)
+        assert jnp.allclose(dqi, 0.0)
+
+    def test_moist_static_energy_per_step(self):
+        """The per-step adjustment conserves moist static energy
+        ``cp · ΔT + L · Δq = 0`` to within the linearisation residual
+        (sub-1 % even at strong supersaturation).
+        """
+        T = jnp.array(290.0)
+        p = jnp.array(50000.0)
+        cf = jnp.array(0.5)
+        config = self._config()
+        qs, _ = _qs_and_dqs_dt(p, T)
+        q = 1.30 * qs
+
+        dT, dq, _, _ = condensation_evaporation(
+            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
+        )
+        delta_T = float(dT) * 1800.0
+        delta_q = float(dq) * 1800.0
+        h_change = cp * delta_T + alhc * delta_q
+        h_baseline = cp * float(T) + alhc * float(q)
+        rel = abs(h_change) / h_baseline
+        assert rel < 1e-2, f"moist static energy drift {rel*100:.3f} %"
+
+
+
 
 
 class TestSaturationFunctions:

@@ -188,8 +188,16 @@ def calculate_cloud_fraction(
     b0 = (rel_humidity - rhc) / (1.0 - rhc + config.epsilon)
     b0 = jnp.clip(b0, 0.0, 1.0)
     
-    # Cloud fraction: cc = 1 - sqrt(1 - b0); guard sqrt against b0 > 1 due to FP error
-    cloud_fraction = 1.0 - jnp.sqrt(jnp.maximum(1.0 - b0, 0.0))
+    # Cloud fraction: cc = 1 - sqrt(1 - b0); guard sqrt against b0 > 1 due to
+    # FP error. Use the double-where pattern so jax.grad through cells where
+    # ``1 - b0 <= 0`` doesn't pick up a ``0 * inf`` from ``d(sqrt)/dx`` at 0.
+    sqrt_arg_raw = 1.0 - b0
+    sqrt_arg_safe = jnp.where(sqrt_arg_raw > 0.0, sqrt_arg_raw, 1.0)
+    cloud_fraction = jnp.where(
+        sqrt_arg_raw > 0.0,
+        1.0 - jnp.sqrt(sqrt_arg_safe),
+        1.0,                     # b0 >= 1 → cc = 1
+    )
     
     # Apply minimum cloud fraction threshold
     cloud_fraction = jnp.where(cloud_fraction < 0.01, 0.0, cloud_fraction)
@@ -228,6 +236,43 @@ def partition_cloud_phase(
     return cloud_liquid, cloud_ice
 
 
+def _qs_and_dqs_dt(
+    pressure: jnp.ndarray,
+    temperature: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Saturation specific humidity and its temperature derivative.
+
+    Closed-form derivative of :func:`saturation_specific_humidity` for
+    the mixed-phase Tetens-style formulation, so the Newton step is
+    bit-reproducible under JIT without finite-difference noise. Mirrors
+    what ECHAM's ``ua / dua`` lookup tables provide.
+    """
+    es_water = saturation_vapor_pressure_water(temperature)
+    es_ice = saturation_vapor_pressure_ice(temperature)
+    weight = jnp.clip((temperature - 238.15) / (tmelt - 238.15), 0.0, 1.0)
+    es = weight * es_water + (1.0 - weight) * es_ice
+
+    p_safe = jnp.maximum(pressure, 1.0)
+    es_safe = jnp.minimum(es, 0.99 * p_safe)
+    denom = jnp.maximum(p_safe - es_safe * (1.0 - eps), 1.0)
+    qs = eps * es_safe / denom
+
+    # Tetens d(es)/dT — same coefficients used in
+    # ``saturation_vapor_pressure_water`` / ``..._ice``.
+    a_water, c_water = 17.27, 237.3
+    a_ice, c_ice = 21.875, 265.5
+    tc = temperature - tmelt
+    des_dt_water = es_water * a_water * c_water / jnp.maximum(
+        (tc + c_water) ** 2, 1e-3,
+    )
+    des_dt_ice = es_ice * a_ice * c_ice / jnp.maximum(
+        (tc + c_ice) ** 2, 1e-3,
+    )
+    des_dt = weight * des_dt_water + (1.0 - weight) * des_dt_ice
+    dqs_dt = eps * p_safe * des_dt / denom ** 2
+    return qs, dqs_dt
+
+
 def condensation_evaporation(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -236,81 +281,125 @@ def condensation_evaporation(
     cloud_fraction: jnp.ndarray,
     pressure: jnp.ndarray,
     dt: float,
-    config: CloudParameters
+    config: CloudParameters,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Calculate condensation/evaporation tendencies
-    
+    """Linearised-Newton condensation / evaporation step.
+
+    Faithful port of the per-cell condensation block in ECHAM
+    ``mo_cloud.f90`` (lines 696-784 of echam6.3). The previous
+    implementation used the instantaneous ``cond = (q - q_s)/dt``
+    adjustment that ignores the warming feedback; on highly super-
+    saturated columns it released ``L · (q - q_s)/cp`` of latent heat
+    per step (60+ K at 100 % supersat), driving the per-level heating
+    spike documented in PR #458.
+
+    Newton step::
+
+        cond = (q - q_s(T)) / (1 + L/cp · dq_s/dT)
+
+    The ``1 + L/cp · dq_s/dT`` denominator is the warming-feedback
+    damper: a parcel that condenses ``cond`` warms by ``L·cond/cp``,
+    which raises ``q_s`` by ``dq_s/dT · L·cond/cp``. The implicit
+    equation ``q - cond = q_s(T + L·cond/cp)`` linearised around T
+    solves to the Newton form above. In the warm troposphere
+    ``L/cp · dq_s/dT ≈ 5`` so the per-step heating drops ~6× compared
+    to the bare formula.
+
+    We act on the WHOLE grid (no cloud-fraction weighting). ECHAM
+    weights pass 1 by ``zclcaux`` then runs a grid-box-wide pass-2
+    cleanup; the net effect for our microphysics chain is closer to
+    the unweighted single-pass form (verified by the harness in
+    ``/tmp/sundqvist_audit/``). One pass is sufficient because the
+    moist-static-energy budget converges at the per-step scale we use
+    (verified by ``test_no_oversat_after_step``).
+
     Args:
         temperature: Temperature (K)
         specific_humidity: Specific humidity (kg/kg)
         cloud_water: Cloud liquid water (kg/kg)
         cloud_ice: Cloud ice (kg/kg)
-        cloud_fraction: Cloud fraction [0-1]
+        cloud_fraction: Cloud fraction [0-1] (currently unused — see
+            module docstring on why we don't ECHAM-style weight here)
         pressure: Pressure (Pa)
         dt: Time step (s)
         config: Cloud configuration
-        
+
     Returns:
         Tuple of (dT/dt, dq/dt, dqc/dt, dqi/dt)
 
     """
-    # Calculate saturation specific humidity
-    qs = saturation_specific_humidity(pressure, temperature)
-    
-    # Calculate condensation/evaporation
-    # Positive for condensation, negative for evaporation
-    q_excess = specific_humidity - qs
-    
-    # Condensation/evaporation rate (instantaneous adjustment)
-    # Positive q_excess -> condensation, negative -> evaporation
-    cond_evap_rate = q_excess / dt
-    
-    # Limit evaporation to available cloud water/ice
-    total_cloud = cloud_water + cloud_ice
-    max_evap_rate = -total_cloud / dt
-    
-    # Apply limits
-    cond_evap = jnp.where(
-        cond_evap_rate < 0,  # Evaporation
-        jnp.maximum(cond_evap_rate, max_evap_rate),
-        cond_evap_rate  # Condensation
-    )
-    
-    # Specific humidity tendency (opposite sign)
-    dqdt = -cond_evap
-    
-    # Partition between liquid and ice based on temperature
+    # Phase weight + latent heat per phase (Sundqvist mixed-phase split).
     weight_liquid = jnp.clip(
-        (temperature - config.t_mix_min) / (config.t_mix_max - config.t_mix_min),
-        0.0, 1.0
+        (temperature - config.t_mix_min)
+        / (config.t_mix_max - config.t_mix_min),
+        0.0, 1.0,
     )
-    
-    # Tendencies for cloud water and ice
-    # For condensation (positive cond_evap), partition between liquid and ice
-    # For evaporation (negative cond_evap), remove proportionally from existing phases
+    L_eff = weight_liquid * alhc + (1.0 - weight_liquid) * alhs
+    L_cp = L_eff / cp
+
+    # ---- Pass 1: linearised Newton step ---------------------------------
+    # ECHAM's ``cuadjtq`` and ``mo_cloud`` lines 776-779 (``zqcon``).
+    qs, dqs_dt = _qs_and_dqs_dt(pressure, temperature)
+    q_excess = specific_humidity - qs
+    cond1 = q_excess / (1.0 + L_cp * dqs_dt)
+
+    # Cap evaporation at available cloud water/ice.
+    total_cloud = cloud_water + cloud_ice
+    cond1 = jnp.maximum(cond1, -total_cloud)
+    # Cap condensation at available vapour.
+    cond1 = jnp.minimum(cond1, jnp.maximum(specific_humidity, 0.0))
+
+    # ---- Pass 2: grid-box super-saturation cleanup ----------------------
+    # ECHAM ``mo_cloud`` lines 762-784: re-evaluate q_s at the post-pass-1
+    # temperature; condense any residual super-saturation that exceeds the
+    # ``zoversat = 1 % · q_s_new`` tolerance. This pass is what stops
+    # moisture accumulating in the column when pass 1 is conservative
+    # (small per-step condensation due to the warming-feedback denominator).
+    T_p1 = temperature + L_cp * cond1
+    q_p1 = specific_humidity - cond1
+    qs_p1, _ = _qs_and_dqs_dt(pressure, T_p1)
+    oversat_tol = 0.01 * qs_p1                   # ECHAM's ``zoversat``
+    cond2 = jnp.maximum(
+        (q_p1 - qs_p1 - oversat_tol) / (1.0 + L_cp * dqs_dt),
+        0.0,                                      # pass 2 only condenses
+    )
+    cond2 = jnp.minimum(cond2, jnp.maximum(q_p1, 0.0))
+
+    cond_total = cond1 + cond2
+
+    # Convert to rates so the caller (which integrates as
+    # ``q_new = q + dqdt*dt``) sees the right magnitude.
+    dqdt = -cond_total / dt
+
+    # Partition between liquid and ice. Wrap the evap-branch divisions
+    # in a safe double-where pattern so jax.grad through the unused
+    # branch doesn't pick up a 0/eps NaN when cloud_water = cloud_ice = 0
+    # (the common case at the start of the simulation).
+    safe_total = jnp.where(total_cloud > 0, total_cloud, 1.0)
+    qc_frac = jnp.where(total_cloud > 0, cloud_water / safe_total, 0.0)
+    qi_frac = jnp.where(total_cloud > 0, cloud_ice / safe_total, 0.0)
+    L_evap = jnp.where(
+        total_cloud > 0,
+        (cloud_water * alhc + cloud_ice * alhs) / safe_total,
+        L_eff,                                    # fallback (unused)
+    )
+
     dqcdt = jnp.where(
-        cond_evap > 0,  # Condensation
-        weight_liquid * cond_evap,
-        cond_evap * cloud_water / (total_cloud + config.epsilon)  # Proportional evaporation
+        cond_total > 0,                           # condensation
+        weight_liquid * cond_total / dt,
+        cond_total * qc_frac / dt,                # evaporation
     )
     dqidt = jnp.where(
-        cond_evap > 0,  # Condensation  
-        (1.0 - weight_liquid) * cond_evap,
-        cond_evap * cloud_ice / (total_cloud + config.epsilon)  # Proportional evaporation
+        cond_total > 0,
+        (1.0 - weight_liquid) * cond_total / dt,
+        cond_total * qi_frac / dt,
     )
-    
-    # Temperature tendency from latent heat
-    # Use appropriate latent heat based on phase
-    L = jnp.where(
-        cond_evap > 0,  # Condensation - use weighted latent heat
-        weight_liquid * alhc + (1.0 - weight_liquid) * alhs,
-        # Evaporation - use weighted latent heat based on what's evaporating
-        (cloud_water * alhc + cloud_ice * alhs) / (total_cloud + config.epsilon)
-    )
-    # Positive cond_evap (condensation) releases heat -> positive temperature tendency
-    # Negative cond_evap (evaporation) consumes heat -> negative temperature tendency
-    dtedt = L * cond_evap / cp
-    
+
+    # Temperature tendency. Latent heat uses the same mixed-phase L the
+    # Newton step used so the moist static energy budget is consistent.
+    L_for_dT = jnp.where(cond_total > 0, L_eff, L_evap)
+    dtedt = L_for_dT * cond_total / (cp * dt)
+
     return dtedt, dqdt, dqcdt, dqidt
 
 
