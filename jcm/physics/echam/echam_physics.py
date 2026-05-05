@@ -883,18 +883,10 @@ def apply_microphysics_1m(
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     droplet_number_per_kg = cdnc_m3 / air_density
 
-    # Reverted from cloud_microphysics_column_sweep — that scheme's
-    # Rotstayn rain evaporation creates a positive-feedback loop
-    # (rain evaporates → moistens dry layer → Sundqvist condenses →
-    # latent heat release → drives convection → more rain) that the
-    # surface bisect identified as the dominant amplifier of the
-    # day-7 NaN on T63L47 + real terrain. The per-level
-    # `cloud_microphysics` discards rain each step (no propagating
-    # flux, no inter-level evap coupling), which breaks the feedback
-    # at the cost of microphysics fidelity. Tracked as follow-up
-    # work — needs either ICON's RH-hysteresis bound on the evap
-    # source or a tighter Newton solve so the evap stays bounded
-    # under coupling with Sundqvist.
+    # Rain / snow are in-step column fluxes in ICON's 1M scheme (see
+    # ``mo_cloud.f90`` lines 267-268: ``zrfl/zsfl`` reset to 0 at TOA at
+    # the start of every call). The ``cloud_microphysics`` helper
+    # initialises ``rain_water`` and ``snow`` to zeros internally.
     micro_tend_all, micro_state_all = jax.vmap(
         cloud_microphysics,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
