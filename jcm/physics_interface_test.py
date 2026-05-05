@@ -152,7 +152,8 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
     def test_unknown_tracer_passes_through_unchanged(self):
         """Tracers not in the positive-definite set must pass through
         unchanged — we don't want to silently clamp e.g. anomaly fields
-        or signed perturbations a future module might add."""
+        or signed perturbations a future module might add.
+        """
         from jcm.physics_interface import verify_state
         kx, ix, il = 4, 8, 8
         signed = jnp.full((kx, ix, il), -0.3)
@@ -181,7 +182,8 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
 
     def test_negative_tracer_tendency_caps_at_zero(self):
         """A microphysics tendency that would make ``qc`` negative is
-        capped at ``-qc / dt`` so the next step lands at exactly 0."""
+        capped at ``-qc / dt`` so the next step lands at exactly 0.
+        """
         from jcm.physics_interface import verify_tendencies, PhysicsTendency
         shape = (4, 8, 8)
         state = PhysicsState.zeros(
@@ -197,7 +199,8 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
     def test_unknown_tracer_tendency_passes_through(self):
         """Tendencies of tracers not in the positive-definite set must
         pass through unchanged (same rationale as ``test_unknown_tracer
-        _passes_through_unchanged``)."""
+        _passes_through_unchanged``).
+        """
         from jcm.physics_interface import verify_tendencies, PhysicsTendency
         shape = (4, 8, 8)
         state = PhysicsState.zeros(

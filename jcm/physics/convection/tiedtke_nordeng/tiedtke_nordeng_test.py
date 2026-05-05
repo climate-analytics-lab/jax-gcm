@@ -97,7 +97,8 @@ class TestMassFluxCFLCap:
 
     def test_mass_flux_at_cb_below_cfl_cap(self):
         """The cloud-base mass flux returned by the scheme must never
-        exceed ``layer_mass[cb] / dt``, even for very high CAPE."""
+        exceed ``layer_mass[cb] / dt``, even for very high CAPE.
+        """
         atm = create_test_atmosphere(unstable=True)
         config = ConvectionParameters.default()
         nlev = len(atm['temperature'])
