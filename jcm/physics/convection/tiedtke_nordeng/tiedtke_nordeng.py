@@ -710,6 +710,21 @@ def tiedtke_nordeng_convection(
         mass_flux_base = mass_flux_closure(
             cape, cin, moisture_conv, conv_type, config
         )
+
+        # ECHAM mass-flux CFL cap (``mo_cumastr.f90:582-583``):
+        #
+        #     zmfmax = pmref(jl, ikb-1) / dt
+        #     zmfub1 = MIN(zmfub1, zmfmax)
+        #
+        # The convective updraft cannot evacuate more mass per unit time
+        # than the source layer at cloud base contains. Without this cap
+        # the closure can return arbitrarily large mass fluxes when CAPE
+        # is high relative to the convective timescale, producing run-
+        # away latent heating in a single step. We use the air mass of
+        # the cloud-base layer itself (``rho * dz``) as the budget.
+        layer_mass_at_cb = rho[cloud_base] * layer_thickness[cloud_base]
+        mfu_cfl_max = layer_mass_at_cb / dt
+        mass_flux_base = jnp.minimum(mass_flux_base, mfu_cfl_max)
         
         # Calculate updraft
         updraft_state = calculate_updraft(

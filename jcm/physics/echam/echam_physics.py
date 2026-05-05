@@ -598,15 +598,13 @@ def apply_convection(
     # Hard limit on the convective T tendency: 5 K / hr, applied symmetrically.
     # Healthy deep convection over the warmest tropical SSTs gives ~1 K/hr at
     # the most active level; the cap only fires when the column's parcel-vs-
-    # environment energy balance has gone pathological. Specifically, T63L47
-    # columns over the Tibetan Plateau (orog ~ 5 km, ps ~ 540 hPa) develop a
-    # localised supersaturation (q ~ 38 g/kg at L40) that the Tiedtke-Nordeng
-    # scheme then unloads as a 320 K hot spot at the ~800-hPa level, before
-    # spreading to a global NaN around step 1800. The same q-overload + thin
-    # column combination shows up in ECHAM's own ``mo_cumastr.f90`` as the
-    # ``zheat_flx`` /  ``zenh`` limiter. Until the moisture-balance side is
-    # tracked down, this cap stops the column NaN-cascade without distorting
-    # the well-behaved 99 % of grid points.
+    # environment energy balance has gone pathological. The companion
+    # cloud-base mass-flux CFL cap in ``tiedtke_nordeng_convection`` (added
+    # in the same branch) bounds the column-integrated mass flux but does
+    # not contain per-level latent-heat spikes inside the updraft loop —
+    # ECHAM bounds those via the per-level moist-adjustment limits in
+    # ``mo_cuadjust.f90`` which we have not yet ported. Until that lands
+    # this cap is the safety net.
     _DTDT_MAX = 5.0 / 3600.0  # K/s
     dt_conv_capped = jnp.clip(
         conv_tendencies_all.dtedt, -_DTDT_MAX, _DTDT_MAX,

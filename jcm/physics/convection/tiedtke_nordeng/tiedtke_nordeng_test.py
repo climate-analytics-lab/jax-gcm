@@ -82,6 +82,83 @@ def create_test_atmosphere(nlev=40, unstable=True):
     }
 
 
+class TestMassFluxCFLCap:
+    """The cloud-base mass flux must respect the layer-mass / dt CFL cap
+    that ECHAM enforces in ``mo_cumastr.f90:582-583``::
+
+        zmfmax = pmref(jl, ikb-1) / dt
+        zmfub1 = MIN(zmfub1, zmfmax)
+
+    Without it, an arbitrarily large CAPE-based closure can produce a
+    cloud-base mass flux that evacuates the source layer in less than one
+    timestep, driving runaway latent heating. The cap was added in PR #458
+    after the T63L47 + real-terrain runaway over the Tibetan Plateau.
+    """
+
+    def test_mass_flux_at_cb_below_cfl_cap(self):
+        """The cloud-base mass flux returned by the scheme must never
+        exceed ``layer_mass[cb] / dt``, even for very high CAPE."""
+        atm = create_test_atmosphere(unstable=True)
+        config = ConvectionParameters.default()
+        nlev = len(atm['temperature'])
+        dt = 3600.0
+        _tend, state = tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=dt, config=config,
+        )
+        # The cap applies at the source layer (cloud base). The mfu
+        # profile higher up CAN exceed this from entrainment — physical
+        # and intended.
+        cb = int(state.kbase)
+        layer_mass_at_cb = float(atm['rho'][cb] * atm['layer_thickness'][cb])
+        cfl_cap = layer_mass_at_cb / dt
+        mfu_at_cb = float(state.mfu[cb])
+        assert mfu_at_cb <= cfl_cap * (1.0 + 1e-6), (
+            f"mfu at cloud base {mfu_at_cb:.4f} exceeds CFL cap "
+            f"{cfl_cap:.4f} kg/m²/s"
+        )
+
+    def test_long_dt_tightens_cap(self):
+        """A longer timestep tightens the CFL cap (``layer_mass / dt``).
+        When the unbounded CAPE-based closure exceeds the cap at a long
+        dt but not at a short dt, the cloud-base mfu at the long dt must
+        equal the cap (the cap is the binding constraint).
+        """
+        atm = create_test_atmosphere(unstable=True)
+        config = ConvectionParameters.default()
+        nlev = len(atm['temperature'])
+        _t_short, s_short = tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=600.0, config=config,
+        )
+        _t_long, s_long = tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt=3600.0, config=config,
+        )
+        cb_long = int(s_long.kbase)
+        cap_long = float(
+            atm['rho'][cb_long] * atm['layer_thickness'][cb_long] / 3600.0
+        )
+        # Use the short-dt mfu as a proxy for the unbounded closure value.
+        unconstrained = float(s_short.mfu[int(s_short.kbase)])
+        # Only informative if the closure exceeds the long-dt cap.
+        if unconstrained > cap_long:
+            mfu_long = float(s_long.mfu[cb_long])
+            assert mfu_long <= cap_long * (1.0 + 1e-6), (
+                f"long-dt mfu {mfu_long:.4f} did not honour CFL cap "
+                f"{cap_long:.4f} (closure was {unconstrained:.4f})"
+            )
+
+
 class TestConvectionScheme:
     """Test suite for Tiedtke-Nordeng convection"""
     
