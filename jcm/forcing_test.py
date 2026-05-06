@@ -465,7 +465,7 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file)
+                ForcingData.from_file(temp_file, validate=False)
             self.assertIn("Invalid nodal shape", str(context.exception))
         finally:
             os.remove(temp_file)
@@ -503,7 +503,10 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             temp_file = f.name
 
         try:
-            forcing = ForcingData.from_file(temp_file)
+            # Synthetic zero-filled fixture — bypass the BC sanity check
+            # that ``from_file`` runs on real data (would reject all-zero
+            # ``stl``/``sst``).
+            forcing = ForcingData.from_file(temp_file, validate=False)
             # Time axis preserved at full length, leading dimension.
             self.assertEqual(forcing.sst if False else forcing.sea_surface_temperature.values.shape,
                              (n_times, *valid_shape))
@@ -537,10 +540,82 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file)
+                ForcingData.from_file(temp_file, validate=False)
             self.assertIn("Missing variables", str(context.exception))
         finally:
             os.remove(temp_file)
+
+
+class TestForcingDataBcSanityCheck(unittest.TestCase):
+    """``_validate_bc_fields`` is the host-side guard against authoring
+    mistakes (units, NaN, AMIP-extrapolated stl) in the boundary-condition
+    NetCDF before they manifest as a multi-day NaN inside the JIT'd
+    integration. Tests cover the hard-range, NaN, and the AMIP-vs-JSBACH
+    heuristic paths.
+    """
+
+    def _make_realistic_ds(self, valid_shape=(96, 48), n_times=12):
+        """Build a small synthetic-but-physically-plausible BC dataset."""
+        import pandas as pd
+        import xarray as xr
+        times = pd.date_range("1980-01-01", periods=n_times, freq="MS")
+        # Realistic ranges for a tiny aquaplanet-style climatology.
+        sst = np.full((*valid_shape, n_times), 285.0)        # ~12°C ocean
+        stl = np.full((*valid_shape, n_times), 280.0)        # ~7°C land — distinct from SST
+        icec = np.zeros((*valid_shape, n_times))
+        alb = np.full(valid_shape, 0.3)
+        soilw = np.full((*valid_shape, n_times), 0.1)
+        snow = np.zeros((*valid_shape, n_times))
+        return xr.Dataset(
+            data_vars={
+                'stl': (['lon', 'lat', 'time'], stl),
+                'icec': (['lon', 'lat', 'time'], icec),
+                'sst': (['lon', 'lat', 'time'], sst),
+                'alb': (['lon', 'lat'], alb),
+                'soilw_am': (['lon', 'lat', 'time'], soilw),
+                'snowc': (['lon', 'lat', 'time'], snow),
+            },
+            coords={'time': times},
+        )
+
+    def test_sanity_check_passes_realistic_bcs(self):
+        from jcm.forcing import _validate_bc_fields
+        _validate_bc_fields(self._make_realistic_ds())  # must not raise
+
+    def test_sanity_check_rejects_celsius_temperatures(self):
+        """An ``stl`` field in °C (≈ 0-30 K range) should be rejected.
+        Catches the most common authoring mistake on the unit boundary.
+        """
+        from jcm.forcing import _validate_bc_fields
+        ds = self._make_realistic_ds()
+        ds['stl'].values[:] = 15.0  # °C-like value, way below 180 K
+        with self.assertRaises(ValueError) as ctx:
+            _validate_bc_fields(ds)
+        self.assertIn("'stl' is out of physical range", str(ctx.exception))
+
+    def test_sanity_check_rejects_nan(self):
+        from jcm.forcing import _validate_bc_fields
+        ds = self._make_realistic_ds()
+        ds['sst'].values[0, 0, 0] = np.nan
+        with self.assertRaises(ValueError) as ctx:
+            _validate_bc_fields(ds)
+        self.assertIn("non-finite", str(ctx.exception))
+
+    def test_sanity_check_warns_on_amip_extrapolated_stl(self):
+        """When ``stl ≈ sst`` everywhere, warn that the JSBACH file is
+        likely missing — the resulting +30 K bias over high orography
+        has historically driven multi-day NaNs over real terrain.
+        """
+        import warnings as _warn
+        from jcm.forcing import _validate_bc_fields
+        ds = self._make_realistic_ds()
+        ds['stl'].values[:] = ds['sst'].values  # exact AMIP-extrapolation pattern
+        with _warn.catch_warnings(record=True) as caught:
+            _warn.simplefilter("always")
+            _validate_bc_fields(ds)
+        amip_warnings = [w for w in caught
+                         if "AMIP-SST extrapolation" in str(w.message)]
+        self.assertEqual(len(amip_warnings), 1)
 
 
 class TestTimeSeriesAndSelect(unittest.TestCase):

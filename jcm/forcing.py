@@ -1,4 +1,7 @@
+import warnings
+
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes, CoordinateSystem
@@ -9,6 +12,87 @@ from jcm.date import (
     DEFAULT_CALENDAR,
     absolute_seconds_since_epoch,
 )
+
+
+def _validate_bc_fields(ds) -> None:
+    """One-time sanity check on a loaded forcing dataset.
+
+    Catches common authoring mistakes in the boundary-condition NetCDF
+    (wrong units, AMIP-SST extrapolation over land, NaN holes, fields
+    flipped in sign) before they manifest as a multi-day NaN once
+    inside the JIT'd integration. Hard violations (out-of-range or
+    non-finite) raise ``ValueError``; soft violations (the JSBACH-vs-
+    AMIP heuristic) emit a warning and continue.
+
+    The expected ranges below assume SI units throughout: temperatures
+    in K, fractions in [0, 1], snow as a depth in mm. The downstream
+    physics code assumes these conventions without re-checking.
+    """
+    # Hard ranges: any value outside these is a strong indication of a
+    # unit error or corrupt input.
+    HARD_RANGES = {
+        "stl":  (180.0, 350.0),  # K — Antarctic plateau winter ≈ 180 K, hottest desert summer ≈ 330 K
+        # AMIP-style SST files commonly carry the under-ice
+        # temperature of the underlying water (down to ~220 K in
+        # extreme Antarctic-pack winters); some authoring conventions
+        # also extrapolate below freezing in fill regions. The lower
+        # bound here is loose enough to admit real-world climatologies
+        # while still catching unit errors (a Celsius file would have
+        # values near 0).
+        "sst":  (220.0, 320.0),  # K
+        "icec": (0.0,   1.0),    # fraction
+        "alb":  (0.0,   1.0),    # fraction
+        "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
+        "snowc":    (0.0, 20000.0),  # mm snow depth (we clip > 20000 to 0 anyway, but reject negatives)
+    }
+    for name, (lo, hi) in HARD_RANGES.items():
+        if name not in ds.data_vars:
+            continue
+        arr = np.asarray(ds[name].values)
+        if not np.all(np.isfinite(arr)):
+            n_bad = int(np.sum(~np.isfinite(arr)))
+            raise ValueError(
+                f"Forcing field '{name}' has {n_bad} non-finite values; "
+                f"the integration would NaN as soon as the affected step is reached."
+            )
+        amin, amax = float(np.min(arr)), float(np.max(arr))
+        if amin < lo or amax > hi:
+            raise ValueError(
+                f"Forcing field '{name}' is out of physical range "
+                f"[{lo}, {hi}]: actual range [{amin:.3g}, {amax:.3g}]. "
+                f"Check the units of the source NetCDF."
+            )
+
+    # Heuristic: the AMIP-SST-extrapolated stl from convert_echam_bc.py
+    # without ``--land-init`` is ~stl ≈ sst everywhere, which gives a
+    # large positive bias over high orography (e.g. +30 K over the
+    # Tibetan plateau in DJF). If we can detect that case, warn — the
+    # run will still launch, but multi-day stability over real terrain
+    # has historically required the JSBACH-derived file.
+    if "stl" in ds.data_vars and "sst" in ds.data_vars:
+        stl = np.asarray(ds["stl"].values)
+        sst = np.asarray(ds["sst"].values)
+        if stl.shape == sst.shape:
+            diff = np.abs(stl - sst)
+            # If 99% of points have |stl - sst| < 1 K, the land field
+            # is almost certainly the SST extrapolation (a real land
+            # climatology has a 10-30 K spread relative to local SST
+            # over continental interiors).
+            if float(np.percentile(diff, 99)) < 1.0:
+                warnings.warn(
+                    "Forcing 'stl' is within 1 K of 'sst' for ≥99% of grid "
+                    "points — this looks like the AMIP-SST extrapolation "
+                    "produced by ``convert_echam_bc.py`` without "
+                    "``--land-init``. Multi-day runs over real terrain "
+                    "have historically NaN'd from the resulting +30 K "
+                    "bias over high orography (Tibetan / Antarctic "
+                    "plateaus). Regenerate the BC file with the JSBACH "
+                    "initial-conditions file (e.g. "
+                    "``ic_land_soil_T63GR15_*.nc``) to use the real "
+                    "land surface temperature climatology.",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
 # `TimeSeries.align_mode` constants. Stored as ints rather than strings so the
 # struct stays a clean JAX pytree (string fields can't ride through `jit`).
@@ -153,19 +237,22 @@ class ForcingData:
 
     @classmethod
     def from_file(cls, filename: str, coords: CoordinateSystem = None,
-                  align_mode: str = "auto"):
+                  align_mode: str = "auto", validate: bool = True):
         """Initialize forcing data from a netCDF file.
 
         Thin wrapper around `from_dataset`: opens `filename` with xarray
-        and delegates. See `from_dataset` for argument semantics.
+        and delegates. See `from_dataset` for argument semantics. The
+        ``validate`` flag forwards to `from_dataset` (default ``True``;
+        pass ``False`` to bypass the BC sanity check, e.g. for synthetic
+        test fixtures).
         """
         import xarray as xr
         return cls.from_dataset(xr.open_dataset(filename), coords=coords,
-                                align_mode=align_mode)
+                                align_mode=align_mode, validate=validate)
 
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
-                     align_mode: str = "auto"):
+                     align_mode: str = "auto", validate: bool = True):
         """Initialize forcing data from an in-memory xarray Dataset.
 
         Time-varying variables are wrapped as `TimeSeries` leaves so the
@@ -194,6 +281,15 @@ class ForcingData:
         }
 
         validate_ds(ds, expected_structure)
+        # Sanity-check the loaded BC values once on the host before
+        # entering the JIT pipeline. Raises on hard violations (units,
+        # NaN, out-of-physical-range), warns on the AMIP-SST
+        # extrapolation heuristic — see docstring. ``validate=False``
+        # is for synthetic test fixtures that intentionally use
+        # zero-filled or out-of-range data to exercise the time/shape
+        # plumbing.
+        if validate:
+            _validate_bc_fields(ds)
         # the spectral resolution is total wavenumbers - 2
         target_resolution = coords.horizontal.total_wavenumbers - 2 if coords is not None else None
 

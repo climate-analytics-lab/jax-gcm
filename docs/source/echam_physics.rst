@@ -466,14 +466,60 @@ Surface Physics
      - Number of soil layers
      - 4
 
-**Boundary-condition workarounds**
+**Boundary conditions**
 
-The T63 boundary-condition files distributed in ``jcm/data/bc/t63`` are placeholder data (``stl ≈ sst`` everywhere), not a proper land climatology. Two workarounds in ``apply_surface`` keep these BCs from blowing the model up:
+The ECHAM physics package consumes two NetCDF files at run time. T63 versions sized for the standard tests ship with the repo under ``jcm/data/bc/t63/``:
 
-1. **Orographic lapse on stl**: ``land_temp = stl_am - 6.5e-3 · terrain.orog``. Without this the un-lapsed BC reads ~+30 K hotter than the actual atmospheric profile over the Tibetan / Andean / Antarctic plateaus, driving runaway sensible heat flux.
-2. **Sea-ice tile temperature cap**: ``ice_surface_temp = min(sst, ctfreez=271.38 K)`` where ``sice_am > 0``. The polar Arctic / Antarctic ice surface is constrained to the saline freezing point even if the underlying SST data is warmer.
+.. list-table:: Fields read by the ECHAM physics
+   :header-rows: 1
+   :widths: 22 20 58
 
-These are workarounds, not the long-term answer — the right fix is to land a proper land-surface climatology (ERA5 ``stl1``, ``stl2``, or similar) at the model's orography. Tracked as a follow-up.
+   * - Field (NetCDF name)
+     - Source / time axis
+     - Used by
+   * - ``orog`` (terrain.nc)
+     - Static
+     - Dynamics (modal orography), surface (lapse-correction lower bound), :py:class:`EchamSSO`
+   * - ``lsm`` (terrain.nc)
+     - Static
+     - ``terrain.fmask`` — tile-fraction split between ocean / sea-ice / land
+   * - ``orostd``, ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval`` (terrain.nc)
+     - Static (optional)
+     - SSO descriptors for :py:class:`EchamSSO`. Filled with zeros if absent.
+   * - ``stl`` (forcing.nc) → ``forcing.stl_am``
+     - 12-month climatology
+     - Land-tile surface temperature in :func:`apply_surface` (passed through unmodified). When generated from the JSBACH IC file (``ic_land_soil_T63GR15_*.nc``, field ``surf_temp``), this is the real ECHAM/JSBACH land T at the model's orography.
+   * - ``sst`` (forcing.nc) → ``forcing.sea_surface_temperature``
+     - 12-month climatology
+     - Ocean-tile surface temperature; also caps the sea-ice tile via ``min(sst, ctfreez = 271.38 K)`` (the saline freezing point — this is a physical constraint, not a workaround).
+   * - ``icec`` (forcing.nc) → ``forcing.sice_am``
+     - 12-month climatology
+     - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
+   * - ``alb`` (forcing.nc) → ``forcing.alb0``
+     - Static (annual mean)
+     - Bare-land surface albedo for the radiation backends.
+   * - ``soilw_am`` (forcing.nc)
+     - 12-month climatology
+     - Soil-moisture initial state for the land-tile column.
+   * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
+     - 12-month climatology
+     - Snow cover (clipped to plausible range at load time).
+
+Generating BC files from ECHAM input
+""""""""""""""""""""""""""""""""""""
+
+``utils/convert_echam_bc.py`` converts the standard ECHAM input files into the JCM ``terrain.nc`` + ``forcing.nc`` pair. Typical invocation::
+
+    python utils/convert_echam_bc.py \
+        --surface T63GR15_jan_surf.nc \
+        --sst     T63_amipsst_1979-2008_mean.nc \
+        --sic     T63_amipsic_1979-2008_mean.nc \
+        --land-init ic_land_soil_T63GR15_1976.nc \
+        --out-dir jcm/data/bc/t63/
+
+When ``--land-init`` is provided (the JSBACH initial-conditions file from a standard ECHAM dataset), the ``stl`` field uses the real monthly land-surface temperature climatology and the soil-moisture / snow fields use ``init_moist`` / ``snow`` rather than the AMIP-SST extrapolation. Without ``--land-init``, ``stl`` falls back to AMIP SST extrapolated over land — fine for short development runs, but the ~+30 K bias over the Tibetan and Antarctic plateaus has historically driven multi-day stability failures, so the JSBACH-backed file should be used for any climate-style integration.
+
+``ForcingData.from_file`` runs a one-time sanity check on the loaded fields (range bounds, finiteness, and a heuristic that flags the AMIP-extrapolation case at high orography). Hard violations raise; soft ones print a warning and continue.
 
 .. admonition:: Gap vs. ICON-A
 
