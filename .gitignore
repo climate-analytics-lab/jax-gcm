@@ -27,6 +27,12 @@ share/python-wheels/
 MANIFEST
 jcm/outputs
 
+# Analysis / data files
+*.json
+*.png
+outputs/
+runs/
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -172,6 +178,9 @@ notebooks/model_state.nc
 # Docker remote setup
 startup.sh
 
+# Local doc files
 docs/build
 docs/source/generated
-.claude/worktrees/
+
+# Local claude files
+.claude/
