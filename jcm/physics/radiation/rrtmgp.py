@@ -265,11 +265,19 @@ def prepare_icon_data(
     toa_sw_up = rrtmgp_data["toa_sw_flux_outgoing_2d_xy"][0, 0]
     toa_lw_up = rrtmgp_data["toa_lw_flux_outgoing_2d_xy"][0, 0]
 
-    # Full flux profiles (nlev+1 interfaces, ngpts bands)
-    sw_flux_up = rrtmgp_data["sw_flux_up_full"][0, :, :].transpose(1, 0)
-    sw_flux_down = rrtmgp_data["sw_flux_down_full"][0, :, :].transpose(1, 0)
-    lw_flux_up = rrtmgp_data["lw_flux_up_full"][0, :, :].transpose(1, 0)
-    lw_flux_down = rrtmgp_data["lw_flux_down_full"][0, :, :].transpose(1, 0)
+    # Full flux profiles. RRTMGP returns shape (1, ngpt, nlev+1); we sum
+    # over the ngpt (g-point) axis here — *before* the per-column vmap
+    # bundles the result — so the vmapped diagnostic stays at
+    # (ncols, nlev+1) instead of blowing up to (ncols, nlev+1, ngpt).
+    # ngpt is 128 (LW) / 112 (SW), so this is a ~120× memory saving on
+    # the radiation flux outputs. The downstream RadiationData consumer
+    # (`echam_physics._apply_radiation_rrtmgp_inner`) already calls
+    # `.sum(axis=-1)` on these, so the per-gpoint detail was being
+    # discarded immediately anyway.
+    sw_flux_up = rrtmgp_data["sw_flux_up_full"][0, :, :].sum(axis=0)
+    sw_flux_down = rrtmgp_data["sw_flux_down_full"][0, :, :].sum(axis=0)
+    lw_flux_up = rrtmgp_data["lw_flux_up_full"][0, :, :].sum(axis=0)
+    lw_flux_down = rrtmgp_data["lw_flux_down_full"][0, :, :].sum(axis=0)
 
     sw_flux_up = lax.cond(needs_reversal, flip, identity, sw_flux_up)
     sw_flux_down = lax.cond(needs_reversal, flip, identity, sw_flux_down)
@@ -277,10 +285,15 @@ def prepare_icon_data(
     lw_flux_down = lax.cond(needs_reversal, flip, identity, lw_flux_down)
 
     diagnostics = RadiationData(
-        cos_zenith=cos_zenith,
-        surface_albedo_vis=jnp.atleast_1d(surface_albedo_vis),
-        surface_albedo_nir=jnp.atleast_1d(surface_albedo_nir),
-        surface_emissivity=jnp.atleast_1d(surface_emissivity),
+        # Match the grey scheme's shape convention so the downstream
+        # vmap+squeeze(-1) in apply_radiation_rrtmgp resolves to (ncols,).
+        # Grey emits cos_zenith with a trailing newaxis but passes the
+        # surface scalars through bare; replicate exactly so the cached
+        # branch in `_radiation_with_caching` matches our shape.
+        cos_zenith=jnp.atleast_1d(cos_zenith),
+        surface_albedo_vis=surface_albedo_vis,
+        surface_albedo_nir=surface_albedo_nir,
+        surface_emissivity=surface_emissivity,
         sw_flux_up=sw_flux_up,
         sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,

@@ -303,17 +303,21 @@ def _apply_radiation_inner(state: PhysicsState,
     # length-1 dim so a single-column run keeps shape ``[1]`` instead of
     # collapsing to a scalar (which mismatches the cached path's shape and
     # breaks the radiation ``lax.cond`` at ``ncols=1``).
+    # Per-gpoint flux profiles are summed over g-points inside the
+    # vmapped per-column compute (rrtmgp.py:268), so the diagnostic
+    # arrays here are shape (ncols, nlev+1) and need only a transpose
+    # to (nlev+1, ncols).
     rad_out = RadiationData(
         cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),  # [ncols, 1] -> [ncols]
         surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
         surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
         surface_emissivity=diagnostics_vmapped.surface_emissivity,
-        sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),  # [nlev+1, ncols] (summed over bands)
-        sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
-        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
-        lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
-        lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
-        lw_heating_rate=tendencies_vmapped.longwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+        sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
+        sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
+        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
+        lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
+        lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
+        lw_heating_rate=tendencies_vmapped.longwave_heating.T,
         surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
         surface_lw_down=diagnostics_vmapped.surface_lw_down,
         surface_sw_up=diagnostics_vmapped.surface_sw_up,
@@ -378,29 +382,112 @@ def _apply_radiation_rrtmgp_inner(
         angstrom=physics_data.aerosol.angstrom.reshape(ncols),
     )
 
-    radiation_results = jax.vmap(
-        radiation_scheme_rrtmgp,
-        in_axes=(
-            1, 1, 1, 1, 1,     # temperature..layer_thickness
-            1, 1, 1, 1,        # air_density..cloud_fraction
-            0, 0, 0, 0,        # surface scalars
-            None, 0, 0,        # date, lat, lon
-            None, 0, 1, None,  # parameters, aerosol, ozone, co2
-        ),
-        out_axes=(0, 0),
-        axis_size=ncols,
-    )(
-        state.temperature, state.specific_humidity,
-        physics_data.diagnostics.pressure_full,
-        physics_data.diagnostics.pressure_half,
-        physics_data.diagnostics.layer_thickness,
-        physics_data.diagnostics.air_density,
-        cloud_water, cloud_ice, cloud_fraction,
-        surface_temperature_col, surface_albedo_vis_col,
-        surface_albedo_nir_col, surface_emissivity_col,
-        solar, latitudes, longitudes,
-        parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr,
-    )
+    # Chunked vmap: RRTMGP allocates ~150 intermediate arrays of shape
+    # (ngpt, nlev) per column inside ``compute_heating_rate`` (gas
+    # optics interpolation tables, planck source functions, optical
+    # depth, working memory for the tridiagonal flux solver, etc.).
+    # At T63L47 with ngpt=128 (LW), nlev=47, ncols=18432, vmapping
+    # all columns at once costs ~67 GiB of peak memory and OOMs on
+    # an 80 GiB A100. Splitting the vmap into ``n_chunks`` smaller
+    # batches via ``lax.map`` linearises the work over chunks while
+    # keeping vmap parallelism inside each chunk; peak memory drops
+    # by roughly a factor of ``n_chunks``. ``chunk_size`` chosen so
+    # that ``ncols % chunk_size == 0`` for the standard T63 (18432),
+    # T85 (32768), T127 (73728) grids — all powers of 4608.
+    chunk_size = 4608  # 18432 / 4 (T63), 32768 not divisible — see below
+    if ncols % chunk_size != 0:
+        # Fall back to whole-grid vmap for grids that don't divide
+        # evenly. Smaller grids may fit; larger grids will OOM and
+        # need a custom chunk size.
+        chunk_size = ncols
+    n_chunks = ncols // chunk_size
+
+    def _per_column_inputs():
+        """Pack all vmap inputs as (n_chunks, chunk_size, ...)."""
+        # ``(nz, ncols)`` arrays (where ``nz`` may be ``nlev`` or
+        # ``nlev+1`` depending on full vs half levels) → reshape to
+        # ``(nz, n_chunks, chunk_size)`` then transpose to
+        # ``(n_chunks, chunk_size, nz)`` so the leading axis is the
+        # chunk axis lax.map iterates over.
+        def split_lev_first(a):
+            nz = a.shape[0]
+            return a.reshape(nz, n_chunks, chunk_size).transpose(1, 2, 0)
+
+        def split_col(a):
+            return a.reshape(n_chunks, chunk_size, *a.shape[1:])
+
+        return dict(
+            temperature=split_lev_first(state.temperature),
+            specific_humidity=split_lev_first(state.specific_humidity),
+            pressure_full=split_lev_first(physics_data.diagnostics.pressure_full),
+            pressure_half=split_lev_first(physics_data.diagnostics.pressure_half),
+            layer_thickness=split_lev_first(physics_data.diagnostics.layer_thickness),
+            air_density=split_lev_first(physics_data.diagnostics.air_density),
+            cloud_water=split_lev_first(cloud_water),
+            cloud_ice=split_lev_first(cloud_ice),
+            cloud_fraction=split_lev_first(cloud_fraction),
+            surface_temperature=split_col(surface_temperature_col),
+            surface_albedo_vis=split_col(surface_albedo_vis_col),
+            surface_albedo_nir=split_col(surface_albedo_nir_col),
+            surface_emissivity=split_col(surface_emissivity_col),
+            latitudes=split_col(latitudes),
+            longitudes=split_col(longitudes),
+            ozone_vmr=split_lev_first(ozone_vmr),
+            aerosol=physics_data.aerosol.copy(
+                aod_profile=split_col(aerosol_data_for_vmap.aod_profile),
+                ssa_profile=split_col(aerosol_data_for_vmap.ssa_profile),
+                asy_profile=split_col(aerosol_data_for_vmap.asy_profile),
+                cdnc_factor=split_col(aerosol_data_for_vmap.cdnc_factor),
+                aod_total=split_col(aerosol_data_for_vmap.aod_total),
+                aod_anthropogenic=split_col(aerosol_data_for_vmap.aod_anthropogenic),
+                aod_background=split_col(aerosol_data_for_vmap.aod_background),
+                Nccn=split_col(physics_data.aerosol.Nccn.reshape(ncols)),
+                angstrom=split_col(aerosol_data_for_vmap.angstrom),
+            ),
+        )
+
+    chunked_inputs = _per_column_inputs()
+
+    def _vmap_one_chunk(chunk_inputs):
+        """Vmap radiation_scheme_rrtmgp across one chunk of `chunk_size` columns."""
+        return jax.vmap(
+            radiation_scheme_rrtmgp,
+            in_axes=(
+                # temperature..layer_thickness, air_density..cloud_fraction:
+                # all stored as (chunk_size, nlev) here, so column axis is 0
+                # and the per-column profile is handled inside the function.
+                0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,           # surface scalars
+                None, 0, 0,           # solar, lat, lon
+                None, 0, 0, None,     # parameters, aerosol, ozone, co2
+            ),
+            out_axes=(0, 0),
+            axis_size=chunk_size,
+        )(
+            chunk_inputs['temperature'], chunk_inputs['specific_humidity'],
+            chunk_inputs['pressure_full'], chunk_inputs['pressure_half'],
+            chunk_inputs['layer_thickness'], chunk_inputs['air_density'],
+            chunk_inputs['cloud_water'], chunk_inputs['cloud_ice'],
+            chunk_inputs['cloud_fraction'],
+            chunk_inputs['surface_temperature'], chunk_inputs['surface_albedo_vis'],
+            chunk_inputs['surface_albedo_nir'], chunk_inputs['surface_emissivity'],
+            solar, chunk_inputs['latitudes'], chunk_inputs['longitudes'],
+            parameters.radiation, chunk_inputs['aerosol'],
+            chunk_inputs['ozone_vmr'], co2_vmr,
+        )
+
+    # ``lax.map`` is sequential over the leading axis but JIT-compatible.
+    # Outputs come back stacked on the leading axis as (n_chunks, chunk_size, ...).
+    chunked_results = jax.lax.map(_vmap_one_chunk, chunked_inputs)
+    tendencies_chunked, diagnostics_chunked = chunked_results
+
+    # Re-merge chunk axis: (n_chunks, chunk_size, ...) → (ncols, ...).
+    def merge(a):
+        return a.reshape(ncols, *a.shape[2:])
+    tendencies_vmapped = jax.tree_util.tree_map(merge, tendencies_chunked)
+    diagnostics_vmapped = jax.tree_util.tree_map(merge, diagnostics_chunked)
+    radiation_results = (tendencies_vmapped, diagnostics_vmapped)
 
     tendencies_vmapped, diagnostics_vmapped = radiation_results
     temperature_tendency = tendencies_vmapped.temperature_tendency.T
@@ -413,16 +500,20 @@ def _apply_radiation_rrtmgp_inner(
         tracers={},
     )
 
+    # Per-gpoint flux profiles are summed over g-points inside the
+    # vmapped per-column compute (rrtmgp.py:268), so the diagnostic
+    # arrays here are shape (ncols, nlev+1) and need only a transpose
+    # to (nlev+1, ncols).
     rad_out = RadiationData(
         cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),
         surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
         surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
         surface_emissivity=diagnostics_vmapped.surface_emissivity,
-        sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),
-        sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
+        sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
+        sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
         sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
-        lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
-        lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
+        lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
+        lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
         lw_heating_rate=tendencies_vmapped.longwave_heating.T,
         surface_sw_down=diagnostics_vmapped.surface_sw_down,
         surface_lw_down=diagnostics_vmapped.surface_lw_down,
@@ -760,10 +851,18 @@ def apply_microphysics_1m(
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     droplet_number_per_kg = cdnc_m3 / air_density
 
-    # Rain / snow are in-step column fluxes in ICON's 1M scheme (see
-    # ``mo_cloud.f90`` lines 267-268: ``zrfl/zsfl`` reset to 0 at TOA at
-    # the start of every call). The ``cloud_microphysics`` helper
-    # initialises ``rain_water`` and ``snow`` to zeros internally.
+    # Reverted from cloud_microphysics_column_sweep — that scheme's
+    # Rotstayn rain evaporation creates a positive-feedback loop
+    # (rain evaporates → moistens dry layer → Sundqvist condenses →
+    # latent heat release → drives convection → more rain) that the
+    # surface bisect identified as the dominant amplifier of the
+    # day-7 NaN on T63L47 + real terrain. The per-level
+    # `cloud_microphysics` discards rain each step (no propagating
+    # flux, no inter-level evap coupling), which breaks the feedback
+    # at the cost of microphysics fidelity. Tracked as follow-up
+    # work — needs either ICON's RH-hysteresis bound on the evap
+    # source or a tighter Newton solve so the evap stays bounded
+    # under coupling with Sundqvist.
     micro_tend_all, micro_state_all = jax.vmap(
         cloud_microphysics,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
@@ -1170,7 +1269,18 @@ def apply_surface(
     # use ``stl_am`` instead of ``sst``).
     ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
-    land_temp = forcing.stl_am.reshape(ncols)
+    # Apply a 6.5 K/km dry lapse-rate correction to the prescribed land
+    # surface temperature so it represents the temperature at the model's
+    # actual orography rather than at sea level. The BC files distributed
+    # in ``jcm/data/bc/t63`` set ``stl_am ≈ sst`` everywhere, which gives
+    # a ~+30 K bias over the Tibetan / Andean / Himalayan plateaux at
+    # 4–5 km elevation. The unlapsed temperature drives runaway sensible-
+    # heat flux upward at the lowest model level (ΔT ≈ 30 K · ρ · cp · CH · U)
+    # and is the dominant cause of the T63L47 ``test_real_terrain_with_sponge_stable_30_days``
+    # NaN around day 7. The lapse coefficient matches the standard
+    # atmospheric lapse used by ECHAM's ``initemp.f90`` for downscaling
+    # boundary surface temperatures to model orography.
+    land_temp = forcing.stl_am.reshape(ncols) - 6.5e-3 * terrain.orog.reshape(ncols)
     ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
                                  jnp.minimum(ocean_temp, ctfreez),
                                  ocean_temp)
