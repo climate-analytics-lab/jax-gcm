@@ -203,5 +203,103 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         self.assertTrue(_state_is_finite(final))
 
 
+@pytest.mark.slow
+class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
+    """T63L47 progression for the **two-moment** microphysics scheme.
+
+    Mirrors :class:`TestEchamLandT63L47Hybrid` but with
+    ``echam_physics(cloud_scheme="2m", ...)``. The 2M scheme manages six
+    cloud tracers (``qc, qi, qnc, qni, qr, qs``) with ECHAM's full
+    Lohmann–Lenderink–Levkov microphysics chain; this class exercises
+    each step in the previously-validated complexity ladder so we can
+    pinpoint regressions or omissions in the orchestrator.
+    """
+
+    def setUp(self):
+        _gpu_required()
+        self.terrain_real = TerrainData.from_file(
+            _T63_BC_DIR / "terrain.nc", coords=_t63l47_coords(),
+        )
+        self.terrain_aqua = TerrainData.aquaplanet(_t63l47_coords())
+        self.forcing = ForcingData.from_file(
+            _T63_BC_DIR / "forcing.nc", coords=_t63l47_coords(),
+        )
+
+    def test_2m_aquaplanet_t63l47_baseline(self):
+        """2M aquaplanet smoke: 1 day, grey radiation, no terrain."""
+        final = _run_steps(
+            echam_physics(cloud_scheme="2m", radiation_scheme="grey"),
+            self.terrain_aqua, self.forcing, n_steps=120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_2m_real_terrain_stable_for_24h(self):
+        """2M + real terrain + grey radiation, 1 day."""
+        final = _run_steps(
+            echam_physics(cloud_scheme="2m", radiation_scheme="grey"),
+            self.terrain_real, self.forcing, n_steps=120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_2m_real_terrain_with_sponge_stable_5_days(self):
+        """2M + grey + real terrain + UpperSponge, 5 days."""
+        from jcm.physics.dissipation import UpperSponge
+        physics = echam_physics(cloud_scheme="2m", radiation_scheme="grey") + UpperSponge(
+            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+        )
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=600,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_2m_real_terrain_with_sponge_stable_30_days(self):
+        """2M + grey radiation + real terrain + UpperSponge, 30 days.
+
+        Long-run stability check for the 2M scheme. Originally failed at
+        day 6 due to a CDNC/ICNC tendency-units bug compounded by
+        spectral-truncation negatives that ``update_in_cloud_water``'s
+        activation-replacement step amplified into a multi-day runaway.
+        Fixed by (1) passing the per-kg ``qnc``/``qni`` (not the per-m^3
+        local ``cdnc``/``icnc``) as ``tracer_tm1_*`` to
+        ``update_tendencies_and_important_vars`` and removing the second
+        ``* inv_rho`` on the orchestrator's output, and (2) clipping
+        ``qnc``/``qni`` to physical bounds at the orchestrator entry
+        (matching ECHAM's per-level ``[icemin, icemax]`` clamps) so the
+        spectral round-trip's negative ringing can't seed runaway growth.
+        """
+        from jcm.physics.dissipation import UpperSponge
+        physics = echam_physics(cloud_scheme="2m", radiation_scheme="grey") + UpperSponge(
+            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+        )
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=30 * 120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_2m_rrtmgp_real_terrain_stable_for_24h(self):
+        """2M + RRTMGP + real terrain, 1 day. RRTMGP must accept the
+        full 2M cloud water (qc + qi) the same way it does for 1M."""
+        physics = echam_physics(cloud_scheme="2m", radiation_scheme="rrtmgp")
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+    def test_2m_rrtmgp_real_terrain_with_sponge_stable_30_days(self):
+        """Full production wiring for the 2M scheme: ECHAM 2M physics +
+        RRTMGP + UpperSponge + real terrain + real JSBACH land T. The
+        analogue of ``test_real_terrain_with_sponge_stable_30_days``."""
+        from jcm.physics.dissipation import UpperSponge
+        physics = echam_physics(
+            cloud_scheme="2m", radiation_scheme="rrtmgp",
+        ) + UpperSponge(
+            n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+        )
+        final = _run_steps(
+            physics, self.terrain_real, self.forcing, n_steps=30 * 120,
+        )
+        self.assertTrue(_state_is_finite(final))
+
+
 if __name__ == "__main__":
     unittest.main()

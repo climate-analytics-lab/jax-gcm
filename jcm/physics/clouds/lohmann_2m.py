@@ -202,7 +202,14 @@ def microphysics_dt_constants(dt: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray
     ztmst = dt
     ztmst_rcp = 1.0 / jnp.maximum(ztmst, eps)
     zcons1 = cpd*vtmpc2
-    zcons2 = ztmst * rgrav
+    # Match the ECHAM Fortran (mo_cloud_micro_2m.f90 line 535):
+    # ``zcons2 = ztmst_rcp * rgrav = 1 / (dt * g)``. The earlier port had
+    # ``ztmst * rgrav`` which was dt^2 too large in every site that uses
+    # zcons2 to convert ``pdp * mmr`` into a flux (kg/m^2/s) — so the
+    # large-scale surface precip diagnostic came out ~dt^2 (~5x10^5 at
+    # dt=12 min) too large, and the latent heat in melt/sub paths was
+    # similarly mis-scaled.
+    zcons2 = ztmst_rcp * rgrav
     zcons3 = 1.0 / ( pi*crhosno*cn0s*cvtfall**(1.0/1.16) )**0.25
     
     return ztmst, ztmst_rcp, zcons1, zcons2, zcons3
@@ -3045,7 +3052,7 @@ def cloud_microphysics_2m(
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
-) -> MicrophysicsTendencies_2M:
+) -> tuple[MicrophysicsTendencies_2M, jnp.ndarray, jnp.ndarray]:
     """Column-sweep orchestrator for the two-moment microphysics scheme.
 
     Processes (in ECHAM6 order):
@@ -3073,6 +3080,22 @@ def cloud_microphysics_2m(
     so we convert at the boundary.
     """
     eps_dt = jnp.finfo(qc.dtype).eps
+
+    # ECHAM's per-level loop clamps icnc to ``[icemin, icemax]`` and
+    # forces cdnc to ``[cqtmin, cdnc_min_upper]``-or-above (lines 1252-3
+    # of mo_cloud_micro_2m.f90 and the activation block in
+    # update_in_cloud_water). Mirror that on the orchestrator's INPUT so
+    # the dynamical-core's spectral round-trip ringing — which can leave
+    # small negative artefacts that ``update_in_cloud_water`` amplifies
+    # via the ``delta_cdnc = activated_cdnc - droplet_number`` step —
+    # cannot drive a multi-day runaway. Upper bound chosen as
+    # ``cdnc_max_phys`` (1e11 / m^3, well above any realistic activation
+    # output) and ``icemax`` (1e7 / m^3) so realistic clouds are
+    # unaffected.
+    _cdnc_max_phys_per_m3 = 1.0e11
+    inv_rho_safe = 1.0 / jnp.maximum(air_density, eps_dt)
+    qnc = jnp.clip(qnc, 0.0, _cdnc_max_phys_per_m3 * inv_rho_safe)
+    qni = jnp.clip(qni, 0.0, params.icemax * inv_rho_safe)
 
     # Number-per-kg-of-air → per-m^3 at the scheme's API boundary.
     cdnc = qnc * air_density
@@ -3454,8 +3477,13 @@ def cloud_microphysics_2m(
     (qi_after_scan, icnc_after_scan, cdnc_after_scan,
      snow_sublim, rain_evap) = scan_outs
 
-    # Extract final snow_melt from carry.
-    (_, _, _, _, _, _, snow_melt_final) = _final_carry
+    # Extract carry state at the bottom of the column. The first two
+    # elements are the surface rain and snow flux (kg/m^2/s) — these are
+    # the large-scale precipitation diagnostics that callers need.
+    (
+        surface_rain_flux, surface_snow_flux,
+        _, _, _, _, snow_melt_final,
+    ) = _final_carry
 
     # ------------------------------------------------------------------
     # update_tendencies_and_important_vars: full ECHAM6 accounting step
@@ -3475,8 +3503,16 @@ def cloud_microphysics_2m(
         cdnc=cdnc_after_scan,
         ice_mmr_prev=in_cloud_ice_cold,
         liq_mmr_prev=in_cloud_liquid_cold,
-        tracer_tm1_cdnc=cdnc,        # original input = previous-timestep value
-        tracer_tm1_icnc=icnc,
+        # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the previous-step
+        # tracer values in per-kg-of-air. ``cdnc`` and ``icnc`` here are
+        # the working per-m^3 values (qnc * rho, qni * rho), so we pass
+        # the per-kg ``qnc``/``qni`` instead. With the original (per-m^3)
+        # values the formula mixes per-kg with per-m^3 in the same
+        # subtraction and the resulting per-step amplification (~1/rho^2
+        # at upper levels) compounds qnc/qni 10+ orders of magnitude
+        # over a few days, producing the day-6 NaN.
+        tracer_tm1_cdnc=qnc,
+        tracer_tm1_icnc=qni,
         condensation_rate=condensation_rate,
         deposition_rate=deposition_rate,
         rain_evap_mmr=rain_evap,
@@ -3521,11 +3557,14 @@ def cloud_microphysics_2m(
     dqrdt = (qr_gain_warm - rain_evap) * inv_dt
     dqsdt = (qc_to_snow + qi_to_snow + qi_sedi_melt_loss - snow_sublim) * inv_dt
 
-    # Number tendencies from update_tendencies (per-m³ → per-kg-of-air)
-    dqncdt = dqncdt_m3 * inv_rho
-    dqnidt = dqnidt_m3 * inv_rho
+    # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
+    # of-air per second once we pass qnc/qni (per-kg) as the tm1 tracers
+    # — see the fix above. The legacy ``* inv_rho`` here was a second
+    # units error compounded with the per-kg-vs-per-m^3 swap above.
+    dqncdt = dqncdt_m3
+    dqnidt = dqnidt_m3
 
-    return MicrophysicsTendencies_2M(
+    tendencies = MicrophysicsTendencies_2M(
         dtedt=dtedt,
         dqdt=dqdt,
         dqcdt=dqcdt,
@@ -3535,6 +3574,7 @@ def cloud_microphysics_2m(
         dqrdt=dqrdt,
         dqsdt=dqsdt,
     )
+    return tendencies, surface_rain_flux, surface_snow_flux
 
 
 # Back-compat alias while the Phase 5a callers are migrated.

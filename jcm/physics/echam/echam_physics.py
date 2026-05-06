@@ -930,14 +930,21 @@ def apply_microphysics_2m(
     forcing: ForcingData,
     terrain: TerrainData,
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Run ECHAM 2-moment cloud microphysics (Phase 5a: minimal warm-rain only).
+    """Run ECHAM 2-moment cloud microphysics.
 
-    Consumes the post-condensation ``qc``/``qi``/``cloud_fraction`` emitted by
-    :func:`apply_cloud_fraction` and returns tendencies for the full 2M tracer
-    set ``{qc, qi, qnc, qni, qr, qs}``. Warm-rain (KK2000) + cold-phase
-    precipitation formation (ice aggregation + riming) are wired in;
-    sedimentation, melting, deposition/WBF, and latent-heat release are
-    later Phase-5b steps — see issue #341.
+    Consumes the post-condensation ``qc``/``qi``/``cloud_fraction`` emitted
+    by :func:`apply_cloud_fraction` and returns tendencies for the full 2M
+    tracer set ``{qc, qi, qnc, qni, qr, qs}``. The orchestrator
+    :func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m` chains the
+    full ECHAM6 process list: warm precip (KK2000) + mixed-phase
+    deposition/condensation + freezing-below-238K + DeMott(2010) INP
+    mixed-phase freezing (placeholder for ECHAM's ``het_mxphase_freezing``
+    which would need HAM aerosol modes — see #436) + WBF + cold precip +
+    a top-down ``lax.scan`` over levels for sedimentation / melting /
+    sublimation+evap / precip-flux accumulation, then ECHAM's
+    ``update_tendencies_and_important_vars`` for the final tendency
+    bookkeeping. Heterogeneous freezing is intentionally simplified to
+    DeMott(2010) since JCM does not yet ingest a real IN field.
     """
     from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
 
@@ -974,10 +981,10 @@ def apply_microphysics_2m(
         exponent=parameters.aerosol.spa_exponent,
     )
 
-    tend_all = jax.vmap(
+    tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
         cloud_microphysics_2m,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-        out_axes=0,
+        out_axes=(0, 0, 0),
     )(state.temperature, state.specific_humidity, pressure_levels,
       qc_interim, qi_interim, qnc, qni, qr, qs,
       cloud_fraction, air_density, layer_thickness, tke,
@@ -1001,7 +1008,16 @@ def apply_microphysics_2m(
     # this term (or downstream update_tendencies_and_important_vars) can
     # read previous-step number concentrations. PhysicsData.clouds is
     # carried forward across timesteps in ComposableEchamPhysics.__call__.
-    clouds_next = physics_data.clouds.copy(qnc_prev=qnc, qni_prev=qni)
+    # Also expose the large-scale surface precip from the column scan as
+    # diagnostic ``precip_rain``/``precip_snow`` (kg/m^2/s) — these are the
+    # gravitational-fall flux at the bottom of the orchestrator's
+    # top-down ``lax.scan``, summing autoconv + accretion + melt - evap
+    # contributions across all levels.
+    clouds_next = physics_data.clouds.copy(
+        qnc_prev=qnc, qni_prev=qni,
+        precip_rain=surface_rain_flux,
+        precip_snow=surface_snow_flux,
+    )
     return tendencies, physics_data.copy(clouds=clouds_next)
 
 
