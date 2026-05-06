@@ -16,6 +16,21 @@ from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
 from jcm.utils import get_coords
+from jcm.physics.physics_term import PhysicsTerm
+
+
+class DummyRadiationTerm(PhysicsTerm):
+    """Minimal radiation term used to test ECHAM factory dispatch."""
+
+    name = "dummy_radiation"
+    category = "radiation"
+
+
+class DummyConvectionTerm(PhysicsTerm):
+    """Minimal non-radiation term used to test factory validation."""
+
+    name = "dummy_convection"
+    category = "convection"
 
 
 def _make_echam_test_setup(nlev=8, nlat=64, nlon=32):
@@ -90,6 +105,39 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertLess(
             categories.index("cloud_fraction"),
             categories.index("clouds"),
+        )
+
+    def test_echam_physics_accepts_custom_radiation_term(self):
+        """A radiation PhysicsTerm can be passed directly."""
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        custom_rad = DummyRadiationTerm()
+        physics = echam_physics(
+            checkpoint_terms=False,
+            radiation_scheme=custom_rad,
+        )
+
+        self.assertIs(physics.terms[4], custom_rad)
+        self.assertEqual(physics.terms[4].category, "radiation")
+
+    def test_echam_physics_rejects_non_radiation_custom_term(self):
+        """Custom radiation terms must declare the radiation category."""
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaisesRegex(ValueError, "category 'radiation'"):
+            echam_physics(
+                checkpoint_terms=False,
+                radiation_scheme=DummyConvectionTerm(),
+            )
+
+    def test_column_vector_handles_vmap_scalar_shapes(self):
+        """Radiation scalar diagnostics are normalized to [ncols]."""
+        from jcm.physics.echam.echam_physics import _column_vector
+
+        self.assertEqual(_column_vector(jnp.arange(3), 3).shape, (3,))
+        self.assertEqual(
+            _column_vector(jnp.arange(3).reshape(3, 1), 3).shape,
+            (3,),
         )
 
     def test_composable_with_model(self):
