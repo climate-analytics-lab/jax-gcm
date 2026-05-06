@@ -84,10 +84,19 @@ def compute_stability_functions(
     phi_h_stable = 1.0 + 5.0 * ri_stable
     phi_m_stable = phi_h_stable
     
-    # Unstable conditions (Ri < 0)
-    # Limit strongly unstable conditions to prevent NaN
+    # Unstable conditions (Ri < 0). Businger-Dyer stability functions:
+    #     Φ_m = (1 - 16 ζ)^(-1/4)   = (1 + 16|ζ|)^(-1/4)  for ζ < 0
+    #     Φ_h = (1 - 16 ζ)^(-1/2)   = (1 + 16|ζ|)^(-1/2)  for ζ < 0
+    # Both are < 1 under unstable conditions, which makes the bulk
+    # exchange coefficients (κ² / (ln·Φ_m·Φ_h)·…) LARGER — the standard
+    # boundary-layer enhancement of turbulent mixing under buoyant
+    # convection. The original implementation here used (1 - 16|Ri|)
+    # inside the parenthesis, which flipped the sign and made Φ ≫ 1
+    # for unstable cells, suppressing surface fluxes by ~5× over warm
+    # surfaces and creating runaway near-surface heat accumulation
+    # that drove the day-7 NaN on T63L47 + real terrain.
     ri_unstable = jnp.maximum(richardson_number, -0.5)  # Limit to -0.5
-    x_arg = jnp.maximum(1.0 - unstable_coeff * jnp.abs(ri_unstable), 0.1)  # Prevent negative
+    x_arg = 1.0 + unstable_coeff * jnp.abs(ri_unstable)
     x = x_arg**0.25
     phi_h_unstable = x_arg**(-0.5)
     phi_m_unstable = x**(-1)

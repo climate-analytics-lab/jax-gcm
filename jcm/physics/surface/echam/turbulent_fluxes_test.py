@@ -122,26 +122,39 @@ class TestStabilityFunctions:
         assert jnp.allclose(phi_m, expected_phi)
     
     def test_unstable_stability_functions(self):
-        """Test stability functions for unstable conditions."""
+        """Test stability functions for unstable conditions.
+
+        Businger-Dyer Φ_m, Φ_h appear in the denominator of the bulk
+        exchange coefficients (``CH = κ²/(ln·Φ_m·Φ_h)·…``). To enhance
+        turbulent mixing under unstable buoyancy (the standard textbook
+        result for free convection), they must be **< 1** for ζ < 0.
+        """
         ncol, nsfc_type = 3, 3
-        
+
         # Negative Richardson numbers (unstable)
         ri_bulk = jnp.ones((ncol, nsfc_type)) * (-0.1)
-        
+
         phi_h, phi_m = compute_stability_functions(ri_bulk)
-        
+
         assert phi_h.shape == (ncol, nsfc_type)
         assert phi_m.shape == (ncol, nsfc_type)
-        
-        # Stability functions should be > 1 for unstable conditions (enhance mixing)
-        assert jnp.all(phi_h > 1.0)
-        assert jnp.all(phi_m > 1.0)
-        
-        # Should be positive and finite
+
+        # Stability functions must be < 1 under unstable conditions so
+        # that CH = κ²/(ln·Φ_m·Φ_h) is *larger* than neutral — the
+        # boundary-layer enhancement of bulk exchange.
+        assert jnp.all(phi_h < 1.0)
+        assert jnp.all(phi_m < 1.0)
+        # Finite & positive guards.
         assert jnp.all(phi_h > 0.0)
         assert jnp.all(phi_m > 0.0)
         assert jnp.all(jnp.isfinite(phi_h))
         assert jnp.all(jnp.isfinite(phi_m))
+        # Specific values: ζ ≈ Ri = -0.1 → Φ_h = (1 + 16·0.1)^(-1/2)
+        # ≈ 0.620, Φ_m = (1 + 16·0.1)^(-1/4) ≈ 0.787.
+        expected_phi_h = (1.0 + 16.0 * 0.1) ** (-0.5)
+        expected_phi_m = (1.0 + 16.0 * 0.1) ** (-0.25)
+        assert jnp.allclose(phi_h, expected_phi_h, rtol=1e-4)
+        assert jnp.allclose(phi_m, expected_phi_m, rtol=1e-4)
     
     def test_neutral_stability_functions(self):
         """Test stability functions for neutral conditions."""
