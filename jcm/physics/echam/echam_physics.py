@@ -332,6 +332,50 @@ def _apply_radiation_inner(state: PhysicsState,
     return physics_tendencies, updated_physics_data
 
 
+# RRTMGP chunked-vmap configuration. ``_RRTMGP_CHUNK_OVERRIDE`` is a
+# Python-side knob (NOT a JAX traced value) so the chunk count can be
+# resolved at trace time and baked into the JIT'd graph. ``None`` means
+# auto-detect from the JAX device's ``bytes_limit`` at first call.
+_RRTMGP_CHUNK_OVERRIDE = None  # int | None
+
+
+def set_rrtmgp_chunk_size(chunk_size) -> None:
+    """Override the RRTMGP chunked-vmap chunk size (cells per chunk).
+
+    Set to a positive integer to fix the chunk count; set to ``None``
+    to revert to auto-detection from device HBM. Must be called BEFORE
+    the first ``model.resume()`` so the JIT'd radiation function picks
+    up the new value (changing it after a JIT compile triggers a
+    recompile on the next radiation call).
+    """
+    global _RRTMGP_CHUNK_OVERRIDE
+    _RRTMGP_CHUNK_OVERRIDE = chunk_size
+
+
+def _rrtmgp_chunk_budget(nlev: int) -> int:
+    """Return the RRTMGP chunk-size budget (cells/chunk) for this device.
+
+    Uses ``_RRTMGP_CHUNK_OVERRIDE`` if set, else queries the JAX device
+    HBM via ``memory_stats()['bytes_limit']`` and computes the largest
+    chunk that fits at ~55 % of the budget — the empirically-measured
+    sweet spot on a single 80 GiB A100 (T63L47, ngpt=128, nlev=47:
+    chunk=9216 cells / 33 GiB peak ≈ 0.52 of the 63.7 GiB XLA bytes_limit;
+    margin covers XLA working memory). Per-cell cost scales linearly
+    with ``nlev`` for other vertical resolutions. Falls back to 9216
+    if the device doesn't report HBM (e.g. CPU run, non-CUDA backend).
+    """
+    if _RRTMGP_CHUNK_OVERRIDE is not None and _RRTMGP_CHUNK_OVERRIDE > 0:
+        return int(_RRTMGP_CHUNK_OVERRIDE)
+    bytes_per_cell = 3.6e6 * (nlev / 47.0)
+    try:
+        bytes_limit = jax.devices()[0].memory_stats().get('bytes_limit', 0)
+    except Exception:
+        bytes_limit = 0
+    if bytes_limit > 0:
+        return max(1, int(0.55 * bytes_limit / bytes_per_cell))
+    return 9216
+
+
 @jit
 def _apply_radiation_rrtmgp_inner(
     state: PhysicsState,
@@ -400,19 +444,22 @@ def _apply_radiation_rrtmgp_inner(
     # 2 chunks is ~74% faster than 4 because XLA needs less
     # rematerialization at lower memory pressure.
     #
-    # ``CHUNK_BUDGET`` (cells/chunk) is the largest size that fits at
-    # ngpt=128, nlev=47 on an 80 GiB A100. For smaller grids the run
-    # is unchunked. For larger grids (T85+) the chunk count grows
-    # automatically; ``ncols`` rounded up to the nearest multiple
-    # of ``CHUNK_BUDGET`` is the smallest n_chunks that keeps each
-    # chunk under the budget.
-    CHUNK_BUDGET = 9216
-    if ncols <= CHUNK_BUDGET:
+    # The chunk size is auto-detected from the device's HBM by default
+    # (``parameters.radiation.rrtmgp_chunk_size = 0``). The empirically-
+    # measured per-cell cost at the current g128/g112 config is ~3.6 MB
+    # at nlev=47 (linear in nlev for other resolutions). We use 50 % of
+    # the device memory budget so XLA has working room — the rest is
+    # rematerialisation buffers and other kernels' allocations. Override
+    # via ``RadiationParameters(rrtmgp_chunk_size=N)`` if the auto pick
+    # OOMs (e.g. shared GPUs) or if you want a fixed chunk count for
+    # reproducible kernel launches.
+    chunk_budget = _rrtmgp_chunk_budget(nlev)
+    if ncols <= chunk_budget:
         chunk_size = ncols
     else:
-        # Pick the smallest n_chunks ≥ ncols / CHUNK_BUDGET such that
+        # Pick the smallest n_chunks ≥ ncols / chunk_budget such that
         # n_chunks divides ncols (so all chunks are equal size).
-        n_chunks = -(-ncols // CHUNK_BUDGET)  # ceil-div
+        n_chunks = -(-ncols // chunk_budget)  # ceil-div
         while ncols % n_chunks != 0:
             n_chunks += 1
         chunk_size = ncols // n_chunks
