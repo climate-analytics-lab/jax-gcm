@@ -332,50 +332,6 @@ def _apply_radiation_inner(state: PhysicsState,
     return physics_tendencies, updated_physics_data
 
 
-# RRTMGP chunked-vmap configuration. ``_RRTMGP_CHUNK_OVERRIDE`` is a
-# Python-side knob (NOT a JAX traced value) so the chunk count can be
-# resolved at trace time and baked into the JIT'd graph. ``None`` means
-# auto-detect from the JAX device's ``bytes_limit`` at first call.
-_RRTMGP_CHUNK_OVERRIDE = None  # int | None
-
-
-def set_rrtmgp_chunk_size(chunk_size) -> None:
-    """Override the RRTMGP chunked-vmap chunk size (cells per chunk).
-
-    Set to a positive integer to fix the chunk count; set to ``None``
-    to revert to auto-detection from device HBM. Must be called BEFORE
-    the first ``model.resume()`` so the JIT'd radiation function picks
-    up the new value (changing it after a JIT compile triggers a
-    recompile on the next radiation call).
-    """
-    global _RRTMGP_CHUNK_OVERRIDE
-    _RRTMGP_CHUNK_OVERRIDE = chunk_size
-
-
-def _rrtmgp_chunk_budget(nlev: int) -> int:
-    """Return the RRTMGP chunk-size budget (cells/chunk) for this device.
-
-    Uses ``_RRTMGP_CHUNK_OVERRIDE`` if set, else queries the JAX device
-    HBM via ``memory_stats()['bytes_limit']`` and computes the largest
-    chunk that fits at ~55 % of the budget — the empirically-measured
-    sweet spot on a single 80 GiB A100 (T63L47, ngpt=128, nlev=47:
-    chunk=9216 cells / 33 GiB peak ≈ 0.52 of the 63.7 GiB XLA bytes_limit;
-    margin covers XLA working memory). Per-cell cost scales linearly
-    with ``nlev`` for other vertical resolutions. Falls back to 9216
-    if the device doesn't report HBM (e.g. CPU run, non-CUDA backend).
-    """
-    if _RRTMGP_CHUNK_OVERRIDE is not None and _RRTMGP_CHUNK_OVERRIDE > 0:
-        return int(_RRTMGP_CHUNK_OVERRIDE)
-    bytes_per_cell = 3.6e6 * (nlev / 47.0)
-    try:
-        bytes_limit = jax.devices()[0].memory_stats().get('bytes_limit', 0)
-    except Exception:
-        bytes_limit = 0
-    if bytes_limit > 0:
-        return max(1, int(0.55 * bytes_limit / bytes_per_cell))
-    return 9216
-
-
 @jit
 def _apply_radiation_rrtmgp_inner(
     state: PhysicsState,
@@ -453,6 +409,7 @@ def _apply_radiation_rrtmgp_inner(
     # via ``RadiationParameters(rrtmgp_chunk_size=N)`` if the auto pick
     # OOMs (e.g. shared GPUs) or if you want a fixed chunk count for
     # reproducible kernel launches.
+    from jcm.physics.radiation.rrtmgp import chunk_budget as _rrtmgp_chunk_budget
     chunk_budget = _rrtmgp_chunk_budget(nlev)
     if ncols <= chunk_budget:
         chunk_size = ncols

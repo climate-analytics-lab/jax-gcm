@@ -263,6 +263,7 @@ class Model:
                  start_date: jdt.Datetime=jdt.to_datetime('2000-01-01'),
                  calendar: str = "365_day",
                  nudging: Nudging | None = None,
+                 radiation_chunk_size: int | None = None,
                  log_level=logging.CRITICAL) -> None:
         """Initialize the model with the given time step, save interval, and total time.
 
@@ -294,6 +295,14 @@ class Model:
                 acts on the dycore state, so the same nudging works under
                 SPEEDY, ICON, or any future physics package. Default
                 ``None`` (no nudging, no extra cost).
+            radiation_chunk_size:
+                Override the RRTMGP chunked-vmap chunk size (cells per
+                chunk). Default ``None`` auto-detects from the JAX
+                device's HBM (largest chunk that fits at ~55 % of the
+                XLA bytes_limit). Set to a positive integer to fix the
+                chunk count — useful on shared GPUs with reduced free
+                memory or for reproducible kernel launches. Has no
+                effect when the radiation backend is not RRTMGP.
             log_level:
                 (int) indicates what level of messages will be output, use logging.INFO (20) for verbose (defaults logging.CRITICAL)
 
@@ -302,6 +311,13 @@ class Model:
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
         self.nudging = nudging
+
+        # Wire the RRTMGP chunked-vmap chunk-size override (only takes
+        # effect if the physics actually uses RRTMGP — the setter is a
+        # no-op for other radiation backends). ``None`` means auto-detect.
+        if radiation_chunk_size is not None:
+            from jcm.physics.radiation import rrtmgp as _rrtmgp_mod
+            _rrtmgp_mod.set_chunk_size(radiation_chunk_size)
 
         self.physics_specs = PHYSICS_SPECS
         self.dt_si = (time_step * units.minute).to(units.second)

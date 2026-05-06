@@ -366,12 +366,20 @@ def build_model(cfg: DictConfig) -> Model:
     diffusion = build_diffusion(cfg)
 
     log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
+    # Optional RRTMGP chunk-size override from physics config (only the
+    # echam physics yaml currently exposes it; other physics packages
+    # don't use RRTMGP).
+    rad_chunk = None
+    physics_cfg = getattr(cfg, 'physics', None)
+    if physics_cfg is not None:
+        rad_chunk = getattr(physics_cfg, 'radiation_chunk_size', None)
     return Model(
         coords=coords,
         physics=physics,
         terrain=terrain,
         diffusion=diffusion,
         time_step=cfg.run.time_step,
+        radiation_chunk_size=rad_chunk,
         log_level=log_level,
     )
 

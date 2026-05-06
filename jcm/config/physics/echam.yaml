@@ -4,6 +4,13 @@ radiation: grey       # grey | rrtmgp | emulated
 cloud_scheme: 1m      # 1m | 2m
 checkpoint_terms: true
 
+# RRTMGP chunked-vmap chunk size (cells per chunk). null = auto-detect
+# from device HBM (recommended). Set to a positive int to fix the chunk
+# count — useful on shared GPUs with reduced free memory or for
+# reproducible kernel launches. No effect when ``radiation != rrtmgp``.
+# Override from CLI: physics.radiation_chunk_size=4608
+radiation_chunk_size: null
+
 # Free-form override map applied to ``Parameters.default()`` at build time.
 # Sub-groups: convection, clouds, microphysics, microphysics_2m,
 # gravity_waves, radiation, vertical_diffusion, surface, aerosol.
