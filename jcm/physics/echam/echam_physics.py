@@ -391,15 +391,31 @@ def _apply_radiation_rrtmgp_inner(
     # an 80 GiB A100. Splitting the vmap into ``n_chunks`` smaller
     # batches via ``lax.map`` linearises the work over chunks while
     # keeping vmap parallelism inside each chunk; peak memory drops
-    # by roughly a factor of ``n_chunks``. ``chunk_size`` chosen so
-    # that ``ncols % chunk_size == 0`` for the standard T63 (18432),
-    # T85 (32768), T127 (73728) grids — all powers of 4608.
-    chunk_size = 4608  # 18432 / 4 (T63), 32768 not divisible — see below
-    if ncols % chunk_size != 0:
-        # Fall back to whole-grid vmap for grids that don't divide
-        # evenly. Smaller grids may fit; larger grids will OOM and
-        # need a custom chunk size.
+    # by roughly a factor of ``n_chunks``.
+    #
+    # Chunk-size sweep at T63L47 on a single 80 GiB A100:
+    #   chunk=18432 (1 chunk):  OOM at 67 GiB peak
+    #   chunk= 9216 (2 chunks): ~8.7 s/step (avg, 7200 s rad cache)
+    #   chunk= 4608 (4 chunks): ~15.2 s/step
+    # 2 chunks is ~74% faster than 4 because XLA needs less
+    # rematerialization at lower memory pressure.
+    #
+    # ``CHUNK_BUDGET`` (cells/chunk) is the largest size that fits at
+    # ngpt=128, nlev=47 on an 80 GiB A100. For smaller grids the run
+    # is unchunked. For larger grids (T85+) the chunk count grows
+    # automatically; ``ncols`` rounded up to the nearest multiple
+    # of ``CHUNK_BUDGET`` is the smallest n_chunks that keeps each
+    # chunk under the budget.
+    CHUNK_BUDGET = 9216
+    if ncols <= CHUNK_BUDGET:
         chunk_size = ncols
+    else:
+        # Pick the smallest n_chunks ≥ ncols / CHUNK_BUDGET such that
+        # n_chunks divides ncols (so all chunks are equal size).
+        n_chunks = -(-ncols // CHUNK_BUDGET)  # ceil-div
+        while ncols % n_chunks != 0:
+            n_chunks += 1
+        chunk_size = ncols // n_chunks
     n_chunks = ncols // chunk_size
 
     def _per_column_inputs():
