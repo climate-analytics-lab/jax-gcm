@@ -19,8 +19,6 @@ from .constants import (
 class RadiationParameters:
     """Configuration parameters for radiation scheme"""
 
-    # Time stepping
-    dt_rad: float            # Radiation time step (s)
     # Seconds between full radiation calls. Heating rates from the most
     # recent call are cached and reused by ``_radiation_with_caching`` on
     # intermediate dynamics steps. Default 7200 s (2 hours) matches the
@@ -62,7 +60,7 @@ class RadiationParameters:
     lw_scaling: Optional[object] = None        # InputScaling for LW network
 
     @classmethod
-    def default(cls, dt_rad=3600.0, radiation_interval=7200.0,
+    def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
                  n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
                  lw_band_limits=LW_BAND_LIMITS,
@@ -74,7 +72,6 @@ class RadiationParameters:
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
         return cls(
-            dt_rad=jnp.array(dt_rad),
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
             n_sw_bands=jnp.asarray(n_sw_bands),

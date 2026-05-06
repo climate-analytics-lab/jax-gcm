@@ -163,10 +163,10 @@ class Parameters:
             'dt_conv': jnp.array(dt_seconds),
         })
 
-        radiation_params = self.radiation.__class__(**{
-            **self.radiation.__dict__,
-            'dt_rad': jnp.array(dt_seconds),
-        })
+        # Radiation has no per-call sub-stepping (all backends do a single
+        # forward pass per radiation_interval), so its config doesn't carry
+        # a per-step value to update here.
+        radiation_params = self.radiation
 
         # dt_sedi should be <= dt_seconds (it's a sub-timestep)
         dt_sedi_1m = min(float(self.microphysics.dt_sedi), dt_seconds)

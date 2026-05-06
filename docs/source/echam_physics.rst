@@ -110,9 +110,6 @@ The grey scheme is a simplified two-stream scheme with hand-tuned band coefficie
    * - Parameter
      - Description
      - Default
-   * - ``dt_rad``
-     - Radiation timestep (s)
-     - 3600.0
    * - ``radiation_interval``
      - Seconds between full radiation calls (cached on intermediate dynamics steps; 0 = every step)
      - 7200.0

@@ -297,26 +297,23 @@ def _apply_radiation_inner(state: PhysicsState,
         tracers={}
     )
     
-    # Reconstruct RadiationData from vmapped diagnostics
-    # Most fields need to be transposed from [ncols, ...] to [..., ncols].
-    # ``squeeze(-1)`` (not bare ``squeeze``) drops only the trailing
-    # length-1 dim so a single-column run keeps shape ``[1]`` instead of
-    # collapsing to a scalar (which mismatches the cached path's shape and
-    # breaks the radiation ``lax.cond`` at ``ncols=1``).
-    # Per-gpoint flux profiles are summed over g-points inside the
-    # vmapped per-column compute (rrtmgp.py:268), so the diagnostic
-    # arrays here are shape (ncols, nlev+1) and need only a transpose
-    # to (nlev+1, ncols).
+    # Reconstruct RadiationData from vmapped diagnostics. The grey scheme
+    # returns per-band flux profiles (shape (ncols, nlev+1, n_bands)
+    # after vmap), so they need transpose+sum here. ``squeeze(-1)``
+    # (not bare ``squeeze``) on cos_zenith drops only the trailing
+    # length-1 dim so a single-column run keeps shape ``[1]`` instead
+    # of collapsing to a scalar (which mismatches the cached path's
+    # shape and breaks the radiation ``lax.cond`` at ``ncols=1``).
     rad_out = RadiationData(
         cos_zenith=diagnostics_vmapped.cos_zenith.squeeze(-1),  # [ncols, 1] -> [ncols]
         surface_albedo_vis=diagnostics_vmapped.surface_albedo_vis,
         surface_albedo_nir=diagnostics_vmapped.surface_albedo_nir,
         surface_emissivity=diagnostics_vmapped.surface_emissivity,
-        sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
-        sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
-        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
-        lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
-        lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
+        sw_flux_up=diagnostics_vmapped.sw_flux_up.transpose(1, 0, 2).sum(axis=-1),  # [nlev+1, ncols] (summed over bands)
+        sw_flux_down=diagnostics_vmapped.sw_flux_down.transpose(1, 0, 2).sum(axis=-1),
+        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,  # [ncols, nlev] -> [nlev, ncols]
+        lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
+        lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
         lw_heating_rate=tendencies_vmapped.longwave_heating.T,
         surface_sw_down=diagnostics_vmapped.surface_sw_down,  # Already [ncols]
         surface_lw_down=diagnostics_vmapped.surface_lw_down,
@@ -326,7 +323,7 @@ def _apply_radiation_inner(state: PhysicsState,
         toa_lw_up=diagnostics_vmapped.toa_lw_up,
         toa_sw_down=diagnostics_vmapped.toa_sw_down
     )
-    
+
     updated_physics_data = physics_data.copy(radiation=rad_out)
 
     return physics_tendencies, updated_physics_data
@@ -1289,18 +1286,13 @@ def apply_surface(
     # use ``stl_am`` instead of ``sst``).
     ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
-    # Apply a 6.5 K/km dry lapse-rate correction to the prescribed land
-    # surface temperature so it represents the temperature at the model's
-    # actual orography rather than at sea level. The BC files distributed
-    # in ``jcm/data/bc/t63`` set ``stl_am ≈ sst`` everywhere, which gives
-    # a ~+30 K bias over the Tibetan / Andean / Himalayan plateaux at
-    # 4–5 km elevation. The unlapsed temperature drives runaway sensible-
-    # heat flux upward at the lowest model level (ΔT ≈ 30 K · ρ · cp · CH · U)
-    # and is the dominant cause of the T63L47 ``test_real_terrain_with_sponge_stable_30_days``
-    # NaN around day 7. The lapse coefficient matches the standard
-    # atmospheric lapse used by ECHAM's ``initemp.f90`` for downscaling
-    # boundary surface temperatures to model orography.
-    land_temp = forcing.stl_am.reshape(ncols) - 6.5e-3 * terrain.orog.reshape(ncols)
+    # ``stl_am`` is the JSBACH land surface temperature climatology
+    # (``surf_temp`` from ``ic_land_soil_T63GR15_*.nc``), already at the
+    # model's orography — no lapse correction needed. (An earlier workaround
+    # subtracted 6.5 K/km · orog because the bundled BCs used ``stl ≈ sst``
+    # extrapolated over land — see ``utils/convert_echam_bc.py`` for the
+    # path that picks the right field.)
+    land_temp = forcing.stl_am.reshape(ncols)
     ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
                                  jnp.minimum(ocean_temp, ctfreez),
                                  ocean_temp)

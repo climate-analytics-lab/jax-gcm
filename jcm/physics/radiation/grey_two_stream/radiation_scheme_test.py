@@ -666,11 +666,10 @@ class TestRadiationCaching:
 
         ncols = 4
         params = Parameters.default()
-        # Set radiation_interval on the parameters
+        # Set radiation_interval on the parameters.
         rad_params = params.radiation.__class__(**{
             **params.radiation.__dict__,
             'radiation_interval': jnp.array(radiation_interval),
-            'dt_rad': jnp.array(dt_seconds),
         })
         params = params.__class__(**{**params.__dict__, 'radiation': rad_params})
 
