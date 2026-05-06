@@ -277,8 +277,11 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         self.assertTrue(_state_is_finite(final))
 
     def test_2m_rrtmgp_real_terrain_stable_for_24h(self):
-        """2M + RRTMGP + real terrain, 1 day. RRTMGP must accept the
-        full 2M cloud water (qc + qi) the same way it does for 1M."""
+        """2M + RRTMGP + real terrain, 1 day.
+
+        RRTMGP must accept the full 2M cloud water (qc + qi) the same
+        way it does for 1M.
+        """
         physics = echam_physics(cloud_scheme="2m", radiation_scheme="rrtmgp")
         final = _run_steps(
             physics, self.terrain_real, self.forcing, n_steps=120,
@@ -286,9 +289,12 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         self.assertTrue(_state_is_finite(final))
 
     def test_2m_rrtmgp_real_terrain_with_sponge_stable_30_days(self):
-        """Full production wiring for the 2M scheme: ECHAM 2M physics +
-        RRTMGP + UpperSponge + real terrain + real JSBACH land T. The
-        analogue of ``test_real_terrain_with_sponge_stable_30_days``."""
+        """Full production wiring for the 2M scheme.
+
+        ECHAM 2M physics + RRTMGP + UpperSponge + real terrain + real
+        JSBACH land T — the analogue of
+        ``test_real_terrain_with_sponge_stable_30_days``.
+        """
         from jcm.physics.dissipation import UpperSponge
         physics = echam_physics(
             cloud_scheme="2m", radiation_scheme="rrtmgp",
