@@ -84,7 +84,28 @@ The RRTMGP path provides physically correct heating rates suitable for multi-day
 
 The reference (g256 / g224) variant ships with the ``jax-rrtmgp`` package and can be selected by editing the file paths in :py:func:`jcm.physics.radiation.rrtmgp._ensure_rrtmgp` if higher spectral fidelity is needed; with the chunked-vmap strategy described below it still fits on a single 80 GiB A100.
 
-*Memory & cost*: RRTMGP has substantial intermediate-array memory needs. JAX-GCM evaluates it in chunks of 4608 columns (T63 = 4 chunks via ``lax.map``) so peak GPU memory stays around 17 GiB per chunk on T63L47, well under 80 GiB. Per-call cost is roughly 40× the grey scheme; with the default 2-hour ``radiation_interval`` cache, the amortised cost is ~4× grey total.
+*Memory & cost*: RRTMGP has substantial intermediate-array memory needs. JAX-GCM evaluates it in chunks via ``lax.map``; the chunk size is auto-detected from device HBM (see :func:`jcm.physics.radiation.rrtmgp.chunk_budget`) and on a single 80 GiB A100 picks 9216 columns / chunk for T63L47 (2 chunks), with peak per-chunk memory around 33 GiB. The earlier 4608-column / 4-chunk default was ~74 % slower per call.
+
+Per-call cost at T63L47 g128/g112 is dominated by gas-optics interpolation table lookups across ``ncols × nlev × ngpt`` cells, so it scales close to linear in horizontal resolution and in ``nlev``. Measured on an idle 80 GiB A100 (single steady-state RRTMGP call inside a single-step ``model.resume`` Python loop, after warm-up):
+
+.. list-table:: Steady-state per-step cost on T63L47 (real terrain + sponge, dt = 12 min)
+   :header-rows: 1
+   :widths: 30 25 25 20
+
+   * - Scheme
+     - RRTMGP step (RAD)
+     - cache step
+     - rad/cache ratio
+   * - 1M microphysics
+     - 16.3 s
+     - ≈ 98 ms
+     - ~165×
+   * - 2M microphysics
+     - 15.8 s
+     - ≈ 101 ms
+     - ~155×
+
+The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min for grey radiation — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
 
 **Grey two-stream** (development / ML training)
 
