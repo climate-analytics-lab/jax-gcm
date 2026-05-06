@@ -23,7 +23,7 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 from jcm.constants import (
-    tmelt, alhf, alhc, alhs, cp, rhow
+    tmelt, alhf, alhc, alhs, cp, rhow, rv, eps
 )
 
 
@@ -826,5 +826,283 @@ def cloud_microphysics(
         precip_rain=jnp.array(precip_rain),
         precip_snow=jnp.array(precip_snow)
     )
-    
+
+    return tendencies, state
+
+
+def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
+    """Saturation specific humidity over water + the vapor pressure es.
+
+    Uses the same Tetens form as :func:`sundqvist.saturation_vapor_pressure_water`
+    so the rain-evaporation step is consistent with the condensation step.
+    The conversion from ``es`` to ``qs`` follows the standard mixing-ratio
+    formula ``qs = ε·es/(p - (1-ε)·es)`` (equivalent to ICON's
+    ``zqsw = uaw/(p - vtmpc1·uaw)`` after expanding ``uaw = ε·es``).
+    Returns ``(qsw, esw_pa)``.
+    """
+    t_c = temperature - tmelt
+    es = 610.78 * jnp.exp(17.27 * t_c / (t_c + 237.3))
+    es_safe = jnp.minimum(es, 0.5 * pressure)
+    qsw = eps * es_safe / jnp.maximum(pressure - (1.0 - eps) * es_safe, 1.0)
+    return qsw, es_safe
+
+
+def cloud_microphysics_column_sweep(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    air_density: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    droplet_number: jnp.ndarray,
+    dt: float,
+    config: Optional[MicrophysicsParameters] = None,
+) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
+    """ICON ``mo_cloud.f90`` column-sweep microphysics — flux propagation.
+
+    Faithful port of the column structure of ICON's ``mo_cloud.f90``
+    (lines 260-1080 in
+    ``/home/dwatsonparris/atm_phy_echam/mo_cloud.f90``). Treats rain
+    (``zrfl``) and snow (``zsfl``) as **downward fluxes** that propagate
+    top-to-bottom through the column within a single timestep:
+
+    1. ``zrfl`` and ``zsfl`` start at 0 at TOA.
+    2. For each layer (top → bottom):
+
+       a. **Snow melt** for incoming flux at ``T > 273 K``: convert
+          ``zsfl`` → ``zrfl``. Per ICON ``mo_cloud.f90:319-323``.
+       b. **Local microphysics**: autoconversion / ice-autoconversion /
+          accretion / riming / aggregation produce mass into rain or
+          snow, drawing from local ``qc`` / ``qi``.
+       c. **Update outgoing flux**:
+          ``zrfl_out = zrfl_in + (autoconv + accr) · pmref / dt``
+          ``zsfl_out = zsfl_in + (ice_auto + aggr + rime) · pmref / dt``
+
+    3. Bottom-of-column ``zrfl`` / ``zsfl`` become the surface
+       precipitation flux (``state.precip_rain`` / ``state.precip_snow``).
+
+    Rain evaporation in subsaturated layers (``mo_cloud.f90:397-435``,
+    Rotstayn 1997) is included: as falling rain enters a layer with
+    ``q < qsw``, a fraction evaporates into vapour, cooling the layer
+    and reducing the propagating ``zrfl``. The implementation tracks
+    a ``zclcpre`` carry — the precipitating-area cloud fraction — using
+    ICON's flux-mass-weighted recipe (``mo_cloud.f90:1006-1013``).
+
+    What's INTENTIONALLY MISSING from this port:
+
+    * **Snow sublimation in subsaturated layers** (``mo_cloud.f90``
+      332-393, Lin et al. 1983). Same structural shape as rain evap;
+      tracked as a separate add when stability data justifies it.
+    * **Rain freezing** below ``cthomi`` and the **Bergeron-Findeisen**
+      ice-from-supercooled-water process.
+
+    The propagating flux means rain produced in a high cloud actually
+    exits the column at the surface in the SAME step (rather than being
+    a per-level diagnostic that doesn't interact with the layer below).
+    With rain evap turned on, falling rain that enters dry air below
+    cloud-base re-evaporates, moistening the lower troposphere — this
+    is the standard mechanism by which the column moisture cycle closes
+    in ECHAM/ICON.
+
+    Same signature as :func:`cloud_microphysics` so call sites can swap.
+    """
+    if config is None:
+        config = MicrophysicsParameters.default()
+
+    nlev = temperature.shape[0]
+
+    # Pre-compute per-level diagnostic quantities used inside the scan.
+    qc_in_cloud = jnp.where(
+        cloud_fraction > config.epsilon, cloud_water / cloud_fraction, 0.0,
+    )
+    qi_in_cloud = jnp.where(
+        cloud_fraction > config.epsilon, cloud_ice / cloud_fraction, 0.0,
+    )
+    pmref = air_density * layer_thickness     # kg/m² per layer
+
+    # Per-level autoconversion / accretion sources (depend only on local
+    # state, vectorised before the scan). These produce condensate that
+    # we add into the falling flux as we sweep down.
+    qc_auto = autoconversion(
+        cloud_water, cloud_fraction, air_density, droplet_number, dt, config,
+    )
+    qi_auto = ice_autoconversion(cloud_ice, temperature, cloud_fraction, dt, config)
+
+    # Phase weights for the latent-heat update from snow melting.
+    zlsdcp = alhs / cp
+    zlvdcp = alhc / cp
+
+    def step(carry, level_inputs):
+        zrfl, zsfl, zclcpre = carry
+        (T, q, p, qc, qi, cf, rho, dz,
+         qcic, qiic, qcaut, qiaut, mref) = level_inputs
+
+        # ---------- (a) snow melt at T > 273 K ----------
+        # ICON ``mo_cloud.f90:319-323``:
+        #
+        #     zcons   = (mref/dt) / (Ls/cp - Lv/cp)
+        #     zsnmlt  = MIN(0.99 * zsfl, zcons * MAX(0, T - tmelt))
+        #     zrfl   += zsnmlt
+        #     zsfl   -= zsnmlt
+        #     zsmlt   = zsnmlt / mref * dt   (per-step mass change)
+        zcons = (mref / dt) / jnp.maximum(zlsdcp - zlvdcp, 1e-6)
+        ztdif = jnp.maximum(0.0, T - tmelt)
+        zsnmlt = jnp.minimum(0.99 * zsfl, zcons * ztdif)
+        zrfl = zrfl + zsnmlt
+        zsfl = zsfl - zsnmlt
+
+        # Latent heat absorbed by the melting snow cools the air.
+        # zsmlt (kg/kg/s) → dT/dt = -(Lf/cp)·zsmlt. (zsnmlt is a per-step
+        # mass-per-area in kg/m², dividing by mref gives kg/kg per step,
+        # dividing by dt gives the rate.)
+        zsmlt_rate = zsnmlt / jnp.maximum(mref, config.epsilon) / dt
+        dTdt_melt = -(zlsdcp - zlvdcp) * zsmlt_rate
+
+        # ---------- (b) local autoconversion / accretion / riming ----------
+        # Cloud water → rain: autoconversion (Beheng / KK2000) + accretion
+        # by the falling rain flux (proportional to zrfl).
+        rain_accr = jnp.where(
+            qc > config.epsilon,
+            config.ccracl * zrfl * qc / jnp.maximum(rho, config.epsilon),
+            0.0,
+        )
+        # Cloud water → snow: riming by falling snow.
+        snow_rime = jnp.where(
+            (qc > config.epsilon) & (T < tmelt),
+            config.ccracl * zsfl * qc / jnp.maximum(rho, config.epsilon),
+            0.0,
+        )
+        # Cloud ice → snow: autoconversion + aggregation by falling snow.
+        snow_aggr = jnp.where(
+            qi > config.epsilon,
+            config.ccracl * zsfl * qi / jnp.maximum(rho, config.epsilon),
+            0.0,
+        )
+
+        # Cloud water / ice tendencies (kg/kg/s).
+        dqcdt_local = -(qcaut + rain_accr + snow_rime)
+        dqidt_local = -(qiaut + snow_aggr)
+
+        # Latent-heat release from riming (liquid → ice via collection by
+        # falling snow). ICON ``mo_cloud.f90:949-952`` carries the riming
+        # contribution into the temperature tendency through ``alhf*zsacl``.
+        # Autoconversion (qc → rain) and ice autoconv (qi → snow) are
+        # phase-preserving and release no latent heat. Snow melt is handled
+        # in step (a) above. Rain evap / snow sublim / rain freezing are
+        # NOT simulated by this minimal port (see module docstring), so
+        # their latent-heat terms are absent here.
+        zlfdcp = zlsdcp - zlvdcp        # alhf / cp
+        dTdt_rime = zlfdcp * snow_rime  # K/s (snow_rime already in kg/kg/s)
+
+        # ---------- (c-pre) Rotstayn (1997) rain evaporation ----------
+        # ICON ``mo_cloud.f90:397-435``. ``zsusatw`` is the (negative)
+        # sub-saturation w.r.t. liquid; ``zast+zbst`` are Rotstayn's
+        # thermodynamic + vapour-diffusion coefficients; the prefactor
+        # ``870`` and the ``zrfl/zclcpre`` exponent ``0.61`` come from
+        # the Marshall-Palmer rain spectrum integral. ``zclcpre`` is
+        # the propagating precipitating-cloud-area fraction carried
+        # from above; we update it after the local rain/snow sources
+        # using ICON's flux-mass-weighted recipe (line 1006).
+        qsw, esw = _qsat_water(p, T)
+        zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
+        zsusatw = jnp.minimum(q / jnp.maximum(qsw, config.epsilon) - 1.0, 0.0)
+        zdv = 2.21 / jnp.maximum(p, config.epsilon)
+        zast = (
+            alhc * (alhc / (rv * jnp.maximum(T, 1.0)) - 1.0)
+            / jnp.maximum(T, 1.0) / 0.024
+        )
+        zbst = T / jnp.maximum(zdv * esw, config.epsilon)
+        zthermo = jnp.maximum(zast + zbst, config.epsilon)
+        zrfl_in_cf = zrfl / zclcpre_safe
+        zqrho_sqrt = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
+        # Rate of evap per unit grid mass per second (kg/kg/s, negative
+        # because zsusatw ≤ 0).
+        zzepr_rate = (
+            870.0 * zsusatw * jnp.power(jnp.maximum(zrfl_in_cf, 0.0), 0.61)
+            * zqrho_sqrt / jnp.sqrt(1.3) / zthermo
+        )
+        # Convert to per-step grid-mean evap (kg/kg). zevp ≥ 0.
+        zevp_unbounded = -zzepr_rate * dt * zclcpre
+        # Cap by Rotstayn's per-step rain budget: can't evaporate more
+        # rain than what's actually falling through the cloud area.
+        zevp_max_rain = zrfl / jnp.maximum(mref, config.epsilon) * dt
+        zevp_max_subsat = jnp.maximum(0.99 * (qsw - q), 0.0)
+        zevp = jnp.minimum(zevp_unbounded, zevp_max_subsat)
+        zevp = jnp.maximum(zevp, 0.0)
+        zevp = jnp.minimum(zevp, zevp_max_rain)
+        # Apply only when there's a propagating rain flux + a precipitating
+        # area to evaporate from.
+        zevp = jnp.where((zrfl > config.epsilon) & (zclcpre > config.epsilon), zevp, 0.0)
+
+        dqdt_evap = zevp / dt                                         # kg/kg/s
+        dTdt_evap = -zlvdcp * dqdt_evap                               # K/s (cooling)
+        rain_evap_flux = zevp * mref / dt                             # kg/m²/s
+
+        # ---------- (c) update fluxes for the next layer ----------
+        # ICON ``mo_cloud.f90:984-985 / 1030-1031``:
+        #     zzdrr = (zraut + zrac1 + zrac2) * mref / dt
+        #     zzdrs = (zspr + zsacl)         * mref / dt
+        #     zrfl += zzdrr - zevp * mref / dt
+        #     zsfl += zzdrs - zsub * mref / dt
+        # (zsub = 0 in this port — snow sublim is a follow-up.)
+        rain_source = (qcaut + rain_accr) * mref          # kg/m²/s
+        snow_source = (qiaut + snow_aggr + snow_rime) * mref
+        # Clamp to ≥ 0 to defend against float round-off when rain
+        # evap consumes essentially all of the incoming flux.
+        zrfl_out = jnp.maximum(zrfl + rain_source - rain_evap_flux, 0.0)
+        zsfl_out = jnp.maximum(zsfl + snow_source, 0.0)
+
+        # ---------- (d) update zclcpre carry per ICON 1006-1013 ----------
+        zpretot = zrfl + zsfl                                       # incoming
+        zpredel = rain_source + snow_source                         # local add
+        zpresum = zpretot + zpredel
+        # Flux-mass-weighted blend of incoming-area and local-cf.
+        zclcpre1 = jnp.where(
+            zpresum > config.epsilon,
+            (cf * zpredel + zclcpre * zpretot) / jnp.maximum(zpresum, config.epsilon),
+            0.0,
+        )
+        zclcpre1 = jnp.clip(jnp.maximum(zclcpre, zclcpre1), 0.0, 1.0)
+        zclcpre_out = jnp.where(zpresum > config.epsilon, zclcpre1, 0.0)
+
+        # Per-step rates the model integrates (q_new = q + dqdt*dt etc).
+        out = (
+            dTdt_melt + dTdt_rime + dTdt_evap,    # dT/dt from this layer (K/s)
+            dqdt_evap,                            # dq/dt (vapour gain)
+            dqcdt_local,
+            dqidt_local,
+            rain_source,                          # local rain source (kg/m²/s)
+            snow_source,
+        )
+        return (zrfl_out, zsfl_out, zclcpre_out), out
+
+    level_inputs = (
+        temperature, specific_humidity, pressure,
+        cloud_water, cloud_ice, cloud_fraction,
+        air_density, layer_thickness,
+        qc_in_cloud, qi_in_cloud,
+        qc_auto, qi_auto,
+        pmref,
+    )
+    (zrfl_surface, zsfl_surface, _zclcpre_surface), per_level_out = jax.lax.scan(
+        step,
+        (jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
+        level_inputs,
+    )
+    dtedt, dqdt, dqcdt, dqidt, rain_flux, snow_flux = per_level_out
+
+    tendencies = MicrophysicsTendencies(
+        dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
+        dqrdt=jnp.zeros(nlev),  # rain/snow live in the flux, not state
+        dqsdt=jnp.zeros(nlev),
+    )
+    state = MicrophysicsState(
+        rain_flux=rain_flux, snow_flux=snow_flux,
+        qc_in_cloud=qc_in_cloud, qi_in_cloud=qi_in_cloud,
+        autoconv_rate=qc_auto, accretion_rate=qc_auto * 0,
+        melting_rate=qc_auto * 0, freezing_rate=qc_auto * 0,
+        precip_rain=zrfl_surface, precip_snow=zsfl_surface,
+    )
     return tendencies, state

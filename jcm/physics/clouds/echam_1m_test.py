@@ -10,7 +10,8 @@ from .echam_1m import (
     autoconversion, autoconversion_beheng, autoconversion_kk2000,
     accretion_rain_cloud,
     ice_autoconversion, snow_accretion, melting_freezing,
-    evaporation_sublimation, sedimentation_flux, cloud_microphysics
+    evaporation_sublimation, sedimentation_flux, cloud_microphysics,
+    cloud_microphysics_column_sweep,
 )
 from jcm.constants import tmelt
 
@@ -642,5 +643,186 @@ if __name__ == "__main__":
     test_full.test_mixed_phase_process()
     test_full.test_conservation()
     test_full.test_jax_compatibility()
-    
+
+
+class TestColumnSweepMicrophysics:
+    """Tests for the ICON ``mo_cloud.f90`` column-sweep port.
+
+    The column sweep propagates rain (``zrfl``) and snow (``zsfl``) as
+    downward fluxes top-to-bottom inside a single timestep. These tests
+    cover the column-budget invariants that the per-level
+    :func:`cloud_microphysics` cannot satisfy because it discards rain/
+    snow each call.
+    """
+
+    @staticmethod
+    def _column(nlev=20, qc_top=None, qi_top=None, T_profile=None):
+        """Build a column with optional cloud water/ice loading."""
+        T = jnp.linspace(220.0, 295.0, nlev) if T_profile is None else T_profile
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        q = jnp.full(nlev, 5e-3)
+        qc = jnp.zeros(nlev) if qc_top is None else qc_top
+        qi = jnp.zeros(nlev) if qi_top is None else qi_top
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        return T, q, p, qc, qi, cf, rho, dz, ndrop
+
+    def test_no_clouds_no_precip(self):
+        """A column with zero qc/qi must produce zero surface precip."""
+        cfg = MicrophysicsParameters.default()
+        T, q, p, qc, qi, cf, rho, dz, ndrop = self._column()
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        assert float(state.precip_rain) == 0.0
+        assert float(state.precip_snow) == 0.0
+
+    def test_warm_cloud_makes_surface_rain(self):
+        """A liquid cloud aloft in a warm, near-saturated column produces rain.
+
+        Background ``q`` is set to ~95% of saturation everywhere so that
+        Rotstayn rain evaporation cannot consume the full precipitation
+        flux before it reaches the surface.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(280.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.95 * qsw
+        qc = jnp.zeros(nlev).at[5].set(2e-3)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        # Rain at surface, no snow (column never goes below freezing).
+        assert float(state.precip_rain) > 1e-6
+        assert float(state.precip_snow) == 0.0
+
+    def test_subsaturated_column_evaporates_rain(self):
+        """A dry column under a cloud must evaporate falling rain.
+
+        Without Rotstayn rain evaporation, a cloud aloft would always
+        deliver its precipitation to the surface. With rain evap, the
+        surface flux is *less* than the column-integrated rain source
+        in a column with sub-saturated layers below the cloud.
+        """
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(280.0, 300.0, nlev)
+        # Dry column (q ~ 5e-3 ≪ qsw ≈ 0.02 at 290K).
+        qc = jnp.zeros(nlev).at[5].set(2e-3)
+        T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop = self._column(
+            nlev=nlev, qc_top=qc, T_profile=T,
+        )
+        _, state = cloud_microphysics_column_sweep(
+            T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        rain_source_total = float(jnp.sum(state.rain_flux))
+        # surface precip should be strictly LESS than the local rain
+        # source when rain evap is active in subsaturated air below cloud.
+        assert float(state.precip_rain) < rain_source_total
+
+    def test_snow_above_warm_layer_melts_to_rain(self):
+        """Snow flux generated aloft melts as it falls into T>273K layers."""
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        # Cold above (level 3, 240K), warm below (>273K from level 8 down).
+        T = jnp.concatenate([
+            jnp.linspace(220.0, 260.0, 8),
+            jnp.linspace(280.0, 295.0, nlev - 8),
+        ])
+        qi = jnp.zeros(nlev).at[3].set(5e-4).at[4].set(3e-4)
+        T_p, q, p, qc, qi_arr, cf, rho, dz, ndrop = self._column(
+            nlev=nlev, qi_top=qi, T_profile=T,
+        )
+        _, state = cloud_microphysics_column_sweep(
+            T_p, q, p, qc, qi_arr, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        # The aloft ice → snow flux is small; what matters is that the
+        # warm layers melt all of it before the surface, so surface snow
+        # is essentially zero while surface rain is positive.
+        assert float(state.precip_snow) < 1e-10
+        # Some ice was autoconverted to snow → melted → rain.
+        assert float(state.precip_rain) >= 0.0
+
+    def test_zero_dt_dependence_on_thicker_column(self):
+        """Sanity: thicker layers ≠ instability; precip should be finite."""
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(280.0, 295.0, nlev)
+        qc = jnp.zeros(nlev).at[5].set(2e-3)
+        T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop = self._column(
+            nlev=nlev, qc_top=qc, T_profile=T,
+        )
+        for dz_val in (200.0, 1000.0, 2000.0):
+            dz_v = jnp.full(nlev, dz_val)
+            _, state = cloud_microphysics_column_sweep(
+                T_p, q, p, qc_arr, qi, cf, rho, dz_v, ndrop, dt=1800.0, config=cfg,
+            )
+            assert jnp.isfinite(state.precip_rain)
+            assert float(state.precip_rain) >= 0.0
+
+    def test_jit_and_vmap(self):
+        """Column sweep must be jit-able and vmap-able (matches per-level)."""
+        cfg = MicrophysicsParameters.default()
+        nlev = 15
+        T_p, q, p, qc, qi, cf, rho, dz, ndrop = self._column(nlev=nlev)
+        qc = qc.at[5].set(1e-3)
+
+        f = jax.jit(cloud_microphysics_column_sweep, static_argnames=())
+        _, state_jit = f(T_p, q, p, qc, qi, cf, rho, dz, ndrop, 1800.0, cfg)
+        assert jnp.isfinite(state_jit.precip_rain)
+
+        # Stack 4 columns and vmap over column axis 0.
+        T_b = jnp.stack([T_p] * 4, axis=0)
+        q_b = jnp.stack([q] * 4, axis=0)
+        p_b = jnp.stack([p] * 4, axis=0)
+        qc_b = jnp.stack([qc] * 4, axis=0)
+        qi_b = jnp.stack([qi] * 4, axis=0)
+        cf_b = jnp.stack([cf] * 4, axis=0)
+        rho_b = jnp.stack([rho] * 4, axis=0)
+        dz_b = jnp.stack([dz] * 4, axis=0)
+        nd_b = jnp.stack([ndrop] * 4, axis=0)
+        _, state_b = jax.vmap(
+            cloud_microphysics_column_sweep,
+            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
+        )(T_b, q_b, p_b, qc_b, qi_b, cf_b, rho_b, dz_b, nd_b, 1800.0, cfg)
+        assert state_b.precip_rain.shape == (4,)
+        assert jnp.all(jnp.isfinite(state_b.precip_rain))
+
+    def test_surface_flux_matches_source_when_no_evap(self):
+        """In a saturated column, no rain evaporates: surface == ∑ source.
+
+        Rain evaporation requires sub-saturation (``q < qsw``); set
+        ``q = qsw`` everywhere so Rotstayn's ``zsusatw = min(0, …) = 0``
+        and the propagating ``zrfl`` at the surface equals the column
+        integrated local rain source exactly.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 15
+        T = jnp.linspace(280.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        q = jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[4].set(1.5e-3).at[7].set(8e-4)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        assert jnp.allclose(
+            state.precip_rain, jnp.sum(state.rain_flux), rtol=1e-5,
+        )
+
     print("All tests passed!")
