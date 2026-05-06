@@ -883,10 +883,18 @@ def apply_microphysics_1m(
     cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
     droplet_number_per_kg = cdnc_m3 / air_density
 
-    # Rain / snow are in-step column fluxes in ICON's 1M scheme (see
-    # ``mo_cloud.f90`` lines 267-268: ``zrfl/zsfl`` reset to 0 at TOA at
-    # the start of every call). The ``cloud_microphysics`` helper
-    # initialises ``rain_water`` and ``snow`` to zeros internally.
+    # Reverted from cloud_microphysics_column_sweep — that scheme's
+    # Rotstayn rain evaporation creates a positive-feedback loop
+    # (rain evaporates → moistens dry layer → Sundqvist condenses →
+    # latent heat release → drives convection → more rain) that the
+    # surface bisect identified as the dominant amplifier of the
+    # day-7 NaN on T63L47 + real terrain. The per-level
+    # `cloud_microphysics` discards rain each step (no propagating
+    # flux, no inter-level evap coupling), which breaks the feedback
+    # at the cost of microphysics fidelity. Tracked as follow-up
+    # work — needs either ICON's RH-hysteresis bound on the evap
+    # source or a tighter Newton solve so the evap stays bounded
+    # under coupling with Sundqvist.
     micro_tend_all, micro_state_all = jax.vmap(
         cloud_microphysics,
         in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
@@ -1293,13 +1301,18 @@ def apply_surface(
     # use ``stl_am`` instead of ``sst``).
     ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
-    # ``stl_am`` is the JSBACH land surface temperature climatology
-    # (``surf_temp`` from ``ic_land_soil_T63GR15_*.nc``), already at the
-    # model's orography — no lapse correction needed. (An earlier workaround
-    # subtracted 6.5 K/km · orog because the bundled BCs used ``stl ≈ sst``
-    # extrapolated over land — see ``utils/convert_echam_bc.py`` for the
-    # path that picks the right field.)
-    land_temp = forcing.stl_am.reshape(ncols)
+    # Apply a 6.5 K/km dry lapse-rate correction to the prescribed land
+    # surface temperature so it represents the temperature at the model's
+    # actual orography rather than at sea level. The BC files distributed
+    # in ``jcm/data/bc/t63`` set ``stl_am ≈ sst`` everywhere, which gives
+    # a ~+30 K bias over the Tibetan / Andean / Himalayan plateaux at
+    # 4–5 km elevation. The unlapsed temperature drives runaway sensible-
+    # heat flux upward at the lowest model level (ΔT ≈ 30 K · ρ · cp · CH · U)
+    # and is the dominant cause of the T63L47 ``test_real_terrain_with_sponge_stable_30_days``
+    # NaN around day 7. The lapse coefficient matches the standard
+    # atmospheric lapse used by ECHAM's ``initemp.f90`` for downscaling
+    # boundary surface temperatures to model orography.
+    land_temp = forcing.stl_am.reshape(ncols) - 6.5e-3 * terrain.orog.reshape(ncols)
     ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
                                  jnp.minimum(ocean_temp, ctfreez),
                                  ocean_temp)
