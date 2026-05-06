@@ -163,8 +163,11 @@ cython_debug/
 .DS_Store
 notebooks/model_state.nc
 
-# NetCDF files
+# NetCDF files (output diagnostics, intermediate products) — but keep
+# the small T63 ECHAM boundary-condition climatologies under
+# ``jcm/data/bc/`` so the standard tests don't need an external download.
 *.nc
+!jcm/data/bc/**/*.nc
 
 # Docker remote setup
 startup.sh

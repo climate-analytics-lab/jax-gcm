@@ -35,6 +35,7 @@ Usage::
         --surface T63GR15_jan_surf.nc \\
         --sst T63_amipsst_1979-2008_mean.nc \\
         --sic T63_amipsic_1979-2008_mean.nc \\
+        --land-init ic_land_soil_T63GR15_1976.nc \\
         --out-dir jcm/data/bc/t63/
 
 Produces, in ``--out-dir``:
@@ -47,6 +48,17 @@ Produces, in ``--out-dir``:
 
 Either ``--surface`` (terrain only) or ``--sst`` + ``--sic`` +
 ``--surface`` (terrain + forcing) is required.
+
+If ``--land-init`` is provided (the standard ECHAM
+``ic_land_soil_T63GR15_*.nc`` JSBACH initial-conditions file), the
+``stl`` field uses the **real monthly land surface temperature
+climatology** (variable ``surf_temp``, 12-month) and the soil moisture
+fields use ``init_moist`` / ``layer_moist`` rather than the AMIP-SST
+extrapolation. Without ``--land-init``, ``stl`` falls back to the
+AMIP SST extrapolation (note: gives ~+30 K bias over Antarctic
+plateau and similar over the Tibetan/Andean plateaus, requiring the
+lapse-rate workaround in ``echam_physics.apply_surface``). With it,
+the workaround is unnecessary.
 """
 
 from __future__ import annotations
@@ -108,24 +120,52 @@ def _build_forcing(
     sst_ds: xr.Dataset,
     sic_ds: xr.Dataset,
     surface_ds: xr.Dataset,
+    land_ds: xr.Dataset | None = None,
 ) -> xr.Dataset:
     # Force shared (lat, lon) coords from SST so xarray doesn't mask rows
     # where the three files disagree in the last few bits.
     sic_ds = sic_ds.assign_coords(lat=sst_ds["lat"], lon=sst_ds["lon"])
     surface_ds = surface_ds.assign_coords(lat=sst_ds["lat"], lon=sst_ds["lon"])
+    if land_ds is not None:
+        land_ds = land_ds.assign_coords(lat=sst_ds["lat"], lon=sst_ds["lon"])
 
     sic = sic_ds["sic"].clip(0.0, 100.0) * 0.01
 
     time = sst_ds["time"]
     ones_t = xr.ones_like(time, dtype="float32")
-    ws = surface_ds["WS"] if "WS" in surface_ds else surface_ds["lsm"] * 0.0
-    sn = surface_ds["SN"] if "SN" in surface_ds else surface_ds["lsm"] * 0.0
     alb = surface_ds["ALB"] if "ALB" in surface_ds else surface_ds["lsm"] * 0.0
 
+    if land_ds is not None and "surf_temp" in land_ds:
+        # ``surf_temp`` is the JSBACH monthly land surface temperature
+        # climatology (12, lat, lon). Use it directly instead of the
+        # AMIP SST extrapolation. Re-stamp the time axis to the SST
+        # months so the JCM forcing interpolator sees a single time
+        # dimension.
+        stl_src = land_ds["surf_temp"].transpose("time", "lat", "lon")
+        # Map ``land_ds.time`` (12 months) onto ``sst_ds.time`` (also 12
+        # months for AMIP climatology). They have identical length but
+        # different epoch encodings.
+        stl_t = stl_src.assign_coords(time=time).transpose("lon", "lat", "time")
+    else:
+        # Fallback: AMIP SST extrapolated over land. Gives ~+30 K bias
+        # at high orography (Tibetan / Antarctic plateau) — needs the
+        # lapse-rate workaround in ``apply_surface``.
+        stl_t = sst_ds["sst"].transpose("lon", "lat", "time")
+
+    if land_ds is not None and "init_moist" in land_ds:
+        # JSBACH-initialised soil wetness (m). Single-time field broadcast
+        # across the 12-month axis. ``layer_moist`` is also available
+        # (5 soil layers) but JCM's surface scheme currently only uses
+        # the column-integrated soilw_am.
+        ws = land_ds["init_moist"]
+    else:
+        ws = surface_ds["WS"] if "WS" in surface_ds else surface_ds["lsm"] * 0.0
+    if land_ds is not None and "snow" in land_ds:
+        sn = land_ds["snow"]
+    else:
+        sn = surface_ds["SN"] if "SN" in surface_ds else surface_ds["lsm"] * 0.0
     soilw_t = (ws * ones_t).transpose("lon", "lat", "time")
     snowc_t = (sn * ones_t).transpose("lon", "lat", "time")
-    # Land surface T proxy = SST (extrapolated over land in the AMIP file).
-    stl_t = sst_ds["sst"].transpose("lon", "lat", "time")
 
     ds = xr.Dataset({
         "sst":      sst_ds["sst"].transpose("lon", "lat", "time").astype("float32"),
@@ -147,6 +187,12 @@ def main() -> None:
                    help="AMIP monthly SST file (omit for terrain-only)")
     p.add_argument("--sic", type=Path,
                    help="AMIP monthly sea-ice file (omit for terrain-only)")
+    p.add_argument("--land-init", type=Path,
+                   help="JSBACH land initial-conditions file "
+                        "(e.g. ic_land_soil_T63GR15_1976.nc) — provides the "
+                        "real monthly land T climatology + initial soil "
+                        "moisture. Optional but strongly recommended; without "
+                        "it ``stl`` falls back to AMIP-SST extrapolation.")
     p.add_argument("--out-dir", required=True, type=Path,
                    help="Output directory (created if missing)")
     args = p.parse_args()
@@ -164,8 +210,16 @@ def main() -> None:
     if args.sst is not None:
         sst_ds = _normalize(xr.open_dataset(args.sst))
         sic_ds = _normalize(xr.open_dataset(args.sic))
+        # JSBACH IC file has time encoded with a pre-1582 ``1-1-1`` reference
+        # date that xarray decodes via cftime by default; ask for non-decoded
+        # times so the SST monthly axis substitution below stays simple.
+        land_ds = (
+            _normalize(xr.open_dataset(args.land_init, decode_times=False))
+            if args.land_init is not None
+            else None
+        )
         forcing_path = args.out_dir / "forcing.nc"
-        _build_forcing(sst_ds, sic_ds, surface_ds).to_netcdf(forcing_path)
+        _build_forcing(sst_ds, sic_ds, surface_ds, land_ds).to_netcdf(forcing_path)
         print(f"wrote {forcing_path}")
 
 
