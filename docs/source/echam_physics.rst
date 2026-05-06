@@ -45,35 +45,63 @@ Each parameterization is described in detail below.
 Radiation
 ^^^^^^^^^
 
-**Type**: Simplified two-stream radiative transfer with gas, cloud, and aerosol optics
+JAX-GCM offers three radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
 
-**Reference Model**: PSrad (Pincus & Stevens, 2013), which wraps the RRTM gas optics (Iacono et al., 2008). The full ICON-A uses 14 shortwave bands with 112 g-points and 16 longwave bands with 140 g-points. JAX-GCM uses a reduced band configuration for computational efficiency.
+- ``"rrtmgp"`` (recommended): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
+- ``"grey"`` (default): a fast, low-fidelity two-stream scheme intended for development and ML emulator training
+- ``"emulated"``: a neural-network surrogate of RRTMGP
 
-**Description**: Computes shortwave (solar) and longwave (terrestrial) radiative heating rates at each model level. Includes explicit treatment of gas absorption (H2O, CO2, O3, CH4, N2O), cloud optical properties (liquid and ice), and aerosol effects.
+**RRTMGP** (recommended for production)
 
-**Key Features**:
+The RRTMGP path provides physically correct heating rates suitable for multi-day to multi-year integrations.
 
-- Two-stream solver for shortwave and longwave fluxes
-- Shortwave: 2 bands (visible 0.2--0.69 um, near-IR 0.69--2.5 um)
-- Longwave: 3 bands (window 10--350 cm-1, CO2 350--500 cm-1, H2O 500--2500 cm-1)
-- Gas optics for H2O, CO2, O3, CH4, N2O
-- Mie scattering for liquid cloud droplets with wavelength-dependent refractive index
-- Ice crystal optics based on Yang et al. (2013) and Baum et al. (2014)
-- Aerosol direct effects with Angstrom spectral scaling
-- Aerosol indirect effects via CDNC modification of cloud droplet effective radius
+*Configuration*: g128 longwave + g112 shortwave (the "reduced" RRTMGP variant designed for production GCMs).
+
+.. list-table:: Radiation g-point comparison
+   :header-rows: 1
+   :widths: 35 25 25 15
+
+   * - Scheme
+     - LW g-points
+     - SW g-points
+     - Notes
+   * - ECHAM-IFS (RRTM)
+     - 140
+     - 112
+     - 16 LW + 14 SW bands; production ECHAM
+   * - **JAX-GCM (RRTMGP reduced)**
+     - **128**
+     - **112**
+     - Default ICON production config; what we use today
+   * - ICON-A (RRTMGP reduced)
+     - 128
+     - 112
+     - Same configuration as JAX-GCM
+   * - RRTMGP reference
+     - 256
+     - 224
+     - Used for line-by-line validation; ~2× the cost
+
+The reference (g256 / g224) variant ships with the ``jax-rrtmgp`` package and can be selected by editing the file paths in :py:func:`jcm.physics.radiation.rrtmgp._ensure_rrtmgp` if higher spectral fidelity is needed; with the chunked-vmap strategy described below it still fits on a single 80 GiB A100.
+
+*Memory & cost*: RRTMGP has substantial intermediate-array memory needs. JAX-GCM evaluates it in chunks of 4608 columns (T63 = 4 chunks via ``lax.map``) so peak GPU memory stays around 17 GiB per chunk on T63L47, well under 80 GiB. Per-call cost is roughly 40× the grey scheme; with the default 2-hour ``radiation_interval`` cache, the amortised cost is ~4× grey total.
+
+**Grey two-stream** (development / ML training)
+
+The grey scheme is a simplified two-stream scheme with hand-tuned band coefficients. It is fast (single GPU pass, no chunking) but NOT physically calibrated — comparison against the RRTMGP harness shows mid-tropospheric LW cooling is roughly 150× too weak and OLR is ~70 % too high on a tropical column. Grey is appropriate for short development runs, neural-network emulator training (the network learns the mapping anyway), and any test where radiation is a passive element of the run; for multi-day climate-style integrations use RRTMGP.
+
+*Configuration*: 2 SW bands (visible 0.2-0.69 µm, near-IR 0.69-2.5 µm), 3 LW bands (window 10-350 cm⁻¹, CO2 350-500 cm⁻¹, H2O 500-2500 cm⁻¹).
+
+**Common features (all backends)**
+
+- Gas absorption for H2O, CO2, O3, CH4, N2O
+- Mie scattering for liquid cloud droplets; ice crystal optics (Yang et al. 2013, Baum et al. 2014)
+- Aerosol direct effects with Angstrom spectral scaling (AOD(λ) = AOD(550nm) · (λ/0.55)^(-α))
+- Aerosol indirect (Twomey) effect via CDNC modification of droplet effective radius
 - Solar geometry from ``jax_solar`` (zenith angle, day/night, orbital parameters)
+- Heating-rate caching: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps via ``_radiation_with_caching``. This matches the ECHAM/ICON convention — radiation is the slowest physics term and varies on hour timescales, so caching is essentially free at the accuracy level. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
 
-**Process**:
-
-1. Compute solar zenith angle and TOA insolation from date, latitude, longitude
-2. Calculate gas optical depths for SW and LW bands
-3. Calculate cloud optical properties (liquid + ice) with Mie/parameterized scattering
-4. Scale aerosol AOD spectrally using Angstrom exponent: AOD(lambda) = AOD(550nm) * (lambda/0.55)^(-alpha)
-5. Combine gas, cloud, and aerosol optical properties
-6. Solve two-stream equations for upward and downward fluxes
-7. Convert net fluxes to heating rates
-
-**Configurable Parameters** (:py:class:`RadiationParameters`):
+**Configurable parameters** (:py:class:`jcm.physics.radiation.radiation_types.RadiationParameters`)
 
 .. list-table::
    :header-rows: 1
@@ -83,17 +111,14 @@ Radiation
      - Description
      - Default
    * - ``dt_rad``
-     - Radiation time step (s)
+     - Radiation timestep (s)
      - 3600.0
+   * - ``radiation_interval``
+     - Seconds between full radiation calls (cached on intermediate dynamics steps; 0 = every step)
+     - 7200.0
    * - ``solar_constant``
-     - Total solar irradiance (W/m2)
+     - Total solar irradiance (W/m²)
      - 1361.0
-   * - ``n_sw_bands``
-     - Number of shortwave bands
-     - 2
-   * - ``n_lw_bands``
-     - Number of longwave bands
-     - 3
    * - ``co2_vmr``
      - CO2 volume mixing ratio
      - 400e-6
@@ -103,10 +128,6 @@ Radiation
    * - ``n2o_vmr``
      - N2O volume mixing ratio
      - 0.32e-6
-
-.. admonition:: Gap vs. ICON-A
-
-   The full ICON-A PSrad scheme uses 14 SW and 16 LW bands with correlated-k gas optics and the Monte Carlo Independent Column Approximation (McICA) for sub-grid cloud variability. JAX-GCM currently uses 2 SW and 3 LW bands with simplified gas optics. Upgrading to RRTMGP-compatible band structure would improve spectral accuracy.
 
 
 Convection
@@ -125,6 +146,8 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
+- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent.
+- **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
 
@@ -224,25 +247,33 @@ Cloud Cover
 Cloud Microphysics
 ^^^^^^^^^^^^^^^^^^
 
-**Type**: Single-moment bulk microphysics based on Lohmann & Roeckner (1996)
+JAX-GCM ships two cloud microphysics schemes; the 1-moment scheme is the default ``echam_physics(cloud_scheme="1m")`` and the 2-moment scheme is selectable via ``cloud_scheme="2m"``.
 
-**Description**: Represents conversion processes between water vapor, cloud liquid, cloud ice, rain, and snow. Rain and snow fluxes are diagnosed within each column (not advected).
+**1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics`
 
-**Key Processes**:
+Bulk single-moment scheme based on ICON's ``mo_cloud.f90`` (single-moment branch). Tracks cloud liquid (``qc``) and cloud ice (``qi``) as prognostic tracers; rain and snow fluxes are computed within each column and not advected.
 
-1. **Autoconversion**: Cloud water to rain via Khairoutdinov & Kogan (2000) parameterization
+Key processes:
 
-   - P_aut = 1350 * qc^2.47 * N_c^(-1.79), where N_c is cloud droplet number concentration
-   - Sensitive to aerosol-modified CDNC via the Twomey effect
+1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
 
-2. **Accretion**: Collection of cloud droplets by raindrops
-3. **Aggregation**: Collection of ice crystals by snow (Levkov et al., 1992)
-4. **Ice nucleation**: Temperature-dependent ice crystal formation
-5. **Melting/Freezing**: Temperature-dependent phase transitions at the melting level
-6. **Sedimentation**: Terminal velocity parameterizations for rain, snow, and ice
-7. **Evaporation/Sublimation**: Subsaturation-driven evaporation of precipitation
+   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is the rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut`` is the qc threshold above which autoconversion fires (small g/kg-scale value, e.g. 1e-5).
 
-**Configurable Parameters** (:py:class:`MicrophysicsParameters`):
+2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
+3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
+4. **Riming** of cloud water by falling snow
+5. **Melting / freezing** at the 0 °C level
+6. **Sedimentation** with terminal velocity parameterisations:
+
+   - Ice uses the integral form ``zxised = xi · exp(-vt·dt/dz) + flux_in / (rho·vt) · (1 - exp(...))`` for stability at the long ECHAM-default ``dt = 12 min`` timestep
+   - Rain and snow use the simpler instantaneous form
+
+7. **Evaporation / sublimation** of precipitation in subsaturated layers
+
+A faithful column-sweep variant :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep` is also implemented (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation). It is currently NOT wired into the default factory because it interacts with Sundqvist condensation in a way that creates a positive moisture-feedback loop (rain re-evap → condensation → latent heat release → convection); a coupled implicit Newton step between the rain-evap source and the condensation sink is the planned fix. Until then ``apply_microphysics_1m`` calls the per-level helper.
+
+**Configurable parameters** (:py:class:`jcm.physics.clouds.echam_1m.MicrophysicsParameters`):
 
 .. list-table::
    :header-rows: 1
@@ -251,34 +282,51 @@ Cloud Microphysics
    * - Parameter
      - Description
      - Default
+   * - ``autoconversion_scheme``
+     - 0 (Beheng) or 1 (KK2000); accepts ``"beheng"`` / ``"kk2000"``
+     - 0 (Beheng)
    * - ``ccraut``
-     - Autoconversion rate coefficient
-     - 1350.0
-   * - ``ccraut_exp_qc``
-     - Autoconversion exponent for cloud water
-     - 2.47
-   * - ``ccraut_exp_nc``
-     - Autoconversion exponent for droplet number
-     - -1.79
-   * - ``cdnc_base``
-     - Base cloud droplet number concentration (1/m3)
+     - Autoconversion rate prefactor (Beheng) or qc threshold (KK2000)
+     - 15.0
+   * - ``ccracl``
+     - Accretion coefficient (cloud → rain)
+     - 6.0
+   * - ``cthomi``
+     - Homogeneous ice nucleation temperature (K)
+     - 233.15
+   * - ``ccollec``
+     - Collection efficiency rain/cloud
+     - 0.7
+   * - ``ccollei``
+     - Collection efficiency snow/ice
+     - 0.3
+   * - ``cn0s``
+     - Snow particle number density (1/m³)
+     - 3.0e6
+   * - ``crhosno``
+     - Snow density (kg/m³)
+     - 100.0
+   * - ``cvtfall``
+     - Ice content-dependent terminal velocity factor
+     - 3.29
+   * - ``vt_rain_a`` / ``vt_rain_b``
+     - Rain terminal velocity coefficient and exponent
+     - 386.0 / 0.67
+   * - ``vt_snow_a`` / ``vt_snow_b``
+     - Snow terminal velocity coefficient and exponent
+     - 8.8 / 0.15
+   * - ``base_cdnc``
+     - Baseline CDNC in clean air (1/m³)
      - 100e6
-   * - ``ccsacl``
-     - Accretion coefficient
-     - 0.1
-   * - ``v_rain``
-     - Rain terminal velocity (m/s)
-     - 5.0
-   * - ``v_snow``
-     - Snow terminal velocity (m/s)
-     - 1.0
-   * - ``v_ice``
-     - Ice crystal sedimentation velocity (m/s)
-     - 0.1
 
-.. admonition:: Gap vs. ICON-A
+**2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
-   ICON-A uses the Lohmann & Roeckner (1996) single-moment scheme with refinements from Lohmann (2004). A two-moment scheme (Seifert & Beheng, 2006) is available as an option but not default. The JAX-GCM implementation uses the KK2000 autoconversion, which is more modern than the original Sundqvist (1978) autoconversion in ECHAM6/ICON-A. This is a deliberate choice to improve aerosol-cloud sensitivity.
+Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation closure (Lin et al., 2025, see Cloud–Aerosol Coupling below). Tracks ``qc``, ``qi``, ``Nc``, ``Ni``, ``qr``, ``qs`` as prognostic variables. Currently in alpha — selectable but the 1M scheme is the default.
+
+.. admonition:: Notes
+
+   - The Sundqvist condensation that feeds the microphysics uses a linearised Newton step (``cond = (q - qs) / (1 + L/cp · dqs/dT)``) ported from ICON ``mo_cloud.f90`` with the Newton denominator that damps the per-step heating by ~6× in the warm troposphere — without it, single-step condensation at 100 % supersat produced ~+60 K heating spikes vs ECHAM's ~+12 K.
+   - ``qc`` and ``qi`` are declared as prognostic tracers via ``EchamCloudsAndMicrophysics1M.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes per ICON ``mo_cloud.f90:267-268`` (``zrfl/zsfl`` reset to 0 at TOA each call).
 
 
 Cloud–Aerosol Coupling (SPA activation)
@@ -382,17 +430,18 @@ Surface Physics
 
 **Type**: Multi-surface tile scheme with separate treatment of ocean, sea ice, and land
 
-**Description**: Computes turbulent fluxes of momentum, heat, and moisture between the surface and lowest atmospheric level. Each surface type has independent prognostic temperature and flux calculations; grid-box mean fluxes are area-weighted.
+**Description**: Computes turbulent fluxes of momentum, heat, and moisture between the surface and lowest atmospheric level. Each surface type has independent prognostic temperature and flux calculations; grid-box mean fluxes are area-weighted across the three tile fractions (``water_fraction``, ``sea_ice_fraction``, ``land_fraction``) which sum to 1.
 
-**Key Features**:
+**Key features**:
 
-- **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterization
+- **Per-tile temperatures**: ocean uses ``forcing.sea_surface_temperature``; sea ice uses ``min(SST, ctfreez=271.38 K)`` (saline freezing point) where ``sice > 0``, else SST; land uses ``forcing.stl_am`` with a 6.5 K/km dry orographic lapse correction (see "Boundary-condition workarounds" below)
+- **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterisation
 - **Sea Ice**: Multi-layer thermodynamics (2 default layers), snow on ice, melting/freezing
 - **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture
-- **Exchange Coefficients**: Monin-Obukhov similarity theory with bulk Richardson number stability correction
-- **Grid-Box Mean**: Area-weighted averaging across three surface types
+- **Exchange coefficients**: Monin-Obukhov similarity theory with bulk Richardson number stability correction. Businger-Dyer Φ_m, Φ_h are < 1 under unstable conditions so that the bulk exchange coefficient (κ²/(ln·Φ_m·Φ_h)·U) is *enhanced* — the textbook free-convection result. (See ``jcm.physics.surface.echam.turbulent_fluxes.compute_stability_functions`` and the test ``test_unstable_stability_functions``.)
+- **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (which is easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express.
 
-**Configurable Parameters** (:py:class:`SurfaceParameters`):
+**Configurable parameters** (:py:class:`jcm.physics.surface.SurfaceParameters`):
 
 .. list-table::
    :header-rows: 1
@@ -419,6 +468,15 @@ Surface Physics
    * - ``n_soil_layers``
      - Number of soil layers
      - 4
+
+**Boundary-condition workarounds**
+
+The T63 boundary-condition files distributed in ``jcm/data/bc/t63`` are placeholder data (``stl ≈ sst`` everywhere), not a proper land climatology. Two workarounds in ``apply_surface`` keep these BCs from blowing the model up:
+
+1. **Orographic lapse on stl**: ``land_temp = stl_am - 6.5e-3 · terrain.orog``. Without this the un-lapsed BC reads ~+30 K hotter than the actual atmospheric profile over the Tibetan / Andean / Antarctic plateaus, driving runaway sensible heat flux.
+2. **Sea-ice tile temperature cap**: ``ice_surface_temp = min(sst, ctfreez=271.38 K)`` where ``sice_am > 0``. The polar Arctic / Antarctic ice surface is constrained to the saline freezing point even if the underlying SST data is warmer.
+
+These are workarounds, not the long-term answer — the right fix is to land a proper land-surface climatology (ERA5 ``stl1``, ``stl2``, or similar) at the model's orography. Tracked as a follow-up.
 
 .. admonition:: Gap vs. ICON-A
 
