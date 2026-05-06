@@ -1301,18 +1301,13 @@ def apply_surface(
     # use ``stl_am`` instead of ``sst``).
     ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
     ctfreez = 271.38  # K, ECHAM ``iniphy.f90:71`` saline-water freezing
-    # Apply a 6.5 K/km dry lapse-rate correction to the prescribed land
-    # surface temperature so it represents the temperature at the model's
-    # actual orography rather than at sea level. The BC files distributed
-    # in ``jcm/data/bc/t63`` set ``stl_am ≈ sst`` everywhere, which gives
-    # a ~+30 K bias over the Tibetan / Andean / Himalayan plateaux at
-    # 4–5 km elevation. The unlapsed temperature drives runaway sensible-
-    # heat flux upward at the lowest model level (ΔT ≈ 30 K · ρ · cp · CH · U)
-    # and is the dominant cause of the T63L47 ``test_real_terrain_with_sponge_stable_30_days``
-    # NaN around day 7. The lapse coefficient matches the standard
-    # atmospheric lapse used by ECHAM's ``initemp.f90`` for downscaling
-    # boundary surface temperatures to model orography.
-    land_temp = forcing.stl_am.reshape(ncols) - 6.5e-3 * terrain.orog.reshape(ncols)
+    # ``stl_am`` is the JSBACH land surface temperature climatology
+    # (``surf_temp`` from ``ic_land_soil_T63GR15_*.nc``), already at the
+    # model's orography — no lapse correction needed. (An earlier workaround
+    # subtracted 6.5 K/km · orog because the bundled BCs used ``stl ≈ sst``
+    # extrapolated over land — see ``utils/convert_echam_bc.py`` for the
+    # path that picks the right field.)
+    land_temp = forcing.stl_am.reshape(ncols)
     ice_surface_temp = jnp.where(sea_ice_fraction > 0.0,
                                  jnp.minimum(ocean_temp, ctfreez),
                                  ocean_temp)
