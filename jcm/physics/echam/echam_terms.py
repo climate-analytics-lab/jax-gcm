@@ -35,6 +35,7 @@ from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
 from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
+from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
 )
@@ -76,7 +77,12 @@ def _data_from_diagnostics(
     elif "_diagnostics" in diagnostics:
         data = data.copy(diagnostics=diagnostics["_diagnostics"])
 
-    if "_radiation" in diagnostics:
+    # ``radiation`` lives under a public top-level key after Phase 3
+    # (``GreyTwoStreamRadiation`` / ``EchamBoundaryConditions``); fall back to
+    # the legacy ``_radiation`` typed key for safety.
+    if "radiation" in diagnostics:
+        data = data.copy(radiation=diagnostics["radiation"])
+    elif "_radiation" in diagnostics:
         data = data.copy(radiation=diagnostics["_radiation"])
     # ``clouds`` lives under a public top-level key after Phase 3
     # (``SundqvistCloudFraction`` / microphysics terms); fall back to
@@ -123,7 +129,7 @@ def _diagnostics_from_data(
     """
     out = {
         **diagnostics,
-        "_radiation": data.radiation,
+        "radiation": data.radiation,
         "clouds": data.clouds,
         "_vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
@@ -178,23 +184,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamRadiation(EchamTermBase):
-    """Grey-body radiation scheme."""
-
-    name: ClassVar[str] = "echam_radiation"
-    category: ClassVar[str] = "radiation"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute radiative heating rates and fluxes."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_radiation
-        tend, data = apply_radiation(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 class EchamRadiationRRTMGP(EchamTermBase):
     """RRTMGP full-spectrum radiation scheme."""
@@ -552,7 +541,7 @@ def echam_physics(
     elif radiation_scheme == "rrtmgp":
         rad_term = EchamRadiationRRTMGP()
     elif radiation_scheme == "grey":
-        rad_term = EchamRadiation()
+        rad_term = GreyTwoStreamRadiation(params=p.radiation)
     elif radiation_scheme == "emulated":
         rad_term = EchamRadiationEmulated()
     else:

@@ -90,7 +90,7 @@ class EchamBoundaryConditions(PhysicsTerm):
     category: ClassVar[str] = "forcing"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = (
-        "_radiation", "_surface", "chemistry",
+        "radiation", "_surface", "chemistry",
     )
 
     def __init__(self):
@@ -136,7 +136,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         # Start from whatever the previous step (or upstream term) left us
         # so we don't clobber radiation cache or other sub-struct fields.
         radiation = diagnostics.get(
-            "_radiation", RadiationData.zeros((ncols,), nlev),
+            "radiation", RadiationData.zeros((ncols,), nlev),
         ).copy(
             surface_albedo_vis=albedo_vis,
             surface_albedo_nir=albedo_nir,
@@ -163,7 +163,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
             **diagnostics,
-            "_radiation": radiation,
+            "radiation": radiation,
             "_surface": surface,
             "chemistry": chemistry,
         }
