@@ -1,53 +1,44 @@
-from typing import Tuple
 import jax.numpy as jnp
-from jcm.physics.echam.echam_physics_data import PhysicsData
-from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics_interface import PhysicsTendency
 from jcm.forcing import ForcingData
-from jcm.terrain import TerrainData
 from .macv2_sp_params import AerosolParameters
 
 
 def get_simple_aerosol(
-    state: PhysicsState,
-    physics_data: PhysicsData,
+    height_full: jnp.ndarray,
+    lats_deg: jnp.ndarray,
+    lons_deg: jnp.ndarray,
+    aerosol_data,
     parameters: AerosolParameters,
     forcing: ForcingData,
-    terrain: TerrainData
-) -> Tuple[PhysicsTendency, PhysicsData]:
-    """Apply MACv2-SP (Simple Plumes) aerosol scheme
-    
-    This implements the simplified aerosol parametrization based on
-    Kinne et al. climatology with 9 anthropogenic plumes plus natural background.
-    
-    The scheme computes:
-    - Aerosol optical depth (AOD) profiles
-    - Single scattering albedo (SSA) profiles  
-    - Asymmetry parameter profiles
-    - Column-integrated properties
-    - Twomey effect on cloud droplet number concentration
+):
+    """Apply MACv2-SP (Simple Plumes) aerosol scheme.
+
+    Implements the simplified aerosol parametrisation based on the Kinne
+    et al. climatology with 9 anthropogenic plumes plus a natural
+    background. Computes AOD, single scattering albedo, asymmetry
+    parameter profiles, column-integrated properties, and the Twomey
+    effect on cloud droplet number concentration.
+
+    Args:
+        height_full: Layer-centre height (m), shape ``(nlev, ncols)``.
+        lats_deg: Per-column latitude in degrees, shape ``(ncols,)``.
+        lons_deg: Per-column longitude in degrees, shape ``(ncols,)``.
+        aerosol_data: Existing :class:`AerosolData` to update via
+            ``.copy(...)``. Lets the caller decide whether to seed it
+            from zeros or from the previous step.
+        parameters: Aerosol parameters wrapper exposing ``.aerosol``.
+        forcing: Forcing data — uses ``aerosol_year_weight`` and
+            ``aerosol_ann_cycle`` for time-varying emissions.
+
+    Returns:
+        Updated ``AerosolData`` with AOD profile, optical properties,
+        column AOD, anthropogenic CDNC factor, and CCN concentration set.
+
     """
-    import jax
-        
-    nlev, ncols = state.temperature.shape
-    aerosol_params = parameters.aerosol
-    
-    # Get grid coordinates from cached coordinates
-    lat, lon = jax.numpy.meshgrid(
-        physics_data.echam_coords.lat * 180.0 / jnp.pi,  # Convert to degrees
-        physics_data.echam_coords.lon * 180.0 / jnp.pi,  # degrees
-    )
-    # Then reshape to (ncols,) to match column format
-    lats = lat.reshape(ncols)
-    lons = lon.reshape(ncols)
-    
-    # Get height coordinate for vertical distribution
-    height_full = physics_data.diagnostics.height_full
-    
-    # Initialize output arrays
-    aod_profile = jnp.zeros((nlev, ncols))
-    ssa_profile = jnp.zeros((nlev, ncols))
-    asy_profile = jnp.zeros((nlev, ncols))
-    
+    nlev, ncols = height_full.shape
+    aerosol_params = parameters
+
     # Get temporal weights from forcing data (allows time-varying emissions)
     year_weight = forcing.aerosol_year_weight
     ann_cycle = forcing.aerosol_ann_cycle
@@ -55,54 +46,63 @@ def get_simple_aerosol(
     # Compute the plume spatial distribution once; ``get_anthropogenic_aod`` /
     # ``get_background_aod`` used to recompute it internally so the Gaussian
     # evaluation ran three times per step. Pass it through instead.
-    spatial_dist = get_plume_spatial_distribution(lats, lons, aerosol_params)
+    spatial_dist = get_plume_spatial_distribution(
+        lats_deg, lons_deg, aerosol_params,
+    )
 
     # Calculate anthropogenic and background AOD using vectorized operations
     aod_anthropogenic = get_anthropogenic_aod(
-        aerosol_params, year_weight, ann_cycle, spatial_dist
+        aerosol_params, year_weight, ann_cycle, spatial_dist,
     )
-    aod_background = get_background_aod(aerosol_params, ann_cycle, spatial_dist)
+    aod_background = get_background_aod(
+        aerosol_params, ann_cycle, spatial_dist,
+    )
 
     # Calculate vertical profiles for each plume using vectorized operations
     plume_profiles = get_vertical_profiles(height_full, aerosol_params)
-    
+
     # Combine plume contributions using vectorized operations
     # plume_profiles: (nplumes, nlev, ncols)
     # spatial_dist: (nplumes, ncols)
     # aod_anthropogenic: (ncols,)
     # Need to broadcast properly for multiplication
     plume_contribution = jnp.sum(
-        plume_profiles * 
-        (aod_anthropogenic[jnp.newaxis, jnp.newaxis, :] * spatial_dist[:, jnp.newaxis, :]),
-        axis=0
+        plume_profiles
+        * (aod_anthropogenic[jnp.newaxis, jnp.newaxis, :]
+           * spatial_dist[:, jnp.newaxis, :]),
+        axis=0,
     )
-    
+
     # Add background contribution with uniform vertical distribution
     bg_profile = get_background_vertical_profile(height_full)
-    bg_contribution = bg_profile[:, jnp.newaxis] * aod_background[jnp.newaxis, :]
-    
+    bg_contribution = (
+        bg_profile[:, jnp.newaxis] * aod_background[jnp.newaxis, :]
+    )
+
     # Combine anthropogenic and background contributions
     aod_profile = plume_contribution + bg_contribution
-    
+
     # Calculate optical properties using weighted averages
     ssa_profile, asy_profile, angstrom = get_optical_properties(
-        aod_profile, spatial_dist, aerosol_params
+        aod_profile, spatial_dist, aerosol_params,
     )
 
     # Calculate total column AOD
     aod_total = jnp.sum(aod_profile, axis=0)
 
     # Calculate Twomey effect using proper CDNC relationship
-    cdnc_factor = get_CDNC(aod_anthropogenic) / get_CDNC(jnp.zeros_like(aod_anthropogenic))
+    cdnc_factor = (
+        get_CDNC(aod_anthropogenic)
+        / get_CDNC(jnp.zeros_like(aod_anthropogenic))
+    )
 
     # CCN concentration [cm^-3] for the SPA-style activation floor used by
     # the two-moment microphysics. Both anthropogenic and background plume
     # contributions feed in — i.e. the column AOD is the source. See
-    # `jcm.physics.aerosol.spa.spa_activated_cdnc` for the consumer.
+    # ``jcm.physics.aerosol.spa.spa_activated_cdnc`` for the consumer.
     Nccn = get_CDNC(aod_anthropogenic + aod_background)
 
-    # Update aerosol data
-    aerosol_data = physics_data.aerosol.copy(
+    return aerosol_data.copy(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
         asy_profile=asy_profile,
@@ -111,16 +111,8 @@ def get_simple_aerosol(
         aod_background=aod_background,
         cdnc_factor=cdnc_factor,
         Nccn=Nccn,
-        angstrom=angstrom
+        angstrom=angstrom,
     )
-    
-    physics_data = physics_data.copy(aerosol=aerosol_data)
-    
-    # No direct tendencies from aerosol scheme
-    # (aerosol effects are applied through radiation)
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
-    
-    return physics_tendencies, physics_data
 
 def _per_feature_plume_gaussians(lats, lons, parameters):
     """Per-feature, per-plume Gaussian shapes — `(nfeatures, nplumes, ncols)`.
@@ -371,3 +363,86 @@ def get_CDNC(AOD, A=60, B=20):
     AEROCOM P1 original: A=60, B=20
     """
     return 1 + A * jnp.log(B * AOD + 1)
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.physics.echam.echam_physics_data import AerosolData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class Macv2SpAerosol(PhysicsTerm):
+    """MACv2-SP simple-plumes aerosol scheme as a composable PhysicsTerm.
+
+    Caches per-column latitude/longitude in degrees from the dinosaur
+    coordinate system at ``cache_coords`` time. Each step reads
+    ``height_full`` from the moist-air diagnostics dict, calls
+    :func:`get_simple_aerosol` with the previous step's
+    :class:`AerosolData` (or zeros on the first step), and writes the
+    updated AOD/SSA/asymmetry/CDNC fields back under the public
+    ``"aerosol"`` key. Returns zero atmospheric tendency — aerosol
+    enters the dynamics indirectly through the radiation term and
+    through the cloud-microphysics activation.
+    """
+
+    name: ClassVar[str] = "macv2_sp_aerosol"
+    category: ClassVar[str] = "aerosol"
+    requires: ClassVar[tuple[str, ...]] = ("height_full",)
+    provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+
+    def __init__(self, params: AerosolParameters | None = None):
+        """Hold the scheme-native :class:`AerosolParameters`."""
+        self.params = nnx.Param(params or AerosolParameters.default())
+        self._coords_cached = False
+
+    def cache_coords(self, coords) -> None:
+        """Cache per-column lat/lon (degrees) from the coordinate system.
+
+        Uses the same lat/lon meshgrid → ``ncols`` reshape that the
+        legacy ECHAM wrapper performed inline; doing it once here at
+        construction time avoids repeating the ``meshgrid`` inside the
+        jitted compute_tendencies loop.
+        """
+        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
+        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
+        # Match get_simple_aerosol's previous meshgrid convention:
+        # ``meshgrid(lat, lon)`` returned (lat[None,:].repeat(nlon, 0),
+        # lon[:,None].repeat(nlat, 1)) reshaped to (nlon*nlat,) ==
+        # (ncols,) with longitude varying fastest.
+        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
+        self._lats = nnx.Variable(lat_2d.reshape(-1))
+        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        self._coords_cached = True
+
+    def __call__(
+        self,
+        state,
+        diagnostics: dict,
+        forcing,
+        terrain: TerrainData,
+    ):
+        """Update the aerosol diagnostics for the current step."""
+        nlev, ncols = state.temperature.shape
+        params = self.params.get_value()
+
+        prev = diagnostics.get(
+            "aerosol", AerosolData.zeros((ncols,), nlev),
+        )
+        new_aerosol = get_simple_aerosol(
+            height_full=diagnostics["height_full"],
+            lats_deg=self._lats.get_value(),
+            lons_deg=self._lons.get_value(),
+            aerosol_data=prev,
+            parameters=params,
+            forcing=forcing,
+        )
+
+        zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+        return zero_tendencies, {**diagnostics, "aerosol": new_aerosol}

@@ -29,6 +29,7 @@ from jcm.physics.diagnostics.moist_air_state import (
     MOIST_AIR_FIELDS,
     MoistAirColumnState,
 )
+from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
@@ -83,7 +84,11 @@ def _data_from_diagnostics(
         )
     if "_surface" in diagnostics:
         data = data.copy(surface=diagnostics["_surface"])
-    if "_aerosol" in diagnostics:
+    # ``aerosol`` lives under a public top-level key after Phase 3
+    # (``Macv2SpAerosol``); fall back to the legacy ``_aerosol`` typed key.
+    if "aerosol" in diagnostics:
+        data = data.copy(aerosol=diagnostics["aerosol"])
+    elif "_aerosol" in diagnostics:
         data = data.copy(aerosol=diagnostics["_aerosol"])
     # ``chemistry`` lives under a public top-level key after Phase 3
     # (``SimpleChemistry`` / ``EchamBoundaryConditions``); fall back to
@@ -115,7 +120,7 @@ def _diagnostics_from_data(
         "_clouds": data.clouds,
         "_vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
-        "_aerosol": data.aerosol,
+        "aerosol": data.aerosol,
         "chemistry": data.chemistry,
     }
     for field in MOIST_AIR_FIELDS:
@@ -166,25 +171,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamAerosol(EchamTermBase):
-    """MACv2-SP simple plume aerosol scheme."""
-
-    name: ClassVar[str] = "echam_aerosol"
-    category: ClassVar[str] = "aerosol"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute aerosol optical properties."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.aerosol.macv2_sp import (
-            get_simple_aerosol,
-        )
-        tend, data = get_simple_aerosol(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 class EchamRadiation(EchamTermBase):
     """Grey-body radiation scheme."""
@@ -654,7 +640,7 @@ def echam_physics(
         terms=[
             MoistAirColumnState(),
             EchamBoundaryConditions(),
-            EchamAerosol(),
+            Macv2SpAerosol(params=p.aerosol),
             SimpleChemistry(),
             rad_term,
             TiedtkeConvection(params=p.convection),
