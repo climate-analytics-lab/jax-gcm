@@ -4,7 +4,6 @@ This script tests the updated radiation scheme with aerosol effects.
 """
 
 import jax.numpy as jnp
-import pytest
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     combine_optical_properties
 )
@@ -200,132 +199,6 @@ def test_temporal_weights_scale_aod():
 
     # Total AOD should decrease compared to present-day
     assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)
-@pytest.mark.skip(
-    reason=(
-        "apply_clouds_and_microphysics was removed in Phase 3 of the "
-        "composable refactor; the equivalent aerosol→cdnc→microphysics "
-        "coupling now flows through Macv2SpAerosol → Echam1MMicrophysics "
-        "via the diagnostics dict and is exercised by the bit-exact "
-        "regression test."
-    )
-)
-def test_aerosol_microphysics_droplet_coupling():
-    """Test that apply_clouds_and_microphysics uses aerosol cdnc_factor for droplet number."""
-    import numpy as np
-    from jcm.physics.echam.echam_physics import apply_clouds_and_microphysics, _prepare_common_physics_state
-    from jcm.physics.echam.echam_physics_data import PhysicsData
-    from jcm.physics.echam.echam_coords import EchamCoords
-    from jcm.physics.echam.parameters import Parameters
-    from jcm.physics_interface import PhysicsState
-    from jcm.date import DateData
-    from jcm.forcing import ForcingData
-    from jcm.terrain import TerrainData
-    from jcm.utils import get_coords
-
-    nlev, nlat, nlon = 40, 32, 64
-    ncols = nlat * nlon
-    sigma_boundaries = np.linspace(0, 1, nlev + 1)
-    coords = get_coords(sigma_boundaries, nodal_shape=(nlon, nlat))
-    echam_coords = EchamCoords.from_coordinate_system(coords)
-
-    # Build a warm profile with cloud water so microphysics has work to do
-    sigma_mid = (sigma_boundaries[:-1] + sigma_boundaries[1:]) / 2
-    temp_profile = 290.0 * (sigma_mid ** 0.19)
-    temperature = jnp.broadcast_to(
-        jnp.array(temp_profile)[:, jnp.newaxis], (nlev, ncols)
-    )
-    q_profile = 0.01 * sigma_mid ** 3
-    specific_hum = jnp.broadcast_to(
-        jnp.array(q_profile)[:, jnp.newaxis], (nlev, ncols)
-    )
-
-    # Cloud water in mid-levels to trigger autoconversion
-    qc = jnp.zeros((nlev, ncols))
-    qc = qc.at[15:25, :].set(1e-3)
-
-    from jcm.constants import physical_constants as pc
-    height_profile = -pc.rd * 290.0 / pc.grav * np.log(sigma_mid)
-    geopotential = jnp.broadcast_to(
-        jnp.array(height_profile * pc.grav)[:, jnp.newaxis], (nlev, ncols)
-    )
-
-    state = PhysicsState(
-        temperature=temperature,
-        specific_humidity=specific_hum,
-        u_wind=jnp.ones((nlev, ncols)) * 5.0,
-        v_wind=jnp.zeros((nlev, ncols)),
-        geopotential=geopotential,
-        normalized_surface_pressure=jnp.ones(ncols),
-        tracers={'qc': qc, 'qi': jnp.zeros((nlev, ncols))},
-    )
-
-    date = DateData.zeros()
-    terrain = TerrainData.aquaplanet(coords)
-    # Use short timestep so autoconversion rate limiter doesn't mask the
-    # droplet-number sensitivity (default dt_conv=3600s clamps both cases)
-    parameters = Parameters.default().with_timestep(1.0)
-    forcing = ForcingData.zeros(coords.horizontal.nodal_shape)
-
-    # --- Run with clean air (cdnc_factor = 1.0) ---
-    pd_clean = PhysicsData.zeros(
-        (ncols,), nlev, echam_coords=echam_coords,
-        model_step=date.model_step, dt_seconds=date.dt_seconds,
-    )
-    cloud_data_clean = pd_clean.clouds.copy(
-        cloud_fraction=jnp.where(qc > 0, 0.8, 0.0),
-    )
-    pd_clean = pd_clean.copy(clouds=cloud_data_clean)
-    _, pd_clean = _prepare_common_physics_state(
-        state, pd_clean, parameters, forcing, terrain
-    )
-    # cdnc_factor defaults to 1.0 from AerosolData.zeros
-
-    tend_clean, pd_out_clean = apply_clouds_and_microphysics(
-        state, pd_clean, parameters, forcing, terrain
-    )
-
-    # --- Run with polluted air (cdnc_factor = 3.0) ---
-    pd_polluted = PhysicsData.zeros(
-        (ncols,), nlev, echam_coords=echam_coords,
-        model_step=date.model_step, dt_seconds=date.dt_seconds,
-    )
-    cloud_data_polluted = pd_polluted.clouds.copy(
-        cloud_fraction=jnp.where(qc > 0, 0.8, 0.0),
-    )
-    aerosol_polluted = pd_polluted.aerosol.copy(
-        cdnc_factor=jnp.ones(ncols) * 3.0,
-    )
-    pd_polluted = pd_polluted.copy(clouds=cloud_data_polluted, aerosol=aerosol_polluted)
-    _, pd_polluted = _prepare_common_physics_state(
-        state, pd_polluted, parameters, forcing, terrain
-    )
-
-    tend_polluted, pd_out_polluted = apply_clouds_and_microphysics(
-        state, pd_polluted, parameters, forcing, terrain
-    )
-
-    # Droplet number stored in output should reflect cdnc_factor
-    assert jnp.allclose(pd_out_clean.clouds.droplet_number, 100e6), (
-        "Clean-air droplet number should be 100e6"
-    )
-    assert jnp.allclose(pd_out_polluted.clouds.droplet_number, 300e6), (
-        "Polluted droplet number should be 3x baseline = 300e6"
-    )
-
-    # Higher CDNC suppresses autoconversion → less cloud water removal
-    # (less negative qc tendency in polluted case)
-    dqc_clean = tend_clean.tracers['qc']
-    dqc_polluted = tend_polluted.tracers['qc']
-    # In cloud layers, clean air should lose more cloud water
-    cloud_mask = qc > 0
-    mean_dqc_clean = float(jnp.mean(jnp.where(cloud_mask, dqc_clean, 0.0)))
-    mean_dqc_polluted = float(jnp.mean(jnp.where(cloud_mask, dqc_polluted, 0.0)))
-    assert mean_dqc_clean < mean_dqc_polluted, (
-        f"Clean air should lose more cloud water (dqc_clean={mean_dqc_clean:.2e}) "
-        f"than polluted air (dqc_polluted={mean_dqc_polluted:.2e})"
-    )
-
-
 def test_higher_cdnc_reduces_autoconversion():
     """Test physical effect: more droplets → smaller drops → less autoconversion."""
     from jcm.physics.clouds.echam_1m import (
@@ -371,7 +244,6 @@ if __name__ == "__main__":
     test_temporal_weights_scale_aod()
 
     print("\n" + "=" * 50)
-    test_aerosol_microphysics_droplet_coupling()
     test_higher_cdnc_reduces_autoconversion()
 
     print("\\n" + "=" * 50)

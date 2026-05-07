@@ -1,38 +1,43 @@
-"""PhysicsTerm wrappers for existing ECHAM physics functions.
+"""``echam_physics()`` factory + ``ComposableEchamPhysics`` parameter wrapper.
 
-Each wrapper delegates to the original ECHAM function, translating between
-the composable ``diagnostics`` dict and the legacy typed ``PhysicsData``
-struct. The numerical implementation is untouched.
+After Phase 3 of the scheme-named-terms refactor, every ECHAM
+parameterisation lives as a ``PhysicsTerm`` next to its underlying
+numerical implementation (``TiedtkeConvection``, ``SundqvistCloudFraction``,
+``Echam1MMicrophysics``, ``GreyTwoStreamRadiation``, …). The legacy
+``apply_*`` wrappers in ``echam_physics.py`` are gone, the
+``EchamTermBase`` / ``_data_from_diagnostics`` / ``_diagnostics_from_data``
+bridge helpers that translated between the diagnostics dict and the
+typed ``PhysicsData`` struct are gone, and this module shrinks to the
+two pieces that still matter:
 
-The ECHAM physics operates in column-vectorized format (nlev, ncols) rather
-than 3D grid format (nlev, nlon, nlat). Column vectorization is handled by
-``ComposablePhysics(vectorize_columns=True)``, so individual term wrappers
-work in column format throughout.
+- :class:`ComposableEchamPhysics` — a ``ComposablePhysics`` subclass
+  that still owns the shared ``Parameters`` struct so ``Model`` can
+  call ``apply_timestep(dt_seconds)`` to keep ``parameters.convection.dt_conv``
+  in sync. Will go away in Phase 4 once each scheme reads dt from
+  ``diagnostics["_date"].dt_seconds`` directly.
+- :func:`echam_physics` — the user-facing factory that wires the
+  scheme-named terms together in a validated default ordering.
 
 Date: 2026-04-13
 """
 
 from __future__ import annotations
 
-
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.date import DateData
-from jcm.physics.echam.echam_physics_data import PhysicsData
-from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.composable_physics import ComposablePhysics
-from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
-from jcm.physics.diagnostics.moist_air_state import (
-    MOIST_AIR_FIELDS,
-    MoistAirColumnState,
-)
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
 from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
 from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
+from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+from jcm.physics.forcing.echam_boundary_conditions import (
+    EchamBoundaryConditions,
+)
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
@@ -40,196 +45,6 @@ from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
-from jcm.physics.forcing.echam_boundary_conditions import (
-    EchamBoundaryConditions,
-)
-
-
-# ------------------------------------------------------------------
-# Helpers for diagnostics ↔ PhysicsData translation
-# ------------------------------------------------------------------
-
-def _data_from_diagnostics(
-    diagnostics: dict, coords: EchamCoords,
-    col_shape: tuple, num_levels: int,
-) -> PhysicsData:
-    """Reconstruct ECHAM PhysicsData from the diagnostics dict.
-
-    The moist-air diagnostics (pressure_full, height_full, …) are now
-    written by :class:`MoistAirColumnState` as top-level public keys.
-    Reassemble them into ``data.diagnostics`` here so legacy ``apply_*``
-    consumers continue to see the typed sub-struct they expect. Falls
-    back to a legacy ``_diagnostics`` typed key if any caller still
-    writes it (defence in depth during the deprecation window).
-    """
-    date = diagnostics.get("_date", DateData.zeros())
-
-    data = PhysicsData.zeros(
-        col_shape, num_levels,
-        echam_coords=coords,
-        model_step=date.model_step,
-        dt_seconds=date.dt_seconds,
-    )
-
-    diag_overrides = {
-        f: diagnostics[f] for f in MOIST_AIR_FIELDS if f in diagnostics
-    }
-    if diag_overrides:
-        data = data.copy(
-            diagnostics=data.diagnostics.copy(**diag_overrides),
-        )
-    elif "_diagnostics" in diagnostics:
-        data = data.copy(diagnostics=diagnostics["_diagnostics"])
-
-    # ``radiation`` lives under a public top-level key after Phase 3
-    # (``GreyTwoStreamRadiation`` / ``EchamBoundaryConditions``); fall back to
-    # the legacy ``_radiation`` typed key for safety.
-    if "radiation" in diagnostics:
-        data = data.copy(radiation=diagnostics["radiation"])
-    elif "_radiation" in diagnostics:
-        data = data.copy(radiation=diagnostics["_radiation"])
-    # ``clouds`` lives under a public top-level key after Phase 3
-    # (``SundqvistCloudFraction`` / microphysics terms); fall back to
-    # the legacy ``_clouds`` typed key for safety.
-    if "clouds" in diagnostics:
-        data = data.copy(clouds=diagnostics["clouds"])
-    elif "_clouds" in diagnostics:
-        data = data.copy(clouds=diagnostics["_clouds"])
-    # ``vertical_diffusion`` lives under a public top-level key after Phase 3
-    # (``TteTkeVerticalDiffusion``); fall back to the legacy
-    # ``_vertical_diffusion`` typed key for safety.
-    if "vertical_diffusion" in diagnostics:
-        data = data.copy(
-            vertical_diffusion=diagnostics["vertical_diffusion"],
-        )
-    elif "_vertical_diffusion" in diagnostics:
-        data = data.copy(
-            vertical_diffusion=diagnostics["_vertical_diffusion"],
-        )
-    # ``surface`` lives under a public top-level key after Phase 3
-    # (``EchamSurface``); fall back to the legacy ``_surface`` typed
-    # key (still written by ``EchamBoundaryConditions``) for safety.
-    if "surface" in diagnostics:
-        data = data.copy(surface=diagnostics["surface"])
-    elif "_surface" in diagnostics:
-        data = data.copy(surface=diagnostics["_surface"])
-    # ``aerosol`` lives under a public top-level key after Phase 3
-    # (``Macv2SpAerosol``); fall back to the legacy ``_aerosol`` typed key.
-    if "aerosol" in diagnostics:
-        data = data.copy(aerosol=diagnostics["aerosol"])
-    elif "_aerosol" in diagnostics:
-        data = data.copy(aerosol=diagnostics["_aerosol"])
-    # ``chemistry`` lives under a public top-level key after Phase 3
-    # (``SimpleChemistry`` / ``EchamBoundaryConditions``); fall back to
-    # the legacy ``_chemistry`` typed key for safety.
-    if "chemistry" in diagnostics:
-        data = data.copy(chemistry=diagnostics["chemistry"])
-    elif "_chemistry" in diagnostics:
-        data = data.copy(chemistry=diagnostics["_chemistry"])
-
-    return data
-
-
-def _diagnostics_from_data(
-    diagnostics: dict, data: PhysicsData,
-) -> dict:
-    """Store ECHAM PhysicsData sub-structs into the diagnostics dict.
-
-    Moist-air diagnostics are written as top-level public keys (no
-    leading underscore, so they appear in user-facing xarray output as
-    ``pressure_full`` / ``height_full`` / … instead of the old
-    ``diagnostics.pressure_full`` / ``diagnostics.height_full``). This
-    propagates any in-step mutation a legacy ``apply_*`` made to
-    ``data.diagnostics`` (e.g. ``apply_cloud_fraction`` updating
-    ``relative_humidity``).
-    """
-    out = {
-        **diagnostics,
-        "radiation": data.radiation,
-        "clouds": data.clouds,
-        "vertical_diffusion": data.vertical_diffusion,
-        "surface": data.surface,
-        "aerosol": data.aerosol,
-        "chemistry": data.chemistry,
-    }
-    for field in MOIST_AIR_FIELDS:
-        out[field] = getattr(data.diagnostics, field)
-    return out
-
-
-# ------------------------------------------------------------------
-# Base class for ECHAM term wrappers
-# ------------------------------------------------------------------
-
-class EchamTermBase(PhysicsTerm):
-    """Base for ECHAM term wrappers.
-
-    Handles EchamCoords caching and provides the translation helpers.
-    Each term accesses the full ECHAM Parameters from diagnostics
-    (injected by ComposableEchamPhysics) to ensure all terms share
-    the same parameter state (including timestep).
-    """
-
-    def __init__(self):
-        """Initialize base ECHAM term."""
-        self._coords_cached = False
-
-    def cache_coords(self, coords):
-        """Cache EchamCoords from the coordinate system."""
-        self._echam_coords = nnx.Variable(
-            EchamCoords.from_coordinate_system(coords),
-        )
-        nodal_shape = self._echam_coords.get_value().nodal_shape
-        self._num_levels = nodal_shape[0]
-        self._col_shape = (nodal_shape[1] * nodal_shape[2],)
-        self._nodal_shape_3d = nodal_shape
-        self._coords_cached = True
-
-    def _build_data(self, diagnostics: dict) -> PhysicsData:
-        """Reconstruct PhysicsData from diagnostics."""
-        return _data_from_diagnostics(
-            diagnostics, self._echam_coords.get_value(),
-            self._col_shape, self._num_levels,
-        )
-
-    def _get_params(self, diagnostics: dict) -> Parameters:
-        """Get full ECHAM Parameters from diagnostics."""
-        return diagnostics.get("_echam_params", Parameters.default())
-
-
-# ------------------------------------------------------------------
-# Concrete ECHAM term wrappers
-# ------------------------------------------------------------------
-
-# ``EchamSimpleGwd`` was extracted to
-# :class:`jcm.physics.gravity_waves.simple.SimpleGwd` (Phase 3 of the
-# scheme-named-terms refactor). It was never wired into the default
-# ``echam_physics()`` factory; users who want the cheap GWD now compose
-# ``SimpleGwd()`` in directly.
-
-
-# ------------------------------------------------------------------
-# Helper to build ECHAM Parameters with overrides
-# ------------------------------------------------------------------
-
-def _echam_params_with(**overrides) -> Parameters:
-    """Build ECHAM Parameters from defaults with specific overrides."""
-    p = Parameters.default()
-    return Parameters(
-        convection=overrides.get("convection", p.convection),
-        clouds=overrides.get("clouds", p.clouds),
-        microphysics=overrides.get("microphysics", p.microphysics),
-        microphysics_2m=overrides.get("microphysics_2m", p.microphysics_2m),
-        hines=overrides.get("hines", p.hines),
-        sso=overrides.get("sso", p.sso),
-        simple_gwd=overrides.get("simple_gwd", p.simple_gwd),
-        radiation=overrides.get("radiation", p.radiation),
-        vertical_diffusion=overrides.get(
-            "vertical_diffusion", p.vertical_diffusion,
-        ),
-        surface=overrides.get("surface", p.surface),
-        aerosol=overrides.get("aerosol", p.aerosol),
-    )
 
 
 # ------------------------------------------------------------------
@@ -240,11 +55,14 @@ class ComposableEchamPhysics(ComposablePhysics):
     """ComposablePhysics with ECHAM shared parameter management.
 
     Column vectorization is handled by the parent class via
-    ``vectorize_columns=True``. This subclass adds ECHAM-specific
-    parameter storage and timestep management.
+    ``vectorize_columns=True``. This subclass holds a single
+    :class:`~jcm.physics.echam.parameters.Parameters` struct and
+    implements ``apply_timestep(dt_seconds)`` so ``Model.__init__`` can
+    sync ``parameters.convection.dt_conv`` to the model dt.
 
-    The full ECHAM ``Parameters`` is stored and injected into the
-    diagnostics dict as ``_echam_params`` so all terms share it.
+    Phase 4 of the refactor will remove this subclass and the
+    isinstance gate in ``Model``: each scheme will read dt directly
+    from ``diagnostics["_date"].dt_seconds``.
     """
 
     def __init__(self, terms, checkpoint_terms=True, parameters=None):
@@ -285,9 +103,7 @@ class ComposableEchamPhysics(ComposablePhysics):
     def remove(self, category):
         """Remove terms, preserving ComposableEchamPhysics type."""
         return ComposableEchamPhysics(
-            terms=[
-                t for t in self.terms if t.category != category
-            ],
+            terms=[t for t in self.terms if t.category != category],
             checkpoint_terms=self.checkpoint_terms,
             parameters=self._echam_parameters.get_value(),
         )
@@ -316,68 +132,11 @@ class ComposableEchamPhysics(ComposablePhysics):
         )
 
     def apply_timestep(self, dt_seconds: float):
-        """Update timestep on the shared ECHAM parameters.
-
-        This mirrors ``EchamPhysics.parameters.with_timestep()``.
-
-        """
+        """Update timestep on the shared ECHAM parameters."""
         p = self._echam_parameters.get_value()
         self._echam_parameters = nnx.Variable(
             p.with_timestep(dt_seconds),
         )
-
-    def _compute_tendencies_columns(
-        self, state, forcing, terrain, date,
-        prev_physics_data=None,
-    ):
-        """Override to inject ECHAM parameters into diagnostics."""
-        import jax
-        import jax.numpy as jnp
-        from jcm.physics.composable_physics import (
-            _reshape_state_to_columns,
-            _accumulate,
-            _reshape_tendencies_to_3d,
-        )
-
-        nlev, nlon, nlat = state.temperature.shape
-        ncols = nlat * nlon
-
-        vectorized_state = _reshape_state_to_columns(
-            state, nlev, ncols,
-        )
-
-        diagnostics: dict = {}
-        if prev_physics_data is not None:
-            diagnostics = {**prev_physics_data}
-
-        diagnostics["_date"] = date
-        diagnostics["_echam_params"] = self._echam_parameters.get_value()
-
-        tracer_tends = {
-            name: jnp.zeros((nlev, ncols))
-            for name in state.tracers
-        }
-        acc = {
-            "u_wind": jnp.zeros((nlev, ncols)),
-            "v_wind": jnp.zeros((nlev, ncols)),
-            "temperature": jnp.zeros((nlev, ncols)),
-            "specific_humidity": jnp.zeros((nlev, ncols)),
-            "tracers": tracer_tends,
-        }
-
-        for term in self.terms:
-            call_fn = (
-                jax.checkpoint(term)
-                if self.checkpoint_terms
-                else term
-            )
-            tend, diagnostics = call_fn(
-                vectorized_state, diagnostics, forcing, terrain,
-            )
-            acc = _accumulate(acc, tend)
-
-        tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
-        return tendencies, diagnostics
 
 
 # ------------------------------------------------------------------
