@@ -30,7 +30,6 @@ from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.surface.echam import surface_physics_step, initialize_surface_state
 from jcm.physics.surface.echam.surface_types import AtmosphericForcing
-from jcm.physics.gravity_waves.sso import sso_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics.aerosol.spa import spa_activated_cdnc
@@ -1406,63 +1405,10 @@ def apply_surface(
 # scheme-named-terms refactor).
 
 
-@jit
-def apply_sso(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply the Lott-Miller (1997) sub-grid orographic GW drag."""
-    diag = physics_data.diagnostics
-    nlev, ncols = state.temperature.shape
-    dt = parameters.convection.dt_conv
-    layer_mass = (diag.pressure_half[1:, :]
-                  - diag.pressure_half[:-1, :]) / physical_constants.grav
+# ``apply_sso`` was extracted to
+# :class:`jcm.physics.gravity_waves.sso.LottMillerSso` (Phase 3 of the
+# scheme-named-terms refactor).
 
-    # Coriolis is only read by the (unported) mountain-lift branch.
-    coriolis = jnp.zeros((ncols,))
-
-    def _sso_one_col(pressure_full, pressure_half, layer_mass_col,
-                     temperature, u_wind, v_wind, height_full,
-                     surface_height, mean_orography, orography_std,
-                     orography_slope, orography_anisotropy,
-                     orography_orientation, peak_elevation,
-                     valley_elevation, coriolis_col, land_fraction):
-        return sso_drag(
-            jnp.asarray(dt), coriolis_col, height_full, surface_height,
-            pressure_half, pressure_full, layer_mass_col,
-            temperature, u_wind, v_wind,
-            mean_orography, orography_std, orography_slope,
-            orography_anisotropy, orography_orientation,
-            peak_elevation, valley_elevation,
-            land_fraction, parameters.sso,
-            nktopg=1, ntop=1,
-        )
-
-    tend, _state = jax.vmap(
-        _sso_one_col,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        out_axes=(0, 0),
-    )(diag.pressure_full, diag.pressure_half, layer_mass,
-      state.temperature, state.u_wind, state.v_wind, diag.height_full,
-      terrain.orog.reshape(-1), terrain.orog.reshape(-1),
-      terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
-      terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
-      terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
-      coriolis, terrain.fmask.reshape(-1))
-
-    dt_temperature = tend.dissip / physical_constants.cpd
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=tend.dudt.T,
-        v_wind=tend.dvdt.T,
-        temperature=dt_temperature.T,
-        specific_humidity=jnp.zeros_like(state.specific_humidity),
-        tracers={},
-    )
-    return physics_tendencies, physics_data
 
 @jit
 def apply_chemistry(

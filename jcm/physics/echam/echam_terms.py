@@ -30,6 +30,7 @@ from jcm.physics.diagnostics.moist_air_state import (
     MoistAirColumnState,
 )
 from jcm.physics.gravity_waves.hines import HinesGwd
+from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
 )
@@ -426,23 +427,6 @@ class EchamSurface(EchamTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
-class EchamSSO(EchamTermBase):
-    """Lott-Miller (1997) sub-grid orographic gravity-wave drag."""
-
-    name: ClassVar[str] = "echam_sso"
-    category: ClassVar[str] = "sso"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute SSO drag tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_sso
-        tend, data = apply_sso(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
 # ``EchamSimpleGwd`` was extracted to
 # :class:`jcm.physics.gravity_waves.simple.SimpleGwd` (Phase 3 of the
 # scheme-named-terms refactor). It was never wired into the default
@@ -690,7 +674,7 @@ def echam_physics(
             EchamVerticalDiffusion(),
             EchamSurface(),
             HinesGwd(params=p.hines),
-            EchamSSO(),
+            LottMillerSso(params=p.sso),
         ],
         checkpoint_terms=checkpoint_terms,
         parameters=p,

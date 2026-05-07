@@ -812,3 +812,113 @@ def sso_drag(
         SSOState(u_stress=u_stress, v_stress=v_stress,
                  dissip_total=dissip_total),
     )
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+import jax  # noqa: E402
+from flax import nnx  # noqa: E402
+
+from jcm import constants as _physical_constants  # noqa: E402
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class LottMillerSso(PhysicsTerm):
+    """Lott-Miller (1997) sub-grid orographic GWD as a composable term.
+
+    Wraps :func:`sso_drag` over columns. Reads ``pressure_full``,
+    ``pressure_half``, ``height_full`` from the moist-air diagnostics
+    dict; reads orography descriptors (``orog``, ``orostd``, ``orosig``,
+    ``orogam``, ``orothe``, ``oropic``, ``oroval``, ``fmask``) from
+    :class:`TerrainData`. Writes only u/v/T tendencies — no Data
+    sub-struct.
+
+    The unported mountain-lift branch (``orolift``, ``gklift=0`` in the
+    production namelist) is not exercised; coriolis is therefore set to
+    zero.
+    """
+
+    name: ClassVar[str] = "lott_miller_sso"
+    category: ClassVar[str] = "sso"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "pressure_half", "height_full",
+    )
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, params: SSOParameters | None = None):
+        """Hold the scheme-native :class:`SSOParameters`."""
+        self.params = nnx.Param(params or SSOParameters.default())
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute u/v/T tendencies from Lott-Miller SSO."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params = self.params.get_value()
+
+        pressure_full = diagnostics["pressure_full"]
+        pressure_half = diagnostics["pressure_half"]
+        height_full = diagnostics["height_full"]
+
+        layer_mass = (
+            (pressure_half[1:, :] - pressure_half[:-1, :])
+            / _physical_constants.grav
+        )
+        # Coriolis is consumed only by the unported mountain-lift branch.
+        coriolis = jnp.zeros((ncols,))
+
+        def _sso_one_col(
+            pressure_full_c, pressure_half_c, layer_mass_c,
+            temperature_c, u_wind_c, v_wind_c, height_full_c,
+            surface_height_c, mean_orography_c, orography_std_c,
+            orography_slope_c, orography_anisotropy_c,
+            orography_orientation_c, peak_elevation_c,
+            valley_elevation_c, coriolis_c, land_fraction_c,
+        ):
+            return sso_drag(
+                jnp.asarray(dt), coriolis_c, height_full_c,
+                surface_height_c,
+                pressure_half_c, pressure_full_c, layer_mass_c,
+                temperature_c, u_wind_c, v_wind_c,
+                mean_orography_c, orography_std_c, orography_slope_c,
+                orography_anisotropy_c, orography_orientation_c,
+                peak_elevation_c, valley_elevation_c,
+                land_fraction_c, params,
+                nktopg=1, ntop=1,
+            )
+
+        tend, _state = jax.vmap(
+            _sso_one_col,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0),
+        )(
+            pressure_full, pressure_half, layer_mass,
+            state.temperature, state.u_wind, state.v_wind, height_full,
+            terrain.orog.reshape(-1), terrain.orog.reshape(-1),
+            terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
+            terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
+            terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
+            coriolis, terrain.fmask.reshape(-1),
+        )
+
+        dt_temperature = tend.dissip / _physical_constants.cpd
+
+        return PhysicsTendency(
+            u_wind=tend.dudt.T,
+            v_wind=tend.dvdt.T,
+            temperature=dt_temperature.T,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={},
+        ), diagnostics

@@ -5,6 +5,7 @@ Port of ECHAM ``mo_ssodrag.f90``. The real implementation lives in
 """
 
 from .lott_miller import (
+    LottMillerSso,
     SSOParameters,
     SSOState,
     SSOTendencies,
@@ -12,6 +13,7 @@ from .lott_miller import (
 )
 
 __all__ = [
+    "LottMillerSso",
     "SSOParameters",
     "SSOState",
     "SSOTendencies",
