@@ -14,7 +14,6 @@ extracted to :class:`jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection`.
 
 import logging
 
-import jax
 from jax import jit
 import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -23,11 +22,8 @@ from jcm.terrain import TerrainData
 from jcm import constants as physical_constants
 
 # Import physics modules (will be implemented progressively)
-from jcm.physics.clouds.sundqvist import shallow_cloud_scheme
-from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.echam.echam_physics_data import PhysicsData
-from jcm.physics.aerosol.spa import spa_activated_cdnc
 
 logger = logging.getLogger(__name__)
 
@@ -170,53 +166,6 @@ def _prepare_common_physics_state(
 # verbatim into the term ``__call__``.
 
 
-def _cloud_and_microphysics_column(
-    temperature, specific_humidity, pressure, qc, qi,
-    surface_pressure, air_density, layer_thickness, droplet_number,
-    dt, cloud_config, micro_config
-):
-    """Compute cloud and microphysics for a single column.
-
-    Following ECHAM mo_cloud.f90: condensation, cloud fraction, autoconversion,
-    accretion, and precipitation are all computed in a single column sweep.
-    This avoids the coupling issues of splitting them into separate calls.
-
-    Tendency accounting (no double counting):
-        The cloud scheme computes condensation and applies it within the
-        timestep to produce updated cloud water (cloud_state.cloud_water).
-        Microphysics then acts on this updated cloud water.
-
-        Both schemes return SEPARATE tendencies that are additive:
-        - Cloud:  dqcdt = +condensation,  dqdt = -condensation,  dtedt = +L*condensation/cp
-        - Micro:  dqcdt = -autoconversion, dqdt = +evaporation,  dtedt = micro heating/cooling
-
-        The integrator applies: qc_new = qc_old + (cloud_dqcdt + micro_dqcdt) * dt
-        This gives: qc_new = 0 + (condensation - autoconversion) * dt
-
-        Moisture is conserved: dq + dqc + precip = 0
-        (-condensation + evap) + (condensation - autoconv) + (autoconv - evap) = 0
-
-        The within-timestep cloud water update is used ONLY to provide
-        microphysics with a physically meaningful input — it does not
-        affect the tendencies returned to the integrator.
-    """
-    # 1. Cloud fraction and condensation
-    cloud_tendencies, cloud_state = shallow_cloud_scheme(
-        temperature, specific_humidity, pressure,
-        qc, qi, surface_pressure, dt, cloud_config
-    )
-
-    # 2. Microphysics acts on the condensation-updated cloud water/ice
-    micro_tendencies, micro_state = cloud_microphysics(
-        temperature, specific_humidity, pressure,
-        cloud_state.cloud_water, cloud_state.cloud_ice,
-        cloud_state.cloud_fraction, air_density, layer_thickness,
-        droplet_number, dt, micro_config
-    )
-
-    return cloud_tendencies, cloud_state, micro_tendencies, micro_state
-
-
 # ``apply_cloud_fraction`` was extracted to
 # :class:`jcm.physics.clouds.sundqvist.SundqvistCloudFraction` (Phase 3
 # of the scheme-named-terms refactor).
@@ -227,176 +176,15 @@ def _cloud_and_microphysics_column(
 # the scheme-named-terms refactor).
 
 
-@jit
-def apply_microphysics_2m(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Run ECHAM 2-moment cloud microphysics.
-
-    Consumes the post-condensation ``qc``/``qi``/``cloud_fraction`` emitted
-    by :func:`apply_cloud_fraction` and returns tendencies for the full 2M
-    tracer set ``{qc, qi, qnc, qni, qr, qs}``. The orchestrator
-    :func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m` chains the
-    full ECHAM6 process list: warm precip (KK2000) + mixed-phase
-    deposition/condensation + freezing-below-238K + DeMott(2010) INP
-    mixed-phase freezing (placeholder for ECHAM's ``het_mxphase_freezing``
-    which would need HAM aerosol modes — see #436) + WBF + cold precip +
-    a top-down ``lax.scan`` over levels for sedimentation / melting /
-    sublimation+evap / precip-flux accumulation, then ECHAM's
-    ``update_tendencies_and_important_vars`` for the final tendency
-    bookkeeping. Heterogeneous freezing is intentionally simplified to
-    DeMott(2010) since JCM does not yet ingest a real IN field.
-    """
-    from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
-
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    air_density = physics_data.diagnostics.air_density
-    layer_thickness = physics_data.diagnostics.layer_thickness
-    tke = physics_data.vertical_diffusion.tke
-    params_2m = parameters.microphysics_2m
-
-    qc_interim = physics_data.clouds.qc
-    qi_interim = physics_data.clouds.qi
-    cloud_fraction = physics_data.clouds.cloud_fraction
-
-    # Default any declared-but-missing tracers to zero.
-    zeros = jnp.zeros_like(state.temperature)
-    qnc = state.tracers.get('qnc', zeros)
-    qni = state.tracers.get('qni', zeros)
-    qr = state.tracers.get('qr', zeros)
-    qs = state.tracers.get('qs', zeros)
-
-    # Aerosol-activated CDNC floor from the MACv2-SP plume CCN
-    # concentration via the SPA sublinear power-law (Lin et al. 2025;
-    # #374). Output is per-level `(nlev, ncols)` in m^-3 — the column-
-    # mean Nccn is broadcast to every level (vertical aerosol structure
-    # is not resolved by the simple-plumes scheme). The fit's prefactor
-    # and exponent come from `parameters.aerosol` so they remain
-    # differentiable for calibration work.
-    Nccn = physics_data.aerosol.Nccn  # (ncols,), units cm^-3
-    activated_cdnc = spa_activated_cdnc(
-        Nccn=Nccn[jnp.newaxis, :],
-        cloud_fraction=cloud_fraction,
-        prefactor=parameters.aerosol.spa_prefactor,
-        exponent=parameters.aerosol.spa_exponent,
-    )
-
-    tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
-        cloud_microphysics_2m,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-        out_axes=(0, 0, 0),
-    )(state.temperature, state.specific_humidity, pressure_levels,
-      qc_interim, qi_interim, qnc, qni, qr, qs,
-      cloud_fraction, air_density, layer_thickness, tke,
-      activated_cdnc, dt, params_2m)
-
-    tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),
-        v_wind=jnp.zeros_like(state.v_wind),
-        temperature=tend_all.dtedt.T,
-        specific_humidity=tend_all.dqdt.T,
-        tracers={
-            'qc': tend_all.dqcdt.T,
-            'qi': tend_all.dqidt.T,
-            'qnc': tend_all.dqncdt.T,
-            'qni': tend_all.dqnidt.T,
-            'qr': tend_all.dqrdt.T,
-            'qs': tend_all.dqsdt.T,
-        },
-    )
-    # Stash the current-step qnc/qni as the tm1 state so the next call of
-    # this term (or downstream update_tendencies_and_important_vars) can
-    # read previous-step number concentrations. PhysicsData.clouds is
-    # carried forward across timesteps in ComposableEchamPhysics.__call__.
-    # Also expose the large-scale surface precip from the column scan as
-    # diagnostic ``precip_rain``/``precip_snow`` (kg/m^2/s) — these are the
-    # gravitational-fall flux at the bottom of the orchestrator's
-    # top-down ``lax.scan``, summing autoconv + accretion + melt - evap
-    # contributions across all levels.
-    clouds_next = physics_data.clouds.copy(
-        qnc_prev=qnc, qni_prev=qni,
-        precip_rain=surface_rain_flux,
-        precip_snow=surface_snow_flux,
-    )
-    return tendencies, physics_data.copy(clouds=clouds_next)
+# ``apply_microphysics_2m`` was extracted to
+# :class:`jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics` (Phase 3
+# of the scheme-named-terms refactor).
 
 
-@jit
-def apply_clouds_and_microphysics(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply cloud scheme and microphysics in a single coupled step.
-
-    Combines condensation → cloud fraction → autoconversion → precipitation
-    in one vmapped column call, following ECHAM mo_cloud.f90.
-    """
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    surface_pressure = physics_data.diagnostics.surface_pressure
-    air_density = physics_data.diagnostics.air_density
-    dz = physics_data.diagnostics.layer_thickness
-    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-
-    # Droplet number concentration from aerosol scheme
-    base_cdnc = parameters.microphysics.base_cdnc  # Clean-air baseline CDNC (1/m³)
-    cdnc_factor = physics_data.aerosol.cdnc_factor  # (ncols,)
-    cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
-    droplet_number_per_kg = cdnc_m3 / air_density  # 1/m³ → 1/kg (for microphysics)
-
-    cloud_config = parameters.clouds
-    micro_config = parameters.microphysics
-
-    # Single vmap over columns: cloud + microphysics together
-    cloud_tend_all, cloud_state_all, micro_tend_all, micro_state_all = jax.vmap(
-        _cloud_and_microphysics_column,
-        in_axes=(1, 1, 1, 1, 1, 0, 1, 1, 1, None, None, None),
-        out_axes=(0, 0, 0, 0)
-    )(state.temperature, state.specific_humidity, pressure_levels,
-      qc, qi, surface_pressure, air_density, dz, droplet_number_per_kg,
-      dt, cloud_config, micro_config)
-
-    # Combine tendencies: cloud (condensation) + microphysics (autoconversion etc.)
-    # These are separate physical processes — see _cloud_and_microphysics_column
-    # docstring for the full accounting showing no double counting.
-    physics_tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),
-        v_wind=jnp.zeros_like(state.v_wind),
-        temperature=cloud_tend_all.dtedt.T + micro_tend_all.dtedt.T,
-        specific_humidity=cloud_tend_all.dqdt.T + micro_tend_all.dqdt.T,
-        tracers={
-            'qc': cloud_tend_all.dqcdt.T + micro_tend_all.dqcdt.T,
-            'qi': cloud_tend_all.dqidt.T + micro_tend_all.dqidt.T
-        }
-    )
-
-    # Update physics data with cloud and microphysics diagnostics
-    cloud_data = physics_data.clouds.copy(
-        cloud_fraction=cloud_state_all.cloud_fraction.T,
-        qc=cloud_state_all.cloud_water.T,
-        qi=cloud_state_all.cloud_ice.T,
-        precip_rain=micro_state_all.precip_rain,
-        precip_snow=micro_state_all.precip_snow,
-        droplet_number=cdnc_m3  # Store in 1/m³ for diagnostics/radiation
-    )
-
-    diagnostics = physics_data.diagnostics.copy(
-        relative_humidity=cloud_state_all.rel_humidity.T,
-    )
-
-    updated_physics_data = physics_data.copy(clouds=cloud_data,
-                                             diagnostics=diagnostics)
-
-    return physics_tendencies, updated_physics_data
+# ``apply_clouds_and_microphysics`` (the deprecated single-term variant)
+# was retired together with its EchamCloudsAndMicrophysics wrapper —
+# the ``cloud_scheme="1m"`` / ``cloud_scheme="2m"`` factory paths now
+# use :class:`Echam1MMicrophysics` / :class:`Lohmann2MMicrophysics`.
 
 
 # ``apply_vertical_diffusion`` was extracted to

@@ -14,11 +14,10 @@ Date: 2026-04-13
 
 from __future__ import annotations
 
-from typing import ClassVar
 
 from flax import nnx
 
-from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+from jcm.physics.physics_term import PhysicsTerm
 from jcm.date import DateData
 from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics.echam.echam_coords import EchamCoords
@@ -32,6 +31,7 @@ from jcm.physics.diagnostics.moist_air_state import (
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
 from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
@@ -200,68 +200,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamCloudsAndMicrophysics2M(EchamTermBase):
-    """ECHAM 2-moment cloud microphysics (Phase 5a: warm-rain only).
-
-    Declares the full 2M prognostic tracer set — qc, qi, qnc, qni, qr, qs —
-    via :meth:`required_tracers`. The qnc/qni number concentrations are
-    stored per kg of air and carry ``nondimensionalize=False`` so they
-    round-trip through the modal/nodal converters without the gram/kg scaling
-    that mass mixing ratios get.
-
-    Only the Khairoutdinov-Kogan warm-rain autoconversion is wired in at this
-    stage; ice-phase and sedimentation work is tracked in issue #341. Must be
-    composed downstream of :class:`SundqvistCloudFraction`.
-    """
-
-    name: ClassVar[str] = "echam_clouds_microphysics_2m"
-    category: ClassVar[str] = "clouds"
-
-    @classmethod
-    def required_tracers(cls):
-        return (
-            TracerSpec("qc", units="kg/kg"),
-            TracerSpec("qi", units="kg/kg"),
-            TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
-            TracerSpec("qni", units="kg^-1", nondimensionalize=False),
-            TracerSpec("qr", units="kg/kg"),
-            TracerSpec("qs", units="kg/kg"),
-        )
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute 2-moment microphysics tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_microphysics_2m
-        tend, data = apply_microphysics_2m(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamCloudsAndMicrophysics(EchamTermBase):
-    """Coupled cloud fraction and microphysics scheme (legacy single-term).
-
-    Deprecated: use :class:`SundqvistCloudFraction` + :class:`EchamCloudsAndMicrophysics1M`
-    instead. Kept for backward compat with existing call sites.
-    """
-
-    name: ClassVar[str] = "echam_clouds_microphysics"
-    category: ClassVar[str] = "clouds"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute cloud and microphysics tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import (
-            apply_clouds_and_microphysics,
-        )
-        tend, data = apply_clouds_and_microphysics(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 # ``EchamSimpleGwd`` was extracted to
 # :class:`jcm.physics.gravity_waves.simple.SimpleGwd` (Phase 3 of the
@@ -491,7 +429,13 @@ def echam_physics(
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(params=p.microphysics)
     elif cloud_scheme == "2m":
-        micro_term = EchamCloudsAndMicrophysics2M()
+        micro_term = Lohmann2MMicrophysics(params=p.microphysics_2m)
+        # SPA activation knobs live on AerosolParameters — wire them into
+        # the 2M term so it stays self-contained at compose time.
+        micro_term.configure_spa(
+            float(p.aerosol.spa_prefactor),
+            float(p.aerosol.spa_exponent),
+        )
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."

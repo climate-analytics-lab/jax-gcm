@@ -4,6 +4,7 @@ This script tests the updated radiation scheme with aerosol effects.
 """
 
 import jax.numpy as jnp
+import pytest
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     combine_optical_properties
 )
@@ -199,6 +200,15 @@ def test_temporal_weights_scale_aod():
 
     # Total AOD should decrease compared to present-day
     assert jnp.sum(aod_seasonal) < jnp.sum(aod_pd)
+@pytest.mark.skip(
+    reason=(
+        "apply_clouds_and_microphysics was removed in Phase 3 of the "
+        "composable refactor; the equivalent aerosol→cdnc→microphysics "
+        "coupling now flows through Macv2SpAerosol → Echam1MMicrophysics "
+        "via the diagnostics dict and is exercised by the bit-exact "
+        "regression test."
+    )
+)
 def test_aerosol_microphysics_droplet_coupling():
     """Test that apply_clouds_and_microphysics uses aerosol cdnc_factor for droplet number."""
     import numpy as np

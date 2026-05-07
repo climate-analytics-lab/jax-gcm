@@ -159,17 +159,17 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertIsNotNone(preds)
 
     def test_replace_radiation(self):
-        """Can replace ECHAM radiation with a different scheme."""
-        from jcm.physics.echam.echam_terms import (
-            echam_physics,
-            EchamRadiation,
+        """Can replace radiation with a different scheme."""
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.grey_two_stream import (
+            GreyTwoStreamRadiation,
         )
 
         composable = echam_physics(checkpoint_terms=False)
         composable.cache_coords(self.coords)
 
         # Replace radiation with a fresh instance
-        new_rad = EchamRadiation()
+        new_rad = GreyTwoStreamRadiation()
         replaced = composable.replace("radiation", new_rad)
         replaced.cache_coords(self.coords)
 

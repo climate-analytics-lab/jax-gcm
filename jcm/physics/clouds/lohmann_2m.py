@@ -3579,3 +3579,154 @@ def cloud_microphysics_2m(
 
 # Back-compat alias while the Phase 5a callers are migrated.
 cloud_microphysics_2m_minimal = cloud_microphysics_2m
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.aerosol.spa import spa_activated_cdnc  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class Lohmann2MMicrophysics(PhysicsTerm):
+    """ECHAM 2-moment cloud microphysics (Lohmann/Seifert-Beheng-style) term.
+
+    Drop-in 2M alternative to :class:`Echam1MMicrophysics`. Declares the
+    full prognostic-tracer set (``qc``, ``qi``, ``qnc``, ``qni``, ``qr``,
+    ``qs``) — the ``qnc`` / ``qni`` number concentrations are stored per
+    kg of air with ``nondimensionalize=False`` so the modal/nodal
+    converters don't apply the gram/kg scaling that mass mixing ratios
+    get.
+
+    Reads the post-condensation ``cloud_fraction`` / ``qc`` / ``qi`` from
+    the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
+    upstream), TKE from ``"vertical_diffusion"``, and the SPA-style
+    activated CDNC floor from the public ``"aerosol"`` Nccn. Writes the
+    surface rain / snow precip flux into ``"clouds"`` along with the
+    qnc / qni state-carry needed for the next step's update.
+
+    Must be composed downstream of ``SundqvistCloudFraction`` and
+    (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
+    """
+
+    name: ClassVar[str] = "lohmann_2m_microphysics"
+    category: ClassVar[str] = "clouds"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "air_density", "layer_thickness",
+        "clouds", "aerosol",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("clouds",)
+
+    def __init__(self, params: 'CloudParams2M | None' = None):
+        """Hold the scheme-native :class:`CloudParams2M`."""
+        if params is None:
+            params = CloudParams2M.default()
+        self.params = nnx.Param(params)
+        # SPA-activation knobs currently live on ``AerosolParameters``;
+        # cache them here so the term doesn't have to read them through
+        # the aerosol typed sub-struct (where they may not be present in
+        # custom compositions).
+        self._spa_prefactor = nnx.Param(jnp.array(1.0))
+        self._spa_exponent = nnx.Param(jnp.array(0.5))
+
+    def configure_spa(self, prefactor: float, exponent: float) -> None:
+        """Set the SPA-activation prefactor / exponent (called by factory)."""
+        self._spa_prefactor = nnx.Param(jnp.asarray(prefactor))
+        self._spa_exponent = nnx.Param(jnp.asarray(exponent))
+
+    @classmethod
+    def required_tracers(cls) -> tuple[TracerSpec, ...]:
+        """Declare the full 2M prognostic tracer set."""
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+            TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
+            TracerSpec("qni", units="kg^-1", nondimensionalize=False),
+            TracerSpec("qr", units="kg/kg"),
+            TracerSpec("qs", units="kg/kg"),
+        )
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute 2M microphysics tendencies and update ``"clouds"``."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params_2m = self.params.get_value()
+
+        pressure_full = diagnostics["pressure_full"]
+        air_density = diagnostics["air_density"]
+        layer_thickness = diagnostics["layer_thickness"]
+
+        clouds = diagnostics["clouds"]
+        qc_interim = clouds.qc
+        qi_interim = clouds.qi
+        cloud_fraction = clouds.cloud_fraction
+
+        zeros = jnp.zeros_like(state.temperature)
+        qnc = state.tracers.get("qnc", zeros)
+        qni = state.tracers.get("qni", zeros)
+        qr = state.tracers.get("qr", zeros)
+        qs = state.tracers.get("qs", zeros)
+
+        if "vertical_diffusion" in diagnostics:
+            tke = diagnostics["vertical_diffusion"].tke
+        else:
+            tke = jnp.zeros_like(state.temperature)
+
+        # SPA-style activated-CDNC floor from the column-mean Nccn (cm^-3).
+        Nccn = diagnostics["aerosol"].Nccn
+        activated_cdnc = spa_activated_cdnc(
+            Nccn=Nccn[jnp.newaxis, :],
+            cloud_fraction=cloud_fraction,
+            prefactor=self._spa_prefactor.get_value(),
+            exponent=self._spa_exponent.get_value(),
+        )
+
+        tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
+            cloud_microphysics_2m,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+            out_axes=(0, 0, 0),
+        )(
+            state.temperature, state.specific_humidity, pressure_full,
+            qc_interim, qi_interim, qnc, qni, qr, qs,
+            cloud_fraction, air_density, layer_thickness, tke,
+            activated_cdnc, dt, params_2m,
+        )
+
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=tend_all.dtedt.T,
+            specific_humidity=tend_all.dqdt.T,
+            tracers={
+                "qc": tend_all.dqcdt.T,
+                "qi": tend_all.dqidt.T,
+                "qnc": tend_all.dqncdt.T,
+                "qni": tend_all.dqnidt.T,
+                "qr": tend_all.dqrdt.T,
+                "qs": tend_all.dqsdt.T,
+            },
+        )
+
+        # Stash current-step qnc/qni as tm1 for the next step's
+        # update_tendencies_and_important_vars; expose surface precip
+        # diagnostics from the lax.scan.
+        clouds_next = clouds.copy(
+            qnc_prev=qnc, qni_prev=qni,
+            precip_rain=surface_rain_flux,
+            precip_snow=surface_snow_flux,
+        )
+        return tendency, {**diagnostics, "clouds": clouds_next}

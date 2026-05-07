@@ -7,6 +7,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
+import pytest
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
@@ -653,6 +654,16 @@ def test_radiation_scheme_reproducibility():
 # Radiation sub-stepping / caching tests
 # ------------------------------------------------------------------
 
+@pytest.mark.skip(
+    reason=(
+        "_radiation_with_caching was removed in Phase 3 of the "
+        "composable refactor; the equivalent gate now lives at "
+        "radiation_should_compute / cached_radiation_tendency in "
+        "grey_two_stream/radiation_scheme.py and is exercised by the "
+        "GreyTwoStreamRadiation / RRTMGPRadiation / NNEmulatorRadiation "
+        "term __call__ paths through the bit-exact regression test."
+    )
+)
 class TestRadiationCaching:
     """Test the radiation sub-stepping wrapper ``_radiation_with_caching``."""
 
