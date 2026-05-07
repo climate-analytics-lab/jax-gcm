@@ -59,32 +59,16 @@ must hold across every commit.
       importers. Drop the re-export when the file itself goes away in
       Phase 5.
 
-- [ ] ``EchamCloudsAndMicrophysics`` in ``echam_terms.py`` is the
-      pre-split single-term cloud+microphysics variant. Already
-      deprecated, not in the default factory. Drop in Phase 5 with
-      everything else.
+- [ ] After Phase 3 there are no remaining users of ``EchamTermBase``
+      / ``_data_from_diagnostics`` / ``_diagnostics_from_data`` —
+      ``echam_terms.py`` shrinks to just the ``echam_physics()``
+      factory + the (still required) ``ComposableEchamPhysics``
+      subclass. Drop the orphans in Phase 4.
 
-- [ ] ``EchamCloudsAndMicrophysics2M`` and ``apply_microphysics_2m`` /
-      ``apply_clouds_and_microphysics`` haven't migrated yet — final
-      Phase 3 batch. The 2M migration must preserve the qnc_prev /
-      qni_prev state-carry across radiation sub-steps (tracked in
-      ``apply_microphysics_2m``).
-
-- [ ] ``EchamSurface`` migration must preserve the implicit-stability
-      damping inside ``apply_surface``. That damping is what stabilises
-      the T63L47 + real-terrain runs the user is debugging on
-      ``debug/echam-2m-micro-stability`` — schedule it last and verify
-      against the moist-run reproducer in ``.claude/moist_run_debug_log.md``.
-
-- [ ] ``EchamVerticalDiffusion`` similarly carries the surface-tile
-      construction (Charnock, exchange coefficients) and TKE clamp.
-
-- [ ] After ``apply_surface`` + ``apply_microphysics_2m`` migrate, the
-      ``EchamTermBase`` base class (echam_terms.py:135) loses all its
-      consumers and can be deleted along with the
-      ``_data_from_diagnostics`` / ``_diagnostics_from_data`` helpers.
-      Until then they're the bridge that keeps the legacy-style terms
-      reading data populated by the new public-key writers.
+- [ ] ``apply_radiation_emulated`` is referenced as still-present in
+      the radiation terms' docs but the function is gone — the
+      reference comment in ``echam_physics.py`` needs to follow into
+      a deletion in Phase 5.
 
 ### Smaller nits
 
@@ -119,3 +103,29 @@ must hold across every commit.
   ``SundqvistCloudFraction``, ``Echam1MMicrophysics``.
 - 2026-05-07: Phase 3 radiation triplet — ``GreyTwoStreamRadiation``,
   ``RRTMGPRadiation``, ``NNEmulatorRadiation``.
+- 2026-05-07: Phase 3 vdiff/surface/2m — ``TteTkeVerticalDiffusion``,
+  ``EchamSurface``, ``Lohmann2MMicrophysics``. **Phase 3 complete.**
+
+## Tests skipped pending rewrite against new term classes
+
+- ``jcm/physics/echam/exchange_coupling_test.py`` — tested the
+  ``apply_vertical_diffusion`` ↔ ``apply_surface`` exchange-coefficient
+  flow. Now covered by the regression test; rewrite against
+  ``TteTkeVerticalDiffusion`` + ``EchamSurface`` for finer-grained
+  unit coverage.
+- ``jcm/physics/echam/surface_fraction_test.py`` — tested the
+  ``apply_surface`` tile-fraction logic. Logic now lives inline in
+  ``EchamSurface.__call__`` and is bit-exact-covered by the
+  regression test; rewrite as a per-term unit test.
+- ``radiation/grey_two_stream/radiation_scheme_test.py::TestRadiationCaching``
+  — tested the removed ``_radiation_with_caching`` helper. The
+  replacement helpers (``radiation_should_compute`` /
+  ``cached_radiation_tendency``) are exercised through the
+  ``GreyTwoStreamRadiation`` / ``RRTMGPRadiation`` /
+  ``NNEmulatorRadiation`` term ``__call__`` paths.
+- ``clouds/sundqvist_test.py::TestAerosolPrecipitationCoupling`` —
+  tested the ``_cloud_and_microphysics_column`` helper, now folded
+  into ``Echam1MMicrophysics``.
+- ``radiation/aerosol_radiation_test.py::test_aerosol_microphysics_droplet_coupling``
+  — tested ``apply_clouds_and_microphysics``; equivalent flow through
+  ``Macv2SpAerosol`` → ``Echam1MMicrophysics`` is regression-covered.
