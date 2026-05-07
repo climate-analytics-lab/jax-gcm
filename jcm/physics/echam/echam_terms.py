@@ -24,6 +24,13 @@ from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.diagnostics.moist_air_state import (
+    MOIST_AIR_FIELDS,
+    MoistAirColumnState,
+)
+from jcm.physics.forcing.echam_boundary_conditions import (
+    EchamBoundaryConditions,
+)
 
 
 # ------------------------------------------------------------------
@@ -34,7 +41,15 @@ def _data_from_diagnostics(
     diagnostics: dict, coords: EchamCoords,
     col_shape: tuple, num_levels: int,
 ) -> PhysicsData:
-    """Reconstruct ECHAM PhysicsData from the diagnostics dict."""
+    """Reconstruct ECHAM PhysicsData from the diagnostics dict.
+
+    The moist-air diagnostics (pressure_full, height_full, …) are now
+    written by :class:`MoistAirColumnState` as top-level public keys.
+    Reassemble them into ``data.diagnostics`` here so legacy ``apply_*``
+    consumers continue to see the typed sub-struct they expect. Falls
+    back to a legacy ``_diagnostics`` typed key if any caller still
+    writes it (defence in depth during the deprecation window).
+    """
     date = diagnostics.get("_date", DateData.zeros())
 
     data = PhysicsData.zeros(
@@ -43,6 +58,16 @@ def _data_from_diagnostics(
         model_step=date.model_step,
         dt_seconds=date.dt_seconds,
     )
+
+    diag_overrides = {
+        f: diagnostics[f] for f in MOIST_AIR_FIELDS if f in diagnostics
+    }
+    if diag_overrides:
+        data = data.copy(
+            diagnostics=data.diagnostics.copy(**diag_overrides),
+        )
+    elif "_diagnostics" in diagnostics:
+        data = data.copy(diagnostics=diagnostics["_diagnostics"])
 
     if "_radiation" in diagnostics:
         data = data.copy(radiation=diagnostics["_radiation"])
@@ -60,8 +85,6 @@ def _data_from_diagnostics(
         data = data.copy(aerosol=diagnostics["_aerosol"])
     if "_chemistry" in diagnostics:
         data = data.copy(chemistry=diagnostics["_chemistry"])
-    if "_diagnostics" in diagnostics:
-        data = data.copy(diagnostics=diagnostics["_diagnostics"])
 
     return data
 
@@ -69,8 +92,17 @@ def _data_from_diagnostics(
 def _diagnostics_from_data(
     diagnostics: dict, data: PhysicsData,
 ) -> dict:
-    """Store all ECHAM PhysicsData sub-structs into the diagnostics dict."""
-    return {
+    """Store ECHAM PhysicsData sub-structs into the diagnostics dict.
+
+    Moist-air diagnostics are written as top-level public keys (no
+    leading underscore, so they appear in user-facing xarray output as
+    ``pressure_full`` / ``height_full`` / … instead of the old
+    ``diagnostics.pressure_full`` / ``diagnostics.height_full``). This
+    propagates any in-step mutation a legacy ``apply_*`` made to
+    ``data.diagnostics`` (e.g. ``apply_cloud_fraction`` updating
+    ``relative_humidity``).
+    """
+    out = {
         **diagnostics,
         "_radiation": data.radiation,
         "_convection": data.convection,
@@ -79,8 +111,10 @@ def _diagnostics_from_data(
         "_surface": data.surface,
         "_aerosol": data.aerosol,
         "_chemistry": data.chemistry,
-        "_diagnostics": data.diagnostics,
     }
+    for field in MOIST_AIR_FIELDS:
+        out[field] = getattr(data.diagnostics, field)
+    return out
 
 
 # ------------------------------------------------------------------
@@ -126,42 +160,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamPrepareState(EchamTermBase):
-    """Compute common diagnostic fields (pressure, height, density)."""
-
-    name: ClassVar[str] = "echam_prepare_state"
-    category: ClassVar[str] = "prepare"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute diagnostic fields from state."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import (
-            _prepare_common_physics_state,
-        )
-        tend, data = _prepare_common_physics_state(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamForcing(EchamTermBase):
-    """Set time-varying boundary conditions."""
-
-    name: ClassVar[str] = "echam_forcing"
-    category: ClassVar[str] = "forcing"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Apply forcing boundary conditions."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.forcing import apply_forcing_data
-        tend, data = apply_forcing_data(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 class EchamAerosol(EchamTermBase):
     """MACv2-SP simple plume aerosol scheme."""
@@ -729,8 +727,8 @@ def echam_physics(
 
     return ComposableEchamPhysics(
         terms=[
-            EchamPrepareState(),
-            EchamForcing(),
+            MoistAirColumnState(),
+            EchamBoundaryConditions(),
             EchamAerosol(),
             EchamChemistry(),
             rad_term,

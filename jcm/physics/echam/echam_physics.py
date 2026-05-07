@@ -1312,7 +1312,7 @@ def apply_surface(
     # Read ``ocean_temp`` and ``land_temp`` straight from the forcing rather
     # than the upstream-blended ``physics_data.surface.surface_temperature``,
     # which is snapped to one-or-the-other via ``where(fmask>0.5)`` in
-    # ``EchamForcing`` and would feed the wrong T into the minority tile
+    # ``EchamBoundaryConditions`` and would feed the wrong T into the minority tile
     # (e.g. the 40% ocean fraction of a fmask=0.6 cell would otherwise
     # use ``stl_am`` instead of ``sst``).
     ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
