@@ -31,6 +31,7 @@ from jcm.physics.diagnostics.moist_air_state import (
 )
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.chemistry import SimpleChemistry
+from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.forcing.echam_boundary_conditions import (
@@ -76,7 +77,12 @@ def _data_from_diagnostics(
 
     if "_radiation" in diagnostics:
         data = data.copy(radiation=diagnostics["_radiation"])
-    if "_clouds" in diagnostics:
+    # ``clouds`` lives under a public top-level key after Phase 3
+    # (``SundqvistCloudFraction`` / microphysics terms); fall back to
+    # the legacy ``_clouds`` typed key for safety.
+    if "clouds" in diagnostics:
+        data = data.copy(clouds=diagnostics["clouds"])
+    elif "_clouds" in diagnostics:
         data = data.copy(clouds=diagnostics["_clouds"])
     if "_vertical_diffusion" in diagnostics:
         data = data.copy(
@@ -117,7 +123,7 @@ def _diagnostics_from_data(
     out = {
         **diagnostics,
         "_radiation": data.radiation,
-        "_clouds": data.clouds,
+        "clouds": data.clouds,
         "_vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
         "aerosol": data.aerosol,
@@ -226,29 +232,6 @@ class EchamRadiationEmulated(EchamTermBase):
             apply_radiation_emulated,
         )
         tend, data = apply_radiation_emulated(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class SundqvistCloudFraction(EchamTermBase):
-    """Sundqvist (1989) / Lohmann-Roeckner (1996) diagnostic cloud fraction.
-
-    Diagnoses cloud fraction as ``cc = 1 - sqrt(1 - b0)`` with
-    ``b0 = (RH - RH_crit) / (1 - RH_crit)`` and emits the associated
-    condensation tendencies. Originally the ECHAM shallow-cloud step;
-    renamed to reflect the underlying scheme rather than the package.
-    """
-
-    name: ClassVar[str] = "sundqvist_cloud_fraction"
-    category: ClassVar[str] = "cloud_fraction"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute condensation tendencies and cloud-fraction diagnostics."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_cloud_fraction
-        tend, data = apply_cloud_fraction(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -644,7 +627,7 @@ def echam_physics(
             SimpleChemistry(),
             rad_term,
             TiedtkeConvection(params=p.convection),
-            SundqvistCloudFraction(),
+            SundqvistCloudFraction(params=p.clouds),
             micro_term,
             EchamVerticalDiffusion(),
             EchamSurface(),

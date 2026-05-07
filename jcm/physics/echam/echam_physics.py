@@ -736,57 +736,9 @@ def _cloud_and_microphysics_column(
     return cloud_tendencies, cloud_state, micro_tendencies, micro_state
 
 
-@jit
-def apply_cloud_fraction(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Run the ECHAM shallow cloud / condensation scheme.
-
-    Emits the condensation tendencies (dtedt, dqdt, dqcdt, dqidt) and
-    publishes post-condensation ``cloud_fraction``, ``qc``, ``qi`` and
-    ``relative_humidity`` on ``physics_data`` for downstream microphysics
-    terms to consume. Split from ``apply_clouds_and_microphysics`` so that
-    the microphysics scheme (1M or 2M) can be swapped independently via
-    ComposablePhysics.replace("clouds", ...).
-    """
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    surface_pressure = physics_data.diagnostics.surface_pressure
-    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    cloud_config = parameters.clouds
-
-    cloud_tend_all, cloud_state_all = jax.vmap(
-        shallow_cloud_scheme,
-        in_axes=(1, 1, 1, 1, 1, 0, None, None),
-        out_axes=(0, 0),
-    )(state.temperature, state.specific_humidity, pressure_levels,
-      qc, qi, surface_pressure, dt, cloud_config)
-
-    tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),
-        v_wind=jnp.zeros_like(state.v_wind),
-        temperature=cloud_tend_all.dtedt.T,
-        specific_humidity=cloud_tend_all.dqdt.T,
-        tracers={
-            'qc': cloud_tend_all.dqcdt.T,
-            'qi': cloud_tend_all.dqidt.T,
-        },
-    )
-
-    cloud_data = physics_data.clouds.copy(
-        cloud_fraction=cloud_state_all.cloud_fraction.T,
-        qc=cloud_state_all.cloud_water.T,
-        qi=cloud_state_all.cloud_ice.T,
-    )
-    diagnostics = physics_data.diagnostics.copy(
-        relative_humidity=cloud_state_all.rel_humidity.T,
-    )
-    return tendencies, physics_data.copy(clouds=cloud_data, diagnostics=diagnostics)
+# ``apply_cloud_fraction`` was extracted to
+# :class:`jcm.physics.clouds.sundqvist.SundqvistCloudFraction` (Phase 3
+# of the scheme-named-terms refactor).
 
 
 @jit

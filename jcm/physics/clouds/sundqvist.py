@@ -474,5 +474,112 @@ def shallow_cloud_scheme(
         rel_humidity=rel_humidity,
         total_cloud_cover=jnp.array(total_cloud_cover)
     )
-    
+
     return tendencies, state
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+import jax  # noqa: E402
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.echam.echam_physics_data import CloudData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class SundqvistCloudFraction(PhysicsTerm):
+    """Sundqvist (1989) / Lohmann-Roeckner (1996) diagnostic cloud fraction.
+
+    Diagnoses cloud fraction as ``cc = 1 - sqrt(1 - b0)`` with
+    ``b0 = (RH - RH_crit) / (1 - RH_crit)`` and emits the associated
+    condensation tendencies. Operates on column-vectorized state
+    ``(nlev, ncols)``. Reads ``pressure_full``, ``surface_pressure``
+    from the moist-air diagnostics dict and ``qc`` / ``qi`` from
+    ``state.tracers``. Writes the post-condensation cloud fraction,
+    cloud water, and cloud ice into the public ``"clouds"`` key
+    (a :class:`CloudData` typed sub-struct shared with the downstream
+    microphysics terms) and updates the public ``"relative_humidity"``
+    moist-air key.
+    """
+
+    name: ClassVar[str] = "sundqvist_cloud_fraction"
+    category: ClassVar[str] = "cloud_fraction"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "surface_pressure",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("clouds", "relative_humidity")
+
+    def __init__(self, params: CloudParameters | None = None):
+        """Hold the scheme-native :class:`CloudParameters`."""
+        self.params = nnx.Param(params or CloudParameters.default())
+
+    @classmethod
+    def required_tracers(cls) -> tuple[TracerSpec, ...]:
+        """``qc`` / ``qi`` are read each step; declared so dynamics carries them."""
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+        )
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute cloud-fraction tendencies + diagnostics."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params = self.params.get_value()
+
+        pressure_full = diagnostics["pressure_full"]
+        surface_pressure = diagnostics["surface_pressure"]
+        qc = state.tracers.get("qc", jnp.zeros_like(state.temperature))
+        qi = state.tracers.get("qi", jnp.zeros_like(state.temperature))
+
+        cloud_tend, cloud_state = jax.vmap(
+            shallow_cloud_scheme,
+            in_axes=(1, 1, 1, 1, 1, 0, None, None),
+            out_axes=(0, 0),
+        )(
+            state.temperature, state.specific_humidity, pressure_full,
+            qc, qi, surface_pressure, dt, params,
+        )
+
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=cloud_tend.dtedt.T,
+            specific_humidity=cloud_tend.dqdt.T,
+            tracers={
+                "qc": cloud_tend.dqcdt.T,
+                "qi": cloud_tend.dqidt.T,
+            },
+        )
+
+        # Preserve any other CloudData fields written upstream (none today,
+        # but the downstream microphysics term writes precip_rain/snow etc.
+        # to the same key on subsequent steps) by copying onto the previous
+        # value or zeros.
+        prev_clouds = diagnostics.get(
+            "clouds", CloudData.zeros((ncols,), nlev),
+        )
+        clouds = prev_clouds.copy(
+            cloud_fraction=cloud_state.cloud_fraction.T,
+            qc=cloud_state.cloud_water.T,
+            qi=cloud_state.cloud_ice.T,
+        )
+
+        return tendency, {
+            **diagnostics,
+            "clouds": clouds,
+            "relative_humidity": cloud_state.rel_humidity.T,
+        }
