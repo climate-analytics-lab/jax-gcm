@@ -38,6 +38,7 @@ from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
 )
@@ -93,7 +94,14 @@ def _data_from_diagnostics(
         data = data.copy(clouds=diagnostics["clouds"])
     elif "_clouds" in diagnostics:
         data = data.copy(clouds=diagnostics["_clouds"])
-    if "_vertical_diffusion" in diagnostics:
+    # ``vertical_diffusion`` lives under a public top-level key after Phase 3
+    # (``TteTkeVerticalDiffusion``); fall back to the legacy
+    # ``_vertical_diffusion`` typed key for safety.
+    if "vertical_diffusion" in diagnostics:
+        data = data.copy(
+            vertical_diffusion=diagnostics["vertical_diffusion"],
+        )
+    elif "_vertical_diffusion" in diagnostics:
         data = data.copy(
             vertical_diffusion=diagnostics["_vertical_diffusion"],
         )
@@ -133,7 +141,7 @@ def _diagnostics_from_data(
         **diagnostics,
         "radiation": data.radiation,
         "clouds": data.clouds,
-        "_vertical_diffusion": data.vertical_diffusion,
+        "vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
         "aerosol": data.aerosol,
         "chemistry": data.chemistry,
@@ -243,25 +251,6 @@ class EchamCloudsAndMicrophysics(EchamTermBase):
             apply_clouds_and_microphysics,
         )
         tend, data = apply_clouds_and_microphysics(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamVerticalDiffusion(EchamTermBase):
-    """TKE-based vertical diffusion and boundary layer."""
-
-    name: ClassVar[str] = "echam_vertical_diffusion"
-    category: ClassVar[str] = "vertical_diffusion"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute vertical diffusion tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import (
-            apply_vertical_diffusion,
-        )
-        tend, data = apply_vertical_diffusion(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -529,7 +518,7 @@ def echam_physics(
             TiedtkeConvection(params=p.convection),
             SundqvistCloudFraction(params=p.clouds),
             micro_term,
-            EchamVerticalDiffusion(),
+            TteTkeVerticalDiffusion(params=p.vertical_diffusion),
             EchamSurface(),
             HinesGwd(params=p.hines),
             LottMillerSso(params=p.sso),

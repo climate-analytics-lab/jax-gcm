@@ -38,6 +38,7 @@ from .matrix_solver import (
 )
 
 from .vertical_diffusion import (
+    TteTkeVerticalDiffusion,
     vertical_diffusion_scheme,
     vertical_diffusion_scheme_vectorized,
     prepare_vertical_diffusion_state,
@@ -49,11 +50,11 @@ from .vertical_diffusion import (
 __all__ = [
     # Types
     "VDiffParameters",
-    "VDiffState", 
+    "VDiffState",
     "VDiffTendencies",
     "VDiffDiagnostics",
     "VDiffMatrixSystem",
-    
+
     # Turbulence coefficients
     "compute_richardson_number",
     "compute_mixing_length",
@@ -63,13 +64,14 @@ __all__ = [
     "compute_boundary_layer_height",
     "compute_friction_velocity",
     "compute_turbulence_diagnostics",
-    
+
     # Matrix solver
     "setup_matrix_system",
     "solve_tridiagonal_system",
     "vertical_diffusion_step",
-    
+
     # Main interface
+    "TteTkeVerticalDiffusion",
     "vertical_diffusion_scheme",
     "vertical_diffusion_scheme_vectorized",
     "prepare_vertical_diffusion_state",
