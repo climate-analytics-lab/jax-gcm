@@ -549,7 +549,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
     state tracers and cloud fraction from the public ``"clouds"`` key;
     reads ozone / CO2 from ``"chemistry"``; reads aerosol optical
     properties from ``"aerosol"``; reads surface temperature from
-    ``"_surface"`` (still legacy until the surface migration) and
+    ``"surface"`` (still legacy until the surface migration) and
     surface albedos / emissivity from ``"radiation"`` (set by
     :class:`~jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions`).
 
@@ -640,10 +640,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         ozone_vmr = chemistry.ozone_vmr * 1e-6
         co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
 
-        # Surface temperature still lives in the legacy "_surface" key
+        # Surface temperature still lives in the legacy "surface" key
         # (until the EchamSurface migration); the radiation surface
         # albedo / emissivity is on the "radiation" sub-struct.
-        surface_temperature = diagnostics["_surface"].surface_temperature.reshape(ncols)
+        surface_temperature = diagnostics["surface"].surface_temperature.reshape(ncols)
         radiation = diagnostics["radiation"]
         surface_albedo_vis = radiation.surface_albedo_vis.reshape(ncols)
         surface_albedo_nir = radiation.surface_albedo_nir.reshape(ncols)

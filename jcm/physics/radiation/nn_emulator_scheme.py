@@ -276,7 +276,7 @@ class NNEmulatorRadiation(PhysicsTerm):
         co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
 
         surface_temperature_col = (
-            diagnostics["_surface"].surface_temperature.reshape(ncols)
+            diagnostics["surface"].surface_temperature.reshape(ncols)
         )
         radiation_in = diagnostics["radiation"]
         surface_albedo_vis_col = radiation_in.surface_albedo_vis.reshape(ncols)

@@ -517,7 +517,7 @@ class RRTMGPRadiation(PhysicsTerm):
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud water / ice from state tracers, ozone / CO2 from
     ``"chemistry"``, aerosol from ``"aerosol"``, surface temperature
-    from the legacy ``"_surface"`` key, and surface albedos /
+    from the legacy ``"surface"`` key, and surface albedos /
     emissivity from the public ``"radiation"`` key. Caches its own
     heating rates across radiation sub-steps via the previous step's
     ``RadiationData`` in ``diagnostics["radiation"]``.
@@ -596,7 +596,7 @@ class RRTMGPRadiation(PhysicsTerm):
         co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
 
         surface_temperature_col = (
-            diagnostics["_surface"].surface_temperature.reshape(ncols)
+            diagnostics["surface"].surface_temperature.reshape(ncols)
         )
         radiation_in = diagnostics["radiation"]
         surface_albedo_vis_col = radiation_in.surface_albedo_vis.reshape(ncols)

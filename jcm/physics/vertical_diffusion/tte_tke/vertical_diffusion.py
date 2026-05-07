@@ -324,7 +324,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     Wraps :func:`vertical_diffusion_column` (already column-batched, no
     per-column vmap needed). Reads pressure / height diagnostics from
     the moist-air dict, surface temperature / roughness from the legacy
-    ``"_surface"`` key, sea-ice / land-temp / soil-water from forcing,
+    ``"surface"`` key, sea-ice / land-temp / soil-water from forcing,
     ``fmask`` from terrain. Builds the 3-tile (water/ice/land) per-column
     fractions, temperatures, roughness (water uses the Charnock-derived
     heat roughness ``exp(2 - 86 z0^0.375)``), and surface wetness inline.
@@ -345,7 +345,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half",
         "height_full", "height_half",
-        "_surface",
+        "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
@@ -402,7 +402,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # Per-tile surface temperature: SST for water, min(SST, ctfreez)
         # for ice (saline freezing point, ECHAM iniphy.f90:71), stl_am
         # for land.
-        surface_in = diagnostics["_surface"]
+        surface_in = diagnostics["surface"]
         sst_col = surface_in.surface_temperature.reshape(ncols)
         land_temp_col = forcing.stl_am.reshape(ncols)
         ctfreez = 271.38

@@ -90,7 +90,7 @@ class EchamBoundaryConditions(PhysicsTerm):
     category: ClassVar[str] = "forcing"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = (
-        "radiation", "_surface", "chemistry",
+        "radiation", "surface", "chemistry",
     )
 
     def __init__(self):
@@ -143,7 +143,7 @@ class EchamBoundaryConditions(PhysicsTerm):
             surface_emissivity=emissivity,
         )
         surface = diagnostics.get(
-            "_surface", SurfaceData.zeros((ncols,), nlev),
+            "surface", SurfaceData.zeros((ncols,), nlev),
         ).copy(
             surface_temperature=surface_temperature,
             skin_temperature=surface_temperature,
@@ -164,6 +164,6 @@ class EchamBoundaryConditions(PhysicsTerm):
         return zero_tendencies, {
             **diagnostics,
             "radiation": radiation,
-            "_surface": surface,
+            "surface": surface,
             "chemistry": chemistry,
         }

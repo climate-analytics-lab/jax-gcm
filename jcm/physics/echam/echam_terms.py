@@ -38,6 +38,7 @@ from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
@@ -105,7 +106,12 @@ def _data_from_diagnostics(
         data = data.copy(
             vertical_diffusion=diagnostics["_vertical_diffusion"],
         )
-    if "_surface" in diagnostics:
+    # ``surface`` lives under a public top-level key after Phase 3
+    # (``EchamSurface``); fall back to the legacy ``_surface`` typed
+    # key (still written by ``EchamBoundaryConditions``) for safety.
+    if "surface" in diagnostics:
+        data = data.copy(surface=diagnostics["surface"])
+    elif "_surface" in diagnostics:
         data = data.copy(surface=diagnostics["_surface"])
     # ``aerosol`` lives under a public top-level key after Phase 3
     # (``Macv2SpAerosol``); fall back to the legacy ``_aerosol`` typed key.
@@ -142,7 +148,7 @@ def _diagnostics_from_data(
         "radiation": data.radiation,
         "clouds": data.clouds,
         "vertical_diffusion": data.vertical_diffusion,
-        "_surface": data.surface,
+        "surface": data.surface,
         "aerosol": data.aerosol,
         "chemistry": data.chemistry,
     }
@@ -251,23 +257,6 @@ class EchamCloudsAndMicrophysics(EchamTermBase):
             apply_clouds_and_microphysics,
         )
         tend, data = apply_clouds_and_microphysics(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamSurface(EchamTermBase):
-    """Surface fluxes for ocean, sea ice, and land."""
-
-    name: ClassVar[str] = "echam_surface"
-    category: ClassVar[str] = "surface"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute surface flux tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_surface
-        tend, data = apply_surface(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -519,7 +508,7 @@ def echam_physics(
             SundqvistCloudFraction(params=p.clouds),
             micro_term,
             TteTkeVerticalDiffusion(params=p.vertical_diffusion),
-            EchamSurface(),
+            EchamSurface(params=p.surface),
             HinesGwd(params=p.hines),
             LottMillerSso(params=p.sso),
         ],
