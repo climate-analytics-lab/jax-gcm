@@ -1106,3 +1106,133 @@ def cloud_microphysics_column_sweep(
         precip_rain=zrfl_surface, precip_snow=zsfl_surface,
     )
     return tendencies, state
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class Echam1MMicrophysics(PhysicsTerm):
+    """ECHAM 1-moment cloud microphysics as a composable PhysicsTerm.
+
+    Consumes the post-condensation ``cloud_fraction``, ``qc``, ``qi``
+    written to the public ``"clouds"`` key by
+    :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction` so it
+    must be composed downstream of that term. Reads ``cdnc_factor`` from
+    the public ``"aerosol"`` key (set by
+    :class:`~jcm.physics.aerosol.Macv2SpAerosol`) to apply the Twomey
+    indirect effect on droplet number — when the aerosol term is absent,
+    falls back to the bare ``base_cdnc`` from the parameters.
+
+    Reads ``pressure_full``, ``air_density``, ``layer_thickness`` from
+    the moist-air diagnostics dict and the model timestep from
+    ``diagnostics["_date"].dt_seconds``. Writes ``precip_rain``,
+    ``precip_snow``, ``droplet_number`` back into the public
+    ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
+    ``qc`` / ``qi`` fields).
+    """
+
+    name: ClassVar[str] = "echam_1m_microphysics"
+    category: ClassVar[str] = "clouds"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "air_density", "layer_thickness", "clouds",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("clouds",)
+
+    def __init__(self, params: MicrophysicsParameters | None = None):
+        """Hold the scheme-native :class:`MicrophysicsParameters`."""
+        self.params = nnx.Param(
+            params or MicrophysicsParameters.default(),
+        )
+
+    @classmethod
+    def required_tracers(cls) -> tuple[TracerSpec, ...]:
+        """``qc`` / ``qi`` are read each step; declared so dynamics carries them."""
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+        )
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute microphysics tendencies + precip/droplet diagnostics."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params = self.params.get_value()
+
+        pressure_full = diagnostics["pressure_full"]
+        air_density = diagnostics["air_density"]
+        layer_thickness = diagnostics["layer_thickness"]
+        clouds = diagnostics["clouds"]
+
+        qc_interim = clouds.qc
+        qi_interim = clouds.qi
+        cloud_fraction = clouds.cloud_fraction
+
+        # Twomey effect: aerosol term provides per-column cdnc_factor.
+        # Fall back to neutral (1.0) when the aerosol term is absent.
+        if "aerosol" in diagnostics:
+            cdnc_factor = diagnostics["aerosol"].cdnc_factor
+        else:
+            cdnc_factor = jnp.ones((ncols,))
+        cdnc_m3 = (
+            jnp.ones_like(state.temperature)
+            * params.base_cdnc
+            * cdnc_factor[jnp.newaxis, :]
+        )
+        droplet_number_per_kg = cdnc_m3 / air_density
+
+        # Reverted from cloud_microphysics_column_sweep — the column-sweep
+        # variant's Rotstayn rain evaporation creates a positive-feedback
+        # loop with Sundqvist (rain evaporates → moistens dry layer →
+        # Sundqvist condenses → latent heat release → drives convection
+        # → more rain) that the surface bisect identified as the dominant
+        # amplifier of the day-7 NaN on T63L47 + real terrain. The per-
+        # level ``cloud_microphysics`` here discards rain each step (no
+        # propagating flux, no inter-level evap coupling), which breaks
+        # the feedback at the cost of microphysics fidelity. Tracked as
+        # follow-up work.
+        micro_tend, micro_state = jax.vmap(
+            cloud_microphysics,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+            out_axes=(0, 0),
+        )(
+            state.temperature, state.specific_humidity, pressure_full,
+            qc_interim, qi_interim, cloud_fraction,
+            air_density, layer_thickness,
+            droplet_number_per_kg, dt, params,
+        )
+
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=micro_tend.dtedt.T,
+            specific_humidity=micro_tend.dqdt.T,
+            tracers={
+                "qc": micro_tend.dqcdt.T,
+                "qi": micro_tend.dqidt.T,
+            },
+        )
+
+        clouds = clouds.copy(
+            precip_rain=micro_state.precip_rain,
+            precip_snow=micro_state.precip_snow,
+            droplet_number=cdnc_m3,
+        )
+
+        return tendency, {**diagnostics, "clouds": clouds}

@@ -741,72 +741,9 @@ def _cloud_and_microphysics_column(
 # of the scheme-named-terms refactor).
 
 
-@jit
-def apply_microphysics_1m(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Run ECHAM 1-moment cloud microphysics.
-
-    Consumes the post-condensation ``qc``, ``qi``, ``cloud_fraction`` that
-    :func:`apply_cloud_fraction` wrote to ``physics_data.clouds`` — so this
-    term must be composed after it.
-    """
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    air_density = physics_data.diagnostics.air_density
-    dz = physics_data.diagnostics.layer_thickness
-    micro_config = parameters.microphysics
-
-    qc_interim = physics_data.clouds.qc
-    qi_interim = physics_data.clouds.qi
-    cloud_fraction = physics_data.clouds.cloud_fraction
-
-    base_cdnc = parameters.microphysics.base_cdnc
-    cdnc_factor = physics_data.aerosol.cdnc_factor
-    cdnc_m3 = jnp.ones_like(state.temperature) * base_cdnc * cdnc_factor[jnp.newaxis, :]
-    droplet_number_per_kg = cdnc_m3 / air_density
-
-    # Reverted from cloud_microphysics_column_sweep — that scheme's
-    # Rotstayn rain evaporation creates a positive-feedback loop
-    # (rain evaporates → moistens dry layer → Sundqvist condenses →
-    # latent heat release → drives convection → more rain) that the
-    # surface bisect identified as the dominant amplifier of the
-    # day-7 NaN on T63L47 + real terrain. The per-level
-    # `cloud_microphysics` discards rain each step (no propagating
-    # flux, no inter-level evap coupling), which breaks the feedback
-    # at the cost of microphysics fidelity. Tracked as follow-up
-    # work — needs either ICON's RH-hysteresis bound on the evap
-    # source or a tighter Newton solve so the evap stays bounded
-    # under coupling with Sundqvist.
-    micro_tend_all, micro_state_all = jax.vmap(
-        cloud_microphysics,
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-        out_axes=(0, 0),
-    )(state.temperature, state.specific_humidity, pressure_levels,
-      qc_interim, qi_interim, cloud_fraction, air_density, dz,
-      droplet_number_per_kg, dt, micro_config)
-
-    tendencies = PhysicsTendency(
-        u_wind=jnp.zeros_like(state.u_wind),
-        v_wind=jnp.zeros_like(state.v_wind),
-        temperature=micro_tend_all.dtedt.T,
-        specific_humidity=micro_tend_all.dqdt.T,
-        tracers={
-            'qc': micro_tend_all.dqcdt.T,
-            'qi': micro_tend_all.dqidt.T,
-        },
-    )
-
-    cloud_data = physics_data.clouds.copy(
-        precip_rain=micro_state_all.precip_rain,
-        precip_snow=micro_state_all.precip_snow,
-        droplet_number=cdnc_m3,
-    )
-    return tendencies, physics_data.copy(clouds=cloud_data)
+# ``apply_microphysics_1m`` was extracted to
+# :class:`jcm.physics.clouds.echam_1m.Echam1MMicrophysics` (Phase 3 of
+# the scheme-named-terms refactor).
 
 
 @jit
