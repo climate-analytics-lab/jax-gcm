@@ -30,7 +30,6 @@ from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.surface.echam import surface_physics_step, initialize_surface_state
 from jcm.physics.surface.echam.surface_types import AtmosphericForcing
-from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics.aerosol.spa import spa_activated_cdnc
 
@@ -1410,61 +1409,6 @@ def apply_surface(
 # scheme-named-terms refactor).
 
 
-@jit
-def apply_chemistry(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply chemistry tendencies
-    
-    Computes tendencies from simple chemistry including:
-    - Fixed ozone distribution with relaxation
-    - Methane chemistry with simple decay
-    - CO2 tracking (no chemistry)
-    """
-    # Extract state variables
-    nlev, ncols = state.temperature.shape
-    temperature = state.temperature.T  # (ncols, nlev)
-    pressure = physics_data.diagnostics.pressure_full.T  # (ncols, nlev)
-    surface_pressure = physics_data.diagnostics.surface_pressure
-    
-    # Get current chemistry tracers from physics data
-    current_ozone = physics_data.chemistry.ozone_vmr.T  # (ncols, nlev)
-    current_methane = physics_data.chemistry.methane_vmr.T  # (ncols, nlev)
-    
-    dt = parameters.convection.dt_conv  # Time step (from convection for now)
-    
-    # Call chemistry scheme
-    chemistry_tend, chemistry_state = simple_chemistry(
-        pressure=pressure.T,  # Back to (nlev, ncols)
-        surface_pressure=surface_pressure,
-        temperature=temperature.T,  # Back to (nlev, ncols)
-        current_ozone=current_ozone.T,  # Back to (nlev, ncols)
-        current_methane=current_methane.T,  # Back to (nlev, ncols)
-        dt=dt,
-        config=None  # Use default chemistry parameters
-    )
-    
-    # Update physics data with chemistry diagnostics
-    updated_chemistry_data = physics_data.chemistry.copy(
-        ozone_vmr=chemistry_state.ozone_vmr,
-        methane_vmr=chemistry_state.methane_vmr,
-        co2_vmr=chemistry_state.co2_vmr,
-        ozone_production=chemistry_state.ozone_production,
-        ozone_loss=chemistry_state.ozone_loss,
-        methane_loss=chemistry_state.methane_loss
-    )
-    
-    updated_physics_data = physics_data.copy(chemistry=updated_chemistry_data)
-    
-    # Currently chemistry doesn't directly affect temperature or dynamics
-    # In future could add:
-    # - Ozone heating rates in radiation
-    # - Methane oxidation heating
-    # For now, return zero tendencies
-    physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
-    
-    return physics_tendencies, updated_physics_data
+# ``apply_chemistry`` was extracted to
+# :class:`jcm.physics.chemistry.SimpleChemistry` (Phase 3 of the
+# scheme-named-terms refactor).

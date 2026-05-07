@@ -29,6 +29,7 @@ from jcm.physics.diagnostics.moist_air_state import (
     MOIST_AIR_FIELDS,
     MoistAirColumnState,
 )
+from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.forcing.echam_boundary_conditions import (
@@ -84,7 +85,12 @@ def _data_from_diagnostics(
         data = data.copy(surface=diagnostics["_surface"])
     if "_aerosol" in diagnostics:
         data = data.copy(aerosol=diagnostics["_aerosol"])
-    if "_chemistry" in diagnostics:
+    # ``chemistry`` lives under a public top-level key after Phase 3
+    # (``SimpleChemistry`` / ``EchamBoundaryConditions``); fall back to
+    # the legacy ``_chemistry`` typed key for safety.
+    if "chemistry" in diagnostics:
+        data = data.copy(chemistry=diagnostics["chemistry"])
+    elif "_chemistry" in diagnostics:
         data = data.copy(chemistry=diagnostics["_chemistry"])
 
     return data
@@ -110,7 +116,7 @@ def _diagnostics_from_data(
         "_vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
         "_aerosol": data.aerosol,
-        "_chemistry": data.chemistry,
+        "chemistry": data.chemistry,
     }
     for field in MOIST_AIR_FIELDS:
         out[field] = getattr(data.diagnostics, field)
@@ -174,23 +180,6 @@ class EchamAerosol(EchamTermBase):
             get_simple_aerosol,
         )
         tend, data = get_simple_aerosol(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamChemistry(EchamTermBase):
-    """Simple chemistry scheme for ozone, methane, CO2."""
-
-    name: ClassVar[str] = "echam_chemistry"
-    category: ClassVar[str] = "chemistry"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Update chemistry tracers."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_chemistry
-        tend, data = apply_chemistry(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -666,7 +655,7 @@ def echam_physics(
             MoistAirColumnState(),
             EchamBoundaryConditions(),
             EchamAerosol(),
-            EchamChemistry(),
+            SimpleChemistry(),
             rad_term,
             TiedtkeConvection(params=p.convection),
             SundqvistCloudFraction(),

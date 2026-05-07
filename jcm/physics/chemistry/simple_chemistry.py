@@ -283,7 +283,7 @@ def initialize_chemistry_tracers(
     
     # Initialize CO2 as constant
     co2_vmr = jnp.ones((nlev, ncols)) * config.co2_vmr
-    
+
     return ChemistryState(
         ozone_vmr=ozone_vmr,
         methane_vmr=methane_vmr,
@@ -292,3 +292,80 @@ def initialize_chemistry_tracers(
         ozone_loss=jnp.zeros((nlev, ncols)),
         methane_loss=jnp.zeros((nlev, ncols))
     )
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class SimpleChemistry(PhysicsTerm):
+    """Simple chemistry as a composable PhysicsTerm.
+
+    Wraps :func:`simple_chemistry`. Reads the current chemistry typed
+    sub-struct from ``diagnostics["chemistry"]`` (initialised by
+    :class:`~jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions`
+    each step), computes the relaxation-to-climatology / linear-decay
+    update, and writes the new ``ChemistryState`` back to the same public
+    key. Returns zero atmospheric tendency — chemistry doesn't directly
+    perturb the dynamics here (its ozone/CO2 fields are consumed by the
+    radiation term to influence heating rates).
+
+    Reads ``pressure_full`` and ``surface_pressure`` from the moist-air
+    diagnostics dict and the model timestep from
+    ``diagnostics["_date"].dt_seconds``.
+    """
+
+    name: ClassVar[str] = "simple_chemistry"
+    category: ClassVar[str] = "chemistry"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "surface_pressure", "chemistry",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("chemistry",)
+
+    def __init__(self, params: ChemistryParameters | None = None):
+        """Hold the scheme-native :class:`ChemistryParameters`."""
+        self.params = nnx.Param(params or ChemistryParameters.default())
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Update chemistry sub-struct from the previous step's values."""
+        params = self.params.get_value()
+        dt = diagnostics["_date"].dt_seconds
+
+        chemistry = diagnostics["chemistry"]
+        _tend, new_state = simple_chemistry(
+            pressure=diagnostics["pressure_full"],
+            surface_pressure=diagnostics["surface_pressure"],
+            temperature=state.temperature,
+            current_ozone=chemistry.ozone_vmr,
+            current_methane=chemistry.methane_vmr,
+            dt=dt,
+            config=params,
+        )
+
+        chemistry = chemistry.copy(
+            ozone_vmr=new_state.ozone_vmr,
+            methane_vmr=new_state.methane_vmr,
+            co2_vmr=new_state.co2_vmr,
+            ozone_production=new_state.ozone_production,
+            ozone_loss=new_state.ozone_loss,
+            methane_loss=new_state.methane_loss,
+        )
+
+        zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
+        return zero_tendencies, {**diagnostics, "chemistry": chemistry}
