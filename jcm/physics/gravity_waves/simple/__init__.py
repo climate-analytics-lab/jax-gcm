@@ -10,6 +10,7 @@ overkill. The proper schemes live in
 """
 
 from .simple_gwd import (
+    SimpleGwd,
     SimpleGwdParameters,
     SimpleGwdState,
     SimpleGwdTendencies,
@@ -19,6 +20,7 @@ from .simple_gwd import (
 )
 
 __all__ = [
+    "SimpleGwd",
     "SimpleGwdParameters",
     "SimpleGwdState",
     "SimpleGwdTendencies",

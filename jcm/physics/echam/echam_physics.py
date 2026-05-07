@@ -31,7 +31,6 @@ from jcm.physics.echam.parameters import Parameters
 from jcm.physics.surface.echam import surface_physics_step, initialize_surface_state
 from jcm.physics.surface.echam.surface_types import AtmosphericForcing
 from jcm.physics.gravity_waves.hines import hines_gwd
-from jcm.physics.gravity_waves.simple import simple_gwd
 from jcm.physics.gravity_waves.sso import sso_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.echam.echam_physics_data import PhysicsData
@@ -1398,40 +1397,9 @@ def apply_surface(
     
     return physics_tendencies, updated_physics_data
 
-@jit
-def apply_simple_gwd(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply the simple monochromatic GWD scheme (cheap fallback)."""
-    diag = physics_data.diagnostics
-    nlev, ncols = state.temperature.shape
-    dt = parameters.convection.dt_conv
-
-    # Placeholder std-dev of sub-grid orography (200 m). The simple
-    # scheme keeps a single fixed value; the real Lott-Miller SSO
-    # scheme uses the per-column ``terrain.orostd`` instead.
-    h_std = jnp.ones(ncols) * 200.0
-
-    tend, _state = jax.vmap(
-        simple_gwd,
-        in_axes=(1, 1, 1, 1, 1, 1, 0, None, None),
-        out_axes=(0, 0),
-    )(state.u_wind, state.v_wind, state.temperature,
-      diag.pressure_full, diag.height_full, diag.air_density,
-      h_std, dt, parameters.simple_gwd)
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=tend.dudt.T,
-        v_wind=tend.dvdt.T,
-        temperature=tend.dtedt.T,
-        specific_humidity=jnp.zeros_like(state.specific_humidity),
-        tracers={},
-    )
-    return physics_tendencies, physics_data
+# ``apply_simple_gwd`` was extracted to
+# :class:`jcm.physics.gravity_waves.simple.SimpleGwd` (Phase 3 of the
+# scheme-named-terms refactor).
 
 
 @jit

@@ -403,3 +403,74 @@ def simple_gwd(
     )
     
     return tendencies, state
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class SimpleGwd(PhysicsTerm):
+    """Simple monochromatic gravity-wave drag as a composable PhysicsTerm.
+
+    Cheap fallback for the full Hines + Lott-Miller stack; kept available
+    for aquaplanet tests but excluded from the default ``echam_physics()``
+    factory. Operates on column-vectorized state ``(nlev, ncols)``. Reads
+    ``pressure_full``, ``height_full``, ``air_density`` from the moist-air
+    diagnostics dict and the model timestep from
+    ``diagnostics["_date"].dt_seconds``. Writes only u/v/T tendencies; no
+    Data sub-struct.
+    """
+
+    name: ClassVar[str] = "simple_gwd"
+    category: ClassVar[str] = "simple_gwd"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "height_full", "air_density",
+    )
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, params: SimpleGwdParameters | None = None):
+        """Hold the scheme-native :class:`SimpleGwdParameters`."""
+        self.params = nnx.Param(params or SimpleGwdParameters.default())
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute u/v/T tendencies from the simple GWD scheme."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params = self.params.get_value()
+
+        # Placeholder fixed std-dev of sub-grid orography. The real
+        # Lott-Miller SSO scheme uses per-column ``terrain.orostd`` instead.
+        h_std = jnp.ones(ncols) * 200.0
+
+        tend, _state = jax.vmap(
+            simple_gwd,
+            in_axes=(1, 1, 1, 1, 1, 1, 0, None, None),
+            out_axes=(0, 0),
+        )(
+            state.u_wind, state.v_wind, state.temperature,
+            diagnostics["pressure_full"], diagnostics["height_full"],
+            diagnostics["air_density"], h_std, dt, params,
+        )
+
+        return PhysicsTendency(
+            u_wind=tend.dudt.T,
+            v_wind=tend.dvdt.T,
+            temperature=tend.dtedt.T,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={},
+        ), diagnostics

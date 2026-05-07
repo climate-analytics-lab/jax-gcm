@@ -459,24 +459,11 @@ class EchamSSO(EchamTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
-class EchamSimpleGwd(EchamTermBase):
-    """Simple monochromatic GWD (cheap fallback). Kept available but not
-    included in the default ``echam_physics()`` factory; pass it explicitly
-    to ``ComposableEchamPhysics`` if you want the cheap scheme.
-    """
-
-    name: ClassVar[str] = "echam_simple_gwd"
-    category: ClassVar[str] = "simple_gwd"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute simple-GWD tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_simple_gwd
-        tend, data = apply_simple_gwd(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
+# ``EchamSimpleGwd`` was extracted to
+# :class:`jcm.physics.gravity_waves.simple.SimpleGwd` (Phase 3 of the
+# scheme-named-terms refactor). It was never wired into the default
+# ``echam_physics()`` factory; users who want the cheap GWD now compose
+# ``SimpleGwd()`` in directly.
 
 
 # ------------------------------------------------------------------
