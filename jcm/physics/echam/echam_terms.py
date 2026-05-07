@@ -36,6 +36,7 @@ from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
 )
@@ -184,25 +185,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamRadiationRRTMGP(EchamTermBase):
-    """RRTMGP full-spectrum radiation scheme."""
-
-    name: ClassVar[str] = "echam_radiation_rrtmgp"
-    category: ClassVar[str] = "radiation"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute RRTMGP radiative heating rates."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import (
-            apply_radiation_rrtmgp,
-        )
-        tend, data = apply_radiation_rrtmgp(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 class EchamRadiationEmulated(EchamTermBase):
     """Neural network radiation emulator (bidirectional GRU).
@@ -539,7 +521,7 @@ def echam_physics(
             )
         rad_term = radiation_scheme
     elif radiation_scheme == "rrtmgp":
-        rad_term = EchamRadiationRRTMGP()
+        rad_term = RRTMGPRadiation(params=p.radiation)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=p.radiation)
     elif radiation_scheme == "emulated":

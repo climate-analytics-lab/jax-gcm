@@ -480,3 +480,272 @@ def radiation_scheme_rrtmgp(
         surface_albedo_nir,
         surface_emissivity,
     )
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics.radiation.grey_two_stream.radiation_scheme import (  # noqa: E402
+    cached_radiation_tendency,
+    radiation_should_compute,
+)
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+def _column_vector_rrtmgp(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
+    """Return a vmapped scalar diagnostic as one value per column."""
+    return jnp.reshape(value, (ncols,))
+
+
+class RRTMGPRadiation(PhysicsTerm):
+    """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
+
+    Uses ``jax.lax.map`` over chunks for memory-bounded vmap (RRTMGP
+    allocates many g-point intermediates per column; running all columns
+    of a T63L47 grid at once OOMs an 80 GiB A100). Chunk size is
+    auto-detected from device HBM via :func:`chunk_budget`; override via
+    ``RadiationParameters(rrtmgp_chunk_size=...)``.
+
+    Reads pressure / height / density from the moist-air diagnostics
+    dict, cloud water / ice from state tracers, ozone / CO2 from
+    ``"chemistry"``, aerosol from ``"aerosol"``, surface temperature
+    from the legacy ``"_surface"`` key, and surface albedos /
+    emissivity from the public ``"radiation"`` key. Caches its own
+    heating rates across radiation sub-steps via the previous step's
+    ``RadiationData`` in ``diagnostics["radiation"]``.
+    """
+
+    name: ClassVar[str] = "rrtmgp_radiation"
+    category: ClassVar[str] = "radiation"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "pressure_half", "layer_thickness",
+        "air_density", "chemistry", "aerosol", "radiation",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("radiation",)
+
+    def __init__(self, params: RadiationParameters | None = None):
+        """Hold the scheme-native :class:`RadiationParameters`."""
+        self.params = nnx.Param(params or RadiationParameters.default())
+        self._coords_cached = False
+
+    def cache_coords(self, coords) -> None:
+        """Cache per-column lat/lon (deg) for the radiation scheme."""
+        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
+        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
+        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
+        self._lats = nnx.Variable(lat_2d.reshape(-1))
+        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        self._coords_cached = True
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute or reuse cached RRTMGP heating rates."""
+        params = self.params.get_value()
+        radiation = diagnostics["radiation"]
+
+        def _compute():
+            return self._compute_full(state, diagnostics, forcing, params)
+
+        def _use_cached():
+            return cached_radiation_tendency(
+                radiation, state.temperature.shape,
+            ), radiation
+
+        tendency, new_radiation = jax.lax.cond(
+            radiation_should_compute(diagnostics, params),
+            _compute, _use_cached,
+        )
+        return tendency, {**diagnostics, "radiation": new_radiation}
+
+    def _compute_full(
+        self, state, diagnostics, forcing, params,
+    ):
+        """Run the full RRTMGP scheme, return (tendency, RadiationData)."""
+        nlev, ncols = state.temperature.shape
+
+        latitudes = self._lats.get_value()
+        longitudes = self._lons.get_value()
+        solar = forcing.solar
+
+        cloud_water = state.tracers.get(
+            "qc", jnp.zeros_like(state.temperature),
+        )
+        cloud_ice = state.tracers.get(
+            "qi", jnp.zeros_like(state.temperature),
+        )
+        if "clouds" in diagnostics:
+            cloud_fraction = diagnostics["clouds"].cloud_fraction
+        else:
+            cloud_fraction = jnp.zeros_like(state.temperature)
+
+        chemistry = diagnostics["chemistry"]
+        ozone_vmr = chemistry.ozone_vmr * 1e-6
+        co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
+
+        surface_temperature_col = (
+            diagnostics["_surface"].surface_temperature.reshape(ncols)
+        )
+        radiation_in = diagnostics["radiation"]
+        surface_albedo_vis_col = radiation_in.surface_albedo_vis.reshape(ncols)
+        surface_albedo_nir_col = radiation_in.surface_albedo_nir.reshape(ncols)
+        surface_emissivity_col = radiation_in.surface_emissivity.reshape(ncols)
+
+        aerosol_in = diagnostics["aerosol"]
+        aerosol_for_vmap = aerosol_in.copy(
+            aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
+            ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
+            asy_profile=aerosol_in.asy_profile.reshape(nlev, ncols).T,
+            cdnc_factor=aerosol_in.cdnc_factor.reshape(ncols),
+            aod_total=aerosol_in.aod_total.reshape(ncols),
+            aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
+            aod_background=aerosol_in.aod_background.reshape(ncols),
+            angstrom=aerosol_in.angstrom.reshape(ncols),
+        )
+
+        # Auto-pick chunk size from device HBM (see chunk_budget()).
+        budget = chunk_budget(nlev)
+        if ncols <= budget:
+            chunk_size = ncols
+        else:
+            n_chunks = -(-ncols // budget)  # ceil-div
+            while ncols % n_chunks != 0:
+                n_chunks += 1
+            chunk_size = ncols // n_chunks
+        n_chunks = ncols // chunk_size
+
+        def split_lev_first(a):
+            """Reshape (nz, ncols) → (n_chunks, chunk_size, nz)."""
+            nz = a.shape[0]
+            return a.reshape(nz, n_chunks, chunk_size).transpose(1, 2, 0)
+
+        def split_col(a):
+            """Reshape (ncols, ...) → (n_chunks, chunk_size, ...)."""
+            return a.reshape(n_chunks, chunk_size, *a.shape[1:])
+
+        chunked_inputs = dict(
+            temperature=split_lev_first(state.temperature),
+            specific_humidity=split_lev_first(state.specific_humidity),
+            pressure_full=split_lev_first(diagnostics["pressure_full"]),
+            pressure_half=split_lev_first(diagnostics["pressure_half"]),
+            layer_thickness=split_lev_first(diagnostics["layer_thickness"]),
+            air_density=split_lev_first(diagnostics["air_density"]),
+            cloud_water=split_lev_first(cloud_water),
+            cloud_ice=split_lev_first(cloud_ice),
+            cloud_fraction=split_lev_first(cloud_fraction),
+            surface_temperature=split_col(surface_temperature_col),
+            surface_albedo_vis=split_col(surface_albedo_vis_col),
+            surface_albedo_nir=split_col(surface_albedo_nir_col),
+            surface_emissivity=split_col(surface_emissivity_col),
+            latitudes=split_col(latitudes),
+            longitudes=split_col(longitudes),
+            ozone_vmr=split_lev_first(ozone_vmr),
+            aerosol=aerosol_for_vmap.copy(
+                aod_profile=split_col(aerosol_for_vmap.aod_profile),
+                ssa_profile=split_col(aerosol_for_vmap.ssa_profile),
+                asy_profile=split_col(aerosol_for_vmap.asy_profile),
+                cdnc_factor=split_col(aerosol_for_vmap.cdnc_factor),
+                aod_total=split_col(aerosol_for_vmap.aod_total),
+                aod_anthropogenic=split_col(aerosol_for_vmap.aod_anthropogenic),
+                aod_background=split_col(aerosol_for_vmap.aod_background),
+                Nccn=split_col(aerosol_in.Nccn.reshape(ncols)),
+                angstrom=split_col(aerosol_for_vmap.angstrom),
+            ),
+        )
+
+        def _vmap_one_chunk(chunk_inputs):
+            return jax.vmap(
+                radiation_scheme_rrtmgp,
+                in_axes=(
+                    0, 0, 0, 0, 0,
+                    0, 0, 0, 0,
+                    0, 0, 0, 0,
+                    None, 0, 0,
+                    None, 0, 0, None,
+                ),
+                out_axes=(0, 0),
+                axis_size=chunk_size,
+            )(
+                chunk_inputs['temperature'], chunk_inputs['specific_humidity'],
+                chunk_inputs['pressure_full'], chunk_inputs['pressure_half'],
+                chunk_inputs['layer_thickness'], chunk_inputs['air_density'],
+                chunk_inputs['cloud_water'], chunk_inputs['cloud_ice'],
+                chunk_inputs['cloud_fraction'],
+                chunk_inputs['surface_temperature'],
+                chunk_inputs['surface_albedo_vis'],
+                chunk_inputs['surface_albedo_nir'],
+                chunk_inputs['surface_emissivity'],
+                solar, chunk_inputs['latitudes'], chunk_inputs['longitudes'],
+                params, chunk_inputs['aerosol'],
+                chunk_inputs['ozone_vmr'], co2_vmr,
+            )
+
+        chunked_results = jax.lax.map(_vmap_one_chunk, chunked_inputs)
+        tendencies_chunked, diagnostics_chunked = chunked_results
+
+        def merge(a):
+            return a.reshape(ncols, *a.shape[2:])
+
+        tendencies_vmapped = jax.tree_util.tree_map(merge, tendencies_chunked)
+        diagnostics_vmapped = jax.tree_util.tree_map(merge, diagnostics_chunked)
+
+        # Per-gpoint flux profiles are summed over g-points inside the
+        # vmapped per-column compute, so flux arrays are (ncols, nlev+1)
+        # — only a transpose is needed (DO NOT use the grey path's
+        # transpose+sum, the per-band axis is already gone).
+        rad_out = RadiationData(
+            cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
+            surface_albedo_vis=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_vis, ncols,
+            ),
+            surface_albedo_nir=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_nir, ncols,
+            ),
+            surface_emissivity=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
+            sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
+            sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
+            lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
+            lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
+            lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            surface_sw_down=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_sw_down, ncols,
+            ),
+            surface_lw_down=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_lw_down, ncols,
+            ),
+            surface_sw_up=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_sw_up, ncols,
+            ),
+            surface_lw_up=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_lw_up, ncols,
+            ),
+            toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
+            toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
+            toa_sw_down=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_sw_down, ncols,
+            ),
+        )
+
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros((nlev, ncols)),
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=tendencies_vmapped.temperature_tendency.T,
+            specific_humidity=jnp.zeros((nlev, ncols)),
+            tracers={},
+        )
+        return tendency, rad_out
