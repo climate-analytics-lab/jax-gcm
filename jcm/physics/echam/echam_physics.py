@@ -23,7 +23,6 @@ from jcm.terrain import TerrainData
 from jcm import constants as physical_constants
 
 # Import physics modules (will be implemented progressively)
-from jcm.physics.echam.echam_physics_data import RadiationData
 from jcm.physics.clouds.sundqvist import shallow_cloud_scheme
 from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
@@ -133,49 +132,6 @@ def _prepare_common_physics_state(
 # Physics term methods
 
 
-def _radiation_with_caching(
-    radiation_fn,
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Wrap a radiation term with sub-stepping via ``jax.lax.cond``.
-
-    On radiation steps the full scheme runs; on other steps the cached
-    heating rates from ``physics_data.radiation`` are reused.
-    """
-    nlev, ncols = state.temperature.shape
-    interval = parameters.radiation.radiation_interval
-    dt = physics_data.dt_seconds
-    step = physics_data.model_step
-
-    # interval <= 0 ⇒ compute every step (default)
-    steps_per_call = jnp.where(
-        interval > 0, jnp.int32(jnp.round(interval / dt)), jnp.int32(1)
-    )
-    should_compute = jnp.mod(step, steps_per_call) == 0
-
-    def _compute():
-        return radiation_fn(state, physics_data, parameters, forcing, terrain)
-
-    def _use_cached():
-        cached_tend = PhysicsTendency(
-            u_wind=jnp.zeros((nlev, ncols)),
-            v_wind=jnp.zeros((nlev, ncols)),
-            temperature=(
-                physics_data.radiation.sw_heating_rate
-                + physics_data.radiation.lw_heating_rate
-            ),
-            specific_humidity=jnp.zeros((nlev, ncols)),
-            tracers={},
-        )
-        return cached_tend, physics_data
-
-    return jax.lax.cond(should_compute, _compute, _use_cached)
-
-
 # ``apply_radiation`` was extracted to
 # :class:`jcm.physics.radiation.grey_two_stream.GreyTwoStreamRadiation`
 # (Phase 3 of the scheme-named-terms refactor). The shared caching gate
@@ -190,18 +146,9 @@ def _radiation_with_caching(
 # scheme-named-terms refactor).
 
 
-def apply_radiation_emulated(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Emulated (neural network) radiation with sub-stepping."""
-    return _radiation_with_caching(
-        _apply_radiation_emulated_inner,
-        state, physics_data, parameters, forcing, terrain,
-    )
+# ``apply_radiation_emulated`` was extracted to
+# :class:`jcm.physics.radiation.nn_emulator_scheme.NNEmulatorRadiation`
+# (Phase 3 of the scheme-named-terms refactor).
 
 
 # ``_apply_radiation_inner`` was moved into
@@ -214,127 +161,9 @@ def apply_radiation_emulated(
 # ``_compute_full`` method.
 
 
-@jit
-def _apply_radiation_emulated_inner(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply emulated (neural-network) radiation heating rates.
-
-    Uses bidirectional GRU networks to predict SW and LW fluxes for each
-    atmospheric column, then derives heating rates from flux divergence.
-    """
-    from jcm.physics.radiation.nn_emulator_scheme import (
-        radiation_scheme_emulated,
-    )
-
-    nlev, ncols = state.temperature.shape
-
-    # Lat/lon from cached coordinates
-    lat, lon = jax.numpy.meshgrid(
-        physics_data.echam_coords.lat * 180.0 / jnp.pi,
-        physics_data.echam_coords.lon * 180.0 / jnp.pi,
-    )
-    latitudes, longitudes = lat.reshape(ncols), lon.reshape(ncols)
-
-    # Solar geometry comes pre-baked on `forcing.solar` (populated by
-    # `Model._get_step_fn_factory` ↔ `ForcingData.select(date)`). The
-    # radiation scheme stays date-free.
-    solar = forcing.solar
-
-    cloud_water = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-    cloud_fraction = physics_data.clouds.cloud_fraction
-
-    ozone_vmr = physics_data.chemistry.ozone_vmr * 1e-6
-    co2_vmr = jnp.mean(physics_data.chemistry.co2_vmr) * 1e-6
-
-    surface_temperature_col = physics_data.surface.surface_temperature.reshape(ncols)
-    surface_albedo_vis_col = physics_data.radiation.surface_albedo_vis.reshape(ncols)
-    surface_albedo_nir_col = physics_data.radiation.surface_albedo_nir.reshape(ncols)
-    surface_emissivity_col = physics_data.radiation.surface_emissivity.reshape(ncols)
-
-    aerosol_data_for_vmap = physics_data.aerosol.copy(
-        aod_profile=physics_data.aerosol.aod_profile.reshape(nlev, ncols).T,
-        ssa_profile=physics_data.aerosol.ssa_profile.reshape(nlev, ncols).T,
-        asy_profile=physics_data.aerosol.asy_profile.reshape(nlev, ncols).T,
-        cdnc_factor=physics_data.aerosol.cdnc_factor.reshape(ncols),
-        aod_total=physics_data.aerosol.aod_total.reshape(ncols),
-        aod_anthropogenic=physics_data.aerosol.aod_anthropogenic.reshape(ncols),
-        aod_background=physics_data.aerosol.aod_background.reshape(ncols),
-        angstrom=physics_data.aerosol.angstrom.reshape(ncols),
-    )
-
-    # Extract emulator weights and scaling from radiation parameters
-    emulator_weights = parameters.radiation.emulator_weights
-    sw_scaling = parameters.radiation.sw_scaling
-    lw_scaling = parameters.radiation.lw_scaling
-
-    radiation_results = jax.vmap(
-        radiation_scheme_emulated,
-        in_axes=(
-            1, 1, 1, 1, 1,     # temperature..layer_thickness
-            1, 1, 1, 1,        # air_density..cloud_fraction
-            0, 0, 0, 0,        # surface scalars
-            None, 0, 0,        # date, lat, lon
-            None, 0, 1, None,  # parameters, aerosol, ozone, co2
-            None, None, None,  # emulator_weights, sw_scaling, lw_scaling
-        ),
-        out_axes=(0, 0),
-        axis_size=ncols,
-    )(
-        state.temperature, state.specific_humidity,
-        physics_data.diagnostics.pressure_full,
-        physics_data.diagnostics.pressure_half,
-        physics_data.diagnostics.layer_thickness,
-        physics_data.diagnostics.air_density,
-        cloud_water, cloud_ice, cloud_fraction,
-        surface_temperature_col, surface_albedo_vis_col,
-        surface_albedo_nir_col, surface_emissivity_col,
-        solar, latitudes, longitudes,
-        parameters.radiation, aerosol_data_for_vmap, ozone_vmr, co2_vmr,
-        emulator_weights, sw_scaling, lw_scaling,
-    )
-
-    tendencies_vmapped, diagnostics_vmapped = radiation_results
-    temperature_tendency = tendencies_vmapped.temperature_tendency.T
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=jnp.zeros((nlev, ncols)),
-        v_wind=jnp.zeros((nlev, ncols)),
-        temperature=temperature_tendency,
-        specific_humidity=jnp.zeros((nlev, ncols)),
-        tracers={},
-    )
-
-    # Emulated fluxes are 1D per column (no spectral bands), so the
-    # vmapped output shapes are [ncols, nlev+1] for fluxes and
-    # [ncols, nlev] for heating rates.
-    rad_out = RadiationData(
-        cos_zenith=_column_vector(diagnostics_vmapped.cos_zenith, ncols),
-        surface_albedo_vis=_column_vector(diagnostics_vmapped.surface_albedo_vis, ncols),
-        surface_albedo_nir=_column_vector(diagnostics_vmapped.surface_albedo_nir, ncols),
-        surface_emissivity=_column_vector(diagnostics_vmapped.surface_emissivity, ncols),
-        sw_flux_up=diagnostics_vmapped.sw_flux_up.T,        # [ncols, nlev+1] -> [nlev+1, ncols]
-        sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
-        sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
-        lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
-        lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
-        lw_heating_rate=tendencies_vmapped.longwave_heating.T,
-        surface_sw_down=_column_vector(diagnostics_vmapped.surface_sw_down, ncols),
-        surface_lw_down=_column_vector(diagnostics_vmapped.surface_lw_down, ncols),
-        surface_sw_up=_column_vector(diagnostics_vmapped.surface_sw_up, ncols),
-        surface_lw_up=_column_vector(diagnostics_vmapped.surface_lw_up, ncols),
-        toa_sw_up=_column_vector(diagnostics_vmapped.toa_sw_up, ncols),
-        toa_lw_up=_column_vector(diagnostics_vmapped.toa_lw_up, ncols),
-        toa_sw_down=_column_vector(diagnostics_vmapped.toa_sw_down, ncols),
-    )
-
-    updated_physics_data = physics_data.copy(radiation=rad_out)
-    return physics_tendencies, updated_physics_data
+# ``_apply_radiation_emulated_inner`` was moved into
+# :class:`jcm.physics.radiation.nn_emulator_scheme.NNEmulatorRadiation`
+# as the term's ``_compute_full`` method.
 
 
 # ``apply_convection`` was extracted to

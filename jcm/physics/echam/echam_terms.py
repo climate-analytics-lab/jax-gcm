@@ -36,6 +36,7 @@ from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.gravity_waves.sso import LottMillerSso
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
@@ -185,30 +186,6 @@ class EchamTermBase(PhysicsTerm):
 # ------------------------------------------------------------------
 # Concrete ECHAM term wrappers
 # ------------------------------------------------------------------
-
-class EchamRadiationEmulated(EchamTermBase):
-    """Neural network radiation emulator (bidirectional GRU).
-
-    Uses a pre-trained neural network to emulate radiative transfer,
-    providing a fast, differentiable alternative to RRTMGP.
-    See ``jcm.physics.echam.radiation.nn_emulator`` for details.
-    """
-
-    name: ClassVar[str] = "echam_radiation_emulated"
-    category: ClassVar[str] = "radiation"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute NN-emulated radiative heating rates."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import (
-            apply_radiation_emulated,
-        )
-        tend, data = apply_radiation_emulated(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
 
 class EchamCloudsAndMicrophysics2M(EchamTermBase):
     """ECHAM 2-moment cloud microphysics (Phase 5a: warm-rain only).
@@ -525,7 +502,7 @@ def echam_physics(
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=p.radiation)
     elif radiation_scheme == "emulated":
-        rad_term = EchamRadiationEmulated()
+        rad_term = NNEmulatorRadiation(params=p.radiation)
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
