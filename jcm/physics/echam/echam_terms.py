@@ -29,6 +29,7 @@ from jcm.physics.diagnostics.moist_air_state import (
     MOIST_AIR_FIELDS,
     MoistAirColumnState,
 )
+from jcm.physics.gravity_waves.hines import HinesGwd
 from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
 )
@@ -425,23 +426,6 @@ class EchamSurface(EchamTermBase):
         return tend, _diagnostics_from_data(diagnostics, data)
 
 
-class EchamHines(EchamTermBase):
-    """Hines (1997) doppler-spread spectral non-orographic GWD."""
-
-    name: ClassVar[str] = "echam_hines"
-    category: ClassVar[str] = "hines"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute Hines GWD tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_hines
-        tend, data = apply_hines(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
 class EchamSSO(EchamTermBase):
     """Lott-Miller (1997) sub-grid orographic gravity-wave drag."""
 
@@ -705,7 +689,7 @@ def echam_physics(
             micro_term,
             EchamVerticalDiffusion(),
             EchamSurface(),
-            EchamHines(),
+            HinesGwd(params=p.hines),
             EchamSSO(),
         ],
         checkpoint_terms=checkpoint_terms,

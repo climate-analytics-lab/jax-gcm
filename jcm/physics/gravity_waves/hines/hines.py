@@ -688,3 +688,83 @@ def hines_gwd(
         HinesTendencies(dudt=drag_u, dvdt=drag_v, dissip=heating),
         HinesState(flux_u=flux_u, flux_v=flux_v, diffco=diffco),
     )
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm import constants as _physical_constants  # noqa: E402
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class HinesGwd(PhysicsTerm):
+    """Hines (1997) doppler-spread spectral non-orographic GWD.
+
+    Composable physics term wrapping :func:`hines_gwd`. Operates on
+    column-vectorized state ``(nlev, ncols)``. Reads ``pressure_full``,
+    ``pressure_half``, ``height_half``, ``air_density`` from the
+    moist-air diagnostics dict, computes per-layer mass ``Δp / g`` on
+    the fly, and writes only u/v/T tendencies (no Data sub-struct —
+    Hines is a pure tendency producer).
+    """
+
+    name: ClassVar[str] = "hines_gwd"
+    category: ClassVar[str] = "hines"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "pressure_half",
+        "height_half", "air_density",
+    )
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, params: HinesParameters | None = None):
+        """Hold the scheme-native :class:`HinesParameters`."""
+        self.params = nnx.Param(params or HinesParameters.default())
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute u/v tendencies + heating from Hines (1997)."""
+        params = self.params.get_value()
+        pressure_full = diagnostics["pressure_full"]
+        pressure_half = diagnostics["pressure_half"]
+        height_half = diagnostics["height_half"]
+        air_density = diagnostics["air_density"]
+
+        # Layer mass per unit area Δp / g, full-level array.
+        layer_mass = (
+            (pressure_half[1:, :] - pressure_half[:-1, :])
+            / _physical_constants.grav
+        )
+
+        tend, _state = jax.vmap(
+            lambda *a: hines_gwd(*a, params),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1),
+            out_axes=(0, 0),
+        )(
+            pressure_half, pressure_full, height_half,
+            air_density, layer_mass,
+            state.temperature, state.u_wind, state.v_wind,
+        )
+
+        # Convert energy dissipation (W/kg) to a temperature tendency.
+        dt_temperature = tend.dissip / _physical_constants.cpd
+
+        return PhysicsTendency(
+            u_wind=tend.dudt.T,
+            v_wind=tend.dvdt.T,
+            temperature=dt_temperature.T,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={},
+        ), diagnostics

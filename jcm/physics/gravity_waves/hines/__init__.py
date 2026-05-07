@@ -5,6 +5,7 @@ Port of ECHAM ``mo_gw_hines.f90``. The real implementation lives in
 """
 
 from .hines import (
+    HinesGwd,
     HinesParameters,
     HinesState,
     HinesTendencies,
@@ -12,6 +13,7 @@ from .hines import (
 )
 
 __all__ = [
+    "HinesGwd",
     "HinesParameters",
     "HinesState",
     "HinesTendencies",

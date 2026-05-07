@@ -30,7 +30,6 @@ from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.surface.echam import surface_physics_step, initialize_surface_state
 from jcm.physics.surface.echam.surface_types import AtmosphericForcing
-from jcm.physics.gravity_waves.hines import hines_gwd
 from jcm.physics.gravity_waves.sso import sso_drag
 from jcm.physics.chemistry import simple_chemistry
 from jcm.physics.echam.echam_physics_data import PhysicsData
@@ -1402,39 +1401,9 @@ def apply_surface(
 # scheme-named-terms refactor).
 
 
-@jit
-def apply_hines(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData,
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply the Hines (1997) doppler-spread spectral non-orographic GWD."""
-    diag = physics_data.diagnostics
-    # Layer mass per unit area Δp / g, full-level array.
-    layer_mass = (diag.pressure_half[1:, :]
-                  - diag.pressure_half[:-1, :]) / physical_constants.grav
-
-    tend, _state = jax.vmap(
-        lambda *a: hines_gwd(*a, parameters.hines),
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1),
-        out_axes=(0, 0),
-    )(diag.pressure_half, diag.pressure_full, diag.height_half,
-      diag.air_density, layer_mass,
-      state.temperature, state.u_wind, state.v_wind)
-
-    # Convert energy dissipation (W/kg) to a temperature tendency.
-    dt_temperature = tend.dissip / physical_constants.cpd
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=tend.dudt.T,
-        v_wind=tend.dvdt.T,
-        temperature=dt_temperature.T,
-        specific_humidity=jnp.zeros_like(state.specific_humidity),
-        tracers={},
-    )
-    return physics_tendencies, physics_data
+# ``apply_hines`` was extracted to
+# :class:`jcm.physics.gravity_waves.hines.HinesGwd` (Phase 3 of the
+# scheme-named-terms refactor).
 
 
 @jit
