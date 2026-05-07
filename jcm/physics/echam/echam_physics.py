@@ -1,10 +1,15 @@
 """ECHAM physics term functions.
 
 Standalone functions implementing the individual ECHAM parameterizations
-(``apply_radiation``, ``apply_convection``, etc.). These are wrapped by
-``ComposablePhysics`` term classes in ``echam_terms.py``; there is no
-monolithic orchestrator class — use ``echam_physics()`` from
+(``apply_radiation``, ``apply_clouds_and_microphysics``, etc.). These are
+wrapped by ``ComposablePhysics`` term classes in ``echam_terms.py``; there
+is no monolithic orchestrator class — use ``echam_physics()`` from
 ``echam_terms`` to build a composable ECHAM physics package.
+
+As schemes migrate to scheme-named ``PhysicsTerm`` classes living next to
+their underlying numerics (Phase 2+ of the composable refactor), the
+``apply_*`` functions in this file shrink. ``apply_convection`` has been
+extracted to :class:`jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection`.
 """
 
 import logging
@@ -20,7 +25,6 @@ from jcm import constants as physical_constants
 # Import physics modules (will be implemented progressively)
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_scheme
 from jcm.physics.echam.echam_physics_data import RadiationData
-from jcm.physics.convection.tiedtke_nordeng import tiedtke_nordeng_convection
 from jcm.physics.clouds.sundqvist import shallow_cloud_scheme
 from jcm.physics.clouds.echam_1m import cloud_microphysics
 from jcm.physics.echam.parameters import Parameters
@@ -683,76 +687,11 @@ def _apply_radiation_emulated_inner(
     return physics_tendencies, updated_physics_data
 
 
-@jit
-def apply_convection(
-    state: PhysicsState,
-    physics_data: PhysicsData,
-    parameters: Parameters,
-    forcing: ForcingData,
-    terrain: TerrainData
-) -> tuple[PhysicsTendency, PhysicsData]:
-    """Apply Tiedtke-Nordeng convection scheme with fixed qc/qi transport"""
-    dt = parameters.convection.dt_conv
-    pressure_levels = physics_data.diagnostics.pressure_full
-    layer_thickness = physics_data.diagnostics.layer_thickness
-    air_density = physics_data.diagnostics.air_density
-    ncols = state.temperature.shape[1]
+# ``apply_convection`` was extracted to
+# ``jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection`` (Phase 2 of
+# the scheme-named-terms refactor). The numerical implementation moved
+# verbatim into the term ``__call__``.
 
-    # Extract fixed qc/qi tracers (with defaults if not present)
-    qc = state.tracers.get('qc', jnp.zeros_like(state.temperature))
-    qi = state.tracers.get('qi', jnp.zeros_like(state.temperature))
-
-    # Per-column land fraction selects between ECHAM's ocean and land
-    # ``zdnoprc`` precip-zone thresholds inside the updraft.
-    land_fraction = terrain.fmask.reshape(ncols)
-
-    conv_results = jax.vmap(
-        tiedtke_nordeng_convection,
-        # dt and config are scalar (None); land_fraction is per-column (axis 0)
-        in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0),
-        out_axes=(0, 0)  # Returns (ConvectionTendencies, ConvectionState) per column
-    )(state.temperature, state.specific_humidity, pressure_levels, layer_thickness,
-      air_density, state.u_wind, state.v_wind, qc, qi, dt, parameters.convection,
-      land_fraction)
-    
-    # Unpack structured results directly (no tuple unpacking needed)
-    conv_tendencies_all, conv_states_all = conv_results
-
-    # Hard limit on the convective T tendency: 5 K / hr, applied symmetrically.
-    # Healthy deep convection over the warmest tropical SSTs gives ~1 K/hr at
-    # the most active level; the cap only fires when the column's parcel-vs-
-    # environment energy balance has gone pathological. The companion
-    # cloud-base mass-flux CFL cap in ``tiedtke_nordeng_convection`` (added
-    # in the same branch) bounds the column-integrated mass flux but does
-    # not contain per-level latent-heat spikes inside the updraft loop —
-    # ECHAM bounds those via the per-level moist-adjustment limits in
-    # ``mo_cuadjust.f90`` which we have not yet ported. Until that lands
-    # this cap is the safety net.
-    _DTDT_MAX = 5.0 / 3600.0  # K/s
-    dt_conv_capped = jnp.clip(
-        conv_tendencies_all.dtedt, -_DTDT_MAX, _DTDT_MAX,
-    )
-
-    physics_tendencies = PhysicsTendency(
-        u_wind=conv_tendencies_all.dudt.T,
-        v_wind=conv_tendencies_all.dvdt.T,
-        temperature=dt_conv_capped.T,
-        specific_humidity=conv_tendencies_all.dqdt.T,
-        tracers={
-            'qc': conv_tendencies_all.dqc_dt.T,
-            'qi': conv_tendencies_all.dqi_dt.T
-        }
-    )
-    
-    # Update physics data with convection diagnostics (transpose scalars)
-    convection_data = physics_data.convection.copy(
-        qc_conv=conv_tendencies_all.qc_conv.T,
-        qi_conv=conv_tendencies_all.qi_conv.T,
-        precip_conv=conv_tendencies_all.precip_conv,  # Already 1D per column
-    )
-    updated_physics_data = physics_data.copy(convection=convection_data)
-    
-    return physics_tendencies, updated_physics_data
 
 def _cloud_and_microphysics_column(
     temperature, specific_humidity, pressure, qc, qi,

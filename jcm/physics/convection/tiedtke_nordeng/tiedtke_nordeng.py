@@ -158,6 +158,41 @@ class ConvectionTendencies(NamedTuple):
     dqi_dt: jnp.ndarray      # Cloud ice tendency (kg/kg/s)
 
 
+@tree_math.struct
+class ConvectionData:
+    """Diagnostic outputs from the Tiedtke-Nordeng convection scheme.
+
+    Stored in the diagnostics dict under the ``"convection"`` key (no
+    leading underscore — flows to user-facing xarray output as
+    ``convection.<field>``). The ``mass_flux_*`` / ``cloud_base`` /
+    ``cloud_top`` / ``cape`` fields are reserved for the future port of
+    the equivalent ECHAM diagnostics; they are zero-filled today.
+    """
+
+    mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)
+    mass_flux_down: jnp.ndarray      # Downdraft mass flux [kg/m²/s] (nlev, ncols)
+    cloud_base: jnp.ndarray          # Cloud base level index (ncols,)
+    cloud_top: jnp.ndarray           # Cloud top level index (ncols,)
+    cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
+    precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
+    qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
+
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        """Construct a zero-filled ``ConvectionData`` for the given grid."""
+        return cls(
+            mass_flux_up=jnp.zeros((nlev,) + nodal_shape),
+            mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
+            cloud_base=jnp.zeros(nodal_shape, dtype=int),
+            cloud_top=jnp.zeros(nodal_shape, dtype=int),
+            cape=jnp.zeros(nodal_shape),
+            precip_conv=jnp.zeros(nodal_shape),
+            qc_conv=jnp.zeros((nlev,) + nodal_shape),
+            qi_conv=jnp.zeros((nlev,) + nodal_shape),
+        )
+
+
 def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     """Calculate saturation vapor pressure using Tetens formula
     
@@ -899,5 +934,136 @@ def tiedtke_nordeng_convection(
     )
 
     return tendencies, updated_state
+
+
+# ---------------------------------------------------------------------------
+# Composable physics term wrapper
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar  # noqa: E402
+
+from flax import nnx  # noqa: E402
+
+from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
+from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.terrain import TerrainData  # noqa: E402
+
+
+class TiedtkeConvection(PhysicsTerm):
+    """Tiedtke-Nordeng mass-flux convection as a composable PhysicsTerm.
+
+    Operates on column-vectorized state ``(nlev, ncols)``. Calls the
+    standalone :func:`tiedtke_nordeng_convection` scheme via ``jax.vmap``
+    over columns. Holds its own :class:`ConvectionParameters` as
+    ``nnx.Param`` so that gradients flow through them.
+
+    Reads the moist-air diagnostics produced by
+    :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`
+    (``pressure_full``, ``layer_thickness``, ``air_density``) and the
+    model timestep from ``diagnostics["_date"].dt_seconds``. Writes the
+    :class:`ConvectionData` sub-struct under the public ``"convection"``
+    key.
+    """
+
+    name: ClassVar[str] = "tiedtke_convection"
+    category: ClassVar[str] = "convection"
+    requires: ClassVar[tuple[str, ...]] = (
+        "pressure_full", "layer_thickness", "air_density",
+    )
+    provides: ClassVar[tuple[str, ...]] = ("convection",)
+
+    def __init__(self, params: ConvectionParameters | None = None):
+        """Hold the scheme-native :class:`ConvectionParameters`."""
+        self.params = nnx.Param(params or ConvectionParameters.default())
+
+    @classmethod
+    def required_tracers(cls) -> tuple[TracerSpec, ...]:
+        """Declare ``qc`` and ``qi`` so the dynamics carries them across steps.
+
+        The scheme transports cloud water and ice prognostically inside
+        each updraft/downdraft, so the tendencies it returns rely on
+        seeing yesterday's qc/qi at the start of every column call.
+        """
+        return (
+            TracerSpec("qc", units="kg/kg"),
+            TracerSpec("qi", units="kg/kg"),
+        )
+
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Compute convective tendencies; write ``convection`` diagnostics."""
+        nlev, ncols = state.temperature.shape
+        dt = diagnostics["_date"].dt_seconds
+        params = self.params.get_value()
+
+        pressure_full = diagnostics["pressure_full"]
+        layer_thickness = diagnostics["layer_thickness"]
+        air_density = diagnostics["air_density"]
+
+        qc = state.tracers.get("qc", jnp.zeros_like(state.temperature))
+        qi = state.tracers.get("qi", jnp.zeros_like(state.temperature))
+
+        # Per-column land fraction selects between ECHAM's ocean and land
+        # ``zdnoprc`` precip-zone thresholds inside the updraft.
+        land_fraction = terrain.fmask.reshape(ncols)
+
+        column_fn = jax.vmap(
+            tiedtke_nordeng_convection,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0),
+            out_axes=(0, 0),
+        )
+        tendencies_all, _state_all = column_fn(
+            state.temperature, state.specific_humidity,
+            pressure_full, layer_thickness, air_density,
+            state.u_wind, state.v_wind, qc, qi,
+            dt, params, land_fraction,
+        )
+
+        # Hard limit on the convective T tendency: 5 K/hr, applied
+        # symmetrically. Healthy deep convection over the warmest tropical
+        # SSTs gives ~1 K/hr at the most active level; the cap only fires
+        # when the column's parcel-vs-environment energy balance has gone
+        # pathological. The companion cloud-base mass-flux CFL cap inside
+        # ``tiedtke_nordeng_convection`` bounds the column-integrated mass
+        # flux but does not contain per-level latent-heat spikes inside
+        # the updraft loop — ECHAM bounds those via the per-level moist-
+        # adjustment limits in ``mo_cuadjust.f90`` which we have not yet
+        # ported. Until that lands this cap is the safety net.
+        _DTDT_MAX = 5.0 / 3600.0  # K/s
+        dt_capped = jnp.clip(tendencies_all.dtedt, -_DTDT_MAX, _DTDT_MAX)
+
+        tendency = PhysicsTendency(
+            u_wind=tendencies_all.dudt.T,
+            v_wind=tendencies_all.dvdt.T,
+            temperature=dt_capped.T,
+            specific_humidity=tendencies_all.dqdt.T,
+            tracers={
+                "qc": tendencies_all.dqc_dt.T,
+                "qi": tendencies_all.dqi_dt.T,
+            },
+        )
+
+        # Mass-flux / cloud-base/top / CAPE diagnostics aren't populated
+        # by the wrapper today (the scheme returns the per-column state
+        # but we don't reduce or surface it yet) — they stay as zeros
+        # for back-compat with existing xarray field names.
+        convection = ConvectionData(
+            mass_flux_up=jnp.zeros_like(pressure_full),
+            mass_flux_down=jnp.zeros_like(pressure_full),
+            cloud_base=jnp.zeros(ncols, dtype=int),
+            cloud_top=jnp.zeros(ncols, dtype=int),
+            cape=jnp.zeros(ncols),
+            precip_conv=tendencies_all.precip_conv,
+            qc_conv=tendencies_all.qc_conv.T,
+            qi_conv=tendencies_all.qi_conv.T,
+        )
+
+        return tendency, {**diagnostics, "convection": convection}
 
 

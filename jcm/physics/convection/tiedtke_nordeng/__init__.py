@@ -6,10 +6,12 @@ associated cloud and precipitation processes.
 """
 
 from .tiedtke_nordeng import (
+    ConvectionData,
+    ConvectionParameters,
+    ConvectionState,
+    ConvectionTendencies,
+    TiedtkeConvection,
     tiedtke_nordeng_convection,
-    ConvectionParameters, 
-    ConvectionState, 
-    ConvectionTendencies
 )
 from .tracer_transport import TracerIndices, TracerTransport, initialize_tracers
 from .adjustment import (
@@ -20,9 +22,11 @@ from .adjustment import (
 
 __all__ = [
     "tiedtke_nordeng_convection",
+    "ConvectionData",
     "ConvectionParameters",
-    "ConvectionState", 
+    "ConvectionState",
     "ConvectionTendencies",
+    "TiedtkeConvection",
     "TracerIndices",
     "TracerTransport",
     "initialize_tracers",

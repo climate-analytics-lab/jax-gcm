@@ -9,6 +9,11 @@ Date: 2025-01-11
 import jax.numpy as jnp
 import tree_math
 from jcm.physics.echam.echam_coords import EchamCoords
+# ``ConvectionData`` lives next to its owning scheme now (Phase 2 of the
+# scheme-named-terms refactor). Re-exported here so existing importers of
+# ``jcm.physics.echam.echam_physics_data.ConvectionData`` keep working
+# until Phase 5 deletes this file.
+from jcm.physics.convection.tiedtke_nordeng import ConvectionData  # noqa: F401
 
 
 @tree_math.struct
@@ -88,54 +93,6 @@ class RadiationData:
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)
-
-
-@tree_math.struct
-class ConvectionData:
-    """Data for convection calculations"""
-    
-    # Mass fluxes
-    mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)
-    mass_flux_down: jnp.ndarray      # Downdraft mass flux [kg/m²/s] (nlev, ncols)
-    
-    # Convective properties
-    cloud_base: jnp.ndarray          # Cloud base level index [1] (ncols,)
-    cloud_top: jnp.ndarray           # Cloud top level index [1] (ncols,)
-    cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
-    
-    # Precipitation
-    precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
-    
-    # Cloud water/ice
-    qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
-    qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
-    
-    @classmethod
-    def zeros(cls, nodal_shape, nlev):
-        return cls(
-            mass_flux_up=jnp.zeros((nlev,) + nodal_shape),
-            mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
-            cloud_base=jnp.zeros(nodal_shape, dtype=int),
-            cloud_top=jnp.zeros(nodal_shape, dtype=int),
-            cape=jnp.zeros(nodal_shape),
-            precip_conv=jnp.zeros(nodal_shape),
-            qc_conv=jnp.zeros((nlev,) + nodal_shape),
-            qi_conv=jnp.zeros((nlev,) + nodal_shape),
-        )
-    
-    def copy(self, **kwargs):
-        new_data = {
-            'mass_flux_up': self.mass_flux_up,
-            'mass_flux_down': self.mass_flux_down,
-            'cloud_base': self.cloud_base,
-            'cloud_top': self.cloud_top,
-            'cape': self.cape,
-            'precip_conv': self.precip_conv,
-            'qc_conv': self.qc_conv,
-            'qi_conv': self.qi_conv,
-        }
-        new_data.update(kwargs)
-        return ConvectionData(**new_data)
 
 
 @tree_math.struct

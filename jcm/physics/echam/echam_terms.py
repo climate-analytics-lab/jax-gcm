@@ -24,6 +24,7 @@ from jcm.physics.echam.echam_physics_data import PhysicsData
 from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.echam.parameters import Parameters
 from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
 from jcm.physics.diagnostics.moist_air_state import (
     MOIST_AIR_FIELDS,
     MoistAirColumnState,
@@ -71,8 +72,6 @@ def _data_from_diagnostics(
 
     if "_radiation" in diagnostics:
         data = data.copy(radiation=diagnostics["_radiation"])
-    if "_convection" in diagnostics:
-        data = data.copy(convection=diagnostics["_convection"])
     if "_clouds" in diagnostics:
         data = data.copy(clouds=diagnostics["_clouds"])
     if "_vertical_diffusion" in diagnostics:
@@ -105,7 +104,6 @@ def _diagnostics_from_data(
     out = {
         **diagnostics,
         "_radiation": data.radiation,
-        "_convection": data.convection,
         "_clouds": data.clouds,
         "_vertical_diffusion": data.vertical_diffusion,
         "_surface": data.surface,
@@ -251,23 +249,6 @@ class EchamRadiationEmulated(EchamTermBase):
             apply_radiation_emulated,
         )
         tend, data = apply_radiation_emulated(
-            state, data,
-            self._get_params(diagnostics), forcing, terrain,
-        )
-        return tend, _diagnostics_from_data(diagnostics, data)
-
-
-class EchamConvection(EchamTermBase):
-    """Tiedtke-Nordeng convection scheme."""
-
-    name: ClassVar[str] = "echam_convection"
-    category: ClassVar[str] = "convection"
-
-    def __call__(self, state, diagnostics, forcing, terrain):
-        """Compute convective tendencies."""
-        data = self._build_data(diagnostics)
-        from jcm.physics.echam.echam_physics import apply_convection
-        tend, data = apply_convection(
             state, data,
             self._get_params(diagnostics), forcing, terrain,
         )
@@ -732,7 +713,7 @@ def echam_physics(
             EchamAerosol(),
             EchamChemistry(),
             rad_term,
-            EchamConvection(),
+            TiedtkeConvection(params=p.convection),
             SundqvistCloudFraction(),
             micro_term,
             EchamVerticalDiffusion(),
