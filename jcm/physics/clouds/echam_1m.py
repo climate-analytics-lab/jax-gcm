@@ -1149,6 +1149,9 @@ class Echam1MMicrophysics(PhysicsTerm):
         "clouds", "aerosol",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds",)
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "params": MicrophysicsParameters,
+    }
 
     def __init__(self, params: MicrophysicsParameters | None = None):
         """Hold the scheme-native :class:`MicrophysicsParameters`."""

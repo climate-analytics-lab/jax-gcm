@@ -438,6 +438,7 @@ class EchamSurface(PhysicsTerm):
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface",)
+    parameters_specs: ClassVar[dict[str, type]] = {"params": SurfaceParameters}
 
     def __init__(self, params=None):
         """Hold the scheme-native :class:`SurfaceParameters`."""

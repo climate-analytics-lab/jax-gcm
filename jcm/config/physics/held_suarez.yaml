@@ -1,5 +1,12 @@
 # Held-Suarez (1994) idealised forcing — no moist physics, no radiation.
-name: held_suarez
+#
+# A single term that does Newtonian temperature relaxation plus
+# Rayleigh friction. ``HeldSuarez.__init__`` takes plain (unit-bearing)
+# kwargs rather than a ``Parameters`` dataclass, so this YAML doesn't
+# normally need overrides; tweak the Python defaults if you need them.
 
-# Held-Suarez has no tunable Parameters object — keep ``params`` empty.
-params: {}
+checkpoint_terms: true
+
+terms:
+  held_suarez:
+    _target_: jcm.physics.held_suarez.held_suarez_physics.HeldSuarez

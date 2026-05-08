@@ -191,6 +191,9 @@ class SpeedyForcing(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_forcing"
     category: ClassVar[str] = "forcing"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "mod_radcon_params": ModRadConParameters,
+    }
 
     def __init__(self, mod_radcon_params=None):
         """Initialize SpeedyForcing."""
@@ -238,6 +241,9 @@ class SpeedyConvection(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_convection"
     category: ClassVar[str] = "convection"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "convection_params": ConvectionParameters,
+    }
 
     def __init__(self, convection_params=None):
         """Initialize SpeedyConvection."""
@@ -260,6 +266,9 @@ class SpeedyLargeScaleCondensation(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_large_scale_condensation"
     category: ClassVar[str] = "condensation"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "condensation_params": CondensationParameters,
+    }
 
     def __init__(self, condensation_params=None):
         """Initialize SpeedyLargeScaleCondensation."""
@@ -286,6 +295,9 @@ class SpeedyClouds(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_clouds"
     category: ClassVar[str] = "clouds"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "sw_params": ShortwaveRadiationParameters,
+    }
 
     def __init__(self, sw_params=None):
         """Initialize SpeedyClouds."""
@@ -308,6 +320,10 @@ class SpeedyShortwaveRadiation(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_shortwave_radiation"
     category: ClassVar[str] = "radiation_sw"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "sw_params": ShortwaveRadiationParameters,
+        "mod_radcon_params": ModRadConParameters,
+    }
 
     def __init__(self, sw_params=None, mod_radcon_params=None):
         """Initialize SpeedyShortwaveRadiation."""
@@ -340,6 +356,9 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_downward_longwave"
     category: ClassVar[str] = "radiation_lw_down"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "mod_radcon_params": ModRadConParameters,
+    }
 
     def __init__(self, mod_radcon_params=None):
         """Initialize SpeedyDownwardLongwaveRadiation."""
@@ -370,6 +389,10 @@ class SpeedySurfaceFlux(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_surface_flux"
     category: ClassVar[str] = "surface"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "surface_params": SurfaceFluxParameters,
+        "mod_radcon_params": ModRadConParameters,
+    }
 
     def __init__(self, surface_params=None, mod_radcon_params=None):
         """Initialize SpeedySurfaceFlux."""
@@ -405,6 +428,9 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_upward_longwave"
     category: ClassVar[str] = "radiation_lw_up"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "mod_radcon_params": ModRadConParameters,
+    }
 
     def __init__(self, mod_radcon_params=None):
         """Initialize SpeedyUpwardLongwaveRadiation."""
@@ -435,6 +461,9 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 
     name: ClassVar[str] = "speedy_vertical_diffusion"
     category: ClassVar[str] = "vertical_diffusion"
+    parameters_specs: ClassVar[dict[str, type]] = {
+        "vdiff_params": VerticalDiffusionParameters,
+    }
 
     def __init__(self, vdiff_params=None):
         """Initialize SpeedyVerticalDiffusion."""

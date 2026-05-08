@@ -84,129 +84,98 @@ def build_coords(cfg: DictConfig):
 # Physics
 # ---------------------------------------------------------------------------
 
-def _apply_param_overrides(base, overrides: dict | None):
-    """Apply a ``{subgroup: {field: value}}`` override dict to a SPEEDY-style aggregator.
+def _build_term(term_name: str, term_entry: dict):
+    """Instantiate a single ``PhysicsTerm`` from a YAML term entry.
 
-    SPEEDY still keeps a monolithic ``Parameters`` aggregator whose
-    sub-fields are themselves struct-style dataclasses. Walks the
-    aggregator and replaces fields per-subgroup; unknown subgroups raise
-    ``ValueError`` so typos don't silently no-op.
+    Each ``cfg.physics.terms.<name>`` block names a term class via
+    ``_target_`` plus optional kwargs. For each entry in the term
+    class's ``parameters_specs`` ClassVar (``{init_kwarg: ParamsCls}``),
+    the corresponding YAML sub-block is treated as a field-override
+    map: defaults come from ``ParamsCls.default()``, the user only has
+    to supply the fields they want to tune. Any remaining keys are
+    passed through as plain ``__init__`` kwargs (used by terms like
+    ``UpperSponge`` that take primitive arguments rather than
+    Parameters dataclasses).
     """
-    if not overrides:
-        return base
-    base_fields = dict(base.__dict__)
-    for subgroup, subdict in overrides.items():
-        if subgroup not in base_fields:
-            raise ValueError(
-                f"Unknown physics parameter subgroup {subgroup!r}; "
-                f"choices: {sorted(base_fields)}"
-            )
-        sub = base_fields[subgroup]
-        base_fields[subgroup] = sub.__class__(**{**sub.__dict__, **dict(subdict)})
-    return base.__class__(**base_fields)
+    from hydra.utils import get_class
 
-
-def _build_echam_param_kwargs(overrides: dict) -> dict:
-    """Resolve ``cfg.physics.params.<subgroup>`` into ECHAM ``echam_physics()`` kwargs.
-
-    Each ECHAM term owns its own scheme-native ``Parameters`` struct;
-    there is no monolithic aggregator. The Hydra side still uses
-    ``physics.params.<subgroup>`` so the CLI surface is unchanged
-    (``physics.params.convection.entrpen=4e-4``); this helper builds
-    each requested sub-Parameters via that scheme's ``.default()`` then
-    applies field-level overrides, returning a kwargs dict ready for
-    ``echam_physics(**kwargs)``.
-    """
-    from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
-    from jcm.physics.clouds.echam_1m import MicrophysicsParameters
-    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
-    from jcm.physics.clouds.sundqvist import CloudParameters
-    from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
-    from jcm.physics.gravity_waves.hines import HinesParameters
-    from jcm.physics.gravity_waves.sso import SSOParameters
-    from jcm.physics.radiation.radiation_types import RadiationParameters
-    from jcm.physics.surface.echam.surface_types import SurfaceParameters
-    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
-        VDiffParameters,
-    )
-
-    # Map cfg subgroup name -> (echam_physics kwarg, Parameters class)
-    subgroup_map = {
-        "convection": ("convection", ConvectionParameters),
-        "clouds": ("clouds", CloudParameters),
-        "microphysics": ("microphysics", MicrophysicsParameters),
-        "microphysics_2m": ("microphysics_2m", CloudParams2M),
-        "radiation": ("radiation", RadiationParameters),
-        "vertical_diffusion": ("vertical_diffusion", VDiffParameters),
-        "surface": ("surface", SurfaceParameters),
-        "aerosol": ("aerosol", AerosolParameters),
-        "hines": ("hines", HinesParameters),
-        "sso": ("sso", SSOParameters),
-    }
-
-    kwargs: dict = {}
-    for subgroup, subdict in overrides.items():
-        if subgroup not in subgroup_map:
-            raise ValueError(
-                f"Unknown physics parameter subgroup {subgroup!r}; "
-                f"choices: {sorted(subgroup_map)}"
-            )
-        kwarg_name, params_cls = subgroup_map[subgroup]
-        base = params_cls.default()
-        kwargs[kwarg_name] = base.__class__(
-            **{**base.__dict__, **dict(subdict)}
+    if not isinstance(term_entry, dict) or "_target_" not in term_entry:
+        raise ValueError(
+            f"physics.terms.{term_name!r} must be a dict containing "
+            f"'_target_'; got {term_entry!r}"
         )
-    return kwargs
+    entry = dict(term_entry)
+    target = entry.pop("_target_")
+    term_cls = get_class(target)
 
+    init_kwargs: dict = {}
+    for kwarg_name, params_cls in term_cls.parameters_specs.items():
+        overrides = entry.pop(kwarg_name, None) or {}
+        base = params_cls.default()
+        init_kwargs[kwarg_name] = base.__class__(
+            **{**base.__dict__, **dict(overrides)}
+        )
 
-def _physics_param_overrides(cfg: DictConfig) -> dict:
-    """Pull ``cfg.physics.params`` out of OmegaConf into a plain nested dict."""
-    raw = cfg.physics.get("params", None)
-    if raw is None:
-        return {}
-    from omegaconf import OmegaConf
-    return OmegaConf.to_container(raw, resolve=True) or {}
+    # Anything left is a plain-kwarg pass-through (e.g. UpperSponge's
+    # n_sponge_levels, sponge_timescale_s).
+    init_kwargs.update(entry)
+    return term_cls(**init_kwargs)
 
 
 def build_physics(cfg: DictConfig):
-    """Build the physics package from ``cfg.physics``.
+    r"""Build a ``ComposablePhysics`` from ``cfg.physics.terms``.
 
-    Each scheme's own ``Parameters.default()`` is the source of truth for
-    tunables. ``cfg.physics.params`` (a free-form nested dict) is walked
-    at build time so users can poke individual fields from the CLI
-    without having to mirror the Parameters structure in YAML, e.g.::
+    ``cfg.physics.terms`` is an ordered mapping from term name to a
+    Hydra-style entry::
 
-        python -m jcm.main physics.params.convection.entrpen=4e-4
+        physics:
+          checkpoint_terms: true
+          vectorize_columns: true
+          terms:
+            tiedtke_convection:
+              _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+              params:
+                entrpen: 4.0e-4
+            grey_two_stream_radiation:
+              _target_: jcm.physics.radiation.grey_two_stream.GreyTwoStreamRadiation
+
+    Override individual fields from the CLI without editing YAML, e.g.::
+
+        python -m jcm.main physics=echam \
+            physics.terms.tiedtke_convection.params.entrpen=4e-4
+
+    Swap a term for an alternative by overriding its ``_target_`` (and
+    optionally its kwargs) at the CLI, or by composing a preset YAML
+    that pulls in ``physics: echam`` via ``defaults`` and then
+    overrides individual term entries.
     """
-    name = cfg.physics.name
-    overrides = _physics_param_overrides(cfg)
+    from omegaconf import OmegaConf
 
-    if name == "speedy":
-        from jcm.physics.speedy.params import Parameters as SpeedyParameters
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-        params = _apply_param_overrides(SpeedyParameters.default(), overrides)
-        return speedy_physics(
-            parameters=params,
-            checkpoint_terms=cfg.physics.get("checkpoint_terms", True),
+    from jcm.physics.composable_physics import ComposablePhysics
+
+    physics_cfg = cfg.physics
+    terms_raw = physics_cfg.get("terms", None)
+    if terms_raw is None:
+        raise ValueError(
+            "cfg.physics.terms is required. Each entry must declare a "
+            "_target_ pointing at a PhysicsTerm subclass."
         )
-    if name == "held_suarez":
-        if overrides:
-            raise ValueError(
-                "Held-Suarez has no Parameters object; cfg.physics.params "
-                "must be empty."
-            )
-        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-        return held_suarez_physics()
-    if name == "echam":
-        from jcm.physics.echam.echam_terms import echam_physics
-        param_kwargs = _build_echam_param_kwargs(overrides)
-        return echam_physics(
-            **param_kwargs,
-            radiation_scheme=cfg.physics.radiation,
-            cloud_scheme=cfg.physics.get("cloud_scheme", "1m"),
-            checkpoint_terms=cfg.physics.get("checkpoint_terms", True),
-        )
-    raise ValueError(f"Unknown physics.name={name!r}")
+    terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
+
+    terms = []
+    for term_name, term_entry in terms_cfg.items():
+        if term_entry is None:
+            # Allow turning a term off via Hydra's `~` removal idiom or
+            # an explicit ``null`` in the YAML — useful when inheriting
+            # a default term list and dropping a term in the override.
+            continue
+        terms.append(_build_term(term_name, term_entry))
+
+    return ComposablePhysics(
+        terms=terms,
+        checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
+        vectorize_columns=physics_cfg.get("vectorize_columns", False),
+    )
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):

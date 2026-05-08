@@ -534,6 +534,7 @@ class RRTMGPRadiation(PhysicsTerm):
         "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
+    parameters_specs: ClassVar[dict[str, type]] = {"params": RadiationParameters}
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""

@@ -1,11 +1,39 @@
 # SPEEDY atmospheric physics package.
-name: speedy
+#
+# Term ordering follows SPEEDY's documented sequence:
+# flags → forcing → humidity → convection → condensation → clouds →
+# shortwave → downward longwave → surface flux → upward longwave →
+# vertical diffusion. Several terms take more than one Parameters
+# dataclass (e.g. ``mod_radcon_params``); each shows up as its own
+# sub-block under the term entry.
+#
+# Override individual fields at the CLI without editing this file::
+#
+#     python -m jcm.main physics=speedy \
+#         physics.terms.speedy_convection.convection_params.entrpen=4e-4
+
 checkpoint_terms: true
 
-# Free-form override map applied to ``Parameters.default()`` at build time.
-# Every key is a sub-Parameters group name (convection, condensation,
-# shortwave_radiation, mod_radcon, surface_flux, vertical_diffusion,
-# forcing) and each value is a ``{field: value}`` dict. Override individual
-# fields from the CLI without editing this file::
-#     python -m jcm.main physics.params.convection.entrpen=4e-4
-params: {}
+terms:
+  speedy_flags:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyFlags
+  speedy_forcing:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyForcing
+  speedy_humidity:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyHumidity
+  speedy_convection:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyConvection
+  speedy_large_scale_condensation:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyLargeScaleCondensation
+  speedy_clouds:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyClouds
+  speedy_shortwave_radiation:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyShortwaveRadiation
+  speedy_downward_longwave:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyDownwardLongwaveRadiation
+  speedy_surface_flux:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux
+  speedy_upward_longwave:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyUpwardLongwaveRadiation
+  speedy_vertical_diffusion:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyVerticalDiffusion

@@ -34,7 +34,7 @@ def _compose(overrides=None):
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()
-        self.assertEqual(cfg.physics.name, "speedy")
+        self.assertIn("speedy_convection", cfg.physics.terms)
         self.assertEqual(cfg.grid.vertical, "sigma")
         self.assertEqual(cfg.grid.layers, 8)
         self.assertEqual(cfg.run.time_step, 10)
@@ -48,8 +48,9 @@ class TestConfigComposition(unittest.TestCase):
             "physics=echam",
             "grid=echam_t42_l8_sigma",
         ])
-        self.assertEqual(cfg.physics.name, "echam")
-        self.assertEqual(cfg.physics.radiation, "grey")
+        # The default radiation slot in the echam preset is grey two-stream.
+        self.assertIn("grey_two_stream_radiation", cfg.physics.terms)
+        self.assertIn("tiedtke_convection", cfg.physics.terms)
         self.assertEqual(cfg.grid.vertical, "sigma")
 
     def test_held_suarez_compose(self):
@@ -57,7 +58,7 @@ class TestConfigComposition(unittest.TestCase):
             "physics=held_suarez",
             "grid=held_suarez_t31_l8",
         ])
-        self.assertEqual(cfg.physics.name, "held_suarez")
+        self.assertIn("held_suarez", cfg.physics.terms)
 
     def test_run_smoke_overrides(self):
         cfg = _compose(["run=smoke"])
@@ -91,12 +92,12 @@ class TestBuilders(unittest.TestCase):
         self.assertIsNotNone(physics)
 
     def test_build_physics_param_overrides(self):
-        # Override an ECHAM convection parameter via the cfg.physics.params
-        # path; the resulting Parameters should pick up the new value.
+        # Override a per-term parameter via the new
+        # ``physics.terms.<term>.params.<field>=...`` CLI path.
         cfg = _compose([
             "physics=echam",
             "grid=echam_t42_l8_sigma",
-            "+physics.params.convection.entrpen=4e-4",
+            "++physics.terms.tiedtke_convection.params.entrpen=4e-4",
         ])
         physics = build_physics(cfg)
         convection_term = next(
@@ -106,18 +107,9 @@ class TestBuilders(unittest.TestCase):
             float(convection_term.params.value.entrpen), 4e-4,
         )
 
-    def test_build_physics_unknown_subgroup_raises(self):
-        cfg = _compose([
-            "physics=echam",
-            "grid=echam_t42_l8_sigma",
-            "+physics.params.not_a_subgroup.foo=1.0",
-        ])
-        with self.assertRaisesRegex(ValueError, "Unknown physics parameter subgroup"):
-            build_physics(cfg)
-
     def test_build_physics_curated_preset(self):
-        # The echam-strong-conv preset should bump entrpen via the same
-        # override pipeline.
+        # The echam-strong-conv preset bumps entrpen via the same
+        # term-list pipeline.
         cfg = _compose([
             "physics=echam-strong-conv",
             "grid=echam_t42_l8_sigma",
@@ -129,6 +121,19 @@ class TestBuilders(unittest.TestCase):
         self.assertAlmostEqual(
             float(convection_term.params.value.entrpen), 4e-4,
         )
+
+    def test_build_physics_swap_radiation_via_preset(self):
+        # The echam-rrtmgp preset replaces grey_two_stream_radiation
+        # with rrtmgp_radiation in the same logical slot.
+        cfg = _compose([
+            "physics=echam-rrtmgp",
+            "grid=echam_t42_l8_sigma",
+        ])
+        physics = build_physics(cfg)
+        rad_term = next(
+            t for t in physics.terms if t.category == "radiation"
+        )
+        self.assertEqual(rad_term.name, "rrtmgp_radiation")
 
     def test_build_terrain_aquaplanet(self):
         cfg = _compose()

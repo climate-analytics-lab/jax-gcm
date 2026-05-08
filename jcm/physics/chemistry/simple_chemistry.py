@@ -396,6 +396,7 @@ class SimpleChemistry(PhysicsTerm):
         "pressure_full", "surface_pressure", "chemistry",
     )
     provides: ClassVar[tuple[str, ...]] = ("chemistry",)
+    parameters_specs: ClassVar[dict[str, type]] = {"params": ChemistryParameters}
 
     def __init__(self, params: ChemistryParameters | None = None):
         """Hold the scheme-native :class:`ChemistryParameters`."""
