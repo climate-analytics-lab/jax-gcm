@@ -340,11 +340,6 @@ class Model:
         self.physics = physics or speedy_physics()
         self.physics.cache_coords(self.coords)
 
-        # Ensure ComposableEchamPhysics uses the correct timestep for all parameterizations
-        from jcm.physics.echam.echam_terms import ComposableEchamPhysics
-        if isinstance(self.physics, ComposableEchamPhysics):
-            self.physics.apply_timestep(self.dt_si.m)
-
         self.diffusion = diffusion or DiffusionFilter.default()
 
         # TODO: make the truncation number a parameter consistent with the grid shape

@@ -99,8 +99,11 @@ class TestBuilders(unittest.TestCase):
             "+physics.params.convection.entrpen=4e-4",
         ])
         physics = build_physics(cfg)
+        convection_term = next(
+            t for t in physics.terms if t.category == "convection"
+        )
         self.assertAlmostEqual(
-            float(physics.parameters.convection.entrpen), 4e-4,
+            float(convection_term.params.value.entrpen), 4e-4,
         )
 
     def test_build_physics_unknown_subgroup_raises(self):
@@ -120,8 +123,11 @@ class TestBuilders(unittest.TestCase):
             "grid=echam_t42_l8_sigma",
         ])
         physics = build_physics(cfg)
+        convection_term = next(
+            t for t in physics.terms if t.category == "convection"
+        )
         self.assertAlmostEqual(
-            float(physics.parameters.convection.entrpen), 4e-4,
+            float(convection_term.params.value.entrpen), 4e-4,
         )
 
     def test_build_terrain_aquaplanet(self):

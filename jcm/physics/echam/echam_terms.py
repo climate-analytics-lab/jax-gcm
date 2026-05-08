@@ -1,29 +1,17 @@
-"""``echam_physics()`` factory + ``ComposableEchamPhysics`` parameter wrapper.
+"""``echam_physics()`` factory.
 
-After Phase 3 of the scheme-named-terms refactor, every ECHAM
-parameterisation lives as a ``PhysicsTerm`` next to its underlying
-numerical implementation (``TiedtkeConvection``, ``SundqvistCloudFraction``,
-``Echam1MMicrophysics``, ``GreyTwoStreamRadiation``, …). The legacy
-``apply_*`` wrappers in ``echam_physics.py`` are gone, the
-``EchamTermBase`` / ``_data_from_diagnostics`` / ``_diagnostics_from_data``
-bridge helpers that translated between the diagnostics dict and the
-typed ``PhysicsData`` struct are gone, and this module shrinks to the
-two pieces that still matter:
-
-- :class:`ComposableEchamPhysics` — a ``ComposablePhysics`` subclass
-  that still owns the shared ``Parameters`` struct so ``Model`` can
-  call ``apply_timestep(dt_seconds)`` to keep ``parameters.convection.dt_conv``
-  in sync. Will go away in Phase 4 once each scheme reads dt from
-  ``diagnostics["_date"].dt_seconds`` directly.
-- :func:`echam_physics` — the user-facing factory that wires the
-  scheme-named terms together in a validated default ordering.
+Every ECHAM parameterisation lives as a ``PhysicsTerm`` next to its
+underlying numerical implementation (``TiedtkeConvection``,
+``SundqvistCloudFraction``, ``Echam1MMicrophysics``,
+``GreyTwoStreamRadiation``, …). This module is the user-facing factory
+that wires the scheme-named terms together in a validated default
+ordering and returns a ready-to-run ``ComposablePhysics`` with column
+vectorisation enabled.
 
 Date: 2026-04-13
 """
 
 from __future__ import annotations
-
-from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.echam.parameters import Parameters
@@ -47,109 +35,13 @@ from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
 
 
-# ------------------------------------------------------------------
-# ComposableEchamPhysics — ECHAM parameter management
-# ------------------------------------------------------------------
-
-class ComposableEchamPhysics(ComposablePhysics):
-    """ComposablePhysics with ECHAM shared parameter management.
-
-    Column vectorization is handled by the parent class via
-    ``vectorize_columns=True``. This subclass holds a single
-    :class:`~jcm.physics.echam.parameters.Parameters` struct and
-    implements ``apply_timestep(dt_seconds)`` so ``Model.__init__`` can
-    sync ``parameters.convection.dt_conv`` to the model dt.
-
-    Phase 4 of the refactor will remove this subclass and the
-    isinstance gate in ``Model``: each scheme will read dt directly
-    from ``diagnostics["_date"].dt_seconds``.
-    """
-
-    def __init__(self, terms, checkpoint_terms=True, parameters=None):
-        """Initialize with ECHAM-specific parameter storage."""
-        super().__init__(
-            terms, checkpoint_terms, vectorize_columns=True,
-        )
-        self._echam_parameters = nnx.Variable(
-            parameters or Parameters.default(),
-        )
-
-    @property
-    def parameters(self) -> Parameters:
-        """Read access to the shared ECHAM parameters struct."""
-        return self._echam_parameters.get_value()
-
-    def replace(self, category, new_term):
-        """Replace a term, preserving ComposableEchamPhysics type."""
-        new_terms = []
-        inserted = False
-        for t in self.terms:
-            if t.category == category:
-                if not inserted:
-                    new_terms.append(new_term)
-                    inserted = True
-            else:
-                new_terms.append(t)
-        if not inserted:
-            raise ValueError(
-                f"No term with category {category!r} found.",
-            )
-        return ComposableEchamPhysics(
-            terms=new_terms,
-            checkpoint_terms=self.checkpoint_terms,
-            parameters=self._echam_parameters.get_value(),
-        )
-
-    def remove(self, category):
-        """Remove terms, preserving ComposableEchamPhysics type."""
-        return ComposableEchamPhysics(
-            terms=[t for t in self.terms if t.category != category],
-            checkpoint_terms=self.checkpoint_terms,
-            parameters=self._echam_parameters.get_value(),
-        )
-
-    def __add__(self, other):
-        """Append term(s), preserving ComposableEchamPhysics type.
-
-        Without this override the parent ``ComposablePhysics.__add__``
-        returns a plain ``ComposablePhysics``; ``Model.__init__`` would
-        then skip the ``apply_timestep`` call (it's gated on
-        ``isinstance(..., ComposableEchamPhysics)``) and ECHAM terms
-        would silently keep the default ``dt_conv = 3600 s`` regardless
-        of the actual model timestep — corrupting any flux that uses
-        ``dt_conv`` (e.g. surface implicit damping factor).
-        """
-        if hasattr(other, "terms"):
-            other_terms = list(other.terms)
-        elif hasattr(other, "category") and callable(other):
-            other_terms = [other]
-        else:
-            return NotImplemented
-        return ComposableEchamPhysics(
-            terms=list(self.terms) + other_terms,
-            checkpoint_terms=self.checkpoint_terms,
-            parameters=self._echam_parameters.get_value(),
-        )
-
-    def apply_timestep(self, dt_seconds: float):
-        """Update timestep on the shared ECHAM parameters."""
-        p = self._echam_parameters.get_value()
-        self._echam_parameters = nnx.Variable(
-            p.with_timestep(dt_seconds),
-        )
-
-
-# ------------------------------------------------------------------
-# Factory function
-# ------------------------------------------------------------------
-
 def echam_physics(
     parameters: Parameters | None = None,
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
 ):
-    """Create a ComposableEchamPhysics with standard ECHAM ordering.
+    """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
     Args:
         parameters: Optional ECHAM Parameters. Uses defaults if None.
@@ -160,7 +52,8 @@ def echam_physics(
             warm-rain; see issue #341 for ongoing scheme completion).
 
     Returns:
-        A ComposableEchamPhysics instance with all ECHAM terms.
+        A ``ComposablePhysics`` instance with all ECHAM terms in the
+        validated default order, configured for column vectorisation.
 
     """
     p = parameters or Parameters.default()
@@ -200,7 +93,7 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
-    return ComposableEchamPhysics(
+    return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
             EchamBoundaryConditions(),
@@ -216,5 +109,5 @@ def echam_physics(
             LottMillerSso(params=p.sso),
         ],
         checkpoint_terms=checkpoint_terms,
-        parameters=p,
+        vectorize_columns=True,
     )

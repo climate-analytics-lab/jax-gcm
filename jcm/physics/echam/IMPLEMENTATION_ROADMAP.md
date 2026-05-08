@@ -52,37 +52,20 @@ must hold across every commit.
 
 ### Code cleanup that's blocked on later phases
 
-- [ ] ``jcm/physics/echam/echam_physics_data.py`` re-exports
-      ``ConvectionData`` from
-      ``jcm.physics.convection.tiedtke_nordeng`` for back-compat with
-      ``radiation/aerosol_radiation_test.py`` and a few other
-      importers. Drop the re-export when the file itself goes away in
-      Phase 5.
+- [ ] The monolithic ``Parameters`` aggregator at
+      ``jcm/physics/echam/parameters.py`` is still used by
+      ``echam_physics()`` to dispatch per-term defaults and by Hydra
+      override plumbing in ``runners.py``. Per-term Parameters live on
+      the terms themselves now, but the aggregator stays as a
+      convenience entry point.
 
-- [ ] After Phase 3 there are no remaining users of ``EchamTermBase``
-      / ``_data_from_diagnostics`` / ``_diagnostics_from_data`` —
-      ``echam_terms.py`` shrinks to just the ``echam_physics()``
-      factory + the (still required) ``ComposableEchamPhysics``
-      subclass. Drop the orphans in Phase 4.
-
-- [ ] ``apply_radiation_emulated`` is referenced as still-present in
-      the radiation terms' docs but the function is gone — the
-      reference comment in ``echam_physics.py`` needs to follow into
-      a deletion in Phase 5.
+- [ ] ``jcm/physics/echam/echam_physics_data.py`` is retained because
+      its typed sub-structs (``RadiationData``, ``ConvectionData``,
+      ``SurfaceData``, etc.) are still imported by tests and other
+      schemes. The ``DiagnosticData`` wrapper inside it is now unused —
+      drop just that struct.
 
 ### Smaller nits
-
-- [ ] ``echam_physics_data.py`` still defines ``DiagnosticData``. After
-      ``EchamTermBase`` goes away, nothing constructs it (the
-      moist-air diagnostics live in the dict as top-level keys); drop
-      it then.
-
-- [ ] ``parameters.with_timestep`` and the
-      ``isinstance(physics, ComposableEchamPhysics)`` gate in
-      ``model.py`` / ``single_column_model.py`` /
-      ``prescribed_state_model.py`` go away in Phase 4. ``dt_conv`` is
-      a deletion candidate too — every consumer now reads the model
-      dt from ``diagnostics["_date"].dt_seconds``.
 
 - [ ] The ``radiation`` and ``_surface`` keys in the diagnostics dict
       are inconsistently styled. ``radiation`` flipped to public in
@@ -105,6 +88,20 @@ must hold across every commit.
   ``RRTMGPRadiation``, ``NNEmulatorRadiation``.
 - 2026-05-07: Phase 3 vdiff/surface/2m — ``TteTkeVerticalDiffusion``,
   ``EchamSurface``, ``Lohmann2MMicrophysics``. **Phase 3 complete.**
+- 2026-05-08: Phase 4 — dropped ``ComposableEchamPhysics``,
+  ``apply_timestep``, ``Parameters.with_timestep``, and the
+  ``isinstance(ComposableEchamPhysics)`` gates in ``model.py`` /
+  ``single_column_model.py`` / ``prescribed_state_model.py``.
+  Terms read the model dt from ``diagnostics["_date"].dt_seconds``;
+  ``echam_physics()`` returns a plain
+  ``ComposablePhysics(vectorize_columns=True)``.
+- 2026-05-08: Phase 5 — deleted ``echam/echam_physics.py`` and
+  ``echam/forcing.py`` (every ``apply_*`` and ``apply_forcing_data``
+  was migrated). ``echam/parameters.py`` and
+  ``echam/echam_physics_data.py`` are retained: the monolithic
+  ``Parameters`` aggregator is still useful as a default-builder for
+  ``echam_physics()`` and for Hydra overrides, and the typed Data
+  sub-structs in ``echam_physics_data.py`` are still imported widely.
 
 ## Tests skipped pending rewrite against new term classes
 

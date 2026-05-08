@@ -53,16 +53,23 @@ def test_parameters_with_methods():
 
 def test_echam_physics_with_parameters():
     """Test that echam_physics() can be initialized with Parameters"""
-    # Default parameters
+    # Default parameters — read entrpen back from the convection term.
+    # Per-term Parameters live on the term itself; there is no monolithic
+    # accessor on ComposablePhysics.
     physics1 = echam_physics()
-    assert physics1.parameters is not None
-    assert abs(float(physics1.parameters.convection.entrpen) - 1.0e-4) < 1e-7
-    
+    convection_term1 = next(
+        t for t in physics1.terms if t.category == "convection"
+    )
+    assert abs(float(convection_term1.params.value.entrpen) - 1.0e-4) < 1e-7
+
     # Custom parameters
     custom_params = Parameters.default().with_convection(entrpen=5.0e-4)
     physics2 = echam_physics(parameters=custom_params)
-    assert abs(float(physics2.parameters.convection.entrpen) - 5.0e-4) < 1e-7
-    
+    convection_term2 = next(
+        t for t in physics2.terms if t.category == "convection"
+    )
+    assert abs(float(convection_term2.params.value.entrpen) - 5.0e-4) < 1e-7
+
     print("✓ echam_physics() accepts Parameters object")
 
 

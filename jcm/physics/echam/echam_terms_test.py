@@ -132,7 +132,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
     def test_column_vector_handles_vmap_scalar_shapes(self):
         """Radiation scalar diagnostics are normalized to [ncols]."""
-        from jcm.physics.echam.echam_physics import _column_vector
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+            _column_vector,
+        )
 
         self.assertEqual(_column_vector(jnp.arange(3), 3).shape, (3,))
         self.assertEqual(

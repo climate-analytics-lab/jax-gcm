@@ -227,9 +227,6 @@ class SingleColumnModel:
         self.forcing = forcing if forcing is not None else ForcingData.zeros((1, 1))
 
         self.physics.cache_coords(self.coords)
-        from jcm.physics.echam.echam_terms import ComposableEchamPhysics
-        if isinstance(self.physics, ComposableEchamPhysics):
-            self.physics.apply_timestep(self.dt_seconds)
 
     # ------------------------------------------------------------------
     # Helpers

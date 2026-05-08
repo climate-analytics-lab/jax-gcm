@@ -7,20 +7,15 @@ real orography. The fixes that landed in this branch:
   positive-upward flux convention as ``ocean.py``. The old
   ``atm - surf`` convention created a positive feedback over cold land
   that NaN'd by step 34.
-* ``apply_surface`` damps the explicit bottom-level surface tendencies
+* ``EchamSurface`` damps the explicit bottom-level surface tendencies
   by the implicit-Euler factor ``1 / (1 + K*dt/dz_sfc)``. Over rough
   terrain the ECHAM-tuned exchange coefficients give ``K*dt/dz > 2``,
   which the old explicit step couldn't survive past ~step 600.
-* ``apply_surface`` reads ``ocean_temp`` and ``land_temp`` straight
+* ``EchamSurface`` reads ``ocean_temp`` and ``land_temp`` straight
   from forcing instead of routing through the upstream-blended
-  ``physics_data.surface.surface_temperature``, which had snapped to
+  ``surface.surface_temperature``, which had snapped to
   the dominant tile via ``where(fmask>0.5)``.
-* ``ComposableEchamPhysics.__add__`` overrides the parent so that
-  ``echam_physics() + UpperSponge(...)`` (the production sponge wiring)
-  preserves the type and ``Model.__init__`` still calls
-  ``apply_timestep`` on it.
-
-* ``apply_convection`` clips the bottom-level convective T tendency to
+* ``TiedtkeConvection`` clips the bottom-level convective T tendency to
   ±5 K/hr. The TN scheme over a 5 km mountain develops a 320 K hot
   spot at ~800 hPa in a single column (Tibetan Plateau), driven by a
   q ~ 38 g/kg supersaturation. The cap is a workaround that prevents
@@ -28,7 +23,7 @@ real orography. The fixes that landed in this branch:
   grid points; the underlying moisture-balance question is its own
   follow-up.
 
-With all five fixes the production T63L47 + real terrain + sponge run
+With all four fixes the production T63L47 + real terrain + sponge run
 is stable for 30 simulated days at dt=12 min on GPU.
 
 T63L47 hybrid is too heavy to compile on CPU within the regular test
@@ -137,11 +132,10 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
     def test_real_terrain_with_sponge_stable_5_days(self):
         """The full production wiring: ECHAM physics + UpperSponge.
 
-        Catches the ``ComposableEchamPhysics + UpperSponge`` regression
-        where the parent ``__add__`` returned a plain ``ComposablePhysics``
-        and ``Model.__init__`` skipped ``apply_timestep`` — leaving ECHAM
-        at the default ``dt_conv = 3600 s`` regardless of model dt.
-        Without that fix this test NaNs by step ~95.
+        Composes ``echam_physics() + UpperSponge`` and runs 5 days. The
+        scheme-named refactor reads the model dt from
+        ``diagnostics["_date"].dt_seconds`` per step, so terms see the
+        right timestep regardless of how the composition was built.
         """
         from jcm.physics.dissipation import UpperSponge
         physics = echam_physics(radiation_scheme="grey") + UpperSponge(
