@@ -115,10 +115,11 @@ Config groups live under `jcm/config/` (`physics`, `grid`, `run`, `init`,
 
 ## Running in Docker
 
-The bundled `Dockerfile` builds an image whose entrypoint is the JCM Hydra
-CLI, which makes it straightforward to launch non-interactive simulations
-on Kubernetes, GCP, NRP or any other batch/queued compute. Build the image
-once:
+The bundled `Dockerfile` is built on `nvidia/cuda` and ships `jax[cuda12]`,
+so the same image runs accelerated on GPU hosts and falls back to CPU
+elsewhere (no TPU support). Its entrypoint is the JCM Hydra CLI, which
+makes it straightforward to launch non-interactive simulations on
+Kubernetes, GCP, NRP or any other batch/queued compute. Build once:
 
 ```bash
 docker build -t jcm .
@@ -127,6 +128,10 @@ docker build -t jcm .
 ### Default run
 
 ```bash
+# On a GPU host
+docker run --rm --gpus all jcm
+
+# Or without GPUs (CPU fallback)
 docker run --rm jcm
 ```
 
@@ -139,13 +144,13 @@ full Hydra CLI (config groups, dotted overrides, multirun) is available:
 
 ```bash
 # Switch physics package and grid
-docker run --rm jcm physics=icon grid=icon_t85_l47_hybrid
+docker run --rm --gpus all jcm physics=icon grid=icon_t85_l47_hybrid
 
 # Override individual run options
-docker run --rm jcm run.time_step=20 run.total_time=30 run.save_interval=1
+docker run --rm --gpus all jcm run.time_step=20 run.total_time=30 run.save_interval=1
 
 # Parameter sweep (multirun)
-docker run --rm jcm -m run.time_step=10,20,30
+docker run --rm --gpus all jcm -m run.time_step=10,20,30
 ```
 
 ### Persisting outputs
@@ -155,7 +160,7 @@ container* and are lost when it exits. Mount a host directory at
 `/app/outputs` to keep them:
 
 ```bash
-docker run --rm -v "$(pwd)/outputs:/app/outputs" jcm \
+docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
     physics=icon run.total_time=30
 ```
 
@@ -172,8 +177,8 @@ docker run --rm -it --entrypoint bash jcm
 
 ### Kubernetes example
 
-Pass Hydra overrides via the container `args` field and mount a persistent
-volume for outputs:
+Pass Hydra overrides via the container `args` field, request a GPU, and
+mount a persistent volume for outputs:
 
 ```yaml
 spec:
@@ -181,6 +186,9 @@ spec:
     - name: jcm
       image: your-registry/jcm:latest
       args: ["physics=icon", "grid=icon_t85_l47_hybrid", "run.total_time=30"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1
       volumeMounts:
         - name: outputs
           mountPath: /app/outputs
