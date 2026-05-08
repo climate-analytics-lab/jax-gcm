@@ -24,7 +24,7 @@ class DateData:
     @classmethod
     def set_date(cls, model_time, model_step=None, dt_seconds=None):
         return cls(
-          tyear=fraction_of_year_elapsed(model_time),
+          tyear= 0.25 - (10.0/365.0), # set to equinox rather than fraction_of_year_elapsed(model_time),
           model_year=get_year(model_time),
           model_step=model_step if model_step is not None else jnp.int32(0),
           dt_seconds=dt_seconds if dt_seconds is not None else 1800.0)
