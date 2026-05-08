@@ -113,6 +113,79 @@ python -m jcm.main --cfg job grid=icon_t85_l47_hybrid   # with overrides
 Config groups live under `jcm/config/` (`physics`, `grid`, `run`, `init`,
 `terrain`, `forcing`, `diffusion`).
 
+## Running in Docker
+
+The bundled `Dockerfile` builds an image whose entrypoint is the JCM Hydra
+CLI, which makes it straightforward to launch non-interactive simulations
+on Kubernetes, GCP, NRP or any other batch/queued compute. Build the image
+once:
+
+```bash
+docker build -t jcm .
+```
+
+### Default run
+
+```bash
+docker run --rm jcm
+```
+
+This runs the default 10-day SPEEDY aquaplanet configuration.
+
+### Hydra overrides
+
+Anything after the image name is forwarded to `python -m jcm.main`, so the
+full Hydra CLI (config groups, dotted overrides, multirun) is available:
+
+```bash
+# Switch physics package and grid
+docker run --rm jcm physics=icon grid=icon_t85_l47_hybrid
+
+# Override individual run options
+docker run --rm jcm run.time_step=20 run.total_time=30 run.save_interval=1
+
+# Parameter sweep (multirun)
+docker run --rm jcm -m run.time_step=10,20,30
+```
+
+### Persisting outputs
+
+By default outputs land in `outputs/YYYY-MM-DD/HH-MM-SS/` *inside the
+container* and are lost when it exits. Mount a host directory at
+`/app/outputs` to keep them:
+
+```bash
+docker run --rm -v "$(pwd)/outputs:/app/outputs" jcm \
+    physics=icon run.total_time=30
+```
+
+After the run finishes the netCDF state file is available on the host
+under `./outputs/`.
+
+### Interactive shell
+
+Override the entrypoint to drop into a shell for debugging or exploration:
+
+```bash
+docker run --rm -it --entrypoint bash jcm
+```
+
+### Kubernetes example
+
+Pass Hydra overrides via the container `args` field and mount a persistent
+volume for outputs:
+
+```yaml
+spec:
+  containers:
+    - name: jcm
+      image: your-registry/jcm:latest
+      args: ["physics=icon", "grid=icon_t85_l47_hybrid", "run.total_time=30"]
+      volumeMounts:
+        - name: outputs
+          mountPath: /app/outputs
+```
+
 ## Example notebooks
 
 Example notebooks are available in the `notebooks/` directory:
