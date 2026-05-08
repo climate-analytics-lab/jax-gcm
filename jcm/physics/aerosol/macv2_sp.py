@@ -396,7 +396,6 @@ class Macv2SpAerosol(PhysicsTerm):
     category: ClassVar[str] = "aerosol"
     requires: ClassVar[tuple[str, ...]] = ("height_full",)
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
-    parameters_specs: ClassVar[dict[str, type]] = {"params": AerosolParameters}
 
     def __init__(self, params: AerosolParameters | None = None):
         """Hold the scheme-native :class:`AerosolParameters`."""

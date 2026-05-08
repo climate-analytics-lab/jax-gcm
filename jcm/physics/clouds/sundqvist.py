@@ -515,7 +515,6 @@ class SundqvistCloudFraction(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds", "relative_humidity")
-    parameters_specs: ClassVar[dict[str, type]] = {"params": CloudParameters}
 
     def __init__(self, params: CloudParameters | None = None):
         """Hold the scheme-native :class:`CloudParameters`."""

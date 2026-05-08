@@ -851,7 +851,6 @@ class LottMillerSso(PhysicsTerm):
         "pressure_full", "pressure_half", "height_full",
     )
     provides: ClassVar[tuple[str, ...]] = ()
-    parameters_specs: ClassVar[dict[str, type]] = {"params": SSOParameters}
 
     def __init__(self, params: SSOParameters | None = None):
         """Hold the scheme-native :class:`SSOParameters`."""

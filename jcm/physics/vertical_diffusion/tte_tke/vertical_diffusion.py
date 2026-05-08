@@ -350,7 +350,6 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
-    parameters_specs: ClassVar[dict[str, type]] = {"params": VDiffParameters}
 
     def __init__(self, params: VDiffParameters | None = None):
         """Hold the scheme-native :class:`VDiffParameters`."""

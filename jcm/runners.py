@@ -10,6 +10,7 @@ Hydra's CLI machinery.
 from __future__ import annotations
 
 import logging
+import types
 from pathlib import Path
 from typing import Any
 
@@ -84,18 +85,64 @@ def build_coords(cfg: DictConfig):
 # Physics
 # ---------------------------------------------------------------------------
 
+def _parameters_specs_from_init(term_cls) -> dict[str, type]:
+    """Discover Parameters-typed kwargs on a term's ``__init__``.
+
+    Returns a mapping from ``__init__`` kwarg name to the
+    Parameters-like class declared as its (possibly ``Optional``) type
+    annotation. A class is considered Parameters-like if it exposes a
+    ``default`` classmethod — the structural marker used uniformly by
+    every scheme (``ConvectionParameters.default()``,
+    ``ModRadConParameters.default()``, …).
+
+    The runner uses this mapping to decide which YAML blocks should be
+    interpreted as Parameters field-override dicts (defaulted via
+    ``ParamsCls.default()``) versus plain pass-through kwargs.
+    """
+    import inspect
+    import typing
+
+    try:
+        hints = typing.get_type_hints(term_cls.__init__)
+    except (NameError, TypeError):
+        # Forward refs that fail to resolve, or no annotations: treat
+        # everything as plain kwargs.
+        return {}
+
+    sig_params = inspect.signature(term_cls.__init__).parameters
+    specs: dict[str, type] = {}
+    for kwarg_name in sig_params:
+        if kwarg_name == "self":
+            continue
+        annot = hints.get(kwarg_name)
+        if annot is None:
+            continue
+        # Strip Optional[X] / Union[X, None] / X | None.
+        origin = typing.get_origin(annot)
+        if origin in (typing.Union, types.UnionType):
+            non_none = [a for a in typing.get_args(annot) if a is not type(None)]
+            if len(non_none) != 1:
+                continue
+            annot = non_none[0]
+        # Structural test: anything with a ``default`` classmethod is a
+        # Parameters dataclass for our purposes.
+        if isinstance(annot, type) and callable(getattr(annot, "default", None)):
+            specs[kwarg_name] = annot
+    return specs
+
+
 def _build_term(term_name: str, term_entry: dict):
     """Instantiate a single ``PhysicsTerm`` from a YAML term entry.
 
     Each ``cfg.physics.terms.<name>`` block names a term class via
-    ``_target_`` plus optional kwargs. For each entry in the term
-    class's ``parameters_specs`` ClassVar (``{init_kwarg: ParamsCls}``),
-    the corresponding YAML sub-block is treated as a field-override
-    map: defaults come from ``ParamsCls.default()``, the user only has
-    to supply the fields they want to tune. Any remaining keys are
-    passed through as plain ``__init__`` kwargs (used by terms like
-    ``UpperSponge`` that take primitive arguments rather than
-    Parameters dataclasses).
+    ``_target_`` plus optional kwargs. The runner introspects the
+    term's ``__init__`` annotations: kwargs typed with a Parameters
+    class (``ConvectionParameters | None``, …) are treated as
+    field-override dicts — defaults come from ``ParamsCls.default()``,
+    the user only has to supply the fields they want to tune. Any
+    other kwargs are passed through as plain ``__init__`` arguments
+    (used by terms like ``UpperSponge`` that take primitive values
+    rather than Parameters dataclasses).
     """
     from hydra.utils import get_class
 
@@ -109,7 +156,7 @@ def _build_term(term_name: str, term_entry: dict):
     term_cls = get_class(target)
 
     init_kwargs: dict = {}
-    for kwarg_name, params_cls in term_cls.parameters_specs.items():
+    for kwarg_name, params_cls in _parameters_specs_from_init(term_cls).items():
         overrides = entry.pop(kwarg_name, None) or {}
         base = params_cls.default()
         init_kwargs[kwarg_name] = base.__class__(

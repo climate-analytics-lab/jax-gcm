@@ -723,7 +723,6 @@ class HinesGwd(PhysicsTerm):
         "height_half", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = ()
-    parameters_specs: ClassVar[dict[str, type]] = {"params": HinesParameters}
 
     def __init__(self, params: HinesParameters | None = None):
         """Hold the scheme-native :class:`HinesParameters`."""

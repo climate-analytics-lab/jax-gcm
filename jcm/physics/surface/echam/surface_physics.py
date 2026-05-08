@@ -438,9 +438,8 @@ class EchamSurface(PhysicsTerm):
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface",)
-    parameters_specs: ClassVar[dict[str, type]] = {"params": SurfaceParameters}
 
-    def __init__(self, params=None):
+    def __init__(self, params: SurfaceParameters | None = None):
         """Hold the scheme-native :class:`SurfaceParameters`."""
         # ``SurfaceParameters`` includes a few non-floats; mirror SPEEDY's
         # SurfaceFlux convention of using ``Variable`` (not ``Param``)

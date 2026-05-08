@@ -436,7 +436,6 @@ class SimpleGwd(PhysicsTerm):
         "pressure_full", "height_full", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = ()
-    parameters_specs: ClassVar[dict[str, type]] = {"params": SimpleGwdParameters}
 
     def __init__(self, params: SimpleGwdParameters | None = None):
         """Hold the scheme-native :class:`SimpleGwdParameters`."""

@@ -3628,7 +3628,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         "clouds", "aerosol",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds",)
-    parameters_specs: ClassVar[dict[str, type]] = {"params": CloudParams2M}
 
     def __init__(self, params: 'CloudParams2M | None' = None):
         """Hold the scheme-native :class:`CloudParams2M`."""

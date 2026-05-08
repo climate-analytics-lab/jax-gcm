@@ -58,12 +58,13 @@ class PhysicsTerm(nnx.Module):
     Subclasses must:
       - Declare ``name``, ``category``, ``requires``, ``provides`` as
         ``ClassVar`` — static metadata, not pytree leaves.
-      - Declare ``parameters_specs`` (mapping ``init`` kwarg name →
-        scheme-native ``Parameters`` class) when ``__init__`` takes
-        Parameters dataclasses. Empty for terms with no parameters or
-        with plain-kwarg ``__init__``. Used by the Hydra-driven
-        ``build_physics`` plumbing to resolve YAML overrides into
-        ``Parameters`` instances before calling ``__init__``.
+      - Type-annotate any Parameters-dataclass kwargs on ``__init__``
+        (e.g. ``params: ConvectionParameters | None = None``). The
+        Hydra-driven ``runners.build_physics`` introspects these
+        annotations to resolve YAML overrides into ``Parameters``
+        instances before calling ``__init__``. Plain primitive kwargs
+        (timescales, level counts, …) need no annotation — they are
+        passed through verbatim from the YAML.
       - Store tunable parameters as ``nnx.Param`` attributes so that
         gradients flow through them.
       - Store coordinate-dependent caches as ``nnx.Variable`` attributes
@@ -75,7 +76,6 @@ class PhysicsTerm(nnx.Module):
     category: ClassVar[str] = ""
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
-    parameters_specs: ClassVar[dict[str, type]] = {}
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:

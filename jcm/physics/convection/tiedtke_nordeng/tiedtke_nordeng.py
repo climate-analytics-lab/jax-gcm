@@ -972,9 +972,6 @@ class TiedtkeConvection(PhysicsTerm):
         "pressure_full", "layer_thickness", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = ("convection",)
-    parameters_specs: ClassVar[dict[str, type]] = {
-        "params": ConvectionParameters,
-    }
 
     def __init__(self, params: ConvectionParameters | None = None):
         """Hold the scheme-native :class:`ConvectionParameters`."""
