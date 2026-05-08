@@ -282,50 +282,24 @@ def physics_tangent_to_dynamics_tangent(
 ) -> State:
     """Linearisation of `physics_state_to_dynamics_state` at `reference_physics`.
 
-    Differences from the state version:
-      - Temperature tangent is converted directly to modal without subtracting the
-        (constant) reference temperature.
-      - Specific-humidity tangent is not clamped.
-      - Surface-pressure tangent uses the chain rule for log:
-            d(log sp) = d(sp) / sp_ref
-        where sp_ref is taken from `reference_physics`.
+    Uses jax.jvp so that all chain-rule factors (surface-pressure log derivative,
+    absence of constant reference-temperature subtraction, no humidity clamping)
+    are handled automatically and correctly.
 
     Args:
         physics_tangent: PhysicsState perturbation (tangent vector).
         dynamics: PrimitiveEquations object.
-        reference_physics: PhysicsState at the linearisation point; only
-            `normalized_surface_pressure` is used.
+        reference_physics: PhysicsState at the linearisation point.
 
     Returns:
         Corresponding tangent vector in dynamics (spectral) space.
     """
-    # (du, dv) → (d_vorticity, d_divergence): linear, same operation as primal
-    d_vorticity, d_divergence = uv_nodal_to_vor_div_modal(
-        dynamics.coords.horizontal,
-        physics_tangent.u_wind,
-        physics_tangent.v_wind,
+    _, dynamics_tangent = jax.jvp(
+        lambda s: physics_state_to_dynamics_state(s, dynamics),
+        (reference_physics,),
+        (physics_tangent,),
     )
-
-    # d_q: nondimensionalise then to_modal — linear, no clamping
-    d_q = dynamics.physics_specs.nondimensionalize(
-        physics_tangent.specific_humidity * units.gram / units.kilogram
-    )
-    d_q_modal = dynamics.coords.horizontal.to_modal(d_q)
-
-    # d_temperature → modal: no reference-temperature subtraction (constant → zero tangent)
-    d_temperature_modal = dynamics.coords.horizontal.to_modal(physics_tangent.temperature)
-
-    # d(log sp) = d(sp) / sp_ref  (chain rule for log at the reference point)
-    d_log_sp = physics_tangent.normalized_surface_pressure / reference_physics.normalized_surface_pressure
-    d_log_sp_modal = dynamics.coords.horizontal.to_modal(d_log_sp)
-
-    return State(
-        vorticity=d_vorticity,
-        divergence=d_divergence,
-        temperature_variation=d_temperature_modal,
-        log_surface_pressure=d_log_sp_modal[..., jnp.newaxis, :, :],
-        tracers={'specific_humidity': d_q_modal},
-    )
+    return dynamics_tangent
 
 
 def dynamics_tangent_to_physics_tangent(
@@ -335,64 +309,24 @@ def dynamics_tangent_to_physics_tangent(
 ) -> PhysicsState:
     """Linearisation of `dynamics_state_to_physics_state` at `reference_state`.
 
-    Differences from the state version:
-      - Temperature tangent does not add the (constant) reference temperature.
-      - Specific-humidity tangent is not clamped.
-      - Surface-pressure tangent uses the chain rule for exp:
-            d(sp) = sp_ref * d(log sp)
-        where sp_ref = exp(log_sp_ref) is computed from `reference_state`.
-      - Geopotential tangent is computed via the linearity of `get_geopotential`
-        in temperature_variation (reference temperature and orography are constants
-        with zero tangent).
-      - Vertical velocity tangent (w_wind) is set to zero; linearising the
-        sigma-coordinate continuity equation is left as a future extension.
+    Uses jax.jvp so that all chain-rule factors (surface-pressure exp derivative,
+    absence of constant reference-temperature addition, w-wind continuity equation)
+    are handled automatically and correctly.
 
     Args:
         dynamics_tangent: State perturbation (tangent vector) in spectral space.
         dynamics: PrimitiveEquations object.
-        reference_state: State at the linearisation point; used for the surface-
-            pressure chain-rule factor.
+        reference_state: State at the linearisation point.
 
     Returns:
         Corresponding tangent vector as a PhysicsState.
     """
-    # (d_vorticity, d_divergence) → (du, dv): linear
-    du, dv = vor_div_to_uv_nodal(
-        dynamics.coords.horizontal,
-        dynamics_tangent.vorticity,
-        dynamics_tangent.divergence,
+    _, physics_tangent = jax.jvp(
+        lambda s: dynamics_state_to_physics_state(s, dynamics),
+        (reference_state,),
+        (dynamics_tangent,),
     )
-
-    # Convert tangent spectral state to nodal to get d_T and d_q
-    # compute_diagnostic_state is linear (spectral→nodal transforms + linear ops)
-    d_nodal = compute_diagnostic_state(dynamics_tangent, dynamics.coords)
-    d_t = d_nodal.temperature_variation          # no reference temperature added
-    d_q = d_nodal.tracers['specific_humidity']
-
-    # d_geopotential: get_geopotential is linear in temperature_variation;
-    # reference_temperature and orography are constants → their tangents are zero
-    d_phi_spectral = get_geopotential(
-        dynamics_tangent.temperature_variation,
-        jnp.zeros_like(dynamics.reference_temperature),
-        jnp.zeros_like(dynamics.orography),
-        dynamics.coords.vertical,
-        dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-        dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
-    )
-    d_phi = dynamics.coords.horizontal.to_nodal(d_phi_spectral)
-
-    # d(sp) = exp(log_sp_ref) * d(log_sp)  (chain rule for exp)
-    d_log_sp_nodal  = dynamics.coords.horizontal.to_nodal(dynamics_tangent.log_surface_pressure)
-    log_sp_ref_nodal = dynamics.coords.horizontal.to_nodal(reference_state.log_surface_pressure)
-    d_sp = jnp.exp(log_sp_ref_nodal) * d_log_sp_nodal
-
-    # d_q: dimensionalise (linear)
-    d_q = dynamics.physics_specs.dimensionalize(d_q, units.gram / units.kilogram).m
-
-    # d_w: zero — linearising the sigma-coordinate continuity equation is not yet implemented
-    d_w = jnp.zeros_like(du)
-
-    return PhysicsState(du, dv, d_w, d_t, d_q, d_phi, jnp.squeeze(d_sp, axis=-3))
+    return physics_tangent
 
 
 def physics_tendency_to_dynamics_tendency(physics_tendency: PhysicsTendency, dynamics: PrimitiveEquations) -> State:
