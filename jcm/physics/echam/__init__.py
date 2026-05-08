@@ -33,9 +33,6 @@ def __getattr__(name):
     if name == "echam_physics":
         from jcm.physics.echam.echam_terms import echam_physics
         return echam_physics
-    if name == "Parameters":
-        from jcm.physics.echam.parameters import Parameters
-        return Parameters
     if name == "wmo_tropopause":
         from jcm.physics.diagnostics.wmo_tropopause import wmo_tropopause
         return wmo_tropopause

@@ -235,3 +235,59 @@ class VDiffMatrixSystem(NamedTuple):
     imqc: int = 3    # cloud water matrix
     imtke: int = 4   # TKE matrix
     imthv: int = 5   # theta_v variance matrix
+
+
+@tree_math.struct
+class VerticalDiffusionData:
+    """Diagnostics produced by the TTE-TKE vertical-diffusion term.
+
+    Lives next to :class:`VDiffParameters` so the TTE-TKE scheme owns
+    one self-contained type module.
+    """
+
+    # Exchange coefficients
+    km: jnp.ndarray                  # Momentum exchange coeff [m²/s] (nlev+1, ncols)
+    kh: jnp.ndarray                  # Heat exchange coeff [m²/s] (nlev+1, ncols)
+
+    # Surface exchange coefficients (per surface type)
+    surface_exchange_heat: jnp.ndarray      # Surface heat exchange [m²/s] (ncols, nsfc_type)
+    surface_exchange_moisture: jnp.ndarray  # Surface moisture exchange [m²/s] (ncols, nsfc_type)
+    surface_exchange_momentum: jnp.ndarray  # Surface momentum exchange [m²/s] (ncols, nsfc_type)
+
+    # Turbulent kinetic energy
+    tke: jnp.ndarray                 # TKE [m²/s²] (nlev, ncols)
+
+    # Boundary layer diagnostics
+    pbl_height: jnp.ndarray          # PBL height [m] (ncols,)
+    surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
+    monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
+
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        nsfc_type = 3  # water, ice, land
+        return cls(
+            km=jnp.zeros((nlev + 1,) + nodal_shape),
+            kh=jnp.zeros((nlev + 1,) + nodal_shape),
+            surface_exchange_heat=jnp.zeros(nodal_shape + (nsfc_type,)),
+            surface_exchange_moisture=jnp.zeros(nodal_shape + (nsfc_type,)),
+            surface_exchange_momentum=jnp.zeros(nodal_shape + (nsfc_type,)),
+            tke=jnp.zeros((nlev,) + nodal_shape),
+            pbl_height=jnp.zeros(nodal_shape),
+            surface_friction_velocity=jnp.zeros(nodal_shape),
+            monin_obukhov_length=jnp.zeros(nodal_shape),
+        )
+
+    def copy(self, **kwargs):
+        new_data = {
+            'km': self.km,
+            'kh': self.kh,
+            'surface_exchange_heat': self.surface_exchange_heat,
+            'surface_exchange_moisture': self.surface_exchange_moisture,
+            'surface_exchange_momentum': self.surface_exchange_momentum,
+            'tke': self.tke,
+            'pbl_height': self.pbl_height,
+            'surface_friction_velocity': self.surface_friction_velocity,
+            'monin_obukhov_length': self.monin_obukhov_length,
+        }
+        new_data.update(kwargs)
+        return VerticalDiffusionData(**new_data)

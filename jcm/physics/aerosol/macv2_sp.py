@@ -373,7 +373,7 @@ from typing import ClassVar  # noqa: E402
 
 from flax import nnx  # noqa: E402
 
-from jcm.physics.echam.echam_physics_data import AerosolData  # noqa: E402
+from jcm.physics.aerosol.aerosol_types import AerosolData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 

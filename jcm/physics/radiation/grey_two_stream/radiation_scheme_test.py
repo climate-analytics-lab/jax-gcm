@@ -13,7 +13,7 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
-from jcm.physics.echam.echam_physics_data import AerosolData
+from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.forcing import SolarGeometry
 import jax_datetime as jdt
 from datetime import datetime

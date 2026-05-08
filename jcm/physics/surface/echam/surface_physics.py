@@ -403,10 +403,10 @@ from flax import nnx  # noqa: E402
 
 from jcm import constants as _physical_constants  # noqa: E402
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.echam.echam_physics_data import SurfaceData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
     AtmosphericForcing,
+    SurfaceData,
     SurfaceParameters,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402

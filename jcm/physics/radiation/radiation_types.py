@@ -91,6 +91,92 @@ class RadiationParameters:
         )
 
 
+@tree_math.struct
+class RadiationData:
+    """Radiation diagnostics shared by every radiation scheme.
+
+    Written by the radiation term on its compute step (and re-used,
+    unchanged, on cached steps); seeded by ``EchamBoundaryConditions``
+    which fills the surface optical properties and zeros the flux
+    fields. Lives next to :class:`RadiationParameters` so the radiation
+    schemes (grey two-stream, RRTMGP, NN emulator) share one home.
+    """
+
+    # Solar/geometric variables
+    cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
+
+    # Surface properties
+    surface_albedo_vis: jnp.ndarray    # Surface albedo visible [1] (ncols,)
+    surface_albedo_nir: jnp.ndarray    # Surface albedo near-infrared [1] (ncols,)
+    surface_emissivity: jnp.ndarray    # Surface emissivity [1] (ncols,)
+
+    # Shortwave fluxes
+    sw_flux_up: jnp.ndarray          # Upward SW flux [W/m²] (nlev+1, ncols)
+    sw_flux_down: jnp.ndarray        # Downward SW flux [W/m²] (nlev+1, ncols)
+    sw_heating_rate: jnp.ndarray     # SW heating rate [K/s] (nlev, ncols)
+
+    # Longwave fluxes
+    lw_flux_up: jnp.ndarray          # Upward LW flux [W/m²] (nlev+1, ncols)
+    lw_flux_down: jnp.ndarray        # Downward LW flux [W/m²] (nlev+1, ncols)
+    lw_heating_rate: jnp.ndarray     # LW heating rate [K/s] (nlev, ncols)
+
+    # Surface fluxes
+    surface_sw_down: jnp.ndarray     # Surface downward SW [W/m²] (ncols,)
+    surface_lw_down: jnp.ndarray     # Surface downward LW [W/m²] (ncols,)
+    surface_sw_up: jnp.ndarray       # Surface upward SW [W/m²] (ncols,)
+    surface_lw_up: jnp.ndarray       # Surface upward LW [W/m²] (ncols,)
+
+    # TOA fluxes
+    toa_sw_up: jnp.ndarray           # TOA upward SW [W/m²] (ncols,)
+    toa_lw_up: jnp.ndarray           # TOA upward LW (OLR) [W/m²] (ncols,)
+    toa_sw_down: jnp.ndarray         # TOA downward SW [W/m²] (ncols,)
+
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        return cls(
+            cos_zenith=jnp.zeros(nodal_shape),
+            surface_albedo_vis=jnp.zeros(nodal_shape),
+            surface_albedo_nir=jnp.zeros(nodal_shape),
+            surface_emissivity=jnp.zeros(nodal_shape),
+            sw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            lw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            surface_sw_down=jnp.zeros(nodal_shape),
+            surface_lw_down=jnp.zeros(nodal_shape),
+            surface_sw_up=jnp.zeros(nodal_shape),
+            surface_lw_up=jnp.zeros(nodal_shape),
+            toa_sw_up=jnp.zeros(nodal_shape),
+            toa_lw_up=jnp.zeros(nodal_shape),
+            toa_sw_down=jnp.zeros(nodal_shape),
+        )
+
+    def copy(self, **kwargs):
+        new_data = {
+            'cos_zenith': self.cos_zenith,
+            'surface_albedo_vis': self.surface_albedo_vis,
+            'surface_albedo_nir': self.surface_albedo_nir,
+            'surface_emissivity': self.surface_emissivity,
+            'sw_flux_up': self.sw_flux_up,
+            'sw_flux_down': self.sw_flux_down,
+            'sw_heating_rate': self.sw_heating_rate,
+            'lw_flux_up': self.lw_flux_up,
+            'lw_flux_down': self.lw_flux_down,
+            'lw_heating_rate': self.lw_heating_rate,
+            'surface_sw_down': self.surface_sw_down,
+            'surface_lw_down': self.surface_lw_down,
+            'surface_sw_up': self.surface_sw_up,
+            'surface_lw_up': self.surface_lw_up,
+            'toa_sw_up': self.toa_sw_up,
+            'toa_lw_up': self.toa_lw_up,
+            'toa_sw_down': self.toa_sw_down,
+        }
+        new_data.update(kwargs)
+        return RadiationData(**new_data)
+
+
 class RadiationState(NamedTuple):
     """State variables for radiation calculations"""
     

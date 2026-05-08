@@ -17,8 +17,8 @@ import jax.numpy as jnp
 from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
+    RadiationData,
 )
-from jcm.physics.echam.echam_physics_data import RadiationData
 from jcm.physics.radiation.nn_emulator import (
     EmulatorWeights,
     InputScaling,

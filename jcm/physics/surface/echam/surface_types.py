@@ -199,17 +199,79 @@ class SurfaceDiagnostics(NamedTuple):
 
 class SurfaceResistances(NamedTuple):
     """Surface resistances for flux calculations."""
-    
+
     # Aerodynamic resistances [s/m]
     aerodynamic_heat: jnp.ndarray      # Heat transfer (ncol, nsfc_type)
     aerodynamic_moisture: jnp.ndarray  # Moisture transfer (ncol, nsfc_type)
     aerodynamic_momentum: jnp.ndarray  # Momentum transfer (ncol, nsfc_type)
-    
+
     # Surface resistances [s/m]
     surface_moisture: jnp.ndarray      # Surface moisture resistance (ncol, nsfc_type)
     canopy_resistance: jnp.ndarray     # Canopy resistance (ncol,)
     soil_resistance: jnp.ndarray       # Soil resistance (ncol,)
-    
+
     # Stability corrections [-]
     stability_heat: jnp.ndarray        # Heat stability function (ncol, nsfc_type)
     stability_momentum: jnp.ndarray    # Momentum stability function (ncol, nsfc_type)
+
+
+@tree_math.struct
+class SurfaceData:
+    """Diagnostics produced by ``EchamSurface`` and seeded by
+    ``EchamBoundaryConditions``.
+
+    The flux fields are written by the surface term per step; the
+    surface temperature, skin temperature, and roughness length are
+    blended from the forcing-driven boundary conditions.
+    """
+
+    # Surface fluxes
+    sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
+    latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
+    momentum_flux_u: jnp.ndarray     # U momentum flux [N/m²] (ncols,)
+    momentum_flux_v: jnp.ndarray     # V momentum flux [N/m²] (ncols,)
+
+    # Surface temperatures
+    surface_temperature: jnp.ndarray # Surface temperature [K] (ncols,)
+    skin_temperature: jnp.ndarray    # Skin temperature [K] (ncols,)
+
+    # Surface properties
+    roughness_length: jnp.ndarray    # Surface roughness length [m] (ncols,)
+
+    # Evaporation
+    evaporation: jnp.ndarray         # Evaporation [kg/m²/s] (ncols,)
+
+    # Exchange coefficients
+    ch: jnp.ndarray                  # Heat exchange coefficient [1] (ncols,)
+    cm: jnp.ndarray                  # Momentum exchange coefficient [1] (ncols,)
+
+    @classmethod
+    def zeros(cls, nodal_shape, nlev):
+        return cls(
+            sensible_heat_flux=jnp.zeros(nodal_shape),
+            latent_heat_flux=jnp.zeros(nodal_shape),
+            momentum_flux_u=jnp.zeros(nodal_shape),
+            momentum_flux_v=jnp.zeros(nodal_shape),
+            surface_temperature=jnp.zeros(nodal_shape),
+            skin_temperature=jnp.zeros(nodal_shape),
+            roughness_length=jnp.zeros(nodal_shape),
+            evaporation=jnp.zeros(nodal_shape),
+            ch=jnp.zeros(nodal_shape),
+            cm=jnp.zeros(nodal_shape),
+        )
+
+    def copy(self, **kwargs):
+        new_data = {
+            'sensible_heat_flux': self.sensible_heat_flux,
+            'latent_heat_flux': self.latent_heat_flux,
+            'momentum_flux_u': self.momentum_flux_u,
+            'momentum_flux_v': self.momentum_flux_v,
+            'surface_temperature': self.surface_temperature,
+            'skin_temperature': self.skin_temperature,
+            'roughness_length': self.roughness_length,
+            'evaporation': self.evaporation,
+            'ch': self.ch,
+            'cm': self.cm,
+        }
+        new_data.update(kwargs)
+        return SurfaceData(**new_data)

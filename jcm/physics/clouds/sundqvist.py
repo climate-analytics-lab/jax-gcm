@@ -488,7 +488,7 @@ import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.echam.echam_physics_data import CloudData  # noqa: E402
+from jcm.physics.clouds.cloud_data import CloudData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402

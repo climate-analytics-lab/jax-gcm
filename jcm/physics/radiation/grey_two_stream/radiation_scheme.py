@@ -10,12 +10,12 @@ import jax.numpy as jnp
 from typing import Tuple, Optional
 
 from ..radiation_types import (
-    RadiationParameters, 
+    RadiationParameters,
     RadiationState,
     RadiationTendencies,
-    OpticalProperties
+    OpticalProperties,
+    RadiationData,
 )
-from jcm.physics.echam.echam_physics_data import RadiationData
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry
@@ -493,7 +493,7 @@ import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.echam.echam_physics_data import RadiationData  # noqa: E402
+from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,

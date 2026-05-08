@@ -35,11 +35,9 @@ from typing import ClassVar
 import jax.numpy as jnp
 
 from jcm.forcing import ForcingData
-from jcm.physics.echam.echam_physics_data import (
-    ChemistryData,
-    RadiationData,
-    SurfaceData,
-)
+from jcm.physics.chemistry.simple_chemistry import ChemistryData
+from jcm.physics.radiation.radiation_types import RadiationData
+from jcm.physics.surface.echam.surface_types import SurfaceData
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData

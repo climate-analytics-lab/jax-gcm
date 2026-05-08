@@ -50,26 +50,7 @@ must hold across every commit.
       entirely and migrate any still-open bugs to GitHub issues with
       the right ``physics/`` labels.
 
-### Code cleanup that's blocked on later phases
-
-- [ ] The monolithic ``Parameters`` aggregator at
-      ``jcm/physics/echam/parameters.py`` is still used by
-      ``echam_physics()`` to dispatch per-term defaults and by Hydra
-      override plumbing in ``runners.py``. Per-term Parameters live on
-      the terms themselves now, but the aggregator stays as a
-      convenience entry point.
-
-- [ ] ``jcm/physics/echam/echam_physics_data.py`` is retained because
-      its typed sub-structs (``RadiationData``, ``ConvectionData``,
-      ``SurfaceData``, etc.) are still imported by tests and other
-      schemes. The ``DiagnosticData`` wrapper inside it is now unused —
-      drop just that struct.
-
 ### Smaller nits
-
-- [ ] The ``radiation`` and ``_surface`` keys in the diagnostics dict
-      are inconsistently styled. ``radiation`` flipped to public in
-      Phase 3; ``_surface`` will flip in the surface migration.
 
 - [ ] ``data/bc/t30/clim/{forcing,terrain}.nc`` get rewritten by the
       pytest runs (xarray re-serialising netCDF metadata). They should
@@ -97,11 +78,22 @@ must hold across every commit.
   ``ComposablePhysics(vectorize_columns=True)``.
 - 2026-05-08: Phase 5 — deleted ``echam/echam_physics.py`` and
   ``echam/forcing.py`` (every ``apply_*`` and ``apply_forcing_data``
-  was migrated). ``echam/parameters.py`` and
-  ``echam/echam_physics_data.py`` are retained: the monolithic
-  ``Parameters`` aggregator is still useful as a default-builder for
-  ``echam_physics()`` and for Hydra overrides, and the typed Data
-  sub-structs in ``echam_physics_data.py`` are still imported widely.
+  was migrated).
+- 2026-05-08: Phase 7 — fully decoupled per-scheme Data and Parameters
+  from the ECHAM aggregator. Each typed Data sub-struct now lives next
+  to the scheme that owns it (``RadiationData`` → ``radiation/
+  radiation_types.py``; ``CloudData`` → ``clouds/cloud_data.py``;
+  ``VerticalDiffusionData`` → ``vertical_diffusion/tte_tke/
+  vertical_diffusion_types.py``; ``SurfaceData`` → ``surface/echam/
+  surface_types.py``; ``AerosolData`` → ``aerosol/aerosol_types.py``;
+  ``ChemistryData`` → ``chemistry/simple_chemistry.py``). The
+  monolithic ``Parameters`` aggregator and ``echam_physics_data.py``
+  were deleted; ``echam_physics()`` now takes per-scheme keyword
+  arguments (``convection=...``, ``clouds=...``, ``radiation=...``,
+  ...) and Hydra's ``physics.params.<subgroup>`` plumbing builds those
+  kwargs directly via ``runners._build_echam_param_kwargs`` without
+  any aggregator round-trip. Dead ``DiagnosticData`` and ``PhysicsData``
+  structs gone with the file.
 
 ## Tests skipped pending rewrite against new term classes
 

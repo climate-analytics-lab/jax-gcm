@@ -312,7 +312,9 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.echam.echam_physics_data import VerticalDiffusionData  # noqa: E402
+from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (  # noqa: E402
+    VerticalDiffusionData,
+)
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402

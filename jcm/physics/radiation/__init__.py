@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from jcm.physics.echam.echam_physics_data import RadiationData
-from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.radiation_types import (
+    RadiationData,
+    RadiationParameters,
+)
 from jcm.physics_interface import PhysicsTendency
 
 

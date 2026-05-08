@@ -1,87 +1,75 @@
-"""Simple test to verify the unified Parameters object works correctly
+"""Test the per-scheme Parameters wiring in ``echam_physics()``.
 
-Date: 2025-01-10
+After the scheme-named-terms refactor, each ECHAM term owns its own
+scheme-native ``Parameters`` struct (``ConvectionParameters``,
+``CloudParameters``, …). The ``echam_physics()`` factory accepts each
+sub-Parameters as a keyword argument; ``None`` resolves to the scheme's
+``.default()``. There is no monolithic aggregator.
 """
 
 import jax.numpy as jnp
-from jcm.physics.echam.parameters import Parameters
+
+from jcm.physics.clouds.echam_1m import MicrophysicsParameters
+from jcm.physics.clouds.sundqvist import CloudParameters
+from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.echam.echam_terms import echam_physics
 
 
-def test_parameters_initialization():
-    """Test that Parameters can be initialized with defaults"""
-    params = Parameters.default()
-    
-    # Check that sub-parameters exist
-    assert params.convection is not None
-    assert params.clouds is not None
-    assert params.microphysics is not None
-    
-    # Check some default values.
+def test_per_scheme_defaults():
+    """Each scheme's ``.default()`` reproduces the documented values."""
+    convection = ConvectionParameters.default()
+    clouds = CloudParameters.default()
+    microphysics = MicrophysicsParameters.default()
+
     # ECHAM-matching convention: crt at surface (0.9), crs aloft (0.7);
     # ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
     # KK2000 threshold the previous JAX port used).
-    assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7
-    assert abs(float(params.clouds.crt) - 0.9) < 1e-7
-    assert abs(float(params.clouds.crs) - 0.7) < 1e-7
-    assert abs(float(params.microphysics.ccraut) - 15.0) < 1e-5
-    
-    print("✓ Default parameters initialized correctly")
+    assert abs(float(convection.entrpen) - 1.0e-4) < 1e-7
+    assert abs(float(clouds.crt) - 0.9) < 1e-7
+    assert abs(float(clouds.crs) - 0.7) < 1e-7
+    assert abs(float(microphysics.ccraut) - 15.0) < 1e-5
 
 
-def test_parameters_with_methods():
-    """Test the with_* methods for updating parameters"""
-    params = Parameters.default()
-    
-    # Test with_convection
-    params2 = params.with_convection(entrpen=4.0e-4)
-    assert abs(float(params2.convection.entrpen) - 4.0e-4) < 1e-7
-    assert abs(float(params.convection.entrpen) - 1.0e-4) < 1e-7  # Original unchanged
-    
-    # Test with_clouds
-    params3 = params.with_clouds(crt=0.85)
-    assert abs(float(params3.clouds.crt) - 0.85) < 1e-7
-    assert abs(float(params.clouds.crt) - 0.9) < 1e-7  # Original unchanged
-    
-    # Test with_microphysics
-    params4 = params.with_microphysics(ccraut=0.5e-3)
-    assert abs(float(params4.microphysics.ccraut) - 0.5e-3) < 1e-7
-    assert abs(float(params.microphysics.ccraut) - 15.0) < 1e-5  # Original unchanged (Beheng default)
-    
-    print("✓ Parameter update methods work correctly")
-
-
-def test_echam_physics_with_parameters():
-    """Test that echam_physics() can be initialized with Parameters"""
-    # Default parameters — read entrpen back from the convection term.
-    # Per-term Parameters live on the term itself; there is no monolithic
-    # accessor on ComposablePhysics.
-    physics1 = echam_physics()
-    convection_term1 = next(
-        t for t in physics1.terms if t.category == "convection"
+def test_echam_physics_default_kwargs():
+    """``echam_physics()`` with no kwargs builds the scheme defaults."""
+    physics = echam_physics()
+    convection_term = next(
+        t for t in physics.terms if t.category == "convection"
     )
-    assert abs(float(convection_term1.params.value.entrpen) - 1.0e-4) < 1e-7
+    assert abs(float(convection_term.params.value.entrpen) - 1.0e-4) < 1e-7
 
-    # Custom parameters
-    custom_params = Parameters.default().with_convection(entrpen=5.0e-4)
-    physics2 = echam_physics(parameters=custom_params)
-    convection_term2 = next(
-        t for t in physics2.terms if t.category == "convection"
+
+def test_echam_physics_per_scheme_kwargs():
+    """Per-scheme ``Parameters`` overrides flow through to the right term."""
+    custom_convection = ConvectionParameters.default().__class__(
+        **{**ConvectionParameters.default().__dict__, "entrpen": 5.0e-4}
     )
-    assert abs(float(convection_term2.params.value.entrpen) - 5.0e-4) < 1e-7
+    physics = echam_physics(convection=custom_convection)
+    convection_term = next(
+        t for t in physics.terms if t.category == "convection"
+    )
+    assert abs(float(convection_term.params.value.entrpen) - 5.0e-4) < 1e-7
 
-    print("✓ echam_physics() accepts Parameters object")
+    # Untouched terms still see their defaults.
+    cloud_fraction_term = next(
+        t for t in physics.terms if t.category == "cloud_fraction"
+    )
+    assert abs(float(cloud_fraction_term.params.value.crt) - 0.9) < 1e-7
 
 
-def test_physics_terms_use_parameters():
-    """Test that physics terms can access parameters"""
-    from jcm.physics_interface import PhysicsState
+def test_physics_terms_compute_tendencies():
+    """Smoke test: ``echam_physics`` with custom params computes tendencies."""
+    from datetime import datetime
+
+    import jax_datetime as jdt
+    import numpy as np
+
     from jcm.date import DateData
     from jcm.forcing import ForcingData
-    import jax_datetime as jdt
-    from datetime import datetime
-    
-    # Create simple test state
+    from jcm.physics_interface import PhysicsState
+    from jcm.terrain import TerrainData
+    from jcm.utils import get_coords
+
     nlev, nlat, nlon = 8, 64, 32
     state = PhysicsState(
         u_wind=jnp.zeros((nlev, nlat, nlon)),
@@ -91,53 +79,42 @@ def test_physics_terms_use_parameters():
         geopotential=jnp.ones((nlev, nlat, nlon)) * 1000.0,
         normalized_surface_pressure=jnp.ones((nlat, nlon)),
         tracers={
-            'qc': jnp.zeros((nlev, nlat, nlon)),
-            'qi': jnp.zeros((nlev, nlat, nlon))
-        }
+            "qc": jnp.zeros((nlev, nlat, nlon)),
+            "qi": jnp.zeros((nlev, nlat, nlon)),
+        },
     )
-    
-    # Create physics with custom parameters
-    custom_params = Parameters.default().with_clouds(crt=0.8)
-    physics = echam_physics(parameters=custom_params)
-    
-    # The physics should be able to compute tendencies
-    # (This is a basic smoke test)
-    import numpy as np
-    from jcm.utils import get_coords
-    from jcm.terrain import TerrainData
+
+    custom_clouds = CloudParameters.default().__class__(
+        **{**CloudParameters.default().__dict__, "crt": 0.8}
+    )
+    physics = echam_physics(clouds=custom_clouds)
+
     sigma_boundaries = np.linspace(0, 1, nlev + 1)
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
     terrain = TerrainData.aquaplanet(coords)
     physics.cache_coords(coords)
-    # Physics terms now consume forcing that has already been time-sliced by
-    # `Model._get_step_fn_factory` → `ForcingData.select(date)`. Build a
-    # 2-D forcing here (no time axis) so the smoke test mirrors the per-step
-    # contract; for time-varying boundary conditions the Model handles the
-    # slicing.
-    forcing = ForcingData.zeros((nlat, nlon),
-                                    sea_surface_temperature=jnp.ones((nlat, nlon)) * 288.0,
-                                    sice_am=jnp.zeros((nlat, nlon)))
-    date = DateData.set_date(jdt.Datetime.from_pydatetime(datetime(2020, 6, 21)))
+    forcing = ForcingData.zeros(
+        (nlat, nlon),
+        sea_surface_temperature=jnp.ones((nlat, nlon)) * 288.0,
+        sice_am=jnp.zeros((nlat, nlon)),
+    )
+    date = DateData.set_date(
+        jdt.Datetime.from_pydatetime(datetime(2020, 6, 21))
+    )
     forcing = forcing.select(date)
 
-    tendencies, physics_data = physics.compute_tendencies(
-        state,
-        forcing=forcing,
-        terrain=terrain,
-        date=date,
+    tendencies, _ = physics.compute_tendencies(
+        state, forcing=forcing, terrain=terrain, date=date,
     )
-    
-    # Check that tendencies have the right shape
+
     assert tendencies.temperature.shape == (nlev, nlat, nlon)
-    assert 'qc' in tendencies.tracers
-    assert 'qi' in tendencies.tracers
-    
-    print("✓ Physics terms can use parameters correctly")
+    assert "qc" in tendencies.tracers
+    assert "qi" in tendencies.tracers
 
 
 if __name__ == "__main__":
-    test_parameters_initialization()
-    test_parameters_with_methods()
-    test_echam_physics_with_parameters()
-    test_physics_terms_use_parameters()
-    print("\nAll parameter tests passed! ✅")
+    test_per_scheme_defaults()
+    test_echam_physics_default_kwargs()
+    test_echam_physics_per_scheme_kwargs()
+    test_physics_terms_compute_tendencies()
+    print("\nAll parameter tests passed!")

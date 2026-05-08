@@ -85,12 +85,11 @@ def build_coords(cfg: DictConfig):
 # ---------------------------------------------------------------------------
 
 def _apply_param_overrides(base, overrides: dict | None):
-    """Apply a ``{subgroup: {field: value}}`` override dict to a Parameters-like object.
+    """Apply a ``{subgroup: {field: value}}`` override dict to a SPEEDY-style aggregator.
 
-    Works for any ``tree_math.struct``-style container whose subgroups are
-    themselves field-based dataclasses (which covers both
-    ``jcm.physics.speedy.params.Parameters`` and
-    ``jcm.physics.echam.parameters.Parameters``). Unknown subgroups raise
+    SPEEDY still keeps a monolithic ``Parameters`` aggregator whose
+    sub-fields are themselves struct-style dataclasses. Walks the
+    aggregator and replaces fields per-subgroup; unknown subgroups raise
     ``ValueError`` so typos don't silently no-op.
     """
     if not overrides:
@@ -107,6 +106,59 @@ def _apply_param_overrides(base, overrides: dict | None):
     return base.__class__(**base_fields)
 
 
+def _build_echam_param_kwargs(overrides: dict) -> dict:
+    """Resolve ``cfg.physics.params.<subgroup>`` into ECHAM ``echam_physics()`` kwargs.
+
+    Each ECHAM term owns its own scheme-native ``Parameters`` struct;
+    there is no monolithic aggregator. The Hydra side still uses
+    ``physics.params.<subgroup>`` so the CLI surface is unchanged
+    (``physics.params.convection.entrpen=4e-4``); this helper builds
+    each requested sub-Parameters via that scheme's ``.default()`` then
+    applies field-level overrides, returning a kwargs dict ready for
+    ``echam_physics(**kwargs)``.
+    """
+    from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
+    from jcm.physics.clouds.echam_1m import MicrophysicsParameters
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    from jcm.physics.clouds.sundqvist import CloudParameters
+    from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
+    from jcm.physics.gravity_waves.hines import HinesParameters
+    from jcm.physics.gravity_waves.sso import SSOParameters
+    from jcm.physics.radiation.radiation_types import RadiationParameters
+    from jcm.physics.surface.echam.surface_types import SurfaceParameters
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+        VDiffParameters,
+    )
+
+    # Map cfg subgroup name -> (echam_physics kwarg, Parameters class)
+    subgroup_map = {
+        "convection": ("convection", ConvectionParameters),
+        "clouds": ("clouds", CloudParameters),
+        "microphysics": ("microphysics", MicrophysicsParameters),
+        "microphysics_2m": ("microphysics_2m", CloudParams2M),
+        "radiation": ("radiation", RadiationParameters),
+        "vertical_diffusion": ("vertical_diffusion", VDiffParameters),
+        "surface": ("surface", SurfaceParameters),
+        "aerosol": ("aerosol", AerosolParameters),
+        "hines": ("hines", HinesParameters),
+        "sso": ("sso", SSOParameters),
+    }
+
+    kwargs: dict = {}
+    for subgroup, subdict in overrides.items():
+        if subgroup not in subgroup_map:
+            raise ValueError(
+                f"Unknown physics parameter subgroup {subgroup!r}; "
+                f"choices: {sorted(subgroup_map)}"
+            )
+        kwarg_name, params_cls = subgroup_map[subgroup]
+        base = params_cls.default()
+        kwargs[kwarg_name] = base.__class__(
+            **{**base.__dict__, **dict(subdict)}
+        )
+    return kwargs
+
+
 def _physics_param_overrides(cfg: DictConfig) -> dict:
     """Pull ``cfg.physics.params`` out of OmegaConf into a plain nested dict."""
     raw = cfg.physics.get("params", None)
@@ -119,11 +171,10 @@ def _physics_param_overrides(cfg: DictConfig) -> dict:
 def build_physics(cfg: DictConfig):
     """Build the physics package from ``cfg.physics``.
 
-    Each package's own ``Parameters.default()`` is the source of truth for
-    tunables. ``cfg.physics.params`` (a free-form nested dict) is walked at
-    build time and applied via ``_apply_param_overrides``, so users can
-    poke individual fields from the CLI without having to mirror the
-    Parameters structure in YAML, e.g.::
+    Each scheme's own ``Parameters.default()`` is the source of truth for
+    tunables. ``cfg.physics.params`` (a free-form nested dict) is walked
+    at build time so users can poke individual fields from the CLI
+    without having to mirror the Parameters structure in YAML, e.g.::
 
         python -m jcm.main physics.params.convection.entrpen=4e-4
     """
@@ -148,10 +199,9 @@ def build_physics(cfg: DictConfig):
         return held_suarez_physics()
     if name == "echam":
         from jcm.physics.echam.echam_terms import echam_physics
-        from jcm.physics.echam.parameters import Parameters as EchamParameters
-        params = _apply_param_overrides(EchamParameters.default(), overrides)
+        param_kwargs = _build_echam_param_kwargs(overrides)
         return echam_physics(
-            parameters=params,
+            **param_kwargs,
             radiation_scheme=cfg.physics.radiation,
             cloud_scheme=cfg.physics.get("cloud_scheme", "1m"),
             checkpoint_terms=cfg.physics.get("checkpoint_terms", True),
