@@ -3619,6 +3619,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
     name: ClassVar[str] = "lohmann_2m_microphysics"
     category: ClassVar[str] = "clouds"
+    # ``vertical_diffusion`` is intentionally not in ``requires``: the
+    # vdiff term runs *after* microphysics in the default ECHAM ordering
+    # (convection → cloud → microphysics → vdiff), so the TKE this term
+    # reads comes from the previous step (or zeros on step 1).
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",

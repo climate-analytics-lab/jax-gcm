@@ -581,40 +581,12 @@ filtered out of the user-facing output by `data_struct_to_dict`.
 
 ---
 
-## Planned next phase: scheme-named terms (in progress)
+## Scheme-named terms
 
-PR #429 reorganised *files* by scheme but stopped short of restructuring
-the *terms*. Today every parameterisation still lives behind three layers
-of indirection:
-
-1. A model-named term class (`EchamConvection`, `SpeedyConvection`) that
-   subclasses a model-specific base.
-2. An `apply_*` wrapper in `echam_physics.py` (~1647 lines) that builds a
-   monolithic `PhysicsData`, calls the scheme, and re-encodes the result.
-3. The actual scheme function (`tiedtke_nordeng_convection`,
-   `shallow_cloud_scheme`, …).
-
-`Parameters` and `PhysicsData` are package-monolithic
-(`echam.parameters.Parameters` aggregates 11 sub-structs from every
-ECHAM term; `echam.echam_physics_data.PhysicsData` aggregates 8). Every
-`apply_*` rebuilds the *full* `PhysicsData` from the diagnostics dict
-even when the term touches one sub-struct. Shared parameters live on a
-`ComposableEchamPhysics` subclass that exists solely to hold the
-monolithic `Parameters`, implement `apply_timestep` (so `Model` can
-rewrite `parameters.convection.dt_conv`), and preserve its own type
-through the `replace`/`remove`/`__add__` operators so the `isinstance`
-gate in `model.py` keeps firing.
-
-Consequence: SPEEDY cannot use `TiedtkeConvection` without depending on
-ECHAM (it would have to wrap `apply_convection`, which lives in
-`echam_physics.py`); a community contributor cannot drop in a new scheme
-without touching `echam.parameters.Parameters`,
-`echam.echam_physics_data.PhysicsData`, `echam_terms.py`, and the
-`_data_from_diagnostics` helper.
-
-### Target architecture
-
-One `PhysicsTerm` subclass per scheme, named for the scheme:
+Each ECHAM parameterisation is a self-contained ``PhysicsTerm``
+living next to its underlying numerical implementation, named for the
+scheme rather than the host model. ``echam_physics()`` is the factory
+that wires a validated ordering of those terms together.
 
 ```python
 # jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py
@@ -622,52 +594,50 @@ class TiedtkeConvection(PhysicsTerm):
     name = "tiedtke_convection"
     category = "convection"
     requires = ("pressure_full", "layer_thickness", "air_density")
-    provides = ("convection",)            # writes ConvectionData under "convection"
+    provides = ("convection",)
 
-    def __init__(self, params: TiedtkeConvectionParameters | None = None):
+    def __init__(self, params: ConvectionParameters | None = None):
         self.params = nnx.Param(
-            params or TiedtkeConvectionParameters.default(),
+            params or ConvectionParameters.default(),
         )
 
     def __call__(self, state, diagnostics, forcing, terrain):
         dt = diagnostics["_date"].dt_seconds
-        # vmap over columns lives HERE — not in a separate apply_convection
+        # vmap over columns lives HERE
         ...
         return tendency, {**diagnostics, "convection": ConvectionData(...)}
 ```
 
-Key shifts from the post-PR-#429 state:
+Properties of this layout:
 
-- **Scheme-named, not model-named.** `TiedtkeConvection`, not
-  `EchamConvection`. SPEEDY can drop the same class into its physics
-  package without referencing ECHAM, provided the SPEEDY composition
-  also includes a `MoistAirColumnState` term upstream.
-- **No `apply_*` wrapper layer.** The vmap, the unit conversions, the
-  per-column reshapes, the dt-clip — all live in the term `__call__`.
-  `echam/echam_physics.py` is deleted entirely.
-- **Per-term `Parameters`.** Each scheme term holds its own
-  scheme-native Parameters struct as `nnx.Param`. The monolithic
-  `echam.parameters.Parameters` is deleted; per-scheme Parameters live
-  with their schemes.
-- **Per-term `Data`.** Each scheme writes a typed sub-struct
-  (`ConvectionData`, `RadiationData`, …) under a public key in the
-  diagnostics dict (no leading underscore — flows to xarray
-  automatically). `echam.echam_physics_data.PhysicsData` is deleted.
-- **`ComposablePhysics` is the only container.** `ComposableEchamPhysics`,
-  `apply_timestep`, and the three isinstance gates in `model.py`,
-  `single_column_model.py`, `prescribed_state_model.py` are deleted.
-  Terms that need the model timestep read it from
-  `diagnostics["_date"].dt_seconds`. `vectorize_columns=True` stays as
-  a `ComposablePhysics` constructor flag.
-- **Stronger init-time validation.** `_validate_ordering` already
-  checks `requires ⊆ ⋃_upstream provides`; we add a single-writer
-  check on `provides` so two terms accidentally claiming the same key
-  is an error, and sharpen the missing-requires error to point at the
-  term that would unblock it.
+- **Scheme-named.** ``TiedtkeConvection`` lives in
+  ``jcm/physics/convection/tiedtke_nordeng/`` alongside the column
+  implementation. SPEEDY can drop the same class into its physics
+  package without depending on the ECHAM tree, provided the
+  composition also includes a ``MoistAirColumnState`` term upstream
+  to provide the moist-air diagnostics it reads.
+- **One layer.** The vmap, unit conversions, per-column reshapes,
+  and any safety clips all live in the term's ``__call__``. There is
+  no separate ``apply_*`` wrapper.
+- **Per-term parameters.** Each term holds its own scheme-native
+  parameters struct as ``nnx.Param``, so gradients flow through them
+  and per-scheme optimisation works without surgery on a monolithic
+  parameters object.
+- **Per-term data.** Each term writes a typed sub-struct
+  (``ConvectionData``, ``RadiationData``, …) under a public key in
+  the diagnostics dict — no leading underscore, so it flows directly
+  through to ``model.run().to_xarray()`` as ``convection.<field>``.
+- **One container.** ``ComposablePhysics(vectorize_columns=...)`` is
+  the only physics class; the dt-of-the-step is read from
+  ``diagnostics["_date"].dt_seconds`` by terms that need it.
+- **Init-time validation.** ``_validate_ordering`` checks each
+  term's ``requires`` against the union of upstream ``provides`` and
+  flags two terms claiming the same ``provides`` key, so misconfigured
+  compositions fail at construction rather than at runtime.
 
-### Plugin authoring contract (forward-looking)
+### Plugin contract
 
-After this refactor lands, a third-party scheme is a single-file drop-in:
+A third-party scheme is a single-file drop-in:
 
 ```python
 # my_package/my_scheme.py
@@ -676,9 +646,9 @@ from jcm.physics.physics_term import PhysicsTerm
 
 class MyScheme(PhysicsTerm):
     name = "my_scheme"
-    category = "convection"           # categories partition the term list
-    requires = ("pressure_full",)     # diagnostics keys read from upstream
-    provides = ("my_scheme",)         # diagnostics keys written
+    category = "convection"        # categories partition the term list
+    requires = ("pressure_full",)  # diagnostics keys read from upstream
+    provides = ("my_scheme",)      # diagnostics keys written
 
     def __init__(self, params=None):
         self.params = nnx.Param(params or MySchemeParameters.default())
@@ -696,29 +666,8 @@ from my_package.my_scheme import MyScheme
 physics = echam_physics().replace("convection", MyScheme())
 ```
 
-`ComposablePhysics.__init__` validates the new term list at construction
-time: every `requires` has an upstream `provides`; no key is provided
-twice; declared `required_tracers()` are seeded into the initial state
-by `Model`.
-
-### Migration phases
-
-The refactor is incremental. Each phase lands as a green-tests PR that
-keeps `echam_physics()` and `speedy_physics()` running unchanged from the
-caller's point of view. The ordering is:
-
-| Phase | Scope |
-|---|---|
-| 0 | Reference-trajectory regression tests (the safety net) |
-| 1 | Extract `MoistAirColumnState` and `EchamBoundaryConditions` terms |
-| 2 | Migrate `TiedtkeConvection` end-to-end as a template |
-| 3 | Migrate remaining ECHAM scheme terms (risk-ordered) |
-| 4 | Drop `ComposableEchamPhysics` and the isinstance gates |
-| 5 | Delete dead ECHAM files (`echam_physics.py`, `echam_physics_data.py`, `parameters.py`, `forcing.py`) |
-| 6 | Plugin-author docs |
-
-SPEEDY scheme function signatures (`get_convection_tendencies`,
-`get_shortwave_rad_fluxes`, …) are *not* refactored in this pass — they
-continue to take monolithic SPEEDY `Parameters`/`PhysicsData`. SPEEDY
-terms wrap them as today. That deeper refactor is a possible follow-up.
+``ComposablePhysics`` validates the new term list at construction
+time: every ``requires`` has an upstream ``provides``; no key is
+provided twice; ``required_tracers()`` are seeded into the initial
+state by ``Model``.
 

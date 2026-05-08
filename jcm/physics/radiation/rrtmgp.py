@@ -492,7 +492,7 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
-from jcm.physics.radiation.grey_two_stream.radiation_scheme import (  # noqa: E402
+from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
     radiation_should_compute,
 )
@@ -525,9 +525,13 @@ class RRTMGPRadiation(PhysicsTerm):
 
     name: ClassVar[str] = "rrtmgp_radiation"
     category: ClassVar[str] = "radiation"
+    # ``clouds`` is intentionally not in ``requires``: the cloud-fraction
+    # term runs *after* radiation in the default ECHAM ordering, so this
+    # term reads the previous step's cloud_fraction (or zeros on step 1).
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half", "layer_thickness",
-        "air_density", "chemistry", "aerosol", "radiation",
+        "air_density", "chemistry", "aerosol",
+        "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
 

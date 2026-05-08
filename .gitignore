@@ -171,9 +171,11 @@ notebooks/model_state.nc
 
 # NetCDF files (output diagnostics, intermediate products) — but keep
 # the small T63 ECHAM boundary-condition climatologies under
-# ``jcm/data/bc/`` so the standard tests don't need an external download.
+# ``jcm/data/bc/`` and the test-stat files under ``jcm/data/test/`` so
+# the standard tests don't need an external download.
 *.nc
 !jcm/data/bc/**/*.nc
+!jcm/data/test/**/*.nc
 
 # Docker remote setup
 startup.sh

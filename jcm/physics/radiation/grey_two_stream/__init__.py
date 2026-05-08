@@ -7,16 +7,12 @@ for the main entry point.
 
 from .radiation_scheme import (
     GreyTwoStreamRadiation,
-    cached_radiation_tendency,
     prepare_radiation_state,
     radiation_scheme,
-    radiation_should_compute,
 )
 
 __all__ = [
     'GreyTwoStreamRadiation',
-    'cached_radiation_tendency',
     'prepare_radiation_state',
     'radiation_scheme',
-    'radiation_should_compute',
 ]

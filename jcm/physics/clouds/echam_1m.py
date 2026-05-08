@@ -1145,7 +1145,8 @@ class Echam1MMicrophysics(PhysicsTerm):
     name: ClassVar[str] = "echam_1m_microphysics"
     category: ClassVar[str] = "clouds"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "air_density", "layer_thickness", "clouds",
+        "pressure_full", "air_density", "layer_thickness",
+        "clouds", "aerosol",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds",)
 
@@ -1184,12 +1185,9 @@ class Echam1MMicrophysics(PhysicsTerm):
         qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
 
-        # Twomey effect: aerosol term provides per-column cdnc_factor.
-        # Fall back to neutral (1.0) when the aerosol term is absent.
-        if "aerosol" in diagnostics:
-            cdnc_factor = diagnostics["aerosol"].cdnc_factor
-        else:
-            cdnc_factor = jnp.ones((ncols,))
+        # Twomey effect: aerosol term provides per-column cdnc_factor
+        # (validated as a required upstream key at composition time).
+        cdnc_factor = diagnostics["aerosol"].cdnc_factor
         cdnc_m3 = (
             jnp.ones_like(state.temperature)
             * params.base_cdnc

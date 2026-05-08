@@ -495,6 +495,10 @@ from flax import nnx  # noqa: E402
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.echam.echam_physics_data import RadiationData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics.radiation import (  # noqa: E402
+    cached_radiation_tendency,
+    radiation_should_compute,
+)
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -503,42 +507,6 @@ from jcm.terrain import TerrainData  # noqa: E402
 def _column_vector(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
     """Return a vmapped scalar diagnostic as one value per column."""
     return jnp.reshape(value, (ncols,))
-
-
-def radiation_should_compute(
-    diagnostics: dict, parameters: RadiationParameters,
-) -> jnp.ndarray:
-    """Return a scalar bool: should we recompute radiation this step?
-
-    Mirrors the legacy ``_radiation_with_caching`` gate: if
-    ``radiation_interval > 0``, recompute every ``round(interval / dt)``
-    steps; otherwise (the default) recompute every step. Exposed so the
-    RRTMGP and NN-emulator radiation terms share a single source of truth.
-    """
-    date = diagnostics["_date"]
-    dt = date.dt_seconds
-    step = date.model_step
-    interval = parameters.radiation_interval
-    steps_per_call = jnp.where(
-        interval > 0,
-        jnp.int32(jnp.round(interval / dt)),
-        jnp.int32(1),
-    )
-    return jnp.mod(step, steps_per_call) == 0
-
-
-def cached_radiation_tendency(
-    radiation: RadiationData, shape: tuple,
-) -> PhysicsTendency:
-    """Build the tendency that re-emits the cached SW + LW heating rates."""
-    nlev, ncols = shape
-    return PhysicsTendency(
-        u_wind=jnp.zeros(shape),
-        v_wind=jnp.zeros(shape),
-        temperature=radiation.sw_heating_rate + radiation.lw_heating_rate,
-        specific_humidity=jnp.zeros(shape),
-        tracers={},
-    )
 
 
 class GreyTwoStreamRadiation(PhysicsTerm):
@@ -567,7 +535,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
     # — same behaviour the legacy ``apply_radiation`` had.
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half", "layer_thickness",
-        "air_density", "chemistry", "aerosol", "radiation",
+        "air_density", "chemistry", "aerosol",
+        "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
 
