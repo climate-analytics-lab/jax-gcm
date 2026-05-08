@@ -157,6 +157,52 @@ class TestModelUnit(unittest.TestCase):
         )
 
     @pytest.mark.slow
+    def test_echam_hybrid_model_output_averages(self):
+        """Regression test for #463.
+
+        ``output_averages=True`` on hybrid vertical coordinates used to crash
+        in ``compute_diagnostic_state_hybrid`` because the post-processor was
+        applied once to the stacked trajectory (with a leading time axis on
+        the surface pressure) instead of per-save. The fix moves
+        post-processing inside the scan body. Sigma coords masked the bug
+        because their ``a_thickness`` is zero so the bad broadcast happened
+        to succeed.
+        """
+        import logging
+        from jcm.model import Model
+        from jcm.utils import get_coords
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        # Smallest hybrid setup that exercises the same code path as the
+        # T63L47 + real-terrain configuration that surfaced the bug.
+        coords = get_coords(get_echam_levels(47), spectral_truncation=31)
+        model = Model(
+            coords=coords,
+            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            time_step=3.0,
+            log_level=logging.CRITICAL,
+        )
+
+        save_interval = 1.0 / 24.0  # 1 hour
+        total_time = 2.0 / 24.0     # 2 hours -> 2 saves
+        preds = model.run(
+            save_interval=save_interval,
+            total_time=total_time,
+            output_averages=True,
+        )
+
+        # Predictions should carry a leading time axis matching the number
+        # of saves and the spatial dims should match the model grid — i.e.
+        # the post-processor ran per-save on a single state, not once on
+        # the stacked trajectory.
+        n_saves = int(total_time / save_interval)
+        self.assertEqual(preds.dynamics.temperature.shape[0], n_saves)
+        self.assertEqual(
+            preds.dynamics.temperature.shape[1:], coords.nodal_shape,
+        )
+
+    @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         from jcm.model import Model
         from jcm.utils import ones_like

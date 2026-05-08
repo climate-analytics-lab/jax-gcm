@@ -239,17 +239,25 @@ def averaged_trajectory_from_step(
             _, updated_diag_state = nnx.split(temp_collector_inner)
             return (x_next, x_sum, updated_diag_state), empty_output
 
+        # `post_process_fn` is applied per-save inside the scan body so it
+        # sees a single instantaneous state, matching dinosaur's
+        # `trajectory_from_step`. Calling it once on the stacked trajectory
+        # would add a leading time axis to the surface pressure that
+        # `compute_diagnostic_state_hybrid` cannot broadcast against the
+        # `(nlev,)` hybrid `a/b_thickness` arrays — that bug only happens
+        # to slip through on sigma coords (where `a_thickness` is zero).
         @nnx.scan(in_axes=(nnx.Carry,), out_axes=out_axes, length=outer_steps)
         def outer_step(carry):
             (x_final, x_sum, diag_state), _ = inner_step(carry)
             temp_collector_outer = nnx.merge(graphdef, diag_state)
             temp_collector_outer.i.value += 1
             _, updated_diag_state = nnx.split(temp_collector_outer)
-            return (x_final, empty_sum, updated_diag_state), (x_sum / inner_steps,)
-        
+            averaged_state = x_sum / inner_steps
+            return (x_final, empty_sum, updated_diag_state), (post_process_fn(averaged_state),)
+
         carry = (x_initial, empty_sum, init_diag_state)
         (x_final, _, final_diag_state), (preds,) = outer_step(carry)
-        return x_final, post_process_fn(preds).replace(
+        return x_final, preds.replace(
             physics=nnx.merge(graphdef, final_diag_state).data.value,
         )
 
