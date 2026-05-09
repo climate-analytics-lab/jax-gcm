@@ -205,13 +205,10 @@ class NNEmulatorRadiation(PhysicsTerm):
 
     name: ClassVar[str] = "nn_emulator_radiation"
     category: ClassVar[str] = "radiation"
-    # ``clouds`` is intentionally not in ``requires``: the cloud-fraction
-    # term runs *after* radiation in the default ECHAM ordering, so this
-    # term reads the previous step's cloud_fraction (or zeros on step 1).
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half", "layer_thickness",
         "air_density", "chemistry", "aerosol",
-        "radiation", "surface",
+        "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
 
@@ -270,10 +267,7 @@ class NNEmulatorRadiation(PhysicsTerm):
         cloud_ice = state.tracers.get(
             "qi", jnp.zeros_like(state.temperature),
         )
-        if "clouds" in diagnostics:
-            cloud_fraction = diagnostics["clouds"].cloud_fraction
-        else:
-            cloud_fraction = jnp.zeros_like(state.temperature)
+        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6

@@ -30,6 +30,7 @@ from jcm.physics.radiation.radiation_types import (
     RadiationData,
 )
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radiation_state
+from jcm.physics.radiation.mcica import column_total_cover, in_cloud_path
 from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice,
@@ -429,6 +430,16 @@ def radiation_scheme_rrtmgp(
 
     Has the identical call signature so it can be used interchangeably with
     the grey/simplified radiation scheme.
+
+    Partial-cloud treatment: clear/cloudy beam-split. RRTMGP exposes only
+    a column-level entry point (no per-gpoint cloud hook), so canonical
+    McICA — one stochastic sub-column per gpoint — would require library
+    changes. The 2-call beam-split here is the next-best approximation:
+    run RRTMGP once with zero condensate (clear beam) and once with
+    in-cloud LWP/IWP scaled up by 1/cf (cloudy beam), then combine the
+    heating rates and flux profiles with the column-total cloud cover
+    weight. Costs 2× a single RRTMGP call. Honest for stratiform clouds;
+    worse than full McICA for broken cumulus.
     """
     # CDNC factor from aerosol data
     if aerosol_data.cdnc_factor.ndim == 0:
@@ -446,36 +457,64 @@ def radiation_scheme_rrtmgp(
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
 
-    # Prepare ICON radiation state (shared with grey scheme)
-    icon_state = prepare_radiation_state(
+    # In-cloud condensate for the cloudy beam.
+    cloud_water_in_cloud = in_cloud_path(cloud_water, cloud_fraction)
+    cloud_ice_in_cloud = in_cloud_path(cloud_ice, cloud_fraction)
+
+    icon_state_clear = prepare_radiation_state(
         temperature=temperature,
         specific_humidity=specific_humidity,
         pressure_levels=pressure_levels,
         pressure_interfaces=pressure_interfaces,
         layer_thickness=layer_thickness,
         air_density=air_density,
-        cloud_water=cloud_water,
-        cloud_ice=cloud_ice,
+        cloud_water=jnp.zeros_like(cloud_water),
+        cloud_ice=jnp.zeros_like(cloud_ice),
+        cloud_fraction=cloud_fraction,
+        cos_zenith=cos_zenith,
+        ozone_vmr=ozone_vmr,
+    )
+    icon_state_cloudy = prepare_radiation_state(
+        temperature=temperature,
+        specific_humidity=specific_humidity,
+        pressure_levels=pressure_levels,
+        pressure_interfaces=pressure_interfaces,
+        layer_thickness=layer_thickness,
+        air_density=air_density,
+        cloud_water=cloud_water_in_cloud,
+        cloud_ice=cloud_ice_in_cloud,
         cloud_fraction=cloud_fraction,
         cos_zenith=cos_zenith,
         ozone_vmr=ozone_vmr,
     )
 
-    # Convert to RRTMGP input format
-    rrtmgp_input = prepare_rrtmgp_data(
-        icon_state,
-        layer_thickness,
-        cdnc_factor,
-        surface_temperature,
+    rrtmgp_input_clear = prepare_rrtmgp_data(
+        icon_state_clear, layer_thickness, cdnc_factor, surface_temperature,
+    )
+    rrtmgp_input_cloudy = prepare_rrtmgp_data(
+        icon_state_cloudy, layer_thickness, cdnc_factor, surface_temperature,
     )
 
-    # Run RRTMGP radiative transfer
-    rrtmgp_output = radiation_scheme_rrtmgp_fn(rrtmgp_input, toa_flux, cos_zenith)
+    rrtmgp_output_clear = radiation_scheme_rrtmgp_fn(
+        rrtmgp_input_clear, toa_flux, cos_zenith,
+    )
+    rrtmgp_output_cloudy = radiation_scheme_rrtmgp_fn(
+        rrtmgp_input_cloudy, toa_flux, cos_zenith,
+    )
 
-    # Convert outputs back to ICON format
+    # Combine the two beams with the column-total cloud cover.
+    c_col = column_total_cover(cloud_fraction, parameters.cloud_overlap)
+
+    def blend(a, b):
+        return (1.0 - c_col) * a + c_col * b
+
+    rrtmgp_output = jax.tree_util.tree_map(
+        blend, rrtmgp_output_clear, rrtmgp_output_cloudy,
+    )
+
     return prepare_icon_data(
         rrtmgp_output,
-        icon_state,
+        icon_state_cloudy,    # geometry / temperature / pressure are identical
         surface_albedo_vis,
         surface_albedo_nir,
         surface_emissivity,
@@ -525,13 +564,10 @@ class RRTMGPRadiation(PhysicsTerm):
 
     name: ClassVar[str] = "rrtmgp_radiation"
     category: ClassVar[str] = "radiation"
-    # ``clouds`` is intentionally not in ``requires``: the cloud-fraction
-    # term runs *after* radiation in the default ECHAM ordering, so this
-    # term reads the previous step's cloud_fraction (or zeros on step 1).
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half", "layer_thickness",
         "air_density", "chemistry", "aerosol",
-        "radiation", "surface",
+        "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
 
@@ -590,10 +626,7 @@ class RRTMGPRadiation(PhysicsTerm):
         cloud_ice = state.tracers.get(
             "qi", jnp.zeros_like(state.temperature),
         )
-        if "clouds" in diagnostics:
-            cloud_fraction = diagnostics["clouds"].cloud_fraction
-        else:
-            cloud_fraction = jnp.zeros_like(state.temperature)
+        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6

@@ -22,6 +22,7 @@ from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
 from ..cloud_optics import cloud_optics
+from ..mcica import column_total_cover, in_cloud_path
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 
@@ -359,31 +360,72 @@ def radiation_scheme(
         cos_zenith=cos_zenith
     )
     
-    # Calculate cloud optical properties
-    cloud_sw_optics, cloud_lw_optics = cloud_optics(
-        cloud_water_path=rad_state.cloud_water_path,
-        cloud_ice_path=rad_state.cloud_ice_path,
-        temperature=temperature,
-        cdnc_factor=cdnc_factor
+    # Beam-split partial-cloud treatment: run radiative transfer twice,
+    # once through a clear-sky column and once through a fully-cloudy
+    # column with in-cloud LWP/IWP scaled up by 1/cf, then combine the
+    # fluxes with the column-total cloud cover c_col. This captures the
+    # plane-parallel inhomogeneity bias the homogeneous-cloud
+    # approximation misses, at twice the radiative-transfer cost. For
+    # canonical McICA see the RRTMGP path (rrtmgp.py) — there the
+    # gpoint count makes per-gpoint sub-columns effectively free.
+    in_cloud_lwp = in_cloud_path(
+        rad_state.cloud_water_path, rad_state.cloud_fraction,
     )
-    
-    # Combine gas, cloud, and aerosol optical depths
-    sw_optics = combine_optical_properties(
-        gas_tau_sw,
-        cloud_sw_optics,
+    in_cloud_ipath = in_cloud_path(
+        rad_state.cloud_ice_path, rad_state.cloud_fraction,
+    )
+
+    cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
+        cloud_water_path=in_cloud_lwp,
+        cloud_ice_path=in_cloud_ipath,
+        temperature=temperature,
+        cdnc_factor=cdnc_factor,
+    )
+    zero_optics_sw = OpticalProperties(
+        optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),
+        single_scatter_albedo=jnp.zeros_like(
+            cloud_sw_optics_cloudy.single_scatter_albedo,
+        ),
+        asymmetry_factor=jnp.zeros_like(
+            cloud_sw_optics_cloudy.asymmetry_factor,
+        ),
+    )
+    zero_optics_lw = OpticalProperties(
+        optical_depth=jnp.zeros_like(cloud_lw_optics_cloudy.optical_depth),
+        single_scatter_albedo=jnp.zeros_like(
+            cloud_lw_optics_cloudy.single_scatter_albedo,
+        ),
+        asymmetry_factor=jnp.zeros_like(
+            cloud_lw_optics_cloudy.asymmetry_factor,
+        ),
+    )
+
+    sw_optics_clear = combine_optical_properties(
+        gas_tau_sw, zero_optics_sw,
         aerosol_optical_depth[:, :default_n_sw_bands],
         aerosol_ssa[:, :default_n_sw_bands],
-        aerosol_asymmetry[:, :default_n_sw_bands]
+        aerosol_asymmetry[:, :default_n_sw_bands],
     )
-    
-    lw_optics = combine_optical_properties(
-        gas_tau_lw,
-        cloud_lw_optics,
+    sw_optics_cloudy = combine_optical_properties(
+        gas_tau_sw, cloud_sw_optics_cloudy,
+        aerosol_optical_depth[:, :default_n_sw_bands],
+        aerosol_ssa[:, :default_n_sw_bands],
+        aerosol_asymmetry[:, :default_n_sw_bands],
+    )
+
+    lw_optics_clear = combine_optical_properties(
+        gas_tau_lw, zero_optics_lw,
         aerosol_optical_depth[:, default_n_sw_bands:],
         aerosol_ssa[:, default_n_sw_bands:],
-        aerosol_asymmetry[:, default_n_sw_bands:]
+        aerosol_asymmetry[:, default_n_sw_bands:],
     )
-    
+    lw_optics_cloudy = combine_optical_properties(
+        gas_tau_lw, cloud_lw_optics_cloudy,
+        aerosol_optical_depth[:, default_n_sw_bands:],
+        aerosol_ssa[:, default_n_sw_bands:],
+        aerosol_asymmetry[:, default_n_sw_bands:],
+    )
+
     # Calculate Planck functions for longwave
     lw_band_limits = parameters.lw_band_limits
     planck_layers = planck_bands_lw(temperature, lw_band_limits)
@@ -391,7 +433,7 @@ def radiation_scheme(
         jnp.linspace(temperature[0], temperature[-1], nlev + 1),
         lw_band_limits
     )
-    
+
     # Surface properties
     # Note: When vmapped, surface_temperature is a scalar; otherwise it's an array
     surface_temp_for_planck = surface_temperature if surface_temperature.ndim == 0 else surface_temperature
@@ -399,12 +441,17 @@ def radiation_scheme(
     if surface_planck.ndim > 1:
         surface_planck = surface_planck[0]
 
-    # Calculate longwave fluxes
     # Note: When vmapped, surface properties are scalars; otherwise extract first element
     emissivity_val = surface_emissivity if surface_emissivity.ndim == 0 else surface_emissivity[0]
-    flux_up_lw, flux_down_lw = longwave_fluxes(
-        lw_optics, planck_layers, planck_interfaces,
-        emissivity_val, surface_planck, default_n_lw_bands
+
+    # Two longwave RT calls, one per beam.
+    flux_up_lw_clear, flux_down_lw_clear = longwave_fluxes(
+        lw_optics_clear, planck_layers, planck_interfaces,
+        emissivity_val, surface_planck, default_n_lw_bands,
+    )
+    flux_up_lw_cloudy, flux_down_lw_cloudy = longwave_fluxes(
+        lw_optics_cloudy, planck_layers, planck_interfaces,
+        emissivity_val, surface_planck, default_n_lw_bands,
     )
 
     # Calculate shortwave fluxes.  ``default_n_sw_bands`` is a Python int, so
@@ -417,10 +464,32 @@ def radiation_scheme(
     # Note: When vmapped, albedos are scalars; otherwise extract first element
     albedo_vis_val = surface_albedo_vis if surface_albedo_vis.ndim == 0 else surface_albedo_vis[0]
     albedo_nir_val = surface_albedo_nir if surface_albedo_nir.ndim == 0 else surface_albedo_nir[0]
-    flux_up_sw, flux_down_sw, flux_direct_sw, flux_diffuse_sw = shortwave_fluxes(
-        sw_optics, cos_zenith, toa_flux_bands,
-        jnp.array([albedo_vis_val, albedo_nir_val]),
-        default_n_sw_bands
+    surface_albedo_arr = jnp.array([albedo_vis_val, albedo_nir_val])
+
+    # Two shortwave RT calls, one per beam. ``shortwave_fluxes`` also
+    # returns direct/diffuse split components which we don't propagate
+    # to ``RadiationData`` today (legacy behaviour).
+    flux_up_sw_clear, flux_down_sw_clear, _, _ = shortwave_fluxes(
+        sw_optics_clear, cos_zenith, toa_flux_bands,
+        surface_albedo_arr, default_n_sw_bands,
+    )
+    flux_up_sw_cloudy, flux_down_sw_cloudy, _, _ = shortwave_fluxes(
+        sw_optics_cloudy, cos_zenith, toa_flux_bands,
+        surface_albedo_arr, default_n_sw_bands,
+    )
+
+    # Column-total cloud cover under the configured overlap rule, used
+    # only as the scalar weight between the clear and cloudy beams.
+    c_col = column_total_cover(
+        rad_state.cloud_fraction, parameters.cloud_overlap,
+    )
+    flux_up_lw = (1.0 - c_col) * flux_up_lw_clear + c_col * flux_up_lw_cloudy
+    flux_down_lw = (
+        (1.0 - c_col) * flux_down_lw_clear + c_col * flux_down_lw_cloudy
+    )
+    flux_up_sw = (1.0 - c_col) * flux_up_sw_clear + c_col * flux_up_sw_cloudy
+    flux_down_sw = (
+        (1.0 - c_col) * flux_down_sw_clear + c_col * flux_down_sw_cloudy
     )
     
     # Zero out fluxes if sun is not up
@@ -529,14 +598,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
 
     name: ClassVar[str] = "grey_two_stream_radiation"
     category: ClassVar[str] = "radiation"
-    # ``clouds`` is intentionally NOT in ``requires``: the cloud-fraction
-    # term runs *after* radiation in the default ECHAM ordering, so this
-    # term reads the previous step's cloud_fraction (or zeros on step 1)
-    # — same behaviour the legacy ``apply_radiation`` had.
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half", "layer_thickness",
         "air_density", "chemistry", "aerosol",
-        "radiation", "surface",
+        "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation",)
 
@@ -596,13 +661,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         cloud_ice = state.tracers.get(
             "qi", jnp.zeros_like(state.temperature),
         )
-        # Fall back to a zero cloud_fraction on step 1 (before any
-        # cloud-fraction term has run) — matches the legacy
-        # ``physics_data.clouds.cloud_fraction`` zero-init behaviour.
-        if "clouds" in diagnostics:
-            cloud_fraction = diagnostics["clouds"].cloud_fraction
-        else:
-            cloud_fraction = jnp.zeros_like(state.temperature)
+        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         # Convert ppmv → VMR. CO2 is well-mixed; pass as scalar.

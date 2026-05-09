@@ -24,12 +24,12 @@ terms:
     _target_: jcm.physics.aerosol.Macv2SpAerosol
   simple_chemistry:
     _target_: jcm.physics.chemistry.SimpleChemistry
+  sundqvist_cloud_fraction:
+    _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
   tiedtke_convection:
     _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
-  sundqvist_cloud_fraction:
-    _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
   echam_1m_microphysics:
     _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
   tte_tke_vertical_diffusion:

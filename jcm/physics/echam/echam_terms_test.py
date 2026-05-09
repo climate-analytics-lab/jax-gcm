@@ -106,6 +106,12 @@ class TestEchamComposablePhysics(unittest.TestCase):
             categories.index("cloud_fraction"),
             categories.index("clouds"),
         )
+        # Cloud fraction must also precede radiation so radiation sees the
+        # current step's cloud field (matches ECHAM6's cov→rad ordering).
+        self.assertLess(
+            categories.index("cloud_fraction"),
+            categories.index("radiation"),
+        )
 
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
@@ -117,8 +123,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
             radiation_scheme=custom_rad,
         )
 
-        self.assertIs(physics.terms[4], custom_rad)
-        self.assertEqual(physics.terms[4].category, "radiation")
+        rad_term = next(t for t in physics.terms if t.category == "radiation")
+        self.assertIs(rad_term, custom_rad)
 
     def test_echam_physics_rejects_non_radiation_custom_term(self):
         """Custom radiation terms must declare the radiation category."""

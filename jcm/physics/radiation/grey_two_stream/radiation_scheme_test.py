@@ -475,6 +475,70 @@ def test_radiation_scheme_very_cloudy():
     assert sw_flux_variations > 1.0  # Some variation due to cloud scattering
 
 
+def test_radiation_beam_split_brackets_clear_and_cloudy():
+    """Beam-split with cf=0.5 should produce fluxes that lie between
+    the cf=0 (clear) and cf=1 (overcast) limits.
+
+    Sanity check on the partial-cloud combination
+    ``F = (1 - c_col) F_clear + c_col F_cloudy``: with the same in-cloud
+    LWP at every level, a 50%-cloud-covered column must absorb less SW
+    than an overcast column and more than a clear column, and emit OLR
+    in the same partial-bracket relation.
+    """
+    atm = create_test_atmosphere(nlev=8)
+    nlev = 8
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+
+    parameters = RadiationParameters.default()
+    aerosol_data = create_default_aerosol_data(
+        nlev=nlev, parameters=parameters, ncols=1,
+    )
+    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))
+
+    # Same in-cloud condensate; vary only the grid-mean cloud_fraction
+    # so all three calls represent the same physical cloud at different
+    # area coverages.
+    in_cloud_qc = 5.0e-4
+    in_cloud_qi = 1.0e-4
+
+    def run(cf_value):
+        cloud_water = jnp.full((nlev,), in_cloud_qc * cf_value)
+        cloud_ice = jnp.full((nlev,), in_cloud_qi * cf_value)
+        cloud_fraction = jnp.full((nlev,), cf_value)
+        return radiation_scheme(
+            temperature=atm['temperature'],
+            specific_humidity=atm['specific_humidity'],
+            pressure_levels=atm['pressure_levels'],
+            pressure_interfaces=atm['pressure_interfaces'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=cloud_water,
+            cloud_ice=cloud_ice,
+            cloud_fraction=cloud_fraction,
+            solar=_solar_from_dt(date),
+            latitude=0.0, longitude=0.0,
+            parameters=parameters, aerosol_data=aerosol_data,
+            surface_albedo_nir=jnp.array([0.2]),
+            surface_albedo_vis=jnp.array([0.2]),
+            surface_emissivity=jnp.array([0.95]),
+            surface_temperature=jnp.array([288.0]),
+        )
+
+    _, d_clear = run(0.0)
+    _, d_half = run(0.5)
+    _, d_full = run(1.0)
+
+    # Surface SW: cloudy < half < clear (clouds reflect more SW).
+    assert float(d_full.surface_sw_down) <= float(d_half.surface_sw_down)
+    assert float(d_half.surface_sw_down) <= float(d_clear.surface_sw_down)
+
+    # OLR: cloudy < clear (clouds emit at colder cloud-top T).
+    assert float(d_full.toa_lw_up) <= float(d_clear.toa_lw_up)
+    assert float(d_full.toa_lw_up) <= float(d_half.toa_lw_up) + 1e-3
+    assert float(d_half.toa_lw_up) <= float(d_clear.toa_lw_up) + 1e-3
+
+
 def test_radiation_scheme_energy_conservation():
     """Test energy conservation in radiation scheme"""
     atm = create_test_atmosphere(nlev=10)
