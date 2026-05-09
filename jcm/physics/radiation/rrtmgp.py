@@ -378,6 +378,14 @@ def prepare_icon_data(
         toa_sw_up=toa_sw_up,
         toa_lw_up=toa_lw_up,
         toa_sw_down=toa_sw_down,
+        # The all-sky values come from the blended rrtmgp_data dict;
+        # the caller (``radiation_scheme_rrtmgp``) overwrites the
+        # clear-sky fields below with the actual clear-beam values via
+        # ``.copy(...)``. Zero placeholders here keep the tree-shape
+        # consistent in case someone calls ``prepare_icon_data``
+        # outside the beam-split context.
+        toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
+        toa_lw_up_clear=jnp.zeros_like(toa_lw_up),
     )
     return tendencies, diagnostics
 
@@ -512,13 +520,21 @@ def radiation_scheme_rrtmgp(
         blend, rrtmgp_output_clear, rrtmgp_output_cloudy,
     )
 
-    return prepare_icon_data(
+    tendencies, diagnostics = prepare_icon_data(
         rrtmgp_output,
         icon_state_cloudy,    # geometry / temperature / pressure are identical
         surface_albedo_vis,
         surface_albedo_nir,
         surface_emissivity,
     )
+    # Clear-sky TOA fluxes from the clear-beam RRTMGP call, exposed so
+    # the radiation term can write CRE diagnostics into the ``"clouds"``
+    # sub-struct downstream.
+    diagnostics = diagnostics.copy(
+        toa_sw_up_clear=rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0],
+        toa_lw_up_clear=rrtmgp_output_clear["toa_lw_flux_outgoing_2d_xy"][0, 0],
+    )
+    return tendencies, diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +585,7 @@ class RRTMGPRadiation(PhysicsTerm):
         "air_density", "chemistry", "aerosol",
         "radiation", "surface", "clouds",
     )
-    provides: ClassVar[tuple[str, ...]] = ("radiation",)
+    provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""
@@ -608,7 +624,17 @@ class RRTMGPRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
-        return tendency, {**diagnostics, "radiation": new_radiation}
+        # Mirror the all-sky and clear-sky TOA fluxes onto the
+        # ``"clouds"`` sub-struct for cloud-radiative-effect diagnostics.
+        clouds = diagnostics["clouds"].copy(
+            toa_sw_up_all=new_radiation.toa_sw_up,
+            toa_sw_up_clear=new_radiation.toa_sw_up_clear,
+            toa_lw_up_all=new_radiation.toa_lw_up,
+            toa_lw_up_clear=new_radiation.toa_lw_up_clear,
+        )
+        return tendency, {
+            **diagnostics, "radiation": new_radiation, "clouds": clouds,
+        }
 
     def _compute_full(
         self, state, diagnostics, forcing, params,
@@ -775,6 +801,12 @@ class RRTMGPRadiation(PhysicsTerm):
             toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
             toa_sw_down=_column_vector_rrtmgp(
                 diagnostics_vmapped.toa_sw_down, ncols,
+            ),
+            toa_sw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_sw_up_clear, ncols,
+            ),
+            toa_lw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
         )
 

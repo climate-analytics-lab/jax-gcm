@@ -163,6 +163,12 @@ def radiation_scheme_emulated(
         toa_sw_up=sw_flux_up[0],
         toa_lw_up=lw_flux_up[0],
         toa_sw_down=toa_sw_down,
+        # NN emulator returns only all-sky fluxes; running it twice
+        # (with and without cloud condensate) for clear-sky CRE values
+        # is a follow-up. Zeros for now so downstream consumers don't
+        # see stale data in the diagnostic key.
+        toa_sw_up_clear=jnp.zeros_like(sw_flux_up[0]),
+        toa_lw_up_clear=jnp.zeros_like(lw_flux_up[0]),
     )
 
     return tendencies, diagnostics
@@ -210,7 +216,7 @@ class NNEmulatorRadiation(PhysicsTerm):
         "air_density", "chemistry", "aerosol",
         "radiation", "surface", "clouds",
     )
-    provides: ClassVar[tuple[str, ...]] = ("radiation",)
+    provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters` (with NN weights)."""
@@ -249,7 +255,19 @@ class NNEmulatorRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
-        return tendency, {**diagnostics, "radiation": new_radiation}
+        # Mirror TOA fluxes onto the clouds sub-struct for CRE
+        # diagnostics. The emulator only produces all-sky values, so
+        # the clear-sky fields stay at zero until the 2-call clear-sky
+        # extension is wired (follow-up).
+        clouds = diagnostics["clouds"].copy(
+            toa_sw_up_all=new_radiation.toa_sw_up,
+            toa_sw_up_clear=new_radiation.toa_sw_up_clear,
+            toa_lw_up_all=new_radiation.toa_lw_up,
+            toa_lw_up_clear=new_radiation.toa_lw_up_clear,
+        )
+        return tendency, {
+            **diagnostics, "radiation": new_radiation, "clouds": clouds,
+        }
 
     def _compute_full(
         self, state, diagnostics, forcing, params,
@@ -360,6 +378,12 @@ class NNEmulatorRadiation(PhysicsTerm):
             ),
             toa_sw_down=_column_vector_emulated(
                 diagnostics_vmapped.toa_sw_down, ncols,
+            ),
+            toa_sw_up_clear=_column_vector_emulated(
+                diagnostics_vmapped.toa_sw_up_clear, ncols,
+            ),
+            toa_lw_up_clear=_column_vector_emulated(
+                diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
         )
 

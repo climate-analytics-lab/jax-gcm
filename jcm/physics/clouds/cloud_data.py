@@ -39,6 +39,23 @@ class CloudData:
     qnc_prev: jnp.ndarray            # Previous-step cloud droplet number [1/kg] (nlev, ncols)
     qni_prev: jnp.ndarray            # Previous-step ice crystal number    [1/kg] (nlev, ncols)
 
+    # All-sky and clear-sky outgoing TOA fluxes from the radiation term's
+    # cloudy + clear beam-split, written so users can compute the cloud
+    # radiative effect (CRE) directly from a single output dataset:
+    #
+    #     CRE_SW = toa_sw_up_clear - toa_sw_up_all   (negative; cooling)
+    #     CRE_LW = toa_lw_up_clear - toa_lw_up_all   (positive; warming)
+    #     CRE    = CRE_SW + CRE_LW
+    #
+    # The all-sky values mirror ``RadiationData.toa_{sw,lw}_up`` — they
+    # are duplicated here so the CRE consumer can read everything from
+    # the ``"clouds"`` diagnostic key without having to cross-reference
+    # the radiation key.
+    toa_sw_up_all: jnp.ndarray       # All-sky outgoing SW at TOA [W/m²] (ncols,)
+    toa_sw_up_clear: jnp.ndarray     # Clear-sky outgoing SW at TOA [W/m²] (ncols,)
+    toa_lw_up_all: jnp.ndarray       # All-sky OLR at TOA [W/m²] (ncols,)
+    toa_lw_up_clear: jnp.ndarray     # Clear-sky OLR at TOA [W/m²] (ncols,)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -50,6 +67,10 @@ class CloudData:
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             qnc_prev=jnp.zeros((nlev,) + nodal_shape),
             qni_prev=jnp.zeros((nlev,) + nodal_shape),
+            toa_sw_up_all=jnp.zeros(nodal_shape),
+            toa_sw_up_clear=jnp.zeros(nodal_shape),
+            toa_lw_up_all=jnp.zeros(nodal_shape),
+            toa_lw_up_clear=jnp.zeros(nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -62,6 +83,10 @@ class CloudData:
             'droplet_number': self.droplet_number,
             'qnc_prev': self.qnc_prev,
             'qni_prev': self.qni_prev,
+            'toa_sw_up_all': self.toa_sw_up_all,
+            'toa_sw_up_clear': self.toa_sw_up_clear,
+            'toa_lw_up_all': self.toa_lw_up_all,
+            'toa_lw_up_clear': self.toa_lw_up_clear,
         }
         new_data.update(kwargs)
         return CloudData(**new_data)

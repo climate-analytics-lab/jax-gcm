@@ -165,6 +165,13 @@ class RadiationData:
     toa_lw_up: jnp.ndarray           # TOA upward LW (OLR) [W/m²] (ncols,)
     toa_sw_down: jnp.ndarray         # TOA downward SW [W/m²] (ncols,)
 
+    # Clear-sky TOA outgoing fluxes from the partial-cloud beam-split.
+    # Used to compute the cloud radiative effect (CRE_SW = clear - all,
+    # CRE_LW = clear - all, both at TOA). The radiation term copies these
+    # onto the ``"clouds"`` diagnostic key for downstream consumers.
+    toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
+    toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -185,6 +192,8 @@ class RadiationData:
             toa_sw_up=jnp.zeros(nodal_shape),
             toa_lw_up=jnp.zeros(nodal_shape),
             toa_sw_down=jnp.zeros(nodal_shape),
+            toa_sw_up_clear=jnp.zeros(nodal_shape),
+            toa_lw_up_clear=jnp.zeros(nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -206,6 +215,8 @@ class RadiationData:
             'toa_sw_up': self.toa_sw_up,
             'toa_lw_up': self.toa_lw_up,
             'toa_sw_down': self.toa_sw_down,
+            'toa_sw_up_clear': self.toa_sw_up_clear,
+            'toa_lw_up_clear': self.toa_lw_up_clear,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)

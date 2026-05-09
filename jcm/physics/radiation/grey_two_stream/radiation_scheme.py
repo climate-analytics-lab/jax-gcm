@@ -521,6 +521,14 @@ def radiation_scheme(
     surface_sw_up = jnp.sum(flux_up_sw[-1, :])
     surface_lw_down = jnp.sum(flux_down_lw[-1, :])
     surface_lw_up = jnp.sum(flux_up_lw[-1, :])
+
+    # Clear-sky TOA fluxes from the beam-split's clear branch — exposed
+    # for cloud-radiative-effect diagnostics. SW: zero out at night to
+    # match the all-sky convention used by ``flux_up_sw`` above.
+    toa_sw_up_clear = jnp.where(
+        is_daylight, jnp.sum(flux_up_sw_clear[0, :]), 0.0,
+    )
+    toa_lw_up_clear = jnp.sum(flux_up_lw_clear[0, :])
     
     # Create output structures
     tendencies = RadiationTendencies(
@@ -547,6 +555,8 @@ def radiation_scheme(
         surface_sw_up=surface_sw_up,
         surface_lw_down=surface_lw_down,
         surface_lw_up=surface_lw_up,
+        toa_sw_up_clear=toa_sw_up_clear,
+        toa_lw_up_clear=toa_lw_up_clear,
     )
 
     return tendencies, diagnostics
@@ -603,7 +613,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         "air_density", "chemistry", "aerosol",
         "radiation", "surface", "clouds",
     )
-    provides: ClassVar[tuple[str, ...]] = ("radiation",)
+    provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""
@@ -643,7 +653,18 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
-        return tendency, {**diagnostics, "radiation": new_radiation}
+        # Mirror the all-sky and clear-sky TOA fluxes onto the
+        # ``"clouds"`` sub-struct so users can read everything CRE-
+        # related (= toa_*_clear − toa_*_all) from a single diagnostic.
+        clouds = diagnostics["clouds"].copy(
+            toa_sw_up_all=new_radiation.toa_sw_up,
+            toa_sw_up_clear=new_radiation.toa_sw_up_clear,
+            toa_lw_up_all=new_radiation.toa_lw_up,
+            toa_lw_up_clear=new_radiation.toa_lw_up_clear,
+        )
+        return tendency, {
+            **diagnostics, "radiation": new_radiation, "clouds": clouds,
+        }
 
     def _compute_full(
         self, state, diagnostics, forcing, params,
@@ -751,6 +772,12 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_lw_up=_column_vector(diagnostics_vmapped.toa_lw_up, ncols),
             toa_sw_down=_column_vector(
                 diagnostics_vmapped.toa_sw_down, ncols,
+            ),
+            toa_sw_up_clear=_column_vector(
+                diagnostics_vmapped.toa_sw_up_clear, ncols,
+            ),
+            toa_lw_up_clear=_column_vector(
+                diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
         )
 
