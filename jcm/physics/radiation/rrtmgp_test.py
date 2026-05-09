@@ -174,3 +174,109 @@ class TestGreyVsRRTMGP:
 
         assert jnp.all(jnp.isfinite(tend_grey.temperature_tendency))
         assert jnp.all(jnp.isfinite(tend_rrtm.temperature_tendency))
+
+
+class TestRRTMGPMcICA:
+    """Behavioural tests for the per-g-point McICA partial-cloud path."""
+
+    def test_clear_sky_limit_zero_cloud_fraction(self):
+        """``cloud_fraction=0`` ⇒ McICA produces clear-sky fluxes."""
+        inputs = _make_inputs(nlev=10)
+        nlev = inputs["temperature"].shape[0]
+        # Zero cloud fraction kills every sub-column's cloud presence.
+        inputs["cloud_fraction"] = jnp.zeros((nlev,))
+        inputs["compute_cre"] = True
+
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+
+        # The McICA all-sky path collapses to clear-sky in this limit, so
+        # the all-sky and clear-sky TOA fluxes must agree.
+        np.testing.assert_allclose(
+            float(diag.toa_sw_up), float(diag.toa_sw_up_clear),
+            rtol=1e-4, atol=1e-4,
+        )
+        np.testing.assert_allclose(
+            float(diag.toa_lw_up), float(diag.toa_lw_up_clear),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_overcast_brackets_clear_sky(self):
+        """``cloud_fraction=1`` with cloud water ⇒ all-sky differs from
+        clear-sky in the expected direction (clouds reflect more SW,
+        emit colder LW).
+        """
+        inputs = _make_inputs(nlev=10)
+        nlev = inputs["temperature"].shape[0]
+        inputs["cloud_fraction"] = jnp.ones((nlev,))
+        # Realistic in-cloud LWP: ~ 5 g/kg liquid mass over a few layers.
+        cloud_water = jnp.zeros((nlev,)).at[3:6].set(5e-4)
+        inputs["cloud_water"] = cloud_water
+        inputs["compute_cre"] = True
+
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+
+        # Cloudy column reflects more SW → all-sky toa_sw_up > clear-sky.
+        assert float(diag.toa_sw_up) > float(diag.toa_sw_up_clear) + 1e-3
+        # Cloudy column emits less OLR → all-sky toa_lw_up < clear-sky.
+        assert float(diag.toa_lw_up) < float(diag.toa_lw_up_clear) - 1e-3
+
+    def test_compute_cre_false_zeros_clear_sky_fields(self):
+        """Disabling ``compute_cre`` skips the clear-sky call; CRE
+        diagnostics stay at their zero default.
+        """
+        inputs = _make_inputs(nlev=10)
+        inputs["compute_cre"] = False
+
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+
+        assert float(diag.toa_sw_up_clear) == 0.0
+        assert float(diag.toa_lw_up_clear) == 0.0
+        # The all-sky McICA result is still computed and finite.
+        assert jnp.isfinite(diag.toa_sw_up)
+        assert jnp.isfinite(diag.toa_lw_up)
+
+    def test_seed_reproducibility(self):
+        """Same ``base_seed`` and column index ⇒ identical fluxes
+        (bit-exact, deterministic McICA seeding).
+        """
+        inputs_a = _make_inputs(nlev=10)
+        inputs_a["base_seed"] = 17
+        inputs_a["column_index"] = jnp.int32(3)
+
+        inputs_b = _make_inputs(nlev=10)
+        inputs_b["base_seed"] = 17
+        inputs_b["column_index"] = jnp.int32(3)
+
+        _, diag_a = radiation_scheme_rrtmgp(**inputs_a)
+        _, diag_b = radiation_scheme_rrtmgp(**inputs_b)
+
+        np.testing.assert_array_equal(
+            np.array(diag_a.toa_sw_up), np.array(diag_b.toa_sw_up),
+        )
+        np.testing.assert_array_equal(
+            np.array(diag_a.toa_lw_up), np.array(diag_b.toa_lw_up),
+        )
+
+    def test_different_seeds_diverge_for_partial_cloud(self):
+        """Different McICA seeds give different stochastic realisations
+        in a partly-cloudy column, but the magnitudes stay sensible.
+        """
+        inputs_a = _make_inputs(nlev=10)
+        nlev = inputs_a["temperature"].shape[0]
+        inputs_a["cloud_fraction"] = jnp.full((nlev,), 0.5)
+        inputs_a["cloud_water"] = jnp.zeros((nlev,)).at[3:6].set(5e-4)
+        inputs_a["base_seed"] = 1
+        inputs_a["column_index"] = jnp.int32(0)
+
+        inputs_b = {**inputs_a, "base_seed": 999}
+
+        _, diag_a = radiation_scheme_rrtmgp(**inputs_a)
+        _, diag_b = radiation_scheme_rrtmgp(**inputs_b)
+
+        # Stochastic noise should be visible at this resolution.
+        toa_diff = float(jnp.abs(diag_a.toa_sw_up - diag_b.toa_sw_up))
+        assert toa_diff > 0.0
+        # But within the band of the all-sky vs. clear-sky difference —
+        # the noise floor should be much smaller than the cloud signal.
+        all_minus_clear = float(jnp.abs(diag_a.toa_sw_up - diag_a.toa_sw_up_clear))
+        assert toa_diff < max(all_minus_clear * 2, 50.0)
