@@ -204,6 +204,7 @@ def echam_tke_source_update(
     Returns:
         Post-source TKE [m²/s²], shape (ncol, nlev). Unconditionally
         non-negative, bounded by the production/dissipation equilibrium.
+
     """
     zzb = mixing_length * (c_m * shear_squared - c_h * buoy_freq_squared)
     zdisl = (mixing_length / c_d) / dt          # m/s
