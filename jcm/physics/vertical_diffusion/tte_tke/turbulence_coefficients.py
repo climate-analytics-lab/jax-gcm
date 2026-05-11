@@ -120,15 +120,32 @@ def compute_mixing_length(
     ], axis=1)
     # ri_extended now has shape (ncol, nlev) which matches mixing_length
     
-    # Stability function: reduce mixing length for stable conditions
+    # Stability function: reduce mixing length for stable conditions.
+    #
+    # The natural form ``(1 - Ri/Ri_crit)²`` is only physically meaningful
+    # for ``0 ≤ Ri < Ri_crit``. The previous version applied it without
+    # capping ``Ri`` at zero, which let negative (unstable) Richardson
+    # numbers drive the squared factor unboundedly upward — Ri = -100
+    # gives ``(1 - (-400))² = 160 000``, scaling the mixing length to
+    # ~10¹⁴ m, propagating into Km/Kh and the implicit matrix solve, and
+    # NaN'ing the atmosphere within a couple of timesteps in averaged
+    # mode (the snapshot path happened to dodge the worst columns).
+    #
+    # Bounded form: clip Ri to [0, Ri_crit] before squaring. Unstable
+    # columns get neutral-strength mixing (factor = 1); stable columns
+    # smoothly reduce toward 0.1; super-critical Ri gets background
+    # mixing. A future improvement would be a proper Louis/Monin-Obukhov
+    # stability function with an unstable-enhancement branch, but this
+    # is the minimal change that's physically defensible.
+    ri_in_band = jnp.clip(ri_extended, 0.0, ri_critical)
     stability_factor = jnp.where(
         ri_extended < ri_critical,
-        jnp.maximum(0.1, (1.0 - ri_extended / ri_critical)**2),
-        0.1  # Minimum mixing in stable conditions
+        jnp.maximum(0.1, (1.0 - ri_in_band / ri_critical) ** 2),
+        0.1,
     )
-    
+
     mixing_length = mixing_length * stability_factor
-    
+
     return jnp.maximum(mixing_length, 1.0)  # Minimum mixing length
 
 

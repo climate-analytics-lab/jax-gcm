@@ -145,6 +145,79 @@ def compute_dissipation(
 
 
 @jax.jit
+def echam_tke_source_update(
+    prev_tke: jnp.ndarray,
+    shear_squared: jnp.ndarray,
+    buoy_freq_squared: jnp.ndarray,
+    mixing_length: jnp.ndarray,
+    dt: float,
+    c_m: float = 0.4,
+    c_h: float = 0.5,
+    c_d: float = 0.19,
+    tke_min: float = 0.01,
+) -> jnp.ndarray:
+    """Closed-form analytic implicit update of TKE under shear/buoyancy/dissipation.
+
+    Faithful port of ECHAM's ``vdiff.f90`` lines 837-843. The TKE prognostic
+    equation, after substituting the production form ``P = sqrt(e)·zzb`` and
+    dissipation ``eps = c_d · e^(3/2) / l``::
+
+        d e/d t = sqrt(e) · l · (c_m S² − c_h N²) − c_d · e^(3/2) / l
+
+    With ``u = sqrt(e)`` this reduces to a quadratic in ``u_new`` whose
+    positive root is::
+
+        u_new = zdisl · (sqrt(zktest) − 1)
+
+    where::
+
+        zzb    = l · (c_m S² − c_h N²)
+        zdisl  = (l / c_d) / dt        (= "zda1·zmix/ztmst" in ECHAM)
+        zktest = 1 + (zzb·dt + 2·sqrt(prev_tke)) / zdisl
+
+    Properties:
+      * Output is always ≥ 0 (we additionally floor at ``tke_min``).
+      * For weak source (``zzb·dt + 2u_old`` small): ``u_new ≈
+        (zzb·dt + 2u_old) / 2`` — linearised.
+      * For strong source: ``e_new → l² · (c_m S² − c_h N²) / c_d``, the
+        production = dissipation equilibrium.
+
+    Replaces the previous explicit Euler step ``tke + dt·(shear + buoy
+    − dissip)`` which has no stability bound; combined with the cross-
+    step ``prev_physics_data`` cache in ``output_averages=true`` mode,
+    the explicit form let one ill-conditioned column run TKE to ~10¹⁸
+    in four timesteps and NaN'd the whole atmosphere.
+
+    Args:
+        prev_tke: TKE at previous step [m²/s²], shape (ncol, nlev).
+        shear_squared: (du/dz)² + (dv/dz)² [1/s²], shape (ncol, nlev).
+        buoy_freq_squared: N² (positive for stable stratification)
+            [1/s²], shape (ncol, nlev).
+        mixing_length: Turbulent length scale [m], shape (ncol, nlev).
+        dt: Time step [s].
+        c_m, c_h: Stability function values in the neutral limit
+            (Mellor-Yamada constants). Match the JCM exchange-coefficient
+            formula ``Km = c_m · l · sqrt(e)``.
+        c_d: Dissipation constant.
+        tke_min: Lower floor for output TKE [m²/s²].
+
+    Returns:
+        Post-source TKE [m²/s²], shape (ncol, nlev). Unconditionally
+        non-negative, bounded by the production/dissipation equilibrium.
+    """
+    zzb = mixing_length * (c_m * shear_squared - c_h * buoy_freq_squared)
+    zdisl = (mixing_length / c_d) / dt          # m/s
+    sqrt_prev = jnp.sqrt(jnp.maximum(prev_tke, 0.0))
+    arg = (zzb * dt + 2.0 * sqrt_prev) / zdisl
+    zktest = 1.0 + arg
+    # When net source is negative enough that zktest < 1, the implicit
+    # equation has u_new = 0 → TKE = 0 (then floored to tke_min).
+    zktest_safe = jnp.maximum(zktest, 1.0)
+    u_new = zdisl * (jnp.sqrt(zktest_safe) - 1.0)
+    return jnp.maximum(u_new * u_new, tke_min)
+
+
+@jax.jit
 def compute_tke_exchange_coefficient(
     tke: jnp.ndarray,
     mixing_length: jnp.ndarray,

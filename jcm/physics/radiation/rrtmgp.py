@@ -723,6 +723,14 @@ class RRTMGPRadiation(PhysicsTerm):
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
         self._coords_cached = False
+        # Eagerly create the global RRTMGP instance now (loads netCDF
+        # gas-optics + cloud-optics tables). Otherwise the first jit
+        # trace of ``__call__`` triggers ``optics_factory`` from inside
+        # the traced scope, and the lookup-table jnp arrays created by
+        # ``load_data`` leak as ``UnexpectedTracerError`` — fatal for
+        # ``output_averages=True`` runs in particular. Doing it here
+        # forces a single non-traced load at term-construction time.
+        _ensure_rrtmgp()
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""

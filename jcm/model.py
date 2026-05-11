@@ -219,7 +219,11 @@ def averaged_trajectory_from_step(
         )
         diagnostics_collector.data = nnx.Variable(stacked_empty_data)
         # Seed the physics data cache so radiation caching can reuse
-        # previous-step results across timesteps.
+        # previous-step results across timesteps. The cache is updated
+        # *only on the first IMEX substage of each model step* — see the
+        # gated write in ``physics_interface.get_physical_tendencies`` —
+        # so within a single step later substages all see the same
+        # "previous step" cache rather than each other's intermediates.
         diagnostics_collector.physics_data_cache = nnx.Variable(empty_data)
         graphdef, init_diag_state = nnx.split(diagnostics_collector)
 

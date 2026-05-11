@@ -426,9 +426,20 @@ def solve_tridiagonal_single(
     ncol, nlev = b.shape
     
     # Forward sweep (elimination)
-    # Guard pivots from underflow to prevent NaN with ill-conditioned matrices
+    # Guard pivots from underflow to prevent NaN with ill-conditioned matrices.
+    # The previous form ``jnp.sign(x) * 1e-20 + 1e-20`` returned exactly 0
+    # when ``x`` was a tiny *negative* number (sign(-eps)*1e-20 + 1e-20 ==
+    # -1e-20 + 1e-20 == 0) — so subsequent ``/_safe(x)`` divisions produced
+    # inf, which after a few back-substitutions explodes the solution by
+    # ~18 orders of magnitude. The new form preserves sign and is never
+    # exactly zero.
     def _safe(x):
-        return jnp.where(jnp.abs(x) > 1e-20, x, jnp.sign(x) * 1e-20 + 1e-20)
+        eps = 1e-20
+        return jnp.where(
+            jnp.abs(x) > eps,
+            x,
+            jnp.where(x < 0, -eps, eps),
+        )
 
     # Initialize first row
     cp_0 = c[:, 0] / _safe(b[:, 0])

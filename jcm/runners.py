@@ -728,11 +728,21 @@ def run_chunked(
         print(f"  Saved {nc_path}")
 
         if not ok:
-            print(
-                f"\n*** STOPPING: atmosphere unhealthy at "
-                f"day {elapsed_sim_days:.0f} ***"
+            # Honour ``run.bail_on_unhealthy`` (default True). The full-year
+            # T63L47 ECHAM-1M run hits a single-column q-max excursion at
+            # day 30 that doesn't propagate globally — bailing on the first
+            # such excursion truncates a usable year of climatology to a
+            # single chunk. With the flag set to False, log a warning and
+            # keep going so we still get the rest of the integration.
+            bail = bool(cfg.run.get("bail_on_unhealthy", True))
+            msg = (
+                f"\n*** atmosphere unhealthy at "
+                f"day {elapsed_sim_days:.0f}: {report.get('reasons', [])} ***"
             )
-            break
+            if bail:
+                print(msg + "\nSTOPPING.")
+                break
+            print(msg + "\nContinuing (bail_on_unhealthy=False).")
 
         sdph = elapsed_sim_days / (total_wall / 3600)
         print(
@@ -760,8 +770,21 @@ def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:
     return out_dir / output_name
 
 
-def save_predictions(predictions: ModelPredictions, output_path: Path) -> None:
+def save_predictions(predictions, output_path: Path) -> None:
+    """Persist a run's outputs.
+
+    ``run_chunked`` already writes one netCDF per chunk and returns the
+    list of health-check reports. Skip the final dump in that case (the
+    list of dicts has no ``to_xarray`` method, and the per-chunk files
+    are the actual data).
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(predictions, list):
+        logger.info(
+            "Chunked run: per-chunk netCDFs already written; skipping "
+            "aggregate save_predictions for %s", output_path,
+        )
+        return
     ds = predictions.to_xarray()
     ds.to_netcdf(str(output_path))
     logger.info("Wrote %s", output_path)

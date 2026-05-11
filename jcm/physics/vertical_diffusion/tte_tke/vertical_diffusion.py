@@ -19,7 +19,8 @@ from .turbulence_coefficients import (
 from .matrix_solver import vertical_diffusion_step
 from .tke_budget import (
     compute_tke_exchange_coefficient,
-    compute_tke_diagnostics
+    compute_tke_diagnostics,
+    echam_tke_source_update,
 )
 
 # Create constants instance
@@ -194,39 +195,121 @@ def vertical_diffusion_column(
         compute_exchange_coefficients(state, params, mixing_length, ri)
     )
     
-    # Compute TKE budget and exchange coefficient
-    tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length)
+    # === ECHAM split-update for TKE ============================================
+    # Match the ECHAM ``vdiff.f90`` formulation:
+    #   1. Apply the source/sink (shear production, buoyancy production,
+    #      dissipation) ANALYTICALLY via the implicit ``sqrt(zktest)-1``
+    #      formula — see ``echam_tke_source_update``. This step is
+    #      unconditionally non-negative and bounded by the production /
+    #      dissipation equilibrium, so it cannot blow up regardless of
+    #      input.
+    #   2. Use that post-source TKE as the matrix-solver input and let
+    #      the matrix do ONLY the vertical-transport implicit step.
+    #
+    # The previous JCM design instead added the source tendency as a
+    # forward-Euler increment on top of the matrix tendency. That
+    # explicit step has no stability bound — combined with the cross-
+    # step ``prev_physics_data`` cache in averaged mode, a single ill-
+    # conditioned column ran TKE to ~10¹⁸ in four steps. ECHAM has
+    # avoided this for decades by doing the source step analytically.
+    # ===========================================================================
 
-    # Compute TKE budget diagnostics
-    tke_shear_prod, tke_buoyancy_prod, tke_dissipation, _ = compute_tke_diagnostics(
-        state, params, exchange_coeff_momentum, exchange_coeff_heat, mixing_length
+    # Step 1: analytic implicit source/sink update on a per-cell basis.
+    shear_sq = _column_shear_squared(state.u, state.v, state.height_full)
+    buoy_n2 = _column_buoyancy_freq_squared(
+        state.temperature, state.height_full,
+    )
+    post_source_tke = echam_tke_source_update(
+        prev_tke=state.tke,
+        shear_squared=shear_sq,
+        buoy_freq_squared=buoy_n2,
+        mixing_length=mixing_length,
+        dt=dt,
     )
 
-    # Compute diagnostics
+    # Step 2: matrix solver for vertical transport, with the post-source
+    # TKE as input. Build a shallow-copied state so we don't mutate the
+    # caller-owned ``state`` and so other variables still see the original
+    # ``state.tke`` for their own coupling (if any).
+    state_for_solver = state._replace(tke=post_source_tke)
+
+    tke_exchange_coeff = compute_tke_exchange_coefficient(
+        post_source_tke, mixing_length,
+    )
+
+    # Diagnostics still use the old per-source decomposition for now —
+    # they're informational, not on the integration path.
+    tke_shear_prod, tke_buoyancy_prod, tke_dissipation, _ = (
+        compute_tke_diagnostics(
+            state_for_solver, params,
+            exchange_coeff_momentum, exchange_coeff_heat, mixing_length,
+        )
+    )
+
     diagnostics = compute_turbulence_diagnostics(
-        state, params, exchange_coeff_momentum,
-        exchange_coeff_heat, exchange_coeff_moisture
+        state_for_solver, params, exchange_coeff_momentum,
+        exchange_coeff_heat, exchange_coeff_moisture,
     )
 
-    # Perform vertical diffusion step — solves the implicit matrix system
-    # for vertical transport of u, v, T, q-hydrometeors, TKE, theta_v_var.
-    # The returned ``tke_tendency`` includes only the vertical-transport
-    # contribution; shear/buoyancy production and dissipation must be
-    # added explicitly here or the TKE stays pinned at its initial value.
+    # The matrix solver returns ``tke_tendency = (matrix_tke_new -
+    # state_for_solver.tke) / dt``. Since the caller computes
+    # ``new_tke = state.tke + dt * tke_tendency`` against the *original*
+    # (raw, pre-source) ``state.tke``, we rewrite ``tke_tendency`` to be
+    # in those reference units before returning so the caller's formula
+    # recovers ``matrix_tke_new`` directly. Equivalent rewrite:
+    #   new_tke_tend = (matrix_tke_new - state.tke) / dt
+    #                = ((post_source_tke + dt * transport_tend) - state.tke) / dt
+    #                = (post_source_tke - state.tke) / dt + transport_tend
     tendencies = vertical_diffusion_step(
-        state, params, exchange_coeff_momentum,
-        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
+        state_for_solver, params,
+        exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture,
+        dt, tke_exchange_coeff,
     )
-
-    # Add TKE source/sink terms (explicit): shear + buoyancy − dissipation.
-    tke_source_tendency = (
-        tke_shear_prod + tke_buoyancy_prod - tke_dissipation
+    tke_tend_rebased = (
+        tendencies.tke_tendency + (post_source_tke - state.tke) / dt
     )
-    tendencies = tendencies._replace(
-        tke_tendency=tendencies.tke_tendency + tke_source_tendency,
-    )
+    tendencies = tendencies._replace(tke_tendency=tke_tend_rebased)
 
     return tendencies, diagnostics
+
+
+# ----------------------------------------------------------------------
+# Helper: column-wise shear² and N², independent of K coefficients so
+# they can be fed into the ECHAM analytic TKE update.
+# ----------------------------------------------------------------------
+
+@jax.jit
+def _column_shear_squared(u: jnp.ndarray, v: jnp.ndarray,
+                          height_full: jnp.ndarray) -> jnp.ndarray:
+    """(du/dz)² + (dv/dz)² on full levels [1/s²].
+
+    Vertical differences are between adjacent full levels; the top
+    level inherits the value just below (matches
+    ``compute_shear_production``'s padding convention).
+    """
+    dz = jnp.diff(height_full, axis=1)
+    # ``height_full`` decreases with index (level 0 = top), so dz < 0;
+    # squaring makes sign irrelevant.
+    du_dz = jnp.diff(u, axis=1) / dz
+    dv_dz = jnp.diff(v, axis=1) / dz
+    s2 = du_dz * du_dz + dv_dz * dv_dz
+    # Pad top: re-use the topmost interior gradient.
+    return jnp.concatenate([s2[:, :1], s2], axis=1)
+
+
+@jax.jit
+def _column_buoyancy_freq_squared(temperature: jnp.ndarray,
+                                  height_full: jnp.ndarray) -> jnp.ndarray:
+    """N² = (g/T) · (dθ/dz) approximated as (g/T) · (dT/dz + g/cp) [1/s²].
+
+    Positive when stably stratified (the warmer-above lapse). Matches
+    the sign convention used in ``compute_buoyancy_production``.
+    """
+    dz = jnp.diff(height_full, axis=1)
+    dT_dz = jnp.diff(temperature, axis=1) / dz
+    dT_dz_full = jnp.concatenate([dT_dz[:, :1], dT_dz], axis=1)
+    lapse = PHYS_CONST.grav / PHYS_CONST.cp
+    return (PHYS_CONST.grav / temperature) * (dT_dz_full + lapse)
 
 
 @jax.jit
@@ -491,6 +574,12 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             nsfc_type, axis=1,
         )
 
+        # ``tke`` here is the *post-source* TKE (the analytic ECHAM-style
+        # implicit update done in ``vertical_diffusion_column``);
+        # ``tke_tend`` is purely the matrix-solver transport tendency.
+        # The closed-form source step is unconditionally non-negative
+        # and bounded by the production/dissipation equilibrium, so the
+        # standard 0.01 m²/s² floor is the only safeguard needed here.
         new_tke = jnp.maximum(tke + dt * tke_tend, 0.01)
 
         tendency = PhysicsTendency(

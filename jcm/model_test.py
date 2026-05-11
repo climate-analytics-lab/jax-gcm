@@ -202,6 +202,27 @@ class TestModelUnit(unittest.TestCase):
             preds.dynamics.temperature.shape[1:], coords.nodal_shape,
         )
 
+        # Regression for the post-#463 output_averages NaN bug
+        # (https://github.com/climate-analytics-lab/jax-gcm/...): #463 fixed
+        # the broadcasting crash but the saved averages were still 100%
+        # NaN at T63L47. Root cause was the DiagnosticsCollector seeding
+        # ``physics_data_cache`` with zero-state probe output, which a
+        # downstream radiation term consumed and propagated 0/0 = NaN
+        # through the dynamic tendency. The fix in physics_interface.py
+        # bypasses the seeded cache. Spot-check that the averaged
+        # dynamics state is finite end-to-end on hybrid coords.
+        import numpy as np
+        T = np.asarray(preds.dynamics.temperature)
+        q = np.asarray(preds.dynamics.specific_humidity)
+        u = np.asarray(preds.dynamics.u_wind)
+        self.assertFalse(np.isnan(T).any(), "averaged temperature has NaN")
+        self.assertFalse(np.isnan(q).any(), "averaged humidity has NaN")
+        self.assertFalse(np.isnan(u).any(), "averaged u-wind has NaN")
+        # Sanity ranges: with a balanced isothermal IC at 288 K and only
+        # 2 hours of integration, the average should stay near IC.
+        self.assertGreater(float(T.mean()), 200.0)
+        self.assertLess(float(T.mean()), 320.0)
+
     @pytest.mark.slow
     def test_speedy_model_gradients_isnan(self):
         from jcm.model import Model

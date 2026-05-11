@@ -581,7 +581,9 @@ def get_physical_tendencies(
     # Retrieve cached physics data from the collector (if available) so
     # that expensive terms like radiation can reuse previous results.
     prev_physics_data = None
-    if diagnostics_collector is not None and hasattr(diagnostics_collector, 'physics_data_cache'):
+    if diagnostics_collector is not None and hasattr(
+        diagnostics_collector, 'physics_data_cache'
+    ):
         prev_physics_data = diagnostics_collector.physics_data_cache.value
 
     physics_tendency, physics_data = physics.compute_tendencies(
@@ -589,9 +591,30 @@ def get_physical_tendencies(
         prev_physics_data=prev_physics_data,
     )
 
-    # Update the cache so the next timestep can reuse this data.
-    if diagnostics_collector is not None and hasattr(diagnostics_collector, 'physics_data_cache'):
-        diagnostics_collector.physics_data_cache.value = physics_data
+    # Update the cache so the next timestep can reuse this data, but only
+    # on the FIRST IMEX substage of each model step. The IMEX RK
+    # integrator calls ``_step_tendencies`` once per substage (~3-4 per
+    # step), each with a different intermediate state. Updating the
+    # cache every substage means later substages read the same step's
+    # intermediate physics back as "previous-step" data — a self-
+    # referential feedback that TTE-TKE's TKE solver does not survive
+    # (it amplifies a small perturbation until ``state.tke``/``km``
+    # NaN's after ~50 steps). The ``physical_step`` flag is already
+    # True for the first substage and reset to False by
+    # ``accumulate_if_physical_step`` below, so we use it here to gate
+    # the cache write. Snapshot mode is unaffected because it has no
+    # collector and never reads/writes this cache.
+    if (
+        diagnostics_collector is not None
+        and hasattr(diagnostics_collector, 'physics_data_cache')
+    ):
+        is_first_substage = diagnostics_collector.physical_step.value
+        old_cache = diagnostics_collector.physics_data_cache.value
+        new_cache = jax.tree_util.tree_map(
+            lambda old, new: jnp.where(is_first_substage, new, old),
+            old_cache, physics_data,
+        )
+        diagnostics_collector.physics_data_cache.value = new_cache
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 
