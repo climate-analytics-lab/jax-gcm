@@ -446,6 +446,25 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             TracerSpec("qi", units="kg/kg"),
         )
 
+    def initial_carry_state(self, coords) -> dict:
+        """Seed the previous-step TKE slot at the ECHAM floor (0.01 m²/s²).
+
+        ``compute_mixing_length`` and the TKE budget update use the
+        carried TKE on every step. Starting from zero would let the
+        first step's diffusion coefficients fall to floor everywhere
+        and overshoot once turbulence reactivates. Setting the seed at
+        the ECHAM lower bound matches the in-loop clamp and gives the
+        spin-up step a starting reservoir that the analytic source
+        update can build on.
+        """
+        nlev = coords.nodal_shape[0]
+        ncols = coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]
+        return {
+            "vertical_diffusion": VerticalDiffusionData.zeros(
+                (ncols,), nlev,
+            ).copy(tke=jnp.full((nlev, ncols), 0.01)),
+        }
+
     def __call__(
         self,
         state: PhysicsState,

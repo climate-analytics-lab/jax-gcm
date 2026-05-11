@@ -88,6 +88,41 @@ class PhysicsTerm(nnx.Module):
         """
         return ()
 
+    def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
+        """Return this term's initial cross-step carry-state slots.
+
+        Operator-split physics threads a ``PhysicsCarryState`` (a dict of
+        typed sub-structs keyed by underscore-prefixed term name, e.g.
+        ``_radiation``, ``_vertical_diffusion``) from one ``dt`` to the
+        next. Terms that need cross-step state — radiation flux for the
+        sub-cycle, prev-step TKE for the analytic source update,
+        aerosol AOD for next step's radiation, … — override this to
+        return their slot(s) with **physically sensible defaults**, not
+        zero-state.
+
+        Returning ``{}`` (the default) means the term carries no state
+        across ``dt``. Internal-only plumbing keys (``_date``,
+        ``_forcing_2d``, …) are repopulated authoritatively at the top
+        of every ``compute_tendencies`` call and must NOT be initialised
+        here.
+
+        IMPORTANT: do NOT probe ``__call__`` with a zero ``PhysicsState``
+        to discover shapes — zero temperature breaks downstream radiation
+        (this was the root cause of the averaged-mode NaN bug PR #469
+        worked around). Either build the slot directly from ``coords``
+        or use a domain-specific ``zeros`` constructor on the typed
+        sub-struct (e.g. ``RadiationData.zeros((ncols,), nlev)``).
+
+        Args:
+            coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
+
+        Returns:
+            Dict of carry slots this term contributes. Keys SHOULD start
+            with ``_<term_name>`` to namespace against other terms.
+
+        """
+        return {}
+
     def cache_coords(self, coords) -> None:
         """Populate coordinate-dependent cached state (in-place).
 

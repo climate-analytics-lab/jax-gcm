@@ -245,9 +245,11 @@ class VerticalDiffusionData:
     one self-contained type module.
     """
 
-    # Exchange coefficients
-    km: jnp.ndarray                  # Momentum exchange coeff [m²/s] (nlev+1, ncols)
-    kh: jnp.ndarray                  # Heat exchange coeff [m²/s] (nlev+1, ncols)
+    # Exchange coefficients (full-level field; the underlying TTE-TKE
+    # scheme returns (ncols, nlev) which we transpose to (nlev, ncols)
+    # to match the rest of the column-vectorised physics).
+    km: jnp.ndarray                  # Momentum exchange coeff [m²/s] (nlev, ncols)
+    kh: jnp.ndarray                  # Heat exchange coeff [m²/s] (nlev, ncols)
 
     # Surface exchange coefficients (per surface type)
     surface_exchange_heat: jnp.ndarray      # Surface heat exchange [m²/s] (ncols, nsfc_type)
@@ -266,8 +268,8 @@ class VerticalDiffusionData:
     def zeros(cls, nodal_shape, nlev):
         nsfc_type = 3  # water, ice, land
         return cls(
-            km=jnp.zeros((nlev + 1,) + nodal_shape),
-            kh=jnp.zeros((nlev + 1,) + nodal_shape),
+            km=jnp.zeros((nlev,) + nodal_shape),
+            kh=jnp.zeros((nlev,) + nodal_shape),
             surface_exchange_heat=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_exchange_moisture=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_exchange_momentum=jnp.zeros(nodal_shape + (nsfc_type,)),

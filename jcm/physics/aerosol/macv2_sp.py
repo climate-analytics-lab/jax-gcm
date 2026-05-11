@@ -421,6 +421,18 @@ class Macv2SpAerosol(PhysicsTerm):
         self._lons = nnx.Variable(lon_2d.reshape(-1))
         self._coords_cached = True
 
+    def initial_carry_state(self, coords) -> dict:
+        """Seed the ``aerosol`` slot.
+
+        ``get_simple_aerosol`` rebuilds the AOD/SSA/asymmetry profiles
+        from the plume parameterisation every step using the carried
+        slot only as a shape source — so zeros here are immediately
+        overwritten by the first step's compute.
+        """
+        nlev = coords.nodal_shape[0]
+        ncols = coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]
+        return {"aerosol": AerosolData.zeros((ncols,), nlev)}
+
     def __call__(
         self,
         state,

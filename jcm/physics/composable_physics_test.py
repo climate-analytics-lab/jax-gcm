@@ -639,6 +639,146 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         self.assertTrue(combined.vectorize_columns)
 
 
+class TestInitialCarryState(unittest.TestCase):
+    """Phase 0 scaffolding for operator-split physics (issue #471).
+
+    ``PhysicsTerm.initial_carry_state(coords)`` and
+    ``ComposablePhysics.initial_carry_state(coords)`` build the cross-step
+    ``physics_state`` carry deterministically — no zero-state probing
+    (which was the root-cause failure mode of ``get_empty_data`` on
+    radiation, see PR #469 / issue #470).
+    """
+
+    def test_default_term_carry_is_empty(self):
+        """Terms that don't override contribute nothing to the carry."""
+        term = LinearHeating()
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.assertEqual(term.initial_carry_state(coords), {})
+
+    def test_composable_carry_aggregates(self):
+        """Carry-state slots from each term merge into a single dict."""
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+
+        class CarryingTerm(PhysicsTerm):
+            name: ClassVar[str] = "carrier"
+            category: ClassVar[str] = "diagnostic"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ()
+
+            def __init__(self, slot_name: str, fill: float = 0.0):
+                self._slot_name = slot_name
+                self._fill = fill
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+            def initial_carry_state(self, coords):
+                return {self._slot_name: jnp.full((2, 3), self._fill)}
+
+        physics = ComposablePhysics(
+            terms=[CarryingTerm("_alpha", 1.0), CarryingTerm("_beta", 2.0)],
+        )
+        carry = physics.initial_carry_state(coords)
+        self.assertIn("_alpha", carry)
+        self.assertIn("_beta", carry)
+        npt.assert_array_equal(carry["_alpha"], jnp.ones((2, 3)))
+        npt.assert_array_equal(carry["_beta"], jnp.full((2, 3), 2.0))
+
+    def test_composable_carry_conflict_raises(self):
+        """Two terms writing the same slot key is a composition bug."""
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+
+        class DuplicateCarrier(PhysicsTerm):
+            name: ClassVar[str] = "dup"
+            category: ClassVar[str] = "diagnostic"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ()
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+            def initial_carry_state(self, coords):
+                return {"_collision": jnp.zeros(2)}
+
+        physics = ComposablePhysics(
+            terms=[DuplicateCarrier(), DuplicateCarrier()],
+        )
+        with self.assertRaises(ValueError):
+            physics.initial_carry_state(coords)
+
+    def test_initial_carry_state_no_zero_probe(self):
+        """``initial_carry_state`` must NOT call ``__call__`` to build the carry.
+
+        Probing the term loop with a zero ``PhysicsState`` is the
+        regression path that produced 0/0 = NaN in radiation
+        (`#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_).
+        Build the carry from ``coords`` directly instead.
+        """
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        called: list[int] = []
+
+        class TracerTerm(PhysicsTerm):
+            name: ClassVar[str] = "tracer"
+            category: ClassVar[str] = "diagnostic"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ()
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                called.append(1)
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+            def initial_carry_state(self, coords):
+                return {"_tracer_slot": jnp.zeros((coords.nodal_shape[0],))}
+
+        physics = ComposablePhysics(terms=[TracerTerm()])
+        _ = physics.initial_carry_state(coords)
+        self.assertEqual(
+            called, [],
+            "initial_carry_state must not call term.__call__ — see #470",
+        )
+
+    def test_initial_carry_state_echam_keys_subset_of_get_empty_data(self):
+        """For an ECHAM composition, every key produced by
+        ``initial_carry_state`` matches a key in ``get_empty_data``
+        with the same shape.
+
+        This is the Phase 0 acceptance criterion (#471): the
+        deterministic carry seed and the legacy zero-probe diagnostics
+        seed agree on shape for keys that both produce. Keys only in
+        ``get_empty_data`` are user-facing per-step diagnostics that
+        the carry doesn't need to cover.
+        """
+        from jcm.utils import get_coords
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=31)
+        physics = echam_physics(
+            radiation_scheme="grey", checkpoint_terms=False,
+        )
+        physics.cache_coords(coords)
+
+        empty = physics.get_empty_data(coords)
+        carry = physics.initial_carry_state(coords)
+        for key in carry:
+            self.assertIn(
+                key, empty,
+                f"initial_carry_state has slot {key!r} not in get_empty_data",
+            )
+            shapes_carry = jax.tree_util.tree_map(jnp.shape, carry[key])
+            shapes_empty = jax.tree_util.tree_map(jnp.shape, empty[key])
+            self.assertEqual(
+                shapes_carry, shapes_empty,
+                f"shape mismatch for {key!r}: "
+                f"initial_carry_state {shapes_carry} vs "
+                f"get_empty_data {shapes_empty}",
+            )
+
+
 class TestPackagesImport(unittest.TestCase):
     """Test packages/ factory re-exports."""
 

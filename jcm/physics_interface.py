@@ -20,9 +20,20 @@ from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
-from typing import Tuple, Any, Dict
+from typing import Tuple, Any, Dict, TypeAlias
 from jcm.diffusion import DiffusionFilter
 import logging
+
+# The cross-step physics carry threaded through the integration scan.
+# In the operator-split path (issue #471) the carry is built once at
+# ``Model`` construction time by :meth:`Physics.initial_carry_state` and
+# threaded through ``Model.run / .resume`` as an explicit pytree.
+#
+# Today the carry is a ``dict`` of typed sub-structs keyed by name
+# (``radiation``, ``vertical_diffusion``, ``clouds``, …). The alias
+# documents intent and gives a single name to update if/when we promote
+# the carry to a typed ``@tree_math.struct``.
+PhysicsCarryState: TypeAlias = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +201,11 @@ class Physics:
             forcing: Forcing data
             terrain: Terrain data (boundary conditions)
             date: Date data
-            prev_physics_data: Previous step's physics data for caching
-                expensive computations (e.g. radiation). None on first step.
+            prev_physics_data: Previous step's physics carry (a
+                :data:`PhysicsCarryState`) — used by radiation sub-cycling,
+                the analytic TKE source update, etc. ``None`` means "no
+                carry available" (snapshot mode under the legacy path, or
+                op-split's first ``dt``).
 
         Returns:
             Physical tendencies in PhysicsTendency format
@@ -200,7 +214,22 @@ class Physics:
         """
         raise NotImplementedError("Physics compute_tendencies method not implemented.")
 
+    def initial_carry_state(self, coords) -> PhysicsCarryState:
+        """Build the cross-step physics carry at ``Model`` construction time.
+
+        Default returns ``{}``. ``ComposablePhysics`` aggregates per-term
+        slots; raw subclasses can return whatever ``compute_tendencies``
+        expects as ``prev_physics_data``.
+        """
+        return {}
+
     def get_empty_data(self, coords) -> Any:
+        """Return a zero-shape diagnostics dict (deprecated).
+
+        Used by the legacy ``output_averages=True`` path as the
+        stacked-running-mean accumulator seed. Will be removed in Phase
+        4 of issue #471 when the legacy path is deleted.
+        """
         return None
 
     def data_struct_to_dict(self, struct: Any, nodal_shape, sep: str = ".") -> dict[str, Any]:
@@ -424,8 +453,15 @@ def physics_tendency_to_dynamics_tendency(
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(dynamics.coords.horizontal, u_tend, v_tend)
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
     q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
-    
-    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[0, ...])
+
+    # dinosaur ``State.log_surface_pressure`` is shape ``(1, n_lat_modes,
+    # n_lon_modes)`` (a leading vertical axis of size 1 for broadcasting
+    # against full vertical fields). The op-split path adds the tendency
+    # directly to the state via tree_math, which checks for *exact*
+    # shape matches. Keep the leading axis here so the same tendency
+    # object works for both the legacy ``compose_equations`` path
+    # (which sums via numpy broadcasting) and the op-split path.
+    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[:1, ...])
 
     # Convert all tracer tendencies to modal; TracerSpec.nondimensionalize=False
     # tendencies carry the same (pre-nondimensional) units as the tracer itself
@@ -545,6 +581,64 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         tracers=clipped_tracer_tends,
     )
 
+def compute_physics_step(
+    state: State,
+    dynamics: PrimitiveEquations,
+    time_step: float,
+    physics: Physics,
+    forcing: ForcingData,
+    terrain: TerrainData,
+    date: DateData,
+    physics_state,
+) -> tuple[State, Any]:
+    """Compute the physics dynamics-tendency for an operator-split timestep.
+
+    The operator-split path (issue #471) calls physics exactly once per
+    ``dt`` rather than once per IMEX RK substage. There is no substage
+    cache to gate against — ``physics_state`` is an explicit pytree
+    carry threaded through the integration scan.
+
+    Args:
+        state: Dynamic (dinosaur) ``State`` in spectral space.
+        dynamics: ``PrimitiveEquations`` instance (provides coords, ref
+            temperature, orography, etc.).
+        time_step: Model timestep in seconds (used by
+            ``verify_tendencies`` to cap negative-going tracer
+            tendencies).
+        physics: ``Physics`` instance (e.g. :class:`ComposablePhysics`).
+        forcing: Time-sliced ``ForcingData`` for this step.
+        terrain: ``TerrainData`` (orography, land-sea mask, …).
+        date: ``DateData`` for the current step.
+        physics_state: The cross-step physics carry — the dict returned
+            by the previous step's ``compute_tendencies`` call, or the
+            initial value produced by ``physics.initial_carry_state``.
+
+    Returns:
+        Tuple of ``(dynamics_tendency, new_physics_state)``. The first
+        is in dinosaur ``State`` form ready to be added to the
+        primitive-equations state; the second is the carry to thread
+        into the next step.
+
+    """
+    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
+    physics_grid_state = dynamics_state_to_physics_state(
+        state, dynamics, tracer_specs=tracer_specs,
+    )
+    clamped_physics_state = verify_state(physics_grid_state)
+
+    physics_tendency, new_physics_state = physics.compute_tendencies(
+        clamped_physics_state, forcing, terrain, date,
+        prev_physics_data=physics_state,
+    )
+    physics_tendency = verify_tendencies(
+        clamped_physics_state, physics_tendency, time_step,
+    )
+    dynamics_tendency = physics_tendency_to_dynamics_tendency(
+        physics_tendency, dynamics, tracer_specs=tracer_specs,
+    )
+    return dynamics_tendency, new_physics_state
+
+
 def get_physical_tendencies(
     state: State,
     dynamics: PrimitiveEquations,
@@ -556,7 +650,17 @@ def get_physical_tendencies(
     date: DateData,
     diagnostics_collector=None,
 ) -> State:
-    """Compute the physical tendencies given the current state and a list of physics functions.
+    """Compute the physical tendencies for the legacy inside-RK physics path.
+
+    Phase 3 of issue #471 dropped the substage cache gating — there is
+    no longer a cross-step ``physics_data_cache`` on the
+    ``DiagnosticsCollector``; ``prev_physics_data`` is always ``None``
+    in this path. Without per-step cache reuse the legacy averaged
+    path's IMEX-RK substage-disambiguation problem is moot, but its
+    radiation sub-cycling is also disabled (radiation now recomputes at
+    every substage). The whole legacy path is being removed in Phase 4
+    of #471; in the meantime ``use_op_split=True`` (the default) is the
+    correctness path.
 
     Args:
         state: Dynamic (dinosaur) State variables
@@ -565,61 +669,35 @@ def get_physical_tendencies(
         physics: Physics object (e.g. composable physics from held_suarez_physics(), speedy_physics())
         forcing: ForcingData object
         terrain: TerrainData object
+        diffusion: DiffusionFilter (unused; preserved for API symmetry)
         date: DateData object
-        diagnostics_collector: DiagnosticsCollector object
+        diagnostics_collector: Optional ``DiagnosticsCollector`` for the
+            averaged-mode running mean. When provided, the per-step
+            diagnostics dict is accumulated into ``collector.data`` once
+            per substage call — this over-counts by the IMEX-RK
+            substage count in the legacy averaged path. Acknowledged
+            degradation; the legacy path is deprecated.
 
     Returns:
         Physical tendencies in dinosaur.primitive_equations.State format
 
     """
+    del diffusion  # unused; retained for API symmetry with the legacy call sites.
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
 
     physics_state = dynamics_state_to_physics_state(state, dynamics, tracer_specs=tracer_specs)
 
     clamped_physics_state = verify_state(physics_state)
 
-    # Retrieve cached physics data from the collector (if available) so
-    # that expensive terms like radiation can reuse previous results.
-    prev_physics_data = None
-    if diagnostics_collector is not None and hasattr(
-        diagnostics_collector, 'physics_data_cache'
-    ):
-        prev_physics_data = diagnostics_collector.physics_data_cache.value
-
     physics_tendency, physics_data = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain, date,
-        prev_physics_data=prev_physics_data,
+        prev_physics_data=None,
     )
-
-    # Update the cache so the next timestep can reuse this data, but only
-    # on the FIRST IMEX substage of each model step. The IMEX RK
-    # integrator calls ``_step_tendencies`` once per substage (~3-4 per
-    # step), each with a different intermediate state. Updating the
-    # cache every substage means later substages read the same step's
-    # intermediate physics back as "previous-step" data — a self-
-    # referential feedback that TTE-TKE's TKE solver does not survive
-    # (it amplifies a small perturbation until ``state.tke``/``km``
-    # NaN's after ~50 steps). The ``physical_step`` flag is already
-    # True for the first substage and reset to False by
-    # ``accumulate_if_physical_step`` below, so we use it here to gate
-    # the cache write. Snapshot mode is unaffected because it has no
-    # collector and never reads/writes this cache.
-    if (
-        diagnostics_collector is not None
-        and hasattr(diagnostics_collector, 'physics_data_cache')
-    ):
-        is_first_substage = diagnostics_collector.physical_step.value
-        old_cache = diagnostics_collector.physics_data_cache.value
-        new_cache = jax.tree_util.tree_map(
-            lambda old, new: jnp.where(is_first_substage, new, old),
-            old_cache, physics_data,
-        )
-        diagnostics_collector.physics_data_cache.value = new_cache
 
     physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
 
     if diagnostics_collector is not None:
-            diagnostics_collector.accumulate_if_physical_step(physics_data)
+        diagnostics_collector.accumulate(physics_data)
 
     dynamics_tendency = physics_tendency_to_dynamics_tendency(
         physics_tendency, dynamics, tracer_specs=tracer_specs,

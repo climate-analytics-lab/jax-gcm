@@ -520,3 +520,288 @@ class TestCalendarDurations(unittest.TestCase):
         self.assertEqual(monthly.sizes['time'], 3)
 
 
+class TestOperatorSplitPhysics(unittest.TestCase):
+    """Operator-split physics (issue #471).
+
+    The op-split path calls physics exactly once per ``dt`` outside the
+    IMEX-RK stages and applies the tendency as a forward-Euler add.
+    These tests verify the path is wired correctly, exists as a JAX
+    pytree, and produces finite atmospheric state in both snapshot and
+    averaged modes.
+    """
+
+    def _speedy_model(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        return Model(coords=coords)
+
+    def _echam_hybrid_model(self):
+        from jcm.model import Model
+        from jcm.utils import get_coords
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        coords = get_coords(get_echam_levels(47), spectral_truncation=31)
+        return Model(
+            coords=coords,
+            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            time_step=3.0,
+        )
+
+    def test_op_split_snapshot_speedy_finite(self):
+        """SPEEDY in op-split snapshot mode produces a finite atmosphere."""
+        import numpy as np
+
+        model = self._speedy_model()
+        preds = model.run(
+            save_interval=1 / 48.0, total_time=1 / 12.0,
+            use_op_split=True,
+        )
+        T = np.asarray(preds.dynamics.temperature)
+        u = np.asarray(preds.dynamics.u_wind)
+        q = np.asarray(preds.dynamics.specific_humidity)
+        self.assertFalse(np.isnan(T).any(), "op-split snapshot T has NaN")
+        self.assertFalse(np.isnan(u).any(), "op-split snapshot u has NaN")
+        self.assertFalse(np.isnan(q).any(), "op-split snapshot q has NaN")
+        self.assertGreater(float(T.mean()), 200.0)
+        self.assertLess(float(T.mean()), 320.0)
+
+    def test_op_split_averaged_speedy_finite(self):
+        """SPEEDY in op-split averaged mode produces a finite atmosphere
+        and a populated time-averaged diagnostics dict.
+        """
+        import numpy as np
+
+        model = self._speedy_model()
+        preds = model.run(
+            save_interval=1 / 48.0, total_time=1 / 12.0,
+            use_op_split=True, output_averages=True,
+        )
+        T = np.asarray(preds.dynamics.temperature)
+        self.assertFalse(np.isnan(T).any(), "op-split averaged T has NaN")
+        self.assertGreater(float(T.mean()), 200.0)
+        self.assertLess(float(T.mean()), 320.0)
+        # In averaged mode the ``physics`` attribute is the time-averaged
+        # diagnostics dict (not None as in snapshot mode).
+        self.assertIsInstance(preds.physics, dict)
+        self.assertGreater(len(preds.physics), 0)
+
+    def test_op_split_averaged_echam_hybrid_finite(self):
+        """ECHAM hybrid in op-split averaged mode produces a finite atmosphere.
+
+        This is the configuration that surfaced #470 (output-averages
+        NaN). The op-split path threads the radiation cache as an
+        explicit pytree carry instead of through the substage-gated
+        ``DiagnosticsCollector.physics_data_cache``.
+        """
+        import numpy as np
+
+        model = self._echam_hybrid_model()
+        preds = model.run(
+            save_interval=1 / 24.0, total_time=2 / 24.0,
+            use_op_split=True, output_averages=True,
+        )
+        T = np.asarray(preds.dynamics.temperature)
+        q = np.asarray(preds.dynamics.specific_humidity)
+        u = np.asarray(preds.dynamics.u_wind)
+        self.assertFalse(np.isnan(T).any(), "op-split echam T has NaN")
+        self.assertFalse(np.isnan(q).any(), "op-split echam q has NaN")
+        self.assertFalse(np.isnan(u).any(), "op-split echam u has NaN")
+        self.assertGreater(float(T.mean()), 200.0)
+        self.assertLess(float(T.mean()), 320.0)
+
+    def test_op_split_close_to_legacy_short_run(self):
+        """For a short run (a few timesteps), op-split and the legacy
+        inside-RK path produce closely-agreeing state.
+
+        The Lie splitting error is :math:`O(dt^2)` per step from the
+        commutator of physics and dynamics tendency operators. Over a
+        handful of SPEEDY ``30 min`` steps the two paths should agree
+        to a few percent on temperature.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        import numpy as np
+
+        model_legacy = Model(coords=coords)
+        preds_legacy = model_legacy.run(
+            save_interval=1 / 48.0, total_time=1 / 12.0,
+            use_op_split=False,
+        )
+        model_split = Model(coords=coords)
+        preds_split = model_split.run(
+            save_interval=1 / 48.0, total_time=1 / 12.0,
+            use_op_split=True,
+        )
+        T_l = float(np.asarray(preds_legacy.dynamics.temperature).mean())
+        T_s = float(np.asarray(preds_split.dynamics.temperature).mean())
+        self.assertLess(
+            abs(T_l - T_s) / abs(T_l), 0.01,
+            f"op-split vs legacy global-mean T differ >1%: "
+            f"{T_l:.2f} vs {T_s:.2f}",
+        )
+
+    def test_op_split_step_is_jax_pure(self):
+        """The op-split single-step function is a pure JAX function:
+        ``(state, physics_state) -> (state, physics_state)`` and traces
+        cleanly under jit + grad.
+        """
+        from jcm.forcing import default_forcing
+
+        model = self._speedy_model()
+        # Set up an initial state via the public API.
+        _ = model.run(total_time=0)
+        initial_state = model._final_modal_state
+
+        forcing = default_forcing(model.coords.horizontal)
+        step = model._get_op_split_step_fn(forcing)
+        initial_physics_state = model.physics.get_empty_data(model.coords)
+
+        # Trace and execute one step under jit.
+        jit_step = jax.jit(step)
+        x1, ps1 = jit_step(initial_state, initial_physics_state)
+
+        # Both pytree halves should be valid.
+        self.assertEqual(
+            jax.tree_util.tree_structure(x1),
+            jax.tree_util.tree_structure(initial_state),
+        )
+        self.assertEqual(
+            jax.tree_util.tree_structure(ps1),
+            jax.tree_util.tree_structure(initial_physics_state),
+        )
+        self.assertFalse(bool(jnp.isnan(x1.temperature_variation).any()))
+
+    def test_op_split_carry_threading(self):
+        """``physics_state`` returned by step N is the same pytree shape
+        as the input to step N+1 — the contract :class:`jax.lax.scan`
+        requires for the carry. Verified by running two steps in
+        sequence.
+        """
+        from jcm.forcing import default_forcing
+
+        model = self._speedy_model()
+        _ = model.run(total_time=0)
+        initial_state = model._final_modal_state
+
+        forcing = default_forcing(model.coords.horizontal)
+        step = jax.jit(model._get_op_split_step_fn(forcing))
+        ps0 = model.physics.get_empty_data(model.coords)
+        x1, ps1 = step(initial_state, ps0)
+        x2, ps2 = step(x1, ps1)
+
+        s0 = jax.tree_util.tree_structure(ps0)
+        s1 = jax.tree_util.tree_structure(ps1)
+        s2 = jax.tree_util.tree_structure(ps2)
+        self.assertEqual(s0, s1)
+        self.assertEqual(s1, s2)
+
+    def test_op_split_deprecation_warning_on_legacy(self):
+        """Asking for the legacy inside-RK path logs a deprecation."""
+        import logging
+
+        model = self._speedy_model()
+        with self.assertLogs("jcm.model", level=logging.WARNING) as cm:
+            _ = model.run(
+                save_interval=1 / 48.0, total_time=1 / 48.0,
+                use_op_split=False,
+            )
+        self.assertTrue(
+            any("op_split" in msg or "Phase 4" in msg for msg in cm.output),
+            f"expected an op-split deprecation warning, got {cm.output!r}",
+        )
+
+
+class TestDiagnosticsCollectorCleanup(unittest.TestCase):
+    """Phase 3 cleanup of ``DiagnosticsCollector`` (issue #471).
+
+    The substage cache plumbing (``physics_data_cache``, ``physical_step``,
+    ``accumulate_if_physical_step``) has been replaced by:
+      - first-class cross-step carry threaded through the op-split scan;
+      - a simple ``accumulate`` method on the legacy averaged-path
+        accumulator (no substage gating).
+    """
+
+    def test_collector_has_no_physics_data_cache(self):
+        """The cache field is gone — its job moved to the integration carry."""
+        from jcm.model import DiagnosticsCollector
+        c = DiagnosticsCollector(steps_to_average=4)
+        self.assertFalse(
+            hasattr(c, "physics_data_cache"),
+            "physics_data_cache must be removed (issue #471 Phase 3)",
+        )
+
+    def test_collector_has_no_physical_step(self):
+        """Substage gating is gone — op-split has no substages."""
+        from jcm.model import DiagnosticsCollector
+        c = DiagnosticsCollector(steps_to_average=4)
+        self.assertFalse(
+            hasattr(c, "physical_step"),
+            "physical_step must be removed (issue #471 Phase 3)",
+        )
+
+    def test_collector_accumulate_method(self):
+        """``accumulate`` adds ``new / steps_to_average`` into ``data[i]``."""
+        import warnings
+
+        from flax import nnx
+        from jcm.model import DiagnosticsCollector
+
+        with warnings.catch_warnings():
+            # Suppress the nnx deprecation noise about ``.value`` —
+            # cleaning that up across the existing collector code is
+            # a separate refactor outside the #471 op-split scope.
+            warnings.simplefilter("ignore", DeprecationWarning)
+
+            c = DiagnosticsCollector(steps_to_average=4)
+            c.data = nnx.Variable({"foo": jnp.zeros((3, 5))})
+            c.accumulate({"foo": jnp.ones(5)})
+            stacked = c.data.value["foo"]
+        # Adding ones / 4 into data[0]; data[1:] still zeros.
+        import numpy as np
+        np.testing.assert_array_equal(
+            np.asarray(stacked[0]), 0.25 * np.ones(5),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(stacked[1:]), np.zeros((2, 5)),
+        )
+
+    def test_physics_carry_state_alias_exists(self):
+        """The :data:`PhysicsCarryState` type alias is importable."""
+        from jcm.physics_interface import PhysicsCarryState
+        # The alias is currently ``Dict[str, Any]`` — just check it's
+        # imported, the precise type may evolve in later phases.
+        self.assertIsNotNone(PhysicsCarryState)
+
+    def test_no_grep_physics_data_cache(self):
+        """Repository-level regression check: no production code identifier
+        references ``physics_data_cache``.
+
+        The substring can still appear in deprecation comments /
+        docstrings explaining what was removed, but no source files
+        should attribute-access or assign to it.
+        """
+        import subprocess
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        match_id = "physics" + "_data_" + "cache"  # defeat self-match
+        pattern = rf"\.{match_id}\b|^[^#]*\b{match_id}\b *(:|=|\()"
+        out = subprocess.run(
+            [
+                "grep", "-rn",
+                "-E", pattern,
+                "--include=*.py",
+                "--exclude=*_test.py",
+                "--exclude-dir=__pycache__",
+                str(repo / "jcm"),
+            ],
+            capture_output=True, text=True,
+        )
+        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        self.assertEqual(
+            lines, [],
+            f"physics_data_cache must be fully removed; found: {lines}",
+        )
+

@@ -213,6 +213,17 @@ class ComposablePhysics(nnx.Module, Physics):
 
         This runs compute_tendencies once with zero state to discover the
         diagnostic keys and their shapes, then zeros them out.
+
+        .. deprecated::
+            Use :meth:`initial_carry_state` instead. ``get_empty_data``
+            probes the term loop with a zero ``PhysicsState`` to discover
+            shapes — that probe path produces 0/0 = NaN cascades on
+            radiation terms and is the architectural bug
+            `#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
+            tracks. The operator-split path uses ``initial_carry_state``
+            which builds the cross-step carry deterministically from
+            ``coords``.
+
         """
         from jax.tree_util import tree_map
 
@@ -230,6 +241,45 @@ class ComposablePhysics(nnx.Module, Physics):
             zero_state, zero_forcing, zero_terrain, zero_date
         )
         return tree_map(jnp.zeros_like, diagnostics)
+
+    def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
+        """Aggregate per-term cross-step carry-state slots.
+
+        Iterates over the term list and merges each term's
+        :meth:`PhysicsTerm.initial_carry_state` output into a single
+        dict. Terms that don't override get ``{}`` and contribute
+        nothing. Conflicting keys (same key written by multiple terms)
+        raise ``ValueError`` — keys should be namespaced per-term.
+
+        This is the deterministic replacement for :meth:`get_empty_data`
+        in the operator-split path. It runs once at ``Model.__init__``
+        time and the result becomes the initial value of the
+        ``physics_state`` carry threaded through the scan.
+
+        Args:
+            coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
+
+        Returns:
+            A dict ``{"<key>": <slot>}`` containing every term's
+            cross-step carry slots, ready to be passed as
+            ``prev_physics_data`` to :meth:`compute_tendencies` on the
+            first step.
+
+        """
+        carry: dict[str, jnp.ndarray] = {}
+        for term in self.terms:
+            slot = term.initial_carry_state(coords)
+            if not slot:
+                continue
+            overlap = carry.keys() & slot.keys()
+            if overlap:
+                raise ValueError(
+                    f"Term {term.name!r} initial_carry_state collides with "
+                    f"an upstream term on keys {sorted(overlap)}. "
+                    "Namespace per-term keys (e.g. ``_radiation``, ``_clouds``)."
+                )
+            carry.update(slot)
+        return carry
 
     # Underscore-prefixed keys that are pure plumbing (date stamps, sliced
     # forcing snapshots, parameter snapshots) and must NOT be flattened into
