@@ -90,3 +90,14 @@ class CloudData:
         }
         new_data.update(kwargs)
         return CloudData(**new_data)
+
+
+def radiation_cloud_fields(state, diagnostics):
+    """Return cloud fields for radiation from the current cloud diagnostic.
+
+    Radiation must use the post-cloud-scheme condensate carried on
+    ``diagnostics["clouds"]``. Reading ``state.tracers["qc"/"qi"]`` here
+    reverts to the pre-physics values for the current split step.
+    """
+    clouds = diagnostics["clouds"]
+    return clouds.qc, clouds.qi, clouds.cloud_fraction

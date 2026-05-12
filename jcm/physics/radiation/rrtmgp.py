@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
+from jcm.physics.clouds.cloud_data import radiation_cloud_fields
 from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
     RadiationTendencies,
@@ -682,7 +683,7 @@ class RRTMGPRadiation(PhysicsTerm):
     ``RadiationParameters(rrtmgp_chunk_size=...)``.
 
     Reads pressure / height / density from the moist-air diagnostics
-    dict, cloud water / ice from state tracers, ozone / CO2 from
+    dict, cloud water / ice from ``diagnostics["clouds"]``, ozone / CO2 from
     ``"chemistry"``, aerosol from ``"aerosol"``, surface temperature
     from the legacy ``"surface"`` key, and surface albedos /
     emissivity from the public ``"radiation"`` key. Caches its own
@@ -803,13 +804,9 @@ class RRTMGPRadiation(PhysicsTerm):
         model_step = diagnostics["radiation"].step
         column_indices = jnp.arange(ncols, dtype=jnp.int32)
 
-        cloud_water = state.tracers.get(
-            "qc", jnp.zeros_like(state.temperature),
+        cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
+            state, diagnostics,
         )
-        cloud_ice = state.tracers.get(
-            "qi", jnp.zeros_like(state.temperature),
-        )
-        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6

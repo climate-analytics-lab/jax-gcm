@@ -188,6 +188,7 @@ import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
@@ -288,13 +289,9 @@ class NNEmulatorRadiation(PhysicsTerm):
         longitudes = self._lons.get_value()
         solar = forcing.solar
 
-        cloud_water = state.tracers.get(
-            "qc", jnp.zeros_like(state.temperature),
+        cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
+            state, diagnostics,
         )
-        cloud_ice = state.tracers.get(
-            "qi", jnp.zeros_like(state.temperature),
-        )
-        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6

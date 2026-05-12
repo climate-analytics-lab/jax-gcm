@@ -576,6 +576,7 @@ import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
@@ -596,8 +597,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
     """Grey two-stream radiation as a composable PhysicsTerm.
 
     Wraps :func:`radiation_scheme`. Reads pressure / height / density
-    from the moist-air diagnostics dict; reads cloud water / ice from
-    state tracers and cloud fraction from the public ``"clouds"`` key;
+    from the moist-air diagnostics dict; reads cloud water / ice and
+    cloud fraction from the public ``"clouds"`` key;
     reads ozone / CO2 from ``"chemistry"``; reads aerosol optical
     properties from ``"aerosol"``; reads surface temperature from
     ``"surface"`` (still legacy until the surface migration) and
@@ -685,13 +686,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         longitudes = self._lons.get_value()
         solar = forcing.solar
 
-        cloud_water = state.tracers.get(
-            "qc", jnp.zeros_like(state.temperature),
+        cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
+            state, diagnostics,
         )
-        cloud_ice = state.tracers.get(
-            "qi", jnp.zeros_like(state.temperature),
-        )
-        cloud_fraction = diagnostics["clouds"].cloud_fraction
 
         chemistry = diagnostics["chemistry"]
         # Convert ppmv → VMR. CO2 is well-mixed; pass as scalar.
