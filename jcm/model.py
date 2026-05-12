@@ -793,9 +793,14 @@ class Model:
         """
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
+        # Op-split saves end-of-step states (snapshot mode) or
+        # post-step running means (averaged mode), so the first saved
+        # frame is at ``initial_state.sim_time + save_interval``, not
+        # ``+ 0``. Index by ``arange(outer_steps) + 1`` to label the
+        # frames at the times they actually correspond to.
         times = self.start_date.delta.days \
                 + (initial_state.sim_time*units.second).to(units.day).m \
-                + save_interval * jnp.arange(outer_steps)
+                + save_interval * (jnp.arange(outer_steps) + 1)
 
         op_split_step = self._get_op_split_step_fn(forcing)
         integrate = self._get_op_split_integrate_fn(
@@ -819,10 +824,20 @@ class Model:
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
-                       initial_physics_state: Any = None,
-    ) -> tuple[primitive_equations.State, Any, ModelPredictions]:
+    ) -> tuple[primitive_equations.State, ModelPredictions]:
         """Run the full simulation forward in time starting from given initial state.
-        Alternative to model.run / model.resume which does not read/write model's internal current state.
+
+        Alternative to ``model.run`` / ``model.resume`` which does not
+        read or write the model's internal state.
+
+        Note: the operator-split path carries a cross-step physics
+        state (radiation cache, prior-step TKE, …). This method
+        rebuilds that carry from scratch at every call. For chaining
+        runs continuously (so the carry persists across API
+        boundaries), use ``run`` / ``resume`` — those thread
+        ``self._final_physics_state`` automatically. For an advanced
+        caller that wants explicit control of the carry, use
+        :meth:`run_from_state_with_carry`.
 
         Args:
             initial_state:
@@ -840,20 +855,54 @@ class Model:
                 Default 120.0 days.
             output_averages:
                 Whether to output time-averaged quantities (default False).
+
+        Returns:
+            A tuple containing (final dinosaur.primitive_equations.State, ModelPredictions object containing trajectory of post-processed model states).
+
+        """
+        final_modal_state, _, predictions = self.run_from_state_with_carry(
+            initial_state,
+            forcing,
+            save_interval=save_interval,
+            total_time=total_time,
+            output_averages=output_averages,
+        )
+        return final_modal_state, predictions
+
+    def run_from_state_with_carry(self,
+                                  initial_state: primitive_equations.State,
+                                  forcing: ForcingData,
+                                  save_interval=10.0,
+                                  total_time=120.0,
+                                  output_averages=False,
+                                  initial_physics_state: Any = None,
+    ) -> tuple[primitive_equations.State, Any, ModelPredictions]:
+        """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
+
+        Same semantics as :meth:`run_from_state` but also accepts a
+        cross-step physics carry seed and returns the final carry —
+        useful for callers that need to chain runs while bypassing the
+        ``self._final_*`` state on ``Model``.
+
+        Args:
+            initial_state: See :meth:`run_from_state`.
+            forcing: See :meth:`run_from_state`.
+            save_interval: See :meth:`run_from_state`.
+            total_time: See :meth:`run_from_state`.
+            output_averages: See :meth:`run_from_state`.
             initial_physics_state:
                 Optional cross-step physics carry to seed the
                 operator-split integration. When ``None`` (default),
-                seeded from :meth:`Physics.initial_carry_state`
+                seeded from :meth:`ComposablePhysics.initial_carry_state`
                 (deterministic, see :meth:`_build_initial_physics_carry`).
                 Threading the previous call's final carry here keeps
                 sub-cycled radiation, prior-step TKE, etc. continuous
-                across API boundaries — so ``run_from_state`` invoked
-                twice for 5d each matches a single 10d call.
+                across API boundaries — so two 5d calls match a single
+                10d call.
 
         Returns:
             ``(final_modal_state, final_physics_state, model_predictions)``.
-            ``final_physics_state`` is the cross-step physics carry
-            after the last ``dt`` of integration; pass it back in as
+            Pass ``final_physics_state`` back in as
             ``initial_physics_state`` on the next call to continue the
             run without re-seeding physics.
 
@@ -910,7 +959,7 @@ class Model:
             lambda: logger.info("Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
                                 save_interval, total_time, output_averages)
         )
-        final_modal_state, final_physics_state, predictions = self.run_from_state(
+        final_modal_state, final_physics_state, predictions = self.run_from_state_with_carry(
             initial_state=self._final_modal_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
