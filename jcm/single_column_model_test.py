@@ -108,6 +108,29 @@ class TestSCMEcham(unittest.TestCase):
         self.assertIn('qc', predictions.tracer_states)
         self.assertIn('qi', predictions.tracer_states)
 
+    def test_radiation_step_counter_starts_at_zero(self):
+        """Regression: SCM bootstrap must not advance the radiation carry.
+
+        After step 0 the radiation term increments its own ``step`` slot
+        from 0→1. If the bootstrap (`initial_physics_data=None` path)
+        seeds the carry from a live ``compute_tendencies`` result
+        instead of a zero template, step 0 starts at 1 and the
+        sub-stepping cadence skews by one — caught by the codex review
+        on PR #476.
+        """
+        column_state = _make_column_state(nlev=8)
+        scm = SingleColumnModel(
+            physics=echam_physics(radiation_scheme='grey'),
+            vertical=SigmaCoordinates.equidistant(8),
+            lat_deg=0.0,
+            lon_deg=0.0,
+        )
+        # Three scan steps with the default ``initial_physics_data=None``
+        # path. After step N the carry's ``step`` field reads N+1.
+        predictions = scm.run([column_state] * 3)
+        rad_steps = predictions.physics_data['radiation'].step
+        self.assertEqual(tuple(int(s) for s in rad_steps), (1, 2, 3))
+
 
 class TestSCMHelpers(unittest.TestCase):
     """The SCM-oriented helpers in ``jcm.utils``."""

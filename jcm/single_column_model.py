@@ -342,21 +342,27 @@ class SingleColumnModel:
                 for name, _ in relaxed_var_params
             }
 
-        # Bootstrap the diagnostics-dict pytree shape by running one step.
+        # Seed the diagnostics-dict carry the same way ``Model`` does:
+        # the structural template comes from
+        # :meth:`ComposablePhysics.get_empty_data` (a zero-filled
+        # snapshot of the post-step output pytree) unioned with the
+        # declarative cross-step carry slots from
+        # :meth:`ComposablePhysics.initial_carry_state` (e.g. TKE
+        # floored at ECHAM's 0.01 m²/s² lower bound). Using a
+        # live ``compute_tendencies`` result here was the architectural
+        # bug `#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
+        # tracks — among other things, the radiation carry's ``step``
+        # counter gets advanced before the first real scan step, which
+        # shifts the sub-stepping cadence by one under ``nstrad > 1``.
         if initial_physics_data is None:
-            first_state = tree_map(lambda x: x[0], prescribed_states)
-            state_args = first_state.asdict()
-            state_args.pop("tracers", None)
-            for name, val in initial_relaxed_vars.items():
-                state_args[name] = val
-            state_args["tracers"] = initial_tracers
-            first_state_combined = type(first_state)(**state_args)
-            nlev = self.coords.nodal_shape[0]
-            grid_state = _column_state_to_grid(first_state_combined, nlev)
-            clamped = verify_state(grid_state)
-            _, initial_physics_data = self.physics.compute_tendencies(
-                clamped, forcing, self.terrain,
-            )
+            template = self.physics.get_empty_data(self.coords)
+            initial_carry = self.physics.initial_carry_state(self.coords)
+            if isinstance(initial_carry, dict) and isinstance(template, dict):
+                initial_physics_data = {**template, **initial_carry}
+            else:
+                initial_physics_data = (
+                    template if initial_carry is None else initial_carry
+                )
 
         if times is None:
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
