@@ -132,7 +132,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
         cloud_fraction=jnp.ones(shape) * 0.5,
     )
     diagnostics = {
-        "_date": SimpleNamespace(dt_seconds=dt),
+        "_dt_seconds": dt,
         "pressure_full": jnp.ones(shape) * 80000.0,
         "layer_thickness": jnp.ones(shape) * 500.0,
         "air_density": jnp.ones(shape),
