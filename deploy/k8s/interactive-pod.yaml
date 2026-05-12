@@ -22,7 +22,9 @@ spec:
   containers:
   - name: jcm
     image: ${JCM_IMAGE}
-    imagePullPolicy: IfNotPresent
+    # `imagePullPolicy` is intentionally unset — see the matching
+    # comment in job.yaml. K8s defaults to `Always` for `:latest`
+    # and `IfNotPresent` for immutable tags, which is exactly right.
     command: ["sleep", "infinity"]
     resources:
       limits:

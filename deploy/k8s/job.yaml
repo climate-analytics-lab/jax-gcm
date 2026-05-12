@@ -55,7 +55,13 @@ spec:
       containers:
       - name: jcm
         image: ${JCM_IMAGE}
-        imagePullPolicy: IfNotPresent
+        # `imagePullPolicy` is intentionally unset: Kubernetes then
+        # defaults to `Always` for the `:latest` tag and `IfNotPresent`
+        # for everything else. That's what we want — `:latest` is
+        # mutable so we must re-pull (otherwise a node with a cached
+        # `:latest` would silently run stale code), but `:vX.Y.Z` and
+        # `:<sha>` tags are immutable, so reusing the cache is safe and
+        # saves a ~4 GiB pull on every Job.
         # Hydra overrides are inlined into a `bash -c` string at apply
         # time so users can pass a single shell-quoted string from the
         # CLI without YAML-escaping each token. `exec` replaces bash

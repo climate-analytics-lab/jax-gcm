@@ -81,6 +81,14 @@ export JCM_HYDRA_ARGS='physics=icon run.total_time=24'
 envsubst < deploy/k8s/job.yaml | kubectl apply -f -
 ```
 
+**For reproducible runs, prefer an immutable tag** (`:vX.Y.Z` or
+`:<short-sha>`) over `:latest`. With `:latest`, Kubernetes pulls on
+every Job (correct, since `:latest` is mutable) but you can't tell
+afterwards which build of the code actually ran. With an immutable
+tag, K8s reuses the cached image (saving the ~4 GiB pull) and the
+provenance is unambiguous. `:latest` is best reserved for quick
+iteration during development.
+
 Watch it run:
 
 ```bash
