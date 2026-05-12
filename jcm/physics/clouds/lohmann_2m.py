@@ -3667,7 +3667,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute 2M microphysics tendencies and update ``"clouds"``."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params_2m = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

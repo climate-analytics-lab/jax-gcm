@@ -77,9 +77,7 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         composable.cache_coords(self.coords)
 
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(
-                self.state, self.forcing, self.terrain, self.date
-            )
+            tend, _ = physics.compute_tendencies(self.state, self.forcing, self.terrain)
             return jnp.sum(tend.temperature ** 2)
 
         grads = nnx.grad(loss_fn)(composable)
@@ -111,9 +109,7 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         replaced = composable.replace("convection", SpeedyConvection(new_conv_params))
 
         replaced.cache_coords(self.coords)
-        tend, _ = replaced.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        tend, _ = replaced.compute_tendencies(self.state, self.forcing, self.terrain)
 
         # Should produce valid (non-NaN) tendencies
         self.assertFalse(jnp.any(jnp.isnan(tend.temperature)))

@@ -410,6 +410,10 @@ def prepare_icon_data(
         # outside the beam-split context.
         toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear=jnp.zeros_like(toa_lw_up),
+        # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
+        # the standalone scheme emits 0 and the term bumps the counter
+        # after its compute-vs-cache cond.
+        step=jnp.int32(0),
     )
     return tendencies, diagnostics
 
@@ -764,6 +768,12 @@ class RRTMGPRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
+        # Advance the radiation-local step counter on every call (both
+        # compute and cached paths). The McICA seed in ``_compute_full``
+        # folds this counter in for per-(step, column) reproducibility,
+        # so the increment must happen even on cached steps to keep the
+        # sub-column sequence aligned with the chosen sub-stepping cadence.
+        new_radiation = new_radiation.copy(step=radiation.step + 1)
         # Mirror the all-sky and clear-sky TOA fluxes onto the
         # ``"clouds"`` sub-struct for cloud-radiative-effect diagnostics.
         clouds = diagnostics["clouds"].copy(
@@ -785,9 +795,12 @@ class RRTMGPRadiation(PhysicsTerm):
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
         solar = forcing.solar
-        # Scalar model step + per-column index drive the McICA seed
-        # via ``mcica.column_key`` inside ``radiation_scheme_rrtmgp``.
-        model_step = diagnostics["_date"].model_step
+        # Scalar radiation step counter + per-column index drive the
+        # McICA seed via ``mcica.column_key`` inside
+        # ``radiation_scheme_rrtmgp``. The counter lives on the
+        # radiation carry slot, advanced in ``__call__`` after the
+        # compute-vs-cache cond.
+        model_step = diagnostics["radiation"].step
         column_indices = jnp.arange(ncols, dtype=jnp.int32)
 
         cloud_water = state.tracers.get(
@@ -960,6 +973,9 @@ class RRTMGPRadiation(PhysicsTerm):
             toa_lw_up_clear=_column_vector_rrtmgp(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
+            # Placeholder — the enclosing ``__call__`` overwrites
+            # ``step`` after the compute-vs-cache cond.
+            step=jnp.int32(0),
         )
 
         tendency = PhysicsTendency(

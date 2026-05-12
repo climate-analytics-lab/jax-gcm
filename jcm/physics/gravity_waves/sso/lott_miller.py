@@ -865,7 +865,7 @@ class LottMillerSso(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v/T tendencies from Lott-Miller SSO."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

@@ -1136,10 +1136,10 @@ class Echam1MMicrophysics(PhysicsTerm):
 
     Reads ``pressure_full``, ``air_density``, ``layer_thickness`` from
     the moist-air diagnostics dict and the model timestep from
-    ``diagnostics["_date"].dt_seconds``. Writes ``precip_rain``,
-    ``precip_snow``, ``droplet_number`` back into the public
-    ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
-    ``qc`` / ``qi`` fields).
+    ``diagnostics["_dt_seconds"]`` (injected by ``ComposablePhysics``).
+    Writes ``precip_rain``, ``precip_snow``, ``droplet_number`` back
+    into the public ``"clouds"`` key (preserving the upstream
+    ``cloud_fraction`` / ``qc`` / ``qi`` fields).
     """
 
     name: ClassVar[str] = "echam_1m_microphysics"
@@ -1173,7 +1173,7 @@ class Echam1MMicrophysics(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute microphysics tendencies + precip/droplet diagnostics."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

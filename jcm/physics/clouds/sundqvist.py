@@ -543,7 +543,7 @@ class SundqvistCloudFraction(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute cloud-fraction tendencies + diagnostics."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

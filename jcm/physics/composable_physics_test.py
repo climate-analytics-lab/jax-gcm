@@ -19,7 +19,6 @@ from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.date import DateData
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +170,8 @@ class TestComposablePhysics(unittest.TestCase):
         state = _make_test_state()
         forcing = _make_test_forcing()
         terrain = _make_test_terrain()
-        date = DateData.zeros()
 
-        tend, diag = physics.compute_tendencies(state, forcing, terrain, date)
+        tend, diag = physics.compute_tendencies(state, forcing, terrain)
 
         # Check all diagnostic keys are present
         self.assertIn("heating_rate", diag)
@@ -257,10 +255,9 @@ class TestDifferentiabilityGate(unittest.TestCase):
         state = _make_test_state()
         forcing = _make_test_forcing()
         terrain = _make_test_terrain()
-        date = DateData.zeros()
 
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+            tend, _ = physics.compute_tendencies(state, forcing, terrain)
             return (
                 jnp.sum(tend.temperature ** 2)
                 + jnp.sum(tend.specific_humidity ** 2)
@@ -296,13 +293,12 @@ class TestDifferentiabilityGate(unittest.TestCase):
         )
         forcing = ForcingData.zeros(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
         # loss = sum((alpha * T)^2) = alpha^2 * T^2 * n_elements
         # d(loss)/d(alpha) = 2 * alpha * T^2 * n_elements
         # With alpha=1.0, T=3.0, n=1: d(loss)/d(alpha) = 2 * 1 * 9 * 1 = 18.0
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+            tend, _ = physics.compute_tendencies(state, forcing, terrain)
             return jnp.sum(tend.temperature ** 2)
 
         grads = nnx.grad(loss_fn)(physics)
@@ -320,14 +316,13 @@ class TestDifferentiabilityGate(unittest.TestCase):
         state = _make_test_state()
         forcing = _make_test_forcing()
         terrain = _make_test_terrain()
-        date = DateData.zeros()
 
         graphdef, param_state = nnx.split(physics)
 
         def loss_fn(param_state):
             physics_restored = nnx.merge(graphdef, param_state)
             tend, _ = physics_restored.compute_tendencies(
-                state, forcing, terrain, date
+                state, forcing, terrain,
             )
             return jnp.sum(tend.temperature ** 2) + jnp.sum(tend.specific_humidity ** 2)
 
@@ -373,7 +368,6 @@ class TestDifferentiabilityGate(unittest.TestCase):
         )
         forcing = ForcingData.zeros(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
         # Only look at u_wind loss (produced by DiagnosticConsumer)
         # u_wind_tend = gamma * heating_rate = gamma * alpha * T
@@ -381,7 +375,7 @@ class TestDifferentiabilityGate(unittest.TestCase):
         # d(loss)/d(alpha) = 2 * gamma^2 * alpha * T^2
         # With gamma=1, alpha=1, T=2: d(loss)/d(alpha) = 2 * 1 * 1 * 4 = 8
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+            tend, _ = physics.compute_tendencies(state, forcing, terrain)
             return jnp.sum(tend.u_wind ** 2)
 
         grads = nnx.grad(loss_fn)(physics)
@@ -427,10 +421,9 @@ class TestDifferentiabilityGate(unittest.TestCase):
         )
         forcing = ForcingData.zeros(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+            tend, _ = physics.compute_tendencies(state, forcing, terrain)
             return jnp.sum(tend.temperature ** 2)
 
         # This should work — nnx.grad differentiates Param but not Variable
@@ -457,9 +450,8 @@ class TestColumnVectorization(unittest.TestCase):
         state = _make_test_state(shape)
         forcing = _make_test_forcing(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
-        tend, diag = physics.compute_tendencies(state, forcing, terrain, date)
+        tend, diag = physics.compute_tendencies(state, forcing, terrain)
 
         # Output should be 3D again
         self.assertEqual(tend.temperature.shape, shape)
@@ -487,9 +479,8 @@ class TestColumnVectorization(unittest.TestCase):
         )
         forcing = _make_test_forcing(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
-        tend, _ = physics.compute_tendencies(state, forcing, terrain, date)
+        tend, _ = physics.compute_tendencies(state, forcing, terrain)
         self.assertEqual(tend.temperature.shape, shape)
 
     def test_column_vectorization_with_prev_data(self):
@@ -505,11 +496,10 @@ class TestColumnVectorization(unittest.TestCase):
         state = _make_test_state(shape)
         forcing = _make_test_forcing(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
         prev_data = {"_cached_value": jnp.array(42.0)}
         tend, diag = physics.compute_tendencies(
-            state, forcing, terrain, date, prev_physics_data=prev_data,
+            state, forcing, terrain, prev_physics_data=prev_data,
         )
         # prev_data should be carried forward
         self.assertIn("_cached_value", diag)
@@ -530,10 +520,9 @@ class TestColumnVectorization(unittest.TestCase):
         state = _make_test_state(shape)
         forcing = _make_test_forcing(shape[1:])
         terrain = _make_test_terrain(shape[1:])
-        date = DateData.zeros()
 
-        tend_3d, _ = physics_3d.compute_tendencies(state, forcing, terrain, date)
-        tend_col, _ = physics_col.compute_tendencies(state, forcing, terrain, date)
+        tend_3d, _ = physics_3d.compute_tendencies(state, forcing, terrain)
+        tend_col, _ = physics_col.compute_tendencies(state, forcing, terrain)
 
         npt.assert_allclose(tend_3d.temperature, tend_col.temperature, rtol=1e-6)
         npt.assert_allclose(tend_3d.u_wind, tend_col.u_wind, rtol=1e-6)
@@ -586,21 +575,21 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
 
     def test_data_struct_to_dict_filters_internal_keys(self):
         """Underscore-prefixed array keys are exposed without the underscore;
-        underscore-prefixed plumbing keys (`_date`, etc.) stay hidden.
+        underscore-prefixed plumbing keys (`_dt_seconds`, etc.) stay hidden.
         """
         physics = ComposablePhysics(terms=[LinearHeating()])
         struct = {
             "_internal": jnp.array(1.0),
             "public_key": jnp.array(2.0),
-            "_date": DateData.zeros(),
+            "_dt_seconds": 1800.0,
         }
         result = physics.data_struct_to_dict(struct)
         self.assertIn("public_key", result)
         # Underscore-prefixed array key surfaces as the key without underscore.
         self.assertIn("internal", result)
-        # `_date` is plumbing — stays hidden.
-        self.assertNotIn("_date", result)
-        self.assertNotIn("date", result)
+        # `_dt_seconds` is plumbing — stays hidden.
+        self.assertNotIn("_dt_seconds", result)
+        self.assertNotIn("dt_seconds", result)
         # Original underscore key is not preserved.
         self.assertNotIn("_internal", result)
 

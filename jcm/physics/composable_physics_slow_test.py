@@ -18,7 +18,6 @@ from flax import nnx
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.date import DateData
 from jcm.utils import get_coords
 
 
@@ -82,12 +81,9 @@ class TestComposableSpeedyIntegration(unittest.TestCase):
         composable = speedy_physics(checkpoint_terms=False)
         composable.cache_coords(self.coords)
         state = self._make_state()
-        date = DateData.zeros()
 
         def loss_fn(physics):
-            tend, _ = physics.compute_tendencies(
-                state, self.forcing, self.terrain, date,
-            )
+            tend, _ = physics.compute_tendencies(state, self.forcing, self.terrain)
             return jnp.sum(tend.temperature ** 2)
 
         grads = nnx.grad(loss_fn)(composable)

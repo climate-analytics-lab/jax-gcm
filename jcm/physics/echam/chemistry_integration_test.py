@@ -17,7 +17,6 @@ from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
-from jcm.date import DateData
 
 
 class TestChemistryIntegration(TestCase):
@@ -58,16 +57,11 @@ class TestChemistryIntegration(TestCase):
             stl_am=jnp.ones((nlon, nlat)) * 280.0,  # Land temperature
             sea_surface_temperature=jnp.ones((nlon, nlat)) * 288.0,  # SST
         )
-        
-        # Create date
-        self.date = DateData.zeros()
     
     def test_chemistry_initialization(self):
         """Test that chemistry tracers are properly initialized"""
         # Run physics once to initialize chemistry
-        tendencies, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        tendencies, physics_data = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Check that chemistry data exists
         self.assertIsNotNone(physics_data["chemistry"])
@@ -92,18 +86,14 @@ class TestChemistryIntegration(TestCase):
     def test_chemistry_evolution(self):
         """Test that chemistry tracers evolve over time"""
         # Run physics once
-        tendencies1, physics_data1 = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        tendencies1, physics_data1 = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Save initial chemistry state
         physics_data1["chemistry"].ozone_vmr.copy()
         physics_data1["chemistry"].methane_vmr.copy()
         
         # Run physics again (chemistry should evolve)
-        tendencies2, physics_data2 = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        tendencies2, physics_data2 = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Check that chemistry has evolved (might be subtle differences)
         # Note: With current implementation, changes might be small
@@ -123,14 +113,10 @@ class TestChemistryIntegration(TestCase):
         )
         
         # Run physics with original state
-        _, physics_data_cold = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        _, physics_data_cold = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Run physics with warm state
-        _, physics_data_warm = self.physics.compute_tendencies(
-            warm_state, self.forcing, self.terrain, self.date
-        )
+        _, physics_data_warm = self.physics.compute_tendencies(warm_state, self.forcing, self.terrain)
         
         # Both should have valid chemistry
         self.assertTrue(jnp.all(jnp.isfinite(physics_data_cold["chemistry"].ozone_vmr)))
@@ -150,9 +136,7 @@ class TestChemistryIntegration(TestCase):
     def test_chemistry_vertical_structure(self):
         """Test that chemistry has reasonable vertical structure"""
         # Run physics
-        _, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        _, physics_data = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Get chemistry profiles (average over horizontal)
         nlev, ncols = physics_data["chemistry"].ozone_vmr.shape
@@ -174,9 +158,7 @@ class TestChemistryIntegration(TestCase):
         # So we test gradients instead, which is the main JAX feature we need
         
         # Test without JIT first to ensure basic functionality
-        tendencies, physics_data = self.physics.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date
-        )
+        tendencies, physics_data = self.physics.compute_tendencies(self.state, self.forcing, self.terrain)
         
         # Should produce valid results
         self.assertTrue(jnp.all(jnp.isfinite(physics_data["chemistry"].ozone_vmr)))
@@ -185,9 +167,7 @@ class TestChemistryIntegration(TestCase):
         # Test that we can compute gradients (though they might be zero)
         def loss_fn(temperature):
             state = self.state.copy(temperature=temperature)
-            _, physics_data = self.physics.compute_tendencies(
-                state, self.forcing, self.terrain, self.date
-            )
+            _, physics_data = self.physics.compute_tendencies(state, self.forcing, self.terrain)
             return jnp.sum(physics_data["chemistry"].ozone_vmr)
         
         # Compute gradient

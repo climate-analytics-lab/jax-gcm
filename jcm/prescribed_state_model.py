@@ -13,13 +13,11 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
 import tree_math
 from jax.tree_util import tree_map
 
 from dinosaur.coordinate_systems import CoordinateSystem
 
-from jcm.date import DateData
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
     Physics,
@@ -38,7 +36,7 @@ class PrescribedStatePredictions:
         states: The prescribed atmospheric state time series.
         tendencies: Physics tendencies for each step.
         physics_data: Per-step diagnostics dict from the physics package.
-        times: Times in days since ``start_date``.
+        times: Times in days since the start of the run.
 
     """
 
@@ -56,7 +54,6 @@ class PrescribedStateModel:
         coords: ``CoordinateSystem`` used for grids and ``physics.cache_coords``.
         terrain: Optional ``TerrainData`` boundary conditions; defaults to the
             aquaplanet derived from ``coords``.
-        start_date: Starting date for time-series indexing (default 2000-01-01).
         dt_seconds: Physics timestep in seconds (default 1800).
 
     """
@@ -66,25 +63,19 @@ class PrescribedStateModel:
         physics: Physics,
         coords: CoordinateSystem,
         terrain: TerrainData | None = None,
-        start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
         dt_seconds: float = 1800.0,
     ) -> None:
         """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-        self.start_date = start_date
         self.dt_seconds = float(dt_seconds)
         self.physics.cache_coords(coords)
-
-    def _date_from_time_index(self, time_index) -> DateData:
-        sim_time_seconds = time_index * self.dt_seconds
-        seconds_int = jnp.round(sim_time_seconds).astype(jnp.int32)
-        return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(seconds=seconds_int),
-            model_step=jnp.asarray(time_index).astype(jnp.int32),
-            dt_seconds=self.dt_seconds,
-        )
+        # Hand the timestep down to the composable-physics container so its
+        # terms read a single ``dt`` source — mirrors the wiring in ``Model``
+        # and ``SingleColumnModel``.
+        if hasattr(self.physics, "dt_seconds"):
+            self.physics.dt_seconds = self.dt_seconds
 
     def run(
         self,
@@ -116,23 +107,14 @@ class PrescribedStateModel:
 
         physics = self.physics
         terrain = self.terrain
-        start_date = self.start_date
-        dt_seconds = self.dt_seconds
 
-        def step(state, time_idx):
-            sim_time_seconds = time_idx * dt_seconds
-            seconds_int = jnp.round(sim_time_seconds).astype(jnp.int32)
-            date = DateData.set_date(
-                model_time=start_date + jdt.Timedelta(seconds=seconds_int),
-                model_step=jnp.asarray(time_idx).astype(jnp.int32),
-                dt_seconds=dt_seconds,
-            )
+        def step(state):
             clamped = verify_state(state)
-            return physics.compute_tendencies(clamped, forcing, terrain, date)
+            return physics.compute_tendencies(clamped, forcing, terrain)
 
         @jax.jit
         def vmapped():
-            return jax.vmap(step)(states, jnp.arange(n_times))
+            return jax.vmap(step)(states)
 
         tendencies, physics_data = vmapped()
         return PrescribedStatePredictions(

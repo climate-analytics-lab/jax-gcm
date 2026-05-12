@@ -29,7 +29,6 @@ from flax import nnx
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.date import DateData
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 
 
@@ -56,6 +55,7 @@ class ComposablePhysics(nnx.Module, Physics):
         terms: list[PhysicsTerm],
         checkpoint_terms: bool = True,
         vectorize_columns: bool = False,
+        dt_seconds: float = 1800.0,
     ):
         """Initialize ComposablePhysics.
 
@@ -66,11 +66,19 @@ class ComposablePhysics(nnx.Module, Physics):
             vectorize_columns: Whether to reshape state from 3D to column
                 format before iterating terms. Use True for column-based
                 physics (ECHAM, etc.), False for grid-based (SPEEDY).
+            dt_seconds: Physics timestep in seconds. Injected into the
+                diagnostics dict as ``"_dt_seconds"`` at the top of every
+                ``compute_tendencies`` call so terms that integrate by
+                ``dt`` (chemistry, microphysics, vertical diffusion, …)
+                read a single source of truth without needing model-wide
+                date plumbing. ``Model.__init__`` overrides this to its
+                own ``dt_si`` after the physics object is constructed.
 
         """
         self.terms = nnx.List(terms)
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
+        self.dt_seconds = float(dt_seconds)
         self._validate_ordering()
 
     # ------------------------------------------------------------------
@@ -105,7 +113,6 @@ class ComposablePhysics(nnx.Module, Physics):
         state: PhysicsState,
         forcing: ForcingData,
         terrain: TerrainData,
-        date: DateData,
         prev_physics_data=None,
     ) -> tuple[PhysicsTendency, dict[str, jnp.ndarray]]:
         """Compute total physics tendencies by iterating over terms.
@@ -114,7 +121,6 @@ class ComposablePhysics(nnx.Module, Physics):
             state: Current atmospheric state.
             forcing: Boundary condition forcing data.
             terrain: Terrain boundary conditions.
-            date: Current model date/time info.
             prev_physics_data: Previous step's diagnostics dict for caching
                 expensive computations (e.g. radiation sub-stepping).
                 None on the first step.
@@ -125,18 +131,19 @@ class ComposablePhysics(nnx.Module, Physics):
         """
         if self.vectorize_columns:
             tendencies, diagnostics = self._compute_tendencies_columns(
-                state, forcing, terrain, date, prev_physics_data,
+                state, forcing, terrain, prev_physics_data,
             )
         else:
             tendencies, diagnostics = self._compute_tendencies_3d(
-                state, forcing, terrain, date, prev_physics_data,
+                state, forcing, terrain, prev_physics_data,
             )
-        # Strip pure-plumbing keys (date snapshot, sliced forcing, parameter
-        # snapshot) before returning. These are re-injected at the top of the
-        # next compute_tendencies call from authoritative sources, so they
-        # don't need to ride in the saved trajectory and would otherwise bloat
-        # the prediction dict and break tree_map averaging tests against
-        # legacy ``PhysicsData``-shaped output.
+        # Strip pure-plumbing keys (timestep snapshot, sliced forcing,
+        # parameter snapshot) before returning. These are re-injected at
+        # the top of the next ``compute_tendencies`` call from
+        # authoritative sources, so they don't need to ride in the saved
+        # trajectory and would otherwise bloat the prediction dict and
+        # break tree_map averaging tests against the legacy
+        # ``PhysicsData``-shaped output.
         diagnostics = {
             k: v for k, v in diagnostics.items()
             if k not in self._INTERNAL_DIAGNOSTIC_KEYS
@@ -144,14 +151,14 @@ class ComposablePhysics(nnx.Module, Physics):
         return tendencies, diagnostics
 
     def _compute_tendencies_3d(
-        self, state, forcing, terrain, date, prev_physics_data=None,
+        self, state, forcing, terrain, prev_physics_data=None,
     ):
         """Iterate terms on the full 3D grid (e.g. SPEEDY)."""
         diagnostics: dict[str, jnp.ndarray] = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
 
-        diagnostics["_date"] = date
+        diagnostics["_dt_seconds"] = self.dt_seconds
 
         tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
@@ -163,7 +170,7 @@ class ComposablePhysics(nnx.Module, Physics):
         return tendencies, diagnostics
 
     def _compute_tendencies_columns(
-        self, state, forcing, terrain, date, prev_physics_data=None,
+        self, state, forcing, terrain, prev_physics_data=None,
     ):
         """Column-vectorized term iteration.
 
@@ -180,7 +187,7 @@ class ComposablePhysics(nnx.Module, Physics):
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
 
-        diagnostics["_date"] = date
+        diagnostics["_dt_seconds"] = self.dt_seconds
 
         tracer_tends = {
             name: jnp.zeros((nlev, ncols))
@@ -248,10 +255,9 @@ class ComposablePhysics(nnx.Module, Physics):
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
         probe_terrain = TerrainData.aquaplanet(coords)
-        probe_date = DateData.zeros()
 
         _, diagnostics = self.compute_tendencies(
-            probe_state, probe_forcing, probe_terrain, probe_date,
+            probe_state, probe_forcing, probe_terrain,
         )
         return tree_map(jnp.zeros_like, diagnostics)
 
@@ -294,11 +300,11 @@ class ComposablePhysics(nnx.Module, Physics):
             carry.update(slot)
         return carry
 
-    # Underscore-prefixed keys that are pure plumbing (date stamps, sliced
+    # Underscore-prefixed keys that are pure plumbing (timestep, sliced
     # forcing snapshots, parameter snapshots) and must NOT be flattened into
     # the user-facing xarray output.
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
-        "_date",
+        "_dt_seconds",
         "_forcing_2d",
         "_echam_params",
         "_echam_coords",
@@ -317,9 +323,9 @@ class ComposablePhysics(nnx.Module, Physics):
           communication (``_radiation``, ``_humidity``, ...) — flattened into
           ``<name>.<field>`` user-facing keys (matches the legacy SPEEDY /
           ECHAM ``PhysicsData`` xarray layout).
-        - Infrastructure objects (``_date``, ``_echam_params``, ...) that are
-          listed in :attr:`_INTERNAL_DIAGNOSTIC_KEYS` or that fail array-only
-          flattening — silently dropped from user output.
+        - Infrastructure objects (``_dt_seconds``, ``_echam_params``, ...)
+          that are listed in :attr:`_INTERNAL_DIAGNOSTIC_KEYS` or that fail
+          array-only flattening — silently dropped from user output.
         """
         if struct is None:
             return {}
@@ -408,6 +414,7 @@ class ComposablePhysics(nnx.Module, Physics):
             terms=list(self.terms) + other_terms,
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
+            dt_seconds=self.dt_seconds,
         )
 
     def __radd__(self, other):
@@ -440,6 +447,7 @@ class ComposablePhysics(nnx.Module, Physics):
             terms=new_terms,
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
+            dt_seconds=self.dt_seconds,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
@@ -448,6 +456,7 @@ class ComposablePhysics(nnx.Module, Physics):
             terms=[t for t in self.terms if t.category != category],
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
+            dt_seconds=self.dt_seconds,
         )
 
     # ------------------------------------------------------------------

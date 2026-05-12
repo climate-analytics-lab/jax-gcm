@@ -98,13 +98,16 @@ def test_physics_terms_compute_tendencies():
         sea_surface_temperature=jnp.ones((nlat, nlon)) * 288.0,
         sice_am=jnp.zeros((nlat, nlon)),
     )
+    # ``forcing.select`` still wants a ``DateData`` to populate
+    # ``forcing.solar`` and align ``TimeSeries`` leaves; physics itself
+    # no longer takes one.
     date = DateData.set_date(
         jdt.Datetime.from_pydatetime(datetime(2020, 6, 21))
     )
     forcing = forcing.select(date)
 
     tendencies, _ = physics.compute_tendencies(
-        state, forcing=forcing, terrain=terrain, date=date,
+        state, forcing=forcing, terrain=terrain,
     )
 
     assert tendencies.temperature.shape == (nlev, nlat, nlon)

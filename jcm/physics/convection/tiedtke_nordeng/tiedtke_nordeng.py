@@ -961,9 +961,9 @@ class TiedtkeConvection(PhysicsTerm):
     Reads the moist-air diagnostics produced by
     :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`
     (``pressure_full``, ``layer_thickness``, ``air_density``) and the
-    model timestep from ``diagnostics["_date"].dt_seconds``. Writes the
-    :class:`ConvectionData` sub-struct under the public ``"convection"``
-    key.
+    model timestep from ``diagnostics["_dt_seconds"]`` (injected by
+    ``ComposablePhysics``). Writes the :class:`ConvectionData` sub-struct
+    under the public ``"convection"`` key.
     """
 
     name: ClassVar[str] = "tiedtke_convection"
@@ -999,7 +999,7 @@ class TiedtkeConvection(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute convective tendencies; write ``convection`` diagnostics."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

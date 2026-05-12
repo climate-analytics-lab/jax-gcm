@@ -85,7 +85,7 @@ class PhysicsTerm(nnx.Module):
     #
     # Override ``initial_carry_state`` directly only when zero is the
     # wrong seed (e.g. ``TteTkeVerticalDiffusion`` floors TKE at ECHAM's
-    # 0.01 m²/s² lower bound). Pure plumbing keys (``_date``,
+    # 0.01 m²/s² lower bound). Pure plumbing keys (``_dt_seconds``,
     # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
     carry_slots: ClassVar[dict[str, type]] = {}
 

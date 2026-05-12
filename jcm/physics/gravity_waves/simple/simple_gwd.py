@@ -426,8 +426,8 @@ class SimpleGwd(PhysicsTerm):
     factory. Operates on column-vectorized state ``(nlev, ncols)``. Reads
     ``pressure_full``, ``height_full``, ``air_density`` from the moist-air
     diagnostics dict and the model timestep from
-    ``diagnostics["_date"].dt_seconds``. Writes only u/v/T tendencies; no
-    Data sub-struct.
+    ``diagnostics["_dt_seconds"]`` (injected by ``ComposablePhysics``).
+    Writes only u/v/T tendencies; no Data sub-struct.
     """
 
     name: ClassVar[str] = "simple_gwd"
@@ -450,7 +450,7 @@ class SimpleGwd(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v/T tendencies from the simple GWD scheme."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         # Placeholder fixed std-dev of sub-grid orography. The real

@@ -387,7 +387,7 @@ class SimpleChemistry(PhysicsTerm):
 
     Reads ``pressure_full`` and ``surface_pressure`` from the moist-air
     diagnostics dict and the model timestep from
-    ``diagnostics["_date"].dt_seconds``.
+    ``diagnostics["_dt_seconds"]`` (injected by ``ComposablePhysics``).
     """
 
     name: ClassVar[str] = "simple_chemistry"
@@ -410,7 +410,7 @@ class SimpleChemistry(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Update chemistry sub-struct from the previous step's values."""
         params = self.params.get_value()
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
 
         chemistry = diagnostics["chemistry"]
         _tend, new_state = simple_chemistry(

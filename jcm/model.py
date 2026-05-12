@@ -390,6 +390,13 @@ class Model:
         
         self.physics = physics or speedy_physics()
         self.physics.cache_coords(self.coords)
+        # Hand the model's timestep to the physics. ``ComposablePhysics``
+        # injects it into the diagnostics dict every step under
+        # ``"_dt_seconds"`` so any term that integrates by ``dt``
+        # (chemistry, microphysics, vertical diffusion, …) reads a
+        # single source of truth instead of going through date plumbing.
+        if hasattr(self.physics, "dt_seconds"):
+            self.physics.dt_seconds = float(self.dt_si.m)
 
         self.diffusion = diffusion or DiffusionFilter.default()
 
@@ -647,6 +654,12 @@ class Model:
         dynamics_step = self._get_dynamics_step_fn()
 
         def step(state, physics_state):
+            # Forcing selection still needs the calendar (forcing files
+            # are date-aligned and ``forcing.solar`` is reconstructed
+            # from the orbital geometry of the current ``dt``). Physics
+            # does not — once ``forcing.select`` has populated
+            # ``forcing.solar`` and pre-sliced every TimeSeries leaf
+            # there's nothing date-shaped left for terms to read.
             date = self._date_from_sim_time(state.sim_time)
             forcing_now = forcing.select(date, calendar=self.calendar)
             dyn_tendency, new_physics_state = compute_physics_step(
@@ -656,7 +669,6 @@ class Model:
                 physics=self.physics,
                 forcing=forcing_now,
                 terrain=self.terrain,
-                date=date,
                 physics_state=physics_state,
             )
             # Forward-Euler add of the physics dynamics tendency. The

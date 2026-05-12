@@ -172,6 +172,15 @@ class RadiationData:
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
 
+    # Internal step counter incremented by the radiation term on every
+    # call (both compute and cached paths). Drives the sub-stepping gate
+    # (see ``radiation_should_compute``) and seeds the McICA RNG so its
+    # samples remain reproducible per (step, column). Lives on the carry
+    # so radiation no longer needs the model-wide step counter — the
+    # operator-split cross-step pass-through already threads this struct
+    # from one ``dt`` to the next.
+    step: jnp.ndarray                # Radiation step counter [int32] scalar
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -194,6 +203,7 @@ class RadiationData:
             toa_sw_down=jnp.zeros(nodal_shape),
             toa_sw_up_clear=jnp.zeros(nodal_shape),
             toa_lw_up_clear=jnp.zeros(nodal_shape),
+            step=jnp.int32(0),
         )
 
     def copy(self, **kwargs):
@@ -217,6 +227,7 @@ class RadiationData:
             'toa_sw_down': self.toa_sw_down,
             'toa_sw_up_clear': self.toa_sw_up_clear,
             'toa_lw_up_clear': self.toa_lw_up_clear,
+            'step': self.step,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)

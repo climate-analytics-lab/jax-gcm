@@ -27,11 +27,13 @@ def radiation_should_compute(
 
     If ``radiation_interval > 0``, recompute every
     ``round(interval / dt)`` steps; otherwise (the default) recompute
-    every step.
+    every step. The step counter is the radiation term's own
+    ``RadiationData.step`` carry slot — incremented each call by the
+    radiation term — so this gate no longer depends on the model-wide
+    date/step plumbing.
     """
-    date = diagnostics["_date"]
-    dt = date.dt_seconds
-    step = date.model_step
+    step = diagnostics["radiation"].step
+    dt = diagnostics["_dt_seconds"]
     interval = parameters.radiation_interval
     steps_per_call = jnp.where(
         interval > 0,

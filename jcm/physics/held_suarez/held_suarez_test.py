@@ -18,7 +18,6 @@ class TestHeldSuarezUnit(unittest.TestCase):
             physics = model.physics,
             forcing = None,
             terrain = None,
-            date = None,
             physics_state = model._build_initial_physics_carry(),
         )
 

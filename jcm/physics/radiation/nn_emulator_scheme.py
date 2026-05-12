@@ -169,6 +169,10 @@ def radiation_scheme_emulated(
         # see stale data in the diagnostic key.
         toa_sw_up_clear=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear=jnp.zeros_like(lw_flux_up[0]),
+        # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
+        # carry — the standalone scheme emits 0 and the term bumps it
+        # after its compute-vs-cache cond.
+        step=jnp.int32(0),
     )
 
     return tendencies, diagnostics
@@ -255,6 +259,11 @@ class NNEmulatorRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
+        # Advance the radiation-local step counter on every call (both
+        # compute and cached paths). Mirrors the carry-side step bump
+        # in the grey two-stream / RRTMGP radiation terms so the
+        # sub-stepping gate sees the same cadence regardless of scheme.
+        new_radiation = new_radiation.copy(step=radiation.step + 1)
         # Mirror TOA fluxes onto the clouds sub-struct for CRE
         # diagnostics. The emulator only produces all-sky values, so
         # the clear-sky fields stay at zero until the 2-call clear-sky
@@ -385,6 +394,9 @@ class NNEmulatorRadiation(PhysicsTerm):
             toa_lw_up_clear=_column_vector_emulated(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
+            # Placeholder — the enclosing ``__call__`` overwrites
+            # ``step`` after the compute-vs-cache cond.
+            step=jnp.int32(0),
         )
 
         tendency = PhysicsTendency(

@@ -19,7 +19,6 @@ from dinosaur.filtering import horizontal_diffusion_filter
 from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.date import DateData
 from typing import Tuple, Any, Dict, TypeAlias
 from jcm.diffusion import DiffusionFilter
 import logging
@@ -193,14 +192,15 @@ class Physics:
         """
         return ()
 
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, date: DateData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
-            forcing: Forcing data
+            forcing: Forcing data — pre-sliced for the current step;
+                ``forcing.solar`` carries the orbital geometry physics
+                needs, so no calendar is plumbed in here.
             terrain: Terrain data (boundary conditions)
-            date: Date data
             prev_physics_data: Previous step's physics carry (a
                 :data:`PhysicsCarryState`) — used by radiation sub-cycling,
                 the analytic TKE source update, etc. ``None`` means "no
@@ -588,7 +588,6 @@ def compute_physics_step(
     physics: Physics,
     forcing: ForcingData,
     terrain: TerrainData,
-    date: DateData,
     physics_state,
 ) -> tuple[State, Any]:
     """Compute the physics dynamics-tendency for an operator-split timestep.
@@ -606,9 +605,10 @@ def compute_physics_step(
             ``verify_tendencies`` to cap negative-going tracer
             tendencies).
         physics: ``Physics`` instance (e.g. :class:`ComposablePhysics`).
-        forcing: Time-sliced ``ForcingData`` for this step.
+        forcing: Time-sliced ``ForcingData`` for this step. ``solar``
+            already carries the per-step orbital geometry, so physics
+            never needs the calendar / model step.
         terrain: ``TerrainData`` (orography, land-sea mask, …).
-        date: ``DateData`` for the current step.
         physics_state: The cross-step physics carry — the dict returned
             by the previous step's ``compute_tendencies`` call, or the
             initial value produced by ``physics.initial_carry_state``.
@@ -627,7 +627,7 @@ def compute_physics_step(
     clamped_physics_state = verify_state(physics_grid_state)
 
     physics_tendency, new_physics_state = physics.compute_tendencies(
-        clamped_physics_state, forcing, terrain, date,
+        clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state,
     )
     physics_tendency = verify_tendencies(

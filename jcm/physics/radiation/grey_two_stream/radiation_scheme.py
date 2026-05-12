@@ -537,6 +537,9 @@ def radiation_scheme(
         shortwave_heating=sw_heating_rate
     )
     
+    # `step` is owned by the ``GreyTwoStreamRadiation`` PhysicsTerm carry —
+    # the standalone scheme always emits 0 here and the term increments
+    # the carry slot after the cond on every call.
     diagnostics = RadiationData(
         cos_zenith=cos_zenith[jnp.newaxis],
         surface_albedo_vis=surface_albedo_vis,
@@ -557,6 +560,7 @@ def radiation_scheme(
         surface_lw_up=surface_lw_up,
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        step=jnp.int32(0),
     )
 
     return tendencies, diagnostics
@@ -653,6 +657,11 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
+        # Advance the radiation-local step counter on every call (both
+        # compute and cached paths). This is the carry-side replacement
+        # for the old ``_date.model_step`` plumbing: ``radiation_should_compute``
+        # reads it back next step to decide compute-vs-cache.
+        new_radiation = new_radiation.copy(step=radiation.step + 1)
         # Mirror the all-sky and clear-sky TOA fluxes onto the
         # ``"clouds"`` sub-struct so users can read everything CRE-
         # related (= toa_*_clear − toa_*_all) from a single diagnostic.
@@ -779,6 +788,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_lw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
+            # Placeholder — the enclosing ``__call__`` overwrites this
+            # via ``new_radiation.copy(step=radiation.step + 1)`` after
+            # the compute-vs-cache cond, so the value here is unused.
+            step=jnp.int32(0),
         )
 
         tendency = PhysicsTendency(

@@ -478,7 +478,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     ) -> tuple[PhysicsTendency, dict]:
         """Compute vdiff tendencies and update ``vertical_diffusion``."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_date"].dt_seconds
+        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]

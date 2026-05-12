@@ -14,7 +14,6 @@ from typing import ClassVar
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.date import DateData
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -46,12 +45,16 @@ def set_physics_flags(
 
     Currently only toggles the shortwave-radiation flag every ``nstrad`` steps
     so that the costly clouds + shortwave fluxes only recompute on radiation
-    sub-steps.
+    sub-steps. The step counter is the radiation carry slot's own
+    :attr:`SWRadiationData.step` — incremented each call so the gate
+    advances without any model-wide step plumbing.
     """
     from jcm.physics.speedy.physical_constants import nstrad
-    compute_shortwave = (jnp.mod(physics_data.model_step, nstrad) == 0)
+    step = physics_data.shortwave_rad.step
+    compute_shortwave = (jnp.mod(step, nstrad) == 0)
     shortwave_data = physics_data.shortwave_rad.copy(
         compute_shortwave=compute_shortwave,
+        step=step + 1,
     )
     physics_data = physics_data.copy(shortwave_rad=shortwave_data)
     physics_tendencies = PhysicsTendency.zeros(state.temperature.shape)
@@ -88,13 +91,18 @@ def _data_from_diagnostics(
     Keys that haven't been populated yet will get their default zero values.
     ``nodal_shape`` and ``num_levels`` are passed explicitly (not from the
     diagnostics dict) so they remain static Python values under JIT.
+
+    ``dt_seconds`` is sourced from the ``"_dt_seconds"`` plumbing slot
+    that ``ComposablePhysics`` injects at the top of every
+    ``compute_tendencies`` call. The shortwave sub-stepping counter
+    lives on the radiation carry (see :func:`set_physics_flags`), so
+    no date / model-wide step is threaded into PhysicsData any more.
     """
-    date = diagnostics.get("_date", DateData.zeros())
+    dt_seconds = diagnostics.get("_dt_seconds", 1800.0)
 
     data = PhysicsData.zeros(
         nodal_shape, num_levels,
-        model_step=date.model_step,
-        dt_seconds=date.dt_seconds,
+        dt_seconds=dt_seconds,
         speedy_coords=coords,
     )
 

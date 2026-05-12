@@ -14,7 +14,6 @@ from flax import nnx
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-from jcm.date import DateData
 from jcm.utils import get_coords
 from jcm.physics.physics_term import PhysicsTerm
 
@@ -39,7 +38,6 @@ def _make_echam_test_setup(nlev=8, nlat=64, nlon=32):
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))
     terrain = TerrainData.aquaplanet(coords)
     forcing = ForcingData.zeros((nlat, nlon))
-    date = DateData.zeros()
 
     shape_3d = (nlev, nlat, nlon)
     key = jax.random.PRNGKey(42)
@@ -70,7 +68,7 @@ def _make_echam_test_setup(nlev=8, nlat=64, nlon=32):
         },
     )
 
-    return coords, state, forcing, terrain, date
+    return coords, state, forcing, terrain
 
 
 class TestEchamComposablePhysics(unittest.TestCase):
@@ -78,7 +76,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.coords, self.state, self.forcing, self.terrain, self.date = (
+        self.coords, self.state, self.forcing, self.terrain = (
             _make_echam_test_setup()
         )
 
@@ -181,8 +179,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         replaced = composable.replace("radiation", new_rad)
         replaced.cache_coords(self.coords)
 
-        tend, _ = replaced.compute_tendencies(
-            self.state, self.forcing, self.terrain, self.date,
+        tend, _ = replaced.compute_tendencies(self.state, self.forcing, self.terrain,
         )
         # Check shape is correct (NaNs expected with random state)
         self.assertEqual(
