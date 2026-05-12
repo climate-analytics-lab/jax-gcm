@@ -212,6 +212,40 @@ class TestModeDispatch(unittest.TestCase):
             self.assertGreaterEqual(len(preds), 1)
             self.assertTrue(any(Path(tmpdir).glob("chunk_day*.nc")))
 
+    def test_chunked_run_resumes_from_checkpoint(self):
+        """``cfg.run.checkpoint_path`` makes a chunked run resumable.
+
+        Drives ``run_chunked`` once for 1 of 2 chunks, then re-invokes
+        with the same ``checkpoint_path`` and ``total_time=2`` and
+        verifies the second invocation only steps the remaining chunk.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_path = f"{tmpdir}/run.ckpt"
+            base_overrides = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={ckpt_path}",
+            ]
+
+            # First invocation: run only the first chunk (1 day total).
+            cfg1 = _compose(base_overrides + ["run.total_time=1"])
+            reports1 = run(cfg1)
+            self.assertEqual(len(reports1), 1)
+            self.assertTrue(Path(ckpt_path).exists())
+
+            # Second invocation: total 2 days, but the first chunk
+            # should be skipped because the checkpoint records day=1.
+            cfg2 = _compose(base_overrides + ["run.total_time=2"])
+            reports2 = run(cfg2)
+            self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
+            self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
         # have a JCM-shaped state to load.

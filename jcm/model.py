@@ -1011,22 +1011,39 @@ class Model:
             A ModelPredictions object containing the trajectory of post-processed model states.
 
         """
+        self.bootstrap_state(initial_state)
+        return self.resume(
+            forcing=forcing, save_interval=save_interval,
+            total_time=total_time, output_averages=output_averages,
+        )
+
+    def bootstrap_state(
+        self,
+        initial_state: PhysicsState | primitive_equations.State | None = None,
+    ) -> None:
+        """Populate ``_final_modal_state`` and ``_final_physics_state`` without integrating.
+
+        Equivalent to the prep that ``run`` does before its first
+        ``resume`` call, but exposed as a standalone method so callers
+        that need only the initial pytrees — checkpoint restore (where
+        ``flax.serialization.from_bytes`` requires a template), state
+        introspection, or a bring-your-own-stepper workflow — don't have
+        to spin up a zero-length integration to get them.
+        """
         if isinstance(initial_state, primitive_equations.State):
             tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
-            self.initial_nodal_state = dynamics_state_to_physics_state(initial_state, self.primitive, tracer_specs=tracer_specs)
+            self.initial_nodal_state = dynamics_state_to_physics_state(
+                initial_state, self.primitive, tracer_specs=tracer_specs)
             self._final_modal_state = initial_state
         else:
             self.initial_nodal_state = initial_state
             self._final_modal_state = self._prepare_initial_modal_state(initial_state)
 
-        # ``run`` starts a fresh trajectory — discard any carry left
-        # over from a previous run on this model object so the next
-        # ``resume`` seeds physics from
-        # :meth:`_build_initial_physics_carry` rather than reusing a
-        # stale carry from a different initial state.
-        self._final_physics_state = None
-
-        return self.resume(
-            forcing=forcing, save_interval=save_interval,
-            total_time=total_time, output_averages=output_averages,
-        )
+        # Eagerly build the physics carry. ``resume`` would otherwise
+        # build it lazily on first call, but materialising it here
+        # makes the pytree available as a checkpoint-restore template
+        # and to any caller that wants to inspect / mutate the seed
+        # state before stepping. Equivalent to leaving it ``None`` and
+        # letting ``resume`` build it: ``resume`` skips its lazy-build
+        # branch when ``_final_physics_state`` is already populated.
+        self._final_physics_state = self._build_initial_physics_carry()

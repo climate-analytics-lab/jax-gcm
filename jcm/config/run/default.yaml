@@ -20,6 +20,13 @@ sponge:
 chunk_days: 0
 output_prefix: chunked_run
 
+# Checkpointing for preemptible chunked runs. When set, the model state
+# (modal + physics carry) and elapsed sim-day count are saved to this
+# path after each chunk; if the file already exists at startup the run
+# resumes from it, skipping completed chunks. Single file per run, flax
+# msgpack format. Leave ``null`` to disable.
+checkpoint_path: null
+
 # Runtime mode:
 #   full        — standard dynamical-core integration (Model.run)
 #   prescribed  — diagnose physics tendencies from a saved state file

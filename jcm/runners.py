@@ -653,6 +653,12 @@ def run_chunked(
     Each chunk is dumped to ``{output_prefix}_day{N}.nc`` and run through
     ``jcm.diagnostics.check_health``. The loop stops early on the first
     failed health check. Returns the per-chunk reports.
+
+    When ``cfg.run.checkpoint_path`` is set, the model state and elapsed
+    sim-day count are persisted after each chunk and (if the file
+    already exists at startup) restored before the loop begins, so a
+    preempted run resumes at the chunk boundary it last reached without
+    redoing the integration. See :mod:`jcm.checkpoint` and issue #128.
     """
     import time
 
@@ -665,20 +671,46 @@ def run_chunked(
 
     save_interval = float(cfg.run.save_interval)
     total_time = float(cfg.run.total_time)
-    n_chunks = int(total_time / chunk_days) + 1
+
+    ckpt_path = cfg.run.get("checkpoint_path", None)
 
     reports: list[dict] = []
     elapsed_sim_days = 0.0
     total_wall = 0.0
+    resumed_from_ckpt = False
 
-    for i in range(n_chunks):
-        remaining = total_time - elapsed_sim_days
-        cur_chunk = min(chunk_days, remaining)
+    if ckpt_path and Path(ckpt_path).exists():
+        from jcm.checkpoint import load_checkpoint
+
+        # Build state templates without integrating so flax.serialization
+        # has pytrees of the right shape and dtype to deserialize against.
+        # Mirrors the init-kind branching of the fresh-start path below;
+        # the template values are immediately overwritten by the
+        # checkpoint's contents.
+        if cfg.init.kind == "jw":
+            inject_jw_profile(model)
+        elif cfg.init.kind == "balanced_isothermal":
+            inject_balanced_isothermal_profile(model)
+        else:
+            model.bootstrap_state()
+
+        elapsed_sim_days = load_checkpoint(model, ckpt_path)
+        resumed_from_ckpt = True
+        print(
+            f"Resumed from checkpoint {ckpt_path} at sim-day "
+            f"{elapsed_sim_days:.1f}"
+        )
+
+    chunk_idx = int(elapsed_sim_days // chunk_days)
+    started_at_days = elapsed_sim_days
+    while elapsed_sim_days < total_time:
+        cur_chunk = min(chunk_days, total_time - elapsed_sim_days)
         if cur_chunk <= 0:
             break
 
         t0 = time.perf_counter()
-        if i == 0 and cfg.init.kind == "jw":
+        first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
+        if first_fresh_chunk and cfg.init.kind == "jw":
             inject_jw_profile(model)
             preds = model.resume(
                 forcing=forcing,
@@ -686,7 +718,7 @@ def run_chunked(
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
             )
-        elif i == 0 and cfg.init.kind == "balanced_isothermal":
+        elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
             inject_balanced_isothermal_profile(model)
             preds = model.resume(
                 forcing=forcing,
@@ -694,7 +726,7 @@ def run_chunked(
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
             )
-        elif i == 0:
+        elif first_fresh_chunk:
             preds = model.run(
                 forcing=forcing,
                 save_interval=save_interval,
@@ -718,7 +750,7 @@ def run_chunked(
         elapsed_sim_days += cur_chunk
 
         ds = preds.to_xarray()
-        ok, report = check_health(ds, i, elapsed_sim_days)
+        ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
         report["wall_seconds"] = chunk_wall
         reports.append(report)
         print_report(report)
@@ -726,6 +758,11 @@ def run_chunked(
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         ds.to_netcdf(nc_path)
         print(f"  Saved {nc_path}")
+
+        if ckpt_path:
+            from jcm.checkpoint import save_checkpoint
+            save_checkpoint(model, ckpt_path, elapsed_days=elapsed_sim_days)
+            print(f"  Saved checkpoint to {ckpt_path}")
 
         if not ok:
             # Honour ``run.bail_on_unhealthy`` (default True). The full-year
@@ -744,13 +781,17 @@ def run_chunked(
                 break
             print(msg + "\nContinuing (bail_on_unhealthy=False).")
 
-        sdph = elapsed_sim_days / (total_wall / 3600)
-        print(
-            f"  Wall: {chunk_wall:.1f}s this chunk, {total_wall:.0f}s total "
-            f"({sdph:.0f} sim days/hr)"
-        )
+        # Throughput is reported over the post-resume window so the
+        # number reflects the run actually happening on this host.
+        days_this_invocation = elapsed_sim_days - started_at_days
+        if total_wall > 0:
+            sdph = days_this_invocation / (total_wall / 3600)
+            print(
+                f"  Wall: {chunk_wall:.1f}s this chunk, {total_wall:.0f}s total "
+                f"({sdph:.0f} sim days/hr)"
+            )
 
-    return reports
+        chunk_idx += 1
 
     return reports
 
