@@ -1,12 +1,10 @@
 from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physics_data import ablco2_ref, PhysicsData
+from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.shortwave_radiation import get_zonal_average_fields
 import jax.numpy as jnp
-# linear trend of co2 absorptivity (del_co2: rate of change per year)
-del_co2   = 0.005
 
 def set_forcing(
     state: PhysicsState,
@@ -28,8 +26,7 @@ def set_forcing(
     alb_s = parameters.mod_radcon.albsea + forcing.sice_am * (parameters.mod_radcon.albice - parameters.mod_radcon.albsea)
     albsfc = alb_s + fmask * (alb_l - alb_s)
 
-    iyear_ref = parameters.forcing.co2_year_ref
-    ablco2 = ablco2_ref * jnp.exp(parameters.forcing.increase_co2 * del_co2 * (model_year + tyear - iyear_ref))
+    ablco2 = forcing.ablco2
 
     mod_radcon = physics_data.mod_radcon.copy(snowc=snowc, alb_l=alb_l, alb_s=alb_s, albsfc=albsfc, ablco2=ablco2)
 
