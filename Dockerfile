@@ -3,8 +3,11 @@
 # libs) and lets `jax[cuda12]` pull its own bundled NVIDIA wheels —
 # cuBLAS, cuDNN, NCCL, etc. live under `nvidia-*-cu12` in pip and JAX
 # loads them from there at import time. Going from `cudnn-runtime` to
-# `base` cuts the final image from ~6 GiB to ~2 GiB without giving up
-# anything JAX uses.
+# `base` cuts the compressed registry size from ~6.0 GiB to ~3.8 GiB
+# (about 36%, measured 2026-05-12). Savings are smaller than you might
+# expect because JAX detects system-installed CUDA libs and skips its
+# bundled wheels when they're available — so the old base wasn't pure
+# overhead, it was substituting for the wheels.
 #
 # JAX falls back to CPU if no GPU is visible at runtime, so the same
 # image works on hosts without `--gpus all`, just without acceleration.
