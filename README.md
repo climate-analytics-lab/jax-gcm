@@ -12,9 +12,10 @@ JCM is a physical climate model that combines the [Dinosaur](https://github.com/
 
 - **Fully Differentiable**: Automatic differentiation through the entire model using JAX
 - **GPU/TPU Accelerated**: JIT compilation and hardware acceleration via JAX
-- **Modular Physics**: SPEEDY and ICON physics packages with radiation, convection, clouds, and surface processes
-- **Composable**: Mix and match parameterizations across physics packages (e.g., SPEEDY convection + ICON radiation)
-- **Flexible Grids**: Spectral dynamical core supporting multiple resolutions (T21 to T425)
+- **Modular Physics**: SPEEDY and ECHAM physics packages with radiation, convection, clouds, and surface processes
+- **Composable**: Mix and match parameterizations across physics packages (e.g., SPEEDY convection + ECHAM radiation)
+- **Flexible Grids**: Spectral dynamical core supporting multiple resolutions (T21 to T425), including hybrid (a + b·P_s) vertical coordinates
+- **Climate-Quality Target Config**: T63L47 hybrid grid with ECHAM physics and RRTMGP radiation (`physics=echam-rrtmgp grid=echam_t63_l47_hybrid`) for production-grade runs
 - **ML-Ready**: Designed for hybrid physics-ML workflows and parameter optimization
 
 ## Installation
@@ -84,18 +85,22 @@ any Python:
 # Default 10-day SPEEDY aquaplanet
 python -m jcm.main
 
-# ICON physics on T85x47 hybrid coords with grey radiation
-python -m jcm.main physics=icon grid=icon_t85_l47_hybrid
+# Targeted production setup: ECHAM physics on T63L47 hybrid coords with RRTMGP radiation
+python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
+
+# ECHAM physics with the default grey two-stream radiation (cheaper, good for tuning)
+python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
 
 # Held-Suarez 30-day integration
 python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
     run.total_time=30 run.save_interval=1
 
-# Override individual physics parameters
-python -m jcm.main physics=icon physics.params.convection.entrpen=4e-4
+# Override individual physics parameters (the leading `+` is required because
+# `params` defaults to the scheme's `.default()` and is not in the yaml).
+python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
-# Long ICON run with chunked health checks
-python -m jcm.main physics=icon grid=icon_t85_l47_hybrid run=longrun
+# Long ECHAM + RRTMGP run with chunked health checks
+python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
 
 # Single-column physics evolution from a saved JCM run
 python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
@@ -107,7 +112,7 @@ Inspect the available config groups and the fully-composed config:
 ```bash
 python -m jcm.main --help                  # config-group choices + Hydra usage
 python -m jcm.main --cfg job               # print the composed config
-python -m jcm.main --cfg job grid=icon_t85_l47_hybrid   # with overrides
+python -m jcm.main --cfg job grid=echam_t63_l47_hybrid   # with overrides
 ```
 
 Config groups live under `jcm/config/` (`physics`, `grid`, `run`, `init`,
@@ -143,8 +148,8 @@ Anything after the image name is forwarded to `python -m jcm.main`, so the
 full Hydra CLI (config groups, dotted overrides, multirun) is available:
 
 ```bash
-# Switch physics package and grid
-docker run --rm --gpus all jcm physics=icon grid=icon_t85_l47_hybrid
+# Switch physics package and grid (recommended ECHAM + RRTMGP setup)
+docker run --rm --gpus all jcm physics=echam-rrtmgp grid=echam_t63_l47_hybrid
 
 # Override individual run options
 docker run --rm --gpus all jcm run.time_step=20 run.total_time=30 run.save_interval=1
@@ -161,7 +166,7 @@ container* and are lost when it exits. Mount a host directory at
 
 ```bash
 docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
-    physics=icon run.total_time=30
+    physics=echam-rrtmgp grid=echam_t63_l47_hybrid run.total_time=30
 ```
 
 After the run finishes the netCDF state file is available on the host
@@ -177,15 +182,17 @@ docker run --rm -it --entrypoint bash jcm
 
 ### Kubernetes example
 
-Pass Hydra overrides via the container `args` field, request a GPU, and
-mount a persistent volume for outputs:
+Ready-to-use manifests for the NRP Nautilus cluster (Job, interactive
+pod, PVC) live under [`deploy/k8s/`](deploy/k8s/). For other clusters,
+pass Hydra overrides via the container `args` field, request a GPU,
+and mount a persistent volume for outputs:
 
 ```yaml
 spec:
   containers:
     - name: jcm
       image: your-registry/jcm:latest
-      args: ["physics=icon", "grid=icon_t85_l47_hybrid", "run.total_time=30"]
+      args: ["physics=echam-rrtmgp", "grid=echam_t63_l47_hybrid", "run.total_time=30"]
       resources:
         limits:
           nvidia.com/gpu: 1
@@ -200,8 +207,11 @@ Example notebooks are available in the `notebooks/` directory:
 
 - **`01_jcm_demo.ipynb`**: Basic model simulation with SPEEDY physics
 - **`02_optimization_example.ipynb`**: Parameter optimization examples
+- **`03_generate_speedy_default_stats.ipynb`**: Regenerate the bundled SPEEDY reference statistics
+- **`04_jcm_era5_example.ipynb`**: Initialising and verifying runs against ERA5
 - **`04_jcm_slides.ipynb`**: Presentation-ready overview
-- **`05_jcm_icon_demo.ipynb`**: Running with ICON physics and composable physics
+- **`05_jcm_echam_demo.ipynb`**: Running with ECHAM physics and composable physics
+- **`06_macv2_aerosols.py`**: Driving ECHAM with MACv2-SP aerosol parameters
 
 ## Physics Packages
 
@@ -218,33 +228,52 @@ The SPEEDY (Simplified Parameterizations, primitivE-Equation DYnamics) physics p
 - Vertical diffusion
 - Orographic drag
 
-### ICON Physics
+### ECHAM Physics
 
-The ICON physics package provides comprehensive atmospheric parameterizations based on the ECHAM/ICON Earth System Model:
+The ECHAM physics package is a JAX port of the MPI-M ECHAM6 / ICON-A
+atmospheric physics. It is the recommended package for climate-quality
+runs and is the target for the `T63L47` hybrid-coordinate setup
+(`grid=echam_t63_l47_hybrid`):
 
 - Tiedtke-Nordeng mass-flux convection
-- Single-moment cloud microphysics (Lohmann & Roeckner)
-- Two-stream radiation with gas, cloud, and aerosol optics (+ RRTMGP and NN emulator options)
-- TKE-based vertical diffusion
-- Multi-surface tile scheme (ocean, sea ice, land)
-- Gravity wave drag
-- MACv2-SP aerosol scheme with aerosol-cloud coupling
+- Sundqvist diagnostic cloud fraction
+- 1-moment (default) or 2-moment cloud microphysics (Lohmann & Roeckner)
+- Radiation, selectable per run via `radiation_scheme`:
+  - Grey two-stream (default, fast)
+  - RRTMGP correlated-k (production accuracy, `physics=echam-rrtmgp`)
+  - Neural-network RRTMGP emulator (RRTMGP accuracy at grey-like cost)
+- TTE-TKE vertical diffusion (Pithan & Brinkop)
+- Multi-tile surface scheme (ocean, sea ice, land)
+- Hines (1997) non-orographic + Lott-Miller (1997) sub-grid orographic gravity-wave drag
+- MACv2-SP aerosol scheme (Stevens et al., 2017) with aerosol-cloud coupling
 - Simple chemistry (ozone, CO2, CH4)
+
+See [`docs/source/echam_physics.rst`](docs/source/echam_physics.rst) for
+the per-scheme references and performance numbers on T63L47.
+
+> **Note:** ECHAM physics was previously called "ICON" in JCM. The
+> `jcm.physics.icon` namespace and `physics=icon` config group have been
+> renamed to `jcm.physics.echam` and `physics=echam` (PR #457).
 
 ### Composable Physics
 
-Individual parameterizations can be mixed across packages using the composable physics API:
+Individual parameterizations are wired together via the composable physics API. Both `speedy_physics()` and `echam_physics()` return a `ComposablePhysics` whose terms can be swapped (`replace`), removed (`remove`) or extended (`+`):
 
 ```python
-from jcm.physics.speedy.speedy_terms import speedy_physics
-from jcm.physics.icon.icon_terms import IconRadiationRRTMGP
+from jcm.physics.echam.echam_terms import echam_physics
 
-# Start with SPEEDY defaults, replace radiation with ICON RRTMGP
-physics = speedy_physics().replace("radiation_sw", IconRadiationRRTMGP())
+# Recommended T63L47 production setup — full RRTMGP correlated-k radiation
+physics = echam_physics(radiation_scheme="rrtmgp")
 
-# Or build from individual terms
-from jcm.physics.icon.icon_terms import icon_physics
-physics = icon_physics(radiation_scheme="emulated")  # Use NN radiation emulator
+# Cheaper alternative: NN radiation emulator at RRTMGP-like accuracy
+physics = echam_physics(radiation_scheme="emulated")
+
+# Drop a term by category, e.g. for sensitivity studies
+physics = echam_physics().remove("hines")
+
+# Or swap an individual term in by category
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+physics = echam_physics().replace("radiation", RRTMGPRadiation())
 ```
 
 Each `PhysicsTerm` stores its own tunable parameters as `flax.nnx.Param`, enabling per-scheme gradient-based optimization.

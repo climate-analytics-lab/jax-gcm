@@ -3,11 +3,12 @@
 # Each entry under ``terms`` is a Hydra-style term spec — a target
 # class plus optional kwargs. Per-scheme parameters live in their own
 # ``params`` block; each unspecified field falls back to that scheme's
-# ``Parameters.default()``. Override individual fields at the CLI
-# without editing this file::
+# ``Parameters.default()``. Because ``params`` is intentionally absent
+# from this yaml (so the scheme default is used), overriding an
+# individual field at the CLI requires the Hydra ``+`` append prefix::
 #
 #     python -m jcm.main physics=echam \
-#         physics.terms.tiedtke_convection.params.entrpen=4e-4
+#         +physics.terms.tiedtke_convection.params.entrpen=4e-4
 #
 # Swap a term entirely from a curated preset (see ``echam-rrtmgp.yaml``)
 # or inline at the CLI by overriding ``_target_`` and the param block.
