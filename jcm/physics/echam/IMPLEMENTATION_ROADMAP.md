@@ -52,11 +52,6 @@ must hold across every commit.
 
 ### Smaller nits
 
-- [ ] ``data/bc/t30/clim/{forcing,terrain}.nc`` get rewritten by the
-      pytest runs (xarray re-serialising netCDF metadata). They should
-      not be touched by tests. Until then, ``git checkout -- jcm/data/bc/``
-      after each test sweep before ``git add``.
-
 ## Done
 
 - 2026-05-07: Phase 0 — bit-exact reference trajectory tests.
