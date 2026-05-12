@@ -475,6 +475,37 @@ class TestFullMicrophysics:
         assert tendencies.dqcdt[0] < 0.0
         assert tendencies.dqrdt[0] > 0.0
         assert jnp.allclose(tendencies.dtedt[0], 0.0, atol=1e-12)
+
+    def test_surface_rain_uses_grid_mean_production_rate(self):
+        """Precip diagnostics must not multiply grid-mean rates by cf again."""
+        config = MicrophysicsParameters.default()
+        temperature = jnp.array([285.0])
+        pressure = jnp.array([85000.0])
+        air_density = jnp.array([1.0])
+        layer_thickness = jnp.array([500.0])
+
+        from .sundqvist import saturation_specific_humidity
+        specific_humidity = jax.vmap(saturation_specific_humidity)(
+            pressure, temperature
+        )
+
+        tendencies, state = cloud_microphysics(
+            temperature=temperature,
+            specific_humidity=specific_humidity,
+            pressure=pressure,
+            cloud_water=jnp.array([1.0e-3]),
+            cloud_ice=jnp.array([0.0]),
+            cloud_fraction=jnp.array([0.5]),
+            air_density=air_density,
+            layer_thickness=layer_thickness,
+            droplet_number=jnp.array([100e6]),
+            dt=300.0,
+            config=config,
+        )
+
+        expected_rain = jnp.sum(tendencies.dqrdt * air_density * layer_thickness)
+        assert state.precip_rain > 0.0
+        assert jnp.allclose(state.precip_rain, expected_rain, rtol=1e-6)
     
     def test_cold_cloud_process(self):
         """Test ice microphysics"""

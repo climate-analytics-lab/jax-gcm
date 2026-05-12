@@ -798,10 +798,11 @@ def cloud_microphysics(
     # where pmref = air_density * layer_thickness (layer mass per unit area)
     layer_mass = air_density * layer_thickness  # kg/m²
 
-    # Rain production per level: autoconversion + accretion + snow melting
-    rain_prod = (qc_auto + qc_accr + snow_melt) * cloud_fraction
-    # Snow production per level: ice autoconversion + aggregation + riming + rain freezing
-    snow_prod = (qi_auto + qi_aggr + qc_rime + rain_freeze) * cloud_fraction
+    # Rain/snow production rates are already grid-mean kg/kg/s. The
+    # autoconversion/accretion helpers convert from in-cloud to grid-mean
+    # internally, and melt/freeze rates operate on grid-mean precip stores.
+    rain_prod = qc_auto + qc_accr + snow_melt
+    snow_prod = qi_auto + qi_aggr + qc_rime + rain_freeze
 
     # Column-integrated surface flux (kg/m²/s)
     precip_rain = jnp.sum(rain_prod * layer_mass)
