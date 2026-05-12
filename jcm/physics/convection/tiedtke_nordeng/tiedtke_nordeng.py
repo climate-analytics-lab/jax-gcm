@@ -960,18 +960,20 @@ class TiedtkeConvection(PhysicsTerm):
 
     Reads the moist-air diagnostics produced by
     :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`
-    (``pressure_full``, ``layer_thickness``, ``air_density``) and the
-    model timestep from ``diagnostics["_dt_seconds"]`` (injected by
-    ``ComposablePhysics``). Writes the :class:`ConvectionData` sub-struct
-    under the public ``"convection"`` key.
+    (``pressure_full``, ``layer_thickness``, ``air_density``), the
+    current cloud diagnostics from ``diagnostics["clouds"]``, and the
+    model timestep from ``diagnostics["_dt_seconds"]``. Writes the
+    :class:`ConvectionData` sub-struct under the public ``"convection"``
+    key and advances ``clouds.qc`` / ``clouds.qi`` for downstream
+    microphysics in the same split step.
     """
 
     name: ClassVar[str] = "tiedtke_convection"
     category: ClassVar[str] = "convection"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "layer_thickness", "air_density",
+        "pressure_full", "layer_thickness", "air_density", "clouds",
     )
-    provides: ClassVar[tuple[str, ...]] = ("convection",)
+    provides: ClassVar[tuple[str, ...]] = ("convection", "clouds")
 
     def __init__(self, params: ConvectionParameters | None = None):
         """Hold the scheme-native :class:`ConvectionParameters`."""
@@ -1064,6 +1066,19 @@ class TiedtkeConvection(PhysicsTerm):
             qi_conv=tendencies_all.qi_conv.T,
         )
 
-        return tendency, {**diagnostics, "convection": convection}
+        clouds = diagnostics["clouds"].copy(
+            qc=jnp.maximum(
+                diagnostics["clouds"].qc + tendency.tracers["qc"] * dt,
+                0.0,
+            ),
+            qi=jnp.maximum(
+                diagnostics["clouds"].qi + tendency.tracers["qi"] * dt,
+                0.0,
+            ),
+        )
 
-
+        return tendency, {
+            **diagnostics,
+            "convection": convection,
+            "clouds": clouds,
+        }

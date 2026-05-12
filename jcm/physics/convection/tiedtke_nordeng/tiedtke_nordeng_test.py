@@ -5,14 +5,20 @@ Date: 2025-01-09
 
 import jax.numpy as jnp
 import jax
+from types import SimpleNamespace
 
+import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as convection_module
+from jcm.physics.clouds.cloud_data import CloudData
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     tiedtke_nordeng_convection,
     find_cloud_base,
     calculate_cape_cin,
     ConvectionParameters,
-    saturation_mixing_ratio
+    ConvectionTendencies,
+    TiedtkeConvection,
+    saturation_mixing_ratio,
 )
+from jcm.physics_interface import PhysicsState
 from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import mass_flux_closure
@@ -80,6 +86,69 @@ def create_test_atmosphere(nlev=40, unstable=True):
         'u_wind': u_wind,
         'v_wind': v_wind
     }
+
+
+def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypatch):
+    """Convective qc/qi tendencies must be visible before microphysics runs."""
+    nlev, ncols = 4, 2
+    dt = 60.0
+    shape = (nlev, ncols)
+    old_qc = jnp.ones(shape) * 1.0e-5
+    old_qi = jnp.ones(shape) * 2.0e-5
+
+    dqc_col = jnp.array([1.0e-7, 2.0e-7, 0.0, -1.0e-7])
+    dqi_col = jnp.array([0.0, 1.0e-7, 2.0e-7, -1.0e-7])
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=zeros,
+            dqdt=zeros,
+            dudt=zeros,
+            dvdt=zeros,
+            qc_conv=dqc_col * dt_seconds,
+            qi_conv=dqi_col * dt_seconds,
+            precip_conv=jnp.array(0.0),
+            dqc_dt=dqc_col,
+            dqi_dt=dqi_col,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": old_qc, "qi": old_qi},
+    )
+    clouds = CloudData.zeros((ncols,), nlev).copy(
+        qc=old_qc,
+        qi=old_qi,
+        cloud_fraction=jnp.ones(shape) * 0.5,
+    )
+    diagnostics = {
+        "_date": SimpleNamespace(dt_seconds=dt),
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": clouds,
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+
+    expected_qc = jnp.maximum(old_qc + tendency.tracers["qc"] * dt, 0.0)
+    expected_qi = jnp.maximum(old_qi + tendency.tracers["qi"] * dt, 0.0)
+    assert jnp.allclose(diagnostics_out["clouds"].qc, expected_qc)
+    assert jnp.allclose(diagnostics_out["clouds"].qi, expected_qi)
+    assert jnp.allclose(diagnostics_out["convection"].qc_conv, dqc_col[:, None] * dt)
 
 
 class TestMassFluxCFLCap:
