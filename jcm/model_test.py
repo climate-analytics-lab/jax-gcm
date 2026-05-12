@@ -120,8 +120,8 @@ class TestModelUnit(unittest.TestCase):
         )
         preds = model.run(save_interval=.5/24., total_time=2/24.)
 
-        # Compare only the dynamics fields. Both paths now save the
-        # same end-of-step state samples:
+        # Compare only the dynamics fields. Both paths save the same
+        # end-of-step state samples:
         #
         # - snapshot mode saves ``state_k`` at outer steps k=1..N
         # - op-split averaged mode sums ``state_k`` for k=1..N inside
@@ -131,10 +131,16 @@ class TestModelUnit(unittest.TestCase):
         #   tolerable for slow fields but op-split's larger per-step
         #   transient amplified it past rtol=1e-2).
         #
-        # So ``mean(snapshots)`` and ``averaged(...)`` should now agree
-        # to numerical roundoff on the dynamics fields. The physics
-        # diagnostics dict is still windowed-average vs. instantaneous
-        # and is not compared.
+        # Tolerance is loosened to ~1e-3 because the output-boundary
+        # ``verify_state`` clamp on non-negative tracers makes
+        # ``mean(clamp(x_k)) != clamp(mean(x_k))`` in the rare
+        # subgrid where small-amplitude Gibbs ringing dips q below
+        # zero. The clamp is cheap (one ``max`` at the modal→nodal
+        # output boundary, no extra spectral round-trip) and the
+        # discrepancy is bounded by the ringing magnitude (~1e-4
+        # kg/kg at T21L8), so the test still catches a *broken*
+        # averaging mechanism (which would diverge by orders of
+        # magnitude more) while tolerating the clamp gap.
         true_avg_dynamics = jtu.tree_map(
             lambda a: jnp.mean(a, axis=0), preds.dynamics,
         )
@@ -151,7 +157,7 @@ class TestModelUnit(unittest.TestCase):
 
         jtu.tree_map(
             lambda a1, a2: self.assertTrue(
-                jnp.allclose(a1, a2, rtol=1e-4, atol=1e-4),
+                jnp.allclose(a1, a2, rtol=1e-3, atol=1e-3),
                 msg=f"max abs diff = {float(jnp.max(jnp.abs(a1 - a2)))}",
             ),
             true_avg_dynamics,

@@ -13,7 +13,7 @@ Date: 2026-04-12
 from __future__ import annotations
 
 import dataclasses
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import jax.numpy as jnp
 from flax import nnx
@@ -77,6 +77,18 @@ class PhysicsTerm(nnx.Module):
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
 
+    # Declarative carry slots. Each entry maps a public ``physics_state``
+    # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``
+    # classmethod. The base ``initial_carry_state`` walks this dict and
+    # zero-fills each slot — subclasses just declare what they own and
+    # don't reimplement the shape extraction.
+    #
+    # Override ``initial_carry_state`` directly only when zero is the
+    # wrong seed (e.g. ``TteTkeVerticalDiffusion`` floors TKE at ECHAM's
+    # 0.01 m²/s² lower bound). Pure plumbing keys (``_date``,
+    # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
+    carry_slots: ClassVar[dict[str, type]] = {}
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """Declare the tracers this term needs in ``state.tracers``.
@@ -88,40 +100,46 @@ class PhysicsTerm(nnx.Module):
         """
         return ()
 
-    def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
+    def initial_carry_state(self, coords) -> dict[str, Any]:
         """Return this term's initial cross-step carry-state slots.
 
-        Operator-split physics threads a ``PhysicsCarryState`` (a dict of
-        typed sub-structs keyed by underscore-prefixed term name, e.g.
-        ``_radiation``, ``_vertical_diffusion``) from one ``dt`` to the
-        next. Terms that need cross-step state — radiation flux for the
-        sub-cycle, prev-step TKE for the analytic source update,
-        aerosol AOD for next step's radiation, … — override this to
-        return their slot(s) with **physically sensible defaults**, not
-        zero-state.
+        Operator-split physics threads a ``PhysicsCarryState`` (a dict
+        of typed sub-structs, e.g. ``radiation``,
+        ``vertical_diffusion``) from one ``dt`` to the next. Default:
+        zero-fill every entry in :attr:`carry_slots`. Terms whose seed
+        depends on integration history (e.g. TKE floored at ECHAM's
+        0.01 m²/s² lower bound) override and either call ``super`` and
+        edit the result, or build the dict directly.
 
-        Returning ``{}`` (the default) means the term carries no state
-        across ``dt``. Internal-only plumbing keys (``_date``,
-        ``_forcing_2d``, …) are repopulated authoritatively at the top
-        of every ``compute_tendencies`` call and must NOT be initialised
-        here.
+        Subclasses that need cross-step state typically just declare
+        :attr:`carry_slots` (a ``ClassVar[dict[str, type]]``); no
+        override is needed for the zero case. ``coords`` flows in only
+        so the typed sub-struct can size itself — the per-term
+        shape-extraction boilerplate lives here once.
 
-        IMPORTANT: do NOT probe ``__call__`` with a zero ``PhysicsState``
-        to discover shapes — zero temperature breaks downstream radiation
-        (this was the root cause of the averaged-mode NaN bug PR #469
-        worked around). Either build the slot directly from ``coords``
-        or use a domain-specific ``zeros`` constructor on the typed
-        sub-struct (e.g. ``RadiationData.zeros((ncols,), nlev)``).
+        IMPORTANT: do NOT probe ``__call__`` with a zero
+        ``PhysicsState`` to discover shapes — zero temperature breaks
+        downstream radiation (root cause of the averaged-mode NaN bug
+        #470). Either rely on this default + declarative
+        :attr:`carry_slots`, or build the slot directly from ``coords``.
 
         Args:
             coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
 
         Returns:
-            Dict of carry slots this term contributes. Keys SHOULD start
-            with ``_<term_name>`` to namespace against other terms.
+            Dict of carry slots this term contributes.
 
         """
-        return {}
+        if not self.carry_slots:
+            return {}
+        col_shape = (
+            coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1],
+        )
+        nlev = coords.nodal_shape[0]
+        return {
+            key: cls.zeros(col_shape, nlev)
+            for key, cls in self.carry_slots.items()
+        }
 
     def cache_coords(self, coords) -> None:
         """Populate coordinate-dependent cached state (in-place).

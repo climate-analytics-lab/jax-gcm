@@ -264,86 +264,94 @@ def _op_split_trajectory(
         dict.
 
     """
+    # Snapshot and averaged modes only differ in what the inner scan
+    # accumulates and what the outer step saves; the surrounding outer
+    # ``lax.scan`` over ``(state, physics_state)`` and the
+    # ``(x_final, ps_final, preds)`` return are identical, so define
+    # them once.
+    def _averaged_outer_step():
+        @jax.checkpoint
+        def inner_step(carry, _):
+            x, physics_state, x_sum, diag_sum = carry
+            x_next, physics_state_next = step_fn(x, physics_state)
+            # Sum POST-step states so that mean(state_1..state_N)
+            # matches the snapshot path (which saves state_N at
+            # outer steps). The legacy averaged path summed pre-step
+            # states and was off by exactly one timestep — tolerable
+            # for slow fields, but op-split's larger per-step
+            # transient amplified the offset enough to break
+            # ``test_speedy_model_averages`` at rtol=1e-2.
+            x_sum = tree_map(lambda a, b: a + b, x_sum, x_next)
+            diag_sum = tree_map(
+                lambda acc, new: acc + new / inner_steps,
+                diag_sum, physics_state_next,
+            )
+            return (x_next, physics_state_next, x_sum, diag_sum), None
+
+        def outer_step(carry, _, empty_sum, empty_diag_sum):
+            x, physics_state = carry
+            init = (x, physics_state, empty_sum, empty_diag_sum)
+            (x_next, ps_next, x_sum, diag_sum), _ = jax.lax.scan(
+                inner_step, init, None, length=inner_steps,
+            )
+            averaged_state = tree_map(lambda s: s / inner_steps, x_sum)
+            preds = post_process_fn(averaged_state, ps_next)
+            # Attach this outer-step's mean diagnostics dict to the
+            # Predictions saved for the frame. Stacked along the
+            # outer-step leading axis by the surrounding scan.
+            preds = preds.replace(physics=diag_sum)
+            return (x_next, ps_next), preds
+
+        return outer_step
+
+    def _snapshot_outer_step():
+        @jax.checkpoint
+        def inner_step(carry, _):
+            x, physics_state = carry
+            x_next, physics_state_next = step_fn(x, physics_state)
+            return (x_next, physics_state_next), None
+
+        def outer_step(carry, _):
+            (x_final, ps_final), _ = jax.lax.scan(
+                inner_step, carry, None, length=inner_steps,
+            )
+            # Save the carried physics state alongside the dynamics
+            # state. Calling ``post_process_fn`` with ``ps_final``
+            # lets snapshot diagnostics reflect the sub-cycled
+            # radiation cache / TKE memory the dycore actually
+            # consumed — recomputing physics at save time with a
+            # freshly-seeded carry would zero out radiation on
+            # non-radiation outer steps (default 2-hour
+            # ``radiation_interval``).
+            return (x_final, ps_final), post_process_fn(x_final, ps_final)
+
+        return outer_step
+
     def integrate(x_initial):
         if output_averages:
             empty_sum = tree_map(jnp.zeros_like, x_initial)
-            # Cast accumulator leaves to float so that ``acc + new / N``
-            # doesn't promote dtype mid-scan (jax.lax.scan rejects type
-            # changes in the carry). The legacy ``averaged_trajectory_from_step``
-            # uses the same explicit-float cast on the stacked accumulator.
+            # Cast accumulator leaves to float so that ``acc + new /
+            # N`` doesn't promote dtype mid-scan (jax.lax.scan
+            # rejects type changes in the carry). The legacy
+            # ``averaged_trajectory_from_step`` uses the same
+            # explicit-float cast on the stacked accumulator.
             empty_diag_sum = tree_map(
                 lambda x: jnp.zeros(jnp.shape(x), dtype=float),
                 empty_diagnostics,
             )
-
-            @jax.checkpoint
-            def inner_step(carry, _):
-                x, physics_state, x_sum, diag_sum = carry
-                x_next, physics_state_next = step_fn(x, physics_state)
-                # Sum POST-step states so that mean(state_1..state_N)
-                # matches the snapshot path (which saves state_N at
-                # outer steps). The legacy averaged path summed pre-
-                # step states and was off by exactly one timestep —
-                # tolerable for slow fields, but op-split's larger
-                # per-step transient amplified the offset enough to
-                # break ``test_speedy_model_averages`` at rtol=1e-2.
-                x_sum = tree_map(lambda a, b: a + b, x_sum, x_next)
-                diag_sum = tree_map(
-                    lambda acc, new: acc + new / inner_steps,
-                    diag_sum, physics_state_next,
-                )
-                return (x_next, physics_state_next, x_sum, diag_sum), None
-
-            def outer_step(carry, _):
-                x, physics_state = carry
-                init = (x, physics_state, empty_sum, empty_diag_sum)
-                (x_next, ps_next, x_sum, diag_sum), _ = jax.lax.scan(
-                    inner_step, init, None, length=inner_steps,
-                )
-                averaged_state = tree_map(lambda s: s / inner_steps, x_sum)
-                preds = post_process_fn(averaged_state, ps_next)
-                # Attach this outer-step's mean diagnostics dict to the
-                # Predictions saved for the frame. Stacked along the
-                # outer-step leading axis by the surrounding scan.
-                preds = preds.replace(physics=diag_sum)
-                return (x_next, ps_next), preds
-
-            (x_final, ps_final), preds = jax.lax.scan(
-                outer_step,
-                (x_initial, initial_physics_state),
-                None, length=outer_steps,
+            outer_step_fn = _averaged_outer_step()
+            outer_step = lambda c, _: outer_step_fn(
+                c, _, empty_sum, empty_diag_sum,
             )
-            return x_final, ps_final, preds
         else:
-            @jax.checkpoint
-            def inner_step(carry, _):
-                x, physics_state = carry
-                x_next, physics_state_next = step_fn(x, physics_state)
-                return (x_next, physics_state_next), None
+            outer_step = _snapshot_outer_step()
 
-            def outer_step(carry, _):
-                (x_final, ps_final), _ = jax.lax.scan(
-                    inner_step, carry, None, length=inner_steps,
-                )
-                # Save the carried physics state alongside the
-                # dynamics state. Calling ``post_process_fn`` with
-                # ``ps_final`` lets snapshot diagnostics reflect the
-                # sub-cycled radiation cache / TKE memory the dycore
-                # actually consumed — recomputing physics at save time
-                # with a freshly-seeded carry would zero out radiation
-                # on non-radiation outer steps (default 2-hour
-                # ``radiation_interval``).
-                return (
-                    (x_final, ps_final),
-                    post_process_fn(x_final, ps_final),
-                )
-
-            (x_final, ps_final), preds = jax.lax.scan(
-                outer_step,
-                (x_initial, initial_physics_state),
-                None, length=outer_steps,
-            )
-            return x_final, ps_final, preds
+        (x_final, ps_final), preds = jax.lax.scan(
+            outer_step,
+            (x_initial, initial_physics_state),
+            None, length=outer_steps,
+        )
+        return x_final, ps_final, preds
 
     return integrate
 
@@ -574,7 +582,7 @@ class Model:
             replace_fn=lambda u_next, u_temp: u_next.replace(temperature_variation=u_temp.temperature_variation),
             level_orders=self.diffusion.level_orders_temp,
         )
-        
+
         self.filters = [
             conserve_global_mean_surface_pressure,
             diffuse_div,
@@ -866,20 +874,27 @@ class Model:
         jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
+        # Clamp non-negative tracers (specific_humidity, qc/qi, GHG
+        # VMRs) at the modal→nodal output boundary so spectral Gibbs
+        # ringing of the physics tendency doesn't leak negative values
+        # into user-visible output. Cheap (a single ``max``) and
+        # complementary to ``verify_state`` on the physics input side.
+        clamped_dynamics = verify_state(
+            dynamics_state_to_physics_state(state, self.primitive, tracer_specs=tracer_specs)
+        )
         predictions = Predictions(
-            dynamics=dynamics_state_to_physics_state(state, self.primitive, tracer_specs=tracer_specs),
+            dynamics=clamped_dynamics,
             physics=None,
             times=None
         )
 
         if not output_averages:
             date = self._date_from_sim_time(state.sim_time)
-            clamped_physics_state = verify_state(predictions.dynamics)
             # Match the per-step path: hand physics a pre-sliced forcing so
             # diagnostic recomputation here doesn't accidentally miss the
             # time axis.
             forcing_now = forcing.select(date, calendar=self.calendar)
-            _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing_now, self.terrain, date)
+            _, physics_data = self.physics.compute_tendencies(clamped_dynamics, forcing_now, self.terrain, date)
             predictions = predictions.replace(physics=physics_data)
 
         return predictions
@@ -909,13 +924,17 @@ class Model:
         and to keep the pytree structure stable.
 
         """
+        from jcm.physics_interface import verify_state
         jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
+        # See ``_post_process`` for the rationale: clamp non-negative
+        # tracers at the modal→nodal output boundary instead of
+        # adding a spectral round-trip filter to ``self.filters``.
         return Predictions(
-            dynamics=dynamics_state_to_physics_state(
+            dynamics=verify_state(dynamics_state_to_physics_state(
                 state, self.primitive, tracer_specs=tracer_specs,
-            ),
+            )),
             physics=physics_state if not output_averages else None,
             times=None,
         )

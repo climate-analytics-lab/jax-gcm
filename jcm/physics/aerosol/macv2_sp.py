@@ -396,6 +396,10 @@ class Macv2SpAerosol(PhysicsTerm):
     category: ClassVar[str] = "aerosol"
     requires: ClassVar[tuple[str, ...]] = ("height_full",)
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+    # Carry seeded as zeros; ``get_simple_aerosol`` rebuilds
+    # AOD/SSA/asymmetry from the plume parameterisation every step
+    # using the slot only as a shape source.
+    carry_slots: ClassVar[dict[str, type]] = {"aerosol": AerosolData}
 
     def __init__(self, params: AerosolParameters | None = None):
         """Hold the scheme-native :class:`AerosolParameters`."""
@@ -420,18 +424,6 @@ class Macv2SpAerosol(PhysicsTerm):
         self._lats = nnx.Variable(lat_2d.reshape(-1))
         self._lons = nnx.Variable(lon_2d.reshape(-1))
         self._coords_cached = True
-
-    def initial_carry_state(self, coords) -> dict:
-        """Seed the ``aerosol`` slot.
-
-        ``get_simple_aerosol`` rebuilds the AOD/SSA/asymmetry profiles
-        from the plume parameterisation every step using the carried
-        slot only as a shape source — so zeros here are immediately
-        overwritten by the first step's compute.
-        """
-        nlev = coords.nodal_shape[0]
-        ncols = coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]
-        return {"aerosol": AerosolData.zeros((ncols,), nlev)}
 
     def __call__(
         self,

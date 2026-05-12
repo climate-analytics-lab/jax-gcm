@@ -90,27 +90,18 @@ class EchamBoundaryConditions(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "radiation", "surface", "chemistry",
     )
+    # Carry seeded as zeros by the base class. The first
+    # ``compute_tendencies`` call overwrites every boundary field from
+    # ``ForcingData`` at the top of the term loop, so the zero seed
+    # never leaks into downstream physics.
+    carry_slots: ClassVar[dict[str, type]] = {
+        "radiation": RadiationData,
+        "surface": SurfaceData,
+        "chemistry": ChemistryData,
+    }
 
     def __init__(self):
         """No tunables; nothing to initialise."""
-
-    def initial_carry_state(self, coords) -> dict:
-        """Seed the radiation/surface/chemistry sub-structs as zeros.
-
-        The first ``compute_tendencies`` call overwrites the boundary
-        fields (albedos, surface temperature, GHG VMRs) from the
-        ``ForcingData`` at the top of the term loop — so zero values
-        here never leak into downstream physics. Using zeros (not a
-        zero-state probe) keeps the carry deterministic and avoids the
-        0/0 = NaN cascade that motivated #470.
-        """
-        nlev = coords.nodal_shape[0]
-        ncols = coords.horizontal.nodal_shape[0] * coords.horizontal.nodal_shape[1]
-        return {
-            "radiation": RadiationData.zeros((ncols,), nlev),
-            "surface": SurfaceData.zeros((ncols,), nlev),
-            "chemistry": ChemistryData.zeros((ncols,), nlev),
-        }
 
     def __call__(
         self,
