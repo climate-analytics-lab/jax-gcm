@@ -654,12 +654,6 @@ class Model:
         dynamics_step = self._get_dynamics_step_fn()
 
         def step(state, physics_state):
-            # Forcing selection still needs the calendar (forcing files
-            # are date-aligned and ``forcing.solar`` is reconstructed
-            # from the orbital geometry of the current ``dt``). Physics
-            # does not — once ``forcing.select`` has populated
-            # ``forcing.solar`` and pre-sliced every TimeSeries leaf
-            # there's nothing date-shaped left for terms to read.
             date = self._date_from_sim_time(state.sim_time)
             forcing_now = forcing.select(date, calendar=self.calendar)
             dyn_tendency, new_physics_state = compute_physics_step(
