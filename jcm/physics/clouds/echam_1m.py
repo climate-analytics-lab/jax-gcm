@@ -743,11 +743,17 @@ def cloud_microphysics(
     # Humidity: gains from evaporation/sublimation
     dqdt = rain_evap + snow_sublim
     
-    # Temperature: latent heat effects
+    # Temperature: latent heat effects. ECHAM's thermodynamic tendency does
+    # not include rain/snow production from autoconversion or aggregation;
+    # those are phase-preserving condensate-to-precip conversions. Only
+    # evaporation/sublimation, melt/freeze, and liquid riming by snow change
+    # phase enthalpy here.
     dtedt = (
-        - alhc / cp * (rain_evap - qc_auto - qc_accr)  # Liquid phase changes
-        - alhs / cp * (snow_sublim - qi_auto - qi_aggr - qc_rime)  # Ice phase changes  
-        - alhf / cp * (snow_melt - rain_freeze)  # Melting/freezing
+        - alhc / cp * rain_evap
+        - alhs / cp * snow_sublim
+        - alhf / cp * snow_melt
+        + alhf / cp * rain_freeze
+        + alhf / cp * qc_rime
     )
     
     # 6. Sedimentation (using simple approach for now)

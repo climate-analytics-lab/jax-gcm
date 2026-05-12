@@ -446,6 +446,35 @@ class TestFullMicrophysics:
         assert jnp.any(tendencies.dqrdt > 0)  # Rain increases
         assert jnp.all(tendencies.dqsdt == 0)  # No snow in warm conditions
         assert state.precip_snow == 0  # No snow at surface
+
+    def test_warm_autoconversion_has_no_direct_latent_heating(self):
+        """Warm qc -> rain production is phase-preserving in ``mo_cloud``."""
+        config = MicrophysicsParameters.default()
+        temperature = jnp.array([285.0])
+        pressure = jnp.array([85000.0])
+
+        from .sundqvist import saturation_specific_humidity
+        specific_humidity = jax.vmap(saturation_specific_humidity)(
+            pressure, temperature
+        )
+
+        tendencies, _ = cloud_microphysics(
+            temperature=temperature,
+            specific_humidity=specific_humidity,
+            pressure=pressure,
+            cloud_water=jnp.array([1.0e-3]),
+            cloud_ice=jnp.array([0.0]),
+            cloud_fraction=jnp.array([1.0]),
+            air_density=jnp.array([1.0]),
+            layer_thickness=jnp.array([500.0]),
+            droplet_number=jnp.array([100e6]),
+            dt=300.0,
+            config=config,
+        )
+
+        assert tendencies.dqcdt[0] < 0.0
+        assert tendencies.dqrdt[0] > 0.0
+        assert jnp.allclose(tendencies.dtedt[0], 0.0, atol=1e-12)
     
     def test_cold_cloud_process(self):
         """Test ice microphysics"""
@@ -484,6 +513,35 @@ class TestFullMicrophysics:
         assert jnp.any(tendencies.dqsdt > 0)  # Snow increases
         assert jnp.all(tendencies.dqrdt == 0)  # No rain in cold conditions
         assert state.precip_rain == 0  # No rain at surface
+
+    def test_ice_autoconversion_has_no_direct_latent_heating(self):
+        """Cold qi -> snow production is phase-preserving in ``mo_cloud``."""
+        config = MicrophysicsParameters.default()
+        temperature = jnp.array([245.0])
+        pressure = jnp.array([50000.0])
+
+        from .sundqvist import saturation_specific_humidity
+        specific_humidity = jax.vmap(saturation_specific_humidity)(
+            pressure, temperature
+        )
+
+        tendencies, _ = cloud_microphysics(
+            temperature=temperature,
+            specific_humidity=specific_humidity,
+            pressure=pressure,
+            cloud_water=jnp.array([0.0]),
+            cloud_ice=jnp.array([8.0e-4]),
+            cloud_fraction=jnp.array([1.0]),
+            air_density=jnp.array([0.7]),
+            layer_thickness=jnp.array([500.0]),
+            droplet_number=jnp.array([50e6]),
+            dt=300.0,
+            config=config,
+        )
+
+        assert tendencies.dqidt[0] < 0.0
+        assert tendencies.dqsdt[0] > 0.0
+        assert jnp.allclose(tendencies.dtedt[0], 0.0, atol=1e-12)
     
     def test_mixed_phase_process(self):
         """Test mixed-phase microphysics"""
