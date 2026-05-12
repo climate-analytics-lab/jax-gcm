@@ -242,20 +242,20 @@ Cloud Cover
      - Description
      - Default
    * - ``crt``
-     - Critical RH at surface for cloud formation
-     - 0.9
+     - Critical RH aloft for cloud formation
+     - 0.75
    * - ``crs``
-     - Critical RH at model top for cloud formation
-     - 0.7
+     - Critical RH near the surface for cloud formation
+     - 0.975
    * - ``nex``
-     - Power-law exponent for vertical RH profile
-     - 4.0
+     - Exponent for the ECHAM ``mo_cover`` RH profile
+     - 2.0
    * - ``t_ice``
      - Temperature for pure ice phase (K)
      - 238.15
    * - ``csatsc``
      - Saturation factor for stratocumulus
-     - 0.97
+     - 0.7
 
 .. admonition:: Gap vs. ICON-A
 

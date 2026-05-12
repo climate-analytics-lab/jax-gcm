@@ -24,8 +24,8 @@ class CloudParameters:
     """Configuration parameters for shallow cloud scheme"""
     
     # Cloud fraction parameters
-    crt: float           # Critical relative humidity at surface  
-    crs: float           # Critical relative humidity at TOA  
+    crt: float           # Critical relative humidity aloft
+    crs: float           # Critical relative humidity near surface
     nex: float           # Exponent for RH threshold profile
     csatsc: float        # Saturation factor for stratocumulus
     
@@ -42,8 +42,8 @@ class CloudParameters:
     t_mix_max: float     # Upper bound of mixed phase (K)
 
     @classmethod
-    def default(cls, crt=0.9, crs=0.7, nex=4.0,
-                 csatsc=0.97, ceffmin=10.0,
+    def default(cls, crt=0.75, crs=0.975, nex=2.0,
+                 csatsc=0.7, ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
         """Return default cloud parameters"""
@@ -59,6 +59,24 @@ class CloudParameters:
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max)
         )
+
+
+def critical_relative_humidity(
+    pressure: jnp.ndarray,
+    surface_pressure: float,
+    config: CloudParameters,
+) -> jnp.ndarray:
+    """ECHAM critical RH profile from ``mo_cover.f90``.
+
+    ECHAM names ``crs`` as the near-surface value and ``crt`` as the
+    free-tropospheric value. The exponent uses surface pressure divided by
+    full-level pressure, not a linear sigma interpolation.
+    """
+    pressure_safe = jnp.maximum(pressure, 1.0)
+    surface_pressure_safe = jnp.maximum(surface_pressure, 1.0)
+    return config.crt + (config.crs - config.crt) * jnp.exp(
+        1.0 - (surface_pressure_safe / pressure_safe) ** config.nex
+    )
 
 
 class CloudState(NamedTuple):
@@ -172,16 +190,9 @@ def calculate_cloud_fraction(
     rel_humidity = specific_humidity / (qs + config.epsilon)
     rel_humidity = jnp.clip(rel_humidity, 0.0, 1.0)
     
-    # Calculate critical relative humidity threshold
-    # Varies from crt at surface to crs at TOA
-    # Following Lohmann & Roeckner (1996) formulation
-    sigma = pressure / surface_pressure  # Normalized pressure (1 at surface, 0 at TOA)
-    # RHc = crt at surface (sigma=1) and crs at TOA (sigma→0)
-    # Using exponential interpolation: at sigma=1, exp(0)=1 so rhc=crt
-    # as sigma→0, exp(-nex)→0 so rhc→crs
-    rhc = config.crs + (config.crt - config.crs) * jnp.exp(
-        -config.nex * (1.0 - sigma)
-    )
+    # Calculate critical relative humidity threshold following ECHAM
+    # ``mo_cover.f90``.
+    rhc = critical_relative_humidity(pressure, surface_pressure, config)
     
     # Calculate cloud fraction using quadratic relationship
     # b_0 = (RH - RH_crit) / (1 - RH_crit)

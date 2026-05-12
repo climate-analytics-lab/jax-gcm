@@ -9,7 +9,7 @@ from .sundqvist import (
     CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
     saturation_specific_humidity, calculate_cloud_fraction,
     partition_cloud_phase, condensation_evaporation,
-    shallow_cloud_scheme, _qs_and_dqs_dt,
+    shallow_cloud_scheme, critical_relative_humidity, _qs_and_dqs_dt,
 )
 from jcm.constants import tmelt, eps, alhc, cp
 
@@ -214,6 +214,44 @@ class TestSaturationFunctions:
 
 class TestCloudFraction:
     """Test cloud fraction calculations"""
+
+    def test_critical_rh_matches_echam_mo_cover(self):
+        """Pin ``mo_cover.f90`` critical-RH profile and parameter meanings."""
+        config = CloudParameters.default()
+        pressure = jnp.array([100000.0, 95000.0, 70000.0, 50000.0, 20000.0])
+        p_sfc = 100000.0
+
+        rhc = critical_relative_humidity(pressure, p_sfc, config)
+        expected = config.crt + (config.crs - config.crt) * jnp.exp(
+            1.0 - (p_sfc / pressure) ** config.nex
+        )
+
+        assert abs(float(config.crs) - 0.975) < 1e-7
+        assert abs(float(config.crt) - 0.75) < 1e-7
+        assert abs(float(config.nex) - 2.0) < 1e-7
+        assert jnp.allclose(rhc, expected)
+        assert jnp.isclose(rhc[0], config.crs)
+        assert rhc[-1] < 0.751
+
+    def test_cloud_fraction_uses_echam_threshold_profile(self):
+        """A 70 kPa, 84.5% RH layer should cloud under ECHAM T63 defaults.
+
+        This RH is above the ``mo_cover`` threshold but below the old
+        sigma-interpolation threshold, so it catches the ordering/formula
+        regression directly through ``calculate_cloud_fraction``.
+        """
+        config = CloudParameters.default()
+        pressure = jnp.array([70000.0])
+        temperature = jnp.array([260.0])
+        p_sfc = 100000.0
+
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        specific_humidity = 0.845 * qs
+        cf, _ = calculate_cloud_fraction(
+            temperature, specific_humidity, pressure, p_sfc, config
+        )
+
+        assert cf[0] > 0.03
     
     def test_cloud_fraction_basic(self):
         """Test basic cloud fraction calculation"""

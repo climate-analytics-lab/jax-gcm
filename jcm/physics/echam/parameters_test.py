@@ -21,12 +21,14 @@ def test_per_scheme_defaults():
     clouds = CloudParameters.default()
     microphysics = MicrophysicsParameters.default()
 
-    # ECHAM-matching convention: crt at surface (0.9), crs aloft (0.7);
-    # ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
+    # ECHAM-matching convention: crs near surface (0.975), crt aloft
+    # (0.75); ccraut = 15.0 (ECHAM default — Beheng-1994 coefficient, not the
     # KK2000 threshold the previous JAX port used).
     assert abs(float(convection.entrpen) - 1.0e-4) < 1e-7
-    assert abs(float(clouds.crt) - 0.9) < 1e-7
-    assert abs(float(clouds.crs) - 0.7) < 1e-7
+    assert abs(float(clouds.crt) - 0.75) < 1e-7
+    assert abs(float(clouds.crs) - 0.975) < 1e-7
+    assert abs(float(clouds.nex) - 2.0) < 1e-7
+    assert abs(float(clouds.csatsc) - 0.7) < 1e-7
     assert abs(float(microphysics.ccraut) - 15.0) < 1e-5
 
 
@@ -54,7 +56,7 @@ def test_echam_physics_per_scheme_kwargs():
     cloud_fraction_term = next(
         t for t in physics.terms if t.category == "cloud_fraction"
     )
-    assert abs(float(cloud_fraction_term.params.value.crt) - 0.9) < 1e-7
+    assert abs(float(cloud_fraction_term.params.value.crt) - 0.75) < 1e-7
 
 
 def test_physics_terms_compute_tendencies():
