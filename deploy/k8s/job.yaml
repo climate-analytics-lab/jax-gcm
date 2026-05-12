@@ -1,0 +1,110 @@
+# Example JCM batch Job for the NRP Nautilus cluster.
+#
+# Usage:
+#   export JCM_IMAGE=ghcr.io/climate-analytics-lab/jcm:latest
+#   export JCM_JOB_NAME=jcm-icon-t31           # must be a valid DNS label
+#   export JCM_HYDRA_ARGS='physics=icon run.total_time=24'
+#   envsubst < deploy/k8s/job.yaml | kubectl apply -f -
+#
+# `envsubst` is part of `gettext` on macOS (`brew install gettext`).
+#
+# The container ENTRYPOINT is `python -m jcm.main`, so JCM_HYDRA_ARGS is
+# forwarded verbatim as Hydra overrides — see jcm/config/ for the available
+# config groups. Anything Hydra accepts on the CLI works here.
+#
+# Why a Job (not a Deployment): JCM runs are finite, and NRP asks users to
+# release GPUs as soon as work finishes. `backoffLimit: 0` prevents the
+# scheduler from re-running a failed sim (which would silently waste a GPU
+# slot on a bug). `ttlSecondsAfterFinished` auto-deletes the Job object a
+# day later so the namespace doesn't fill up with completed Jobs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JCM_JOB_NAME}
+  labels:
+    app: jcm
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: jcm
+        job-name: ${JCM_JOB_NAME}
+    spec:
+      restartPolicy: Never
+      # NRP nodes are tainted/labelled by GPU model. The generic
+      # `nvidia.com/gpu` request below lets the scheduler pick any
+      # available GPU. To pin to a specific model, switch the resource
+      # key (e.g. `nvidia.com/a100: 1`) and uncomment the affinity block.
+      #
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #       - matchExpressions:
+      #         - key: nvidia.com/gpu.product
+      #           operator: In
+      #           values: ["NVIDIA-A100-SXM4-80GB"]
+      #
+      # For ARM64 (GH200) nodes, also add:
+      # tolerations:
+      # - key: "nautilus.io/arm64"
+      #   operator: "Exists"
+      #   effect: "NoSchedule"
+      containers:
+      - name: jcm
+        image: ${JCM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        # Hydra overrides are inlined into a `bash -c` string at apply
+        # time so users can pass a single shell-quoted string from the
+        # CLI without YAML-escaping each token. `exec` replaces bash
+        # with python so signals (SIGTERM on Job deletion) reach JCM
+        # directly. The fully-rendered command is visible in
+        # `kubectl describe job/<name>`, which helps debugging.
+        command: ["/bin/bash", "-c"]
+        args:
+        - 'exec python -m jcm.main ${JCM_HYDRA_ARGS}'
+        env:
+        # JAX picks CUDA by default when a GPU is present. We list `cpu`
+        # explicitly because jcm uses `jax.debug.callback`, which needs
+        # to materialize inputs on the local CPU device — `JAX_PLATFORMS=cuda`
+        # alone hides CPU and the callback crashes at runtime.
+        - name: JAX_PLATFORMS
+          value: "cuda,cpu"
+        resources:
+          # NRP allows up to 2 GPUs per Pod and 8 per Job. Bump GPU
+          # count for multi-device runs once the SPMD sharding configs
+          # in jcm support more than one device.
+          #
+          # NRP policy: cpu/memory limit must be ≤ 1.2× request. The
+          # simplest way to satisfy that (and to land in the Guaranteed
+          # QoS class) is to set requests == limits.
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: 16Gi
+            ephemeral-storage: 20Gi
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: 16Gi
+            ephemeral-storage: 20Gi
+        volumeMounts:
+        # JAX collectives and dataloader workers expect a real /dev/shm.
+        # NRP defaults this to 64MB, which is too small for non-trivial
+        # batch sizes.
+        - name: dshm
+          mountPath: /dev/shm
+        # Uncomment to persist outputs across Job runs. Requires a PVC
+        # named `jcm-outputs` in the namespace (see pvc.yaml).
+        # - name: outputs
+        #   mountPath: /app/outputs
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      # - name: outputs
+      #   persistentVolumeClaim:
+      #     claimName: jcm-outputs

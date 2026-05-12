@@ -1,0 +1,25 @@
+# Persistent storage for JCM outputs.
+#
+# Apply once per namespace:
+#   kubectl apply -f deploy/k8s/pvc.yaml
+#
+# Then uncomment the `outputs` volume blocks in job.yaml / interactive-pod.yaml
+# to mount it at /app/outputs (where Hydra writes results by default).
+#
+# Storage class: NRP exposes several. `rook-cephfs` is a good default
+# (multi-AZ, ReadWriteMany-capable). Use ReadWriteOnce here since one
+# Job typically writes from a single pod; switch to ReadWriteMany if
+# you need to fan out reads from multiple pods at once.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jcm-outputs
+  labels:
+    app: jcm
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: rook-cephfs

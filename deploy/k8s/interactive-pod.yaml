@@ -1,0 +1,50 @@
+# Interactive JCM pod for debugging / shelling in.
+#
+# Usage:
+#   export JCM_IMAGE=ghcr.io/climate-analytics-lab/jcm:latest
+#   envsubst < deploy/k8s/interactive-pod.yaml | kubectl apply -f -
+#   kubectl exec -it jcm-shell -- bash
+#   # ...work, then:
+#   kubectl delete pod jcm-shell
+#
+# This pod intentionally does NOT request a GPU by default — NRP asks
+# users not to sit on GPUs interactively. Uncomment the GPU resource
+# lines below if you actually need device access for the session.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jcm-shell
+  labels:
+    app: jcm
+    purpose: interactive
+spec:
+  restartPolicy: Never
+  containers:
+  - name: jcm
+    image: ${JCM_IMAGE}
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "infinity"]
+    resources:
+      limits:
+        cpu: "4"
+        memory: 16Gi
+        ephemeral-storage: 20Gi
+        # nvidia.com/gpu: 1
+      requests:
+        cpu: "2"
+        memory: 8Gi
+        ephemeral-storage: 10Gi
+        # nvidia.com/gpu: 1
+    volumeMounts:
+    - name: dshm
+      mountPath: /dev/shm
+    # - name: outputs
+    #   mountPath: /app/outputs
+  volumes:
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+  # - name: outputs
+  #   persistentVolumeClaim:
+  #     claimName: jcm-outputs
