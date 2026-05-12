@@ -1,6 +1,6 @@
 # Operator-split physics — implementation plan
 
-**Status:** Phases 0-3 implemented (PR pending); Phase 4 housekeeping + Phase 5 Strang upgrade still to come.
+**Status:** Phases 0-3 implemented (PR #472, with P1/P2 carry-threading follow-up); Phase 4 housekeeping + Phase 5 Strang upgrade still to come.
 **Issue:** [#471 — Operator-split physics from the IMEX-RK dynamical core](https://github.com/climate-analytics-lab/jax-gcm/issues/471)
 **Related:**
 - [#470 — Integration trajectory should not depend on output mode](https://github.com/climate-analytics-lab/jax-gcm/issues/470) (the architectural concern this refactor closes)
@@ -307,7 +307,48 @@ The original plan called for fully deleting `get_empty_data` and `accumulate_if_
 
 - **`VerticalDiffusionData.km` / `.kh` shape doc was corrected**: the docstring claimed `(nlev+1, ncols)` but the term writes `(nlev, ncols)`; `.zeros()` was producing the documented (wrong) shape, which masked itself in the legacy averaged path because `get_empty_data` overwrote it on the first probe call. The fix aligns docstring + factory + actual term output at `(nlev, ncols)`.
 
-Estimated effort: phases 0-2 ≈ 2-3 days of focused work + validation. Phase 3 ≈ 1 day. Phase 4 ≈ 0.5 day. Phase 5 ≈ 0.5 day + validation. Phase 6 is sized by the pysces work, not by this refactor.
+### Phase 3 follow-up: P1/P2 carry-threading fixes
+
+Phase 3 wired the carry through the integration scan but left two
+gaps that a code review of #472 surfaced:
+
+- **P1: persist the carry across `run()`/`resume()` API boundaries.**
+  The trajectory builder discarded the final `physics_state`, and
+  `Model` only persisted `_final_modal_state`. Each call to
+  `_run_from_state` therefore rebuilt the cross-step carry from
+  scratch, so radiation cache, prior-step TKE, etc. reset at every
+  API seam — a continuous 10-day run differed from a 5-day `run()`
+  plus 5-day `resume()`. Fixed by adding a `_final_physics_state`
+  slot to `Model`, returning the final carry from
+  `_op_split_trajectory` / `_run_from_state` / `run_from_state`, and
+  threading it back in on `resume()`. `run()` resets the slot so a
+  fresh trajectory does not pick up stale carry from a previous run.
+  New regression test: `test_op_split_carry_persists_across_resume`.
+
+- **P2: snapshot diagnostics use the integration carry.** In
+  snapshot mode the scan saved `post_process_fn(x_final)` per outer
+  step, and `_post_process` recomputed physics inside with
+  `prev_physics_data=None`. Because the default `radiation_interval`
+  is 7200 s the dycore re-uses cached radiation on most outer steps;
+  the recompute path however always sees a freshly-seeded cache and
+  silently reports zero / IC radiation fields. Fixed by saving the
+  carried `physics_state` from the scan and using it directly as
+  `predictions.physics` (the averaged path already did this with the
+  inner-step running mean). New `_op_split_post_process` does only
+  the dynamics-state conversion; no recompute. New regression test:
+  `test_op_split_snapshot_physics_uses_integration_carry`.
+
+- **Averaged accumulator switched to post-step states.** Previously
+  the averaged accumulator summed pre-step states (matching the
+  legacy convention), which gave a one-timestep offset against the
+  snapshot path's post-step samples. The offset was tolerable for
+  slow fields under the legacy inside-RK scheme, but op-split's
+  larger per-step transient amplified the difference enough to break
+  `test_speedy_model_averages` at `rtol=1e-2`. Summing `x_next`
+  rather than `x` brings the two paths into numerical-roundoff
+  agreement (the test now passes at `rtol=1e-4`).
+
+Estimated effort: phases 0-2 ≈ 2-3 days of focused work + validation. Phase 3 ≈ 1 day (+ P1/P2 follow-up ≈ 0.5 day). Phase 4 ≈ 0.5 day. Phase 5 ≈ 0.5 day + validation. Phase 6 is sized by the pysces work, not by this refactor.
 
 ## Tests and validation
 

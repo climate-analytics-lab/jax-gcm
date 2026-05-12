@@ -120,14 +120,21 @@ class TestModelUnit(unittest.TestCase):
         )
         preds = model.run(save_interval=.5/24., total_time=2/24.)
 
-        # Compare only the dynamics fields. Manual mean over saved snapshots
-        # uses end-of-step states; the output_averages path uses the inner
-        # x_sum which is built from BEFORE-step states (note the
-        # `x_sum += x` placement in averaged_trajectory_from_step). For the
-        # dynamics state these two windows agree to <1e-4 over a short run;
-        # for the physics diagnostics dict (cloud cover, surface fluxes,
-        # land surface temperature) the offset can produce O(1) differences
-        # that are not a meaningful regression test.
+        # Compare only the dynamics fields. Both paths now save the
+        # same end-of-step state samples:
+        #
+        # - snapshot mode saves ``state_k`` at outer steps k=1..N
+        # - op-split averaged mode sums ``state_k`` for k=1..N inside
+        #   the inner scan (Issue #471 P1 follow-up: switched the
+        #   averaged accumulator from pre-step to post-step to match
+        #   the snapshot path; the legacy one-timestep offset was
+        #   tolerable for slow fields but op-split's larger per-step
+        #   transient amplified it past rtol=1e-2).
+        #
+        # So ``mean(snapshots)`` and ``averaged(...)`` should now agree
+        # to numerical roundoff on the dynamics fields. The physics
+        # diagnostics dict is still windowed-average vs. instantaneous
+        # and is not compared.
         true_avg_dynamics = jtu.tree_map(
             lambda a: jnp.mean(a, axis=0), preds.dynamics,
         )
@@ -142,14 +149,9 @@ class TestModelUnit(unittest.TestCase):
             output_averages=True,
         )
 
-        # Tolerance: the manual save path captures end-of-step states (1..N)
-        # while output_averages sums BEFORE-step states (0..N-1) — they
-        # average windows offset by one timestep. rtol=1e-2 lets this test
-        # catch a broken averaging mechanism without flagging the legitimate
-        # one-timestep offset (worst-case ~0.3% on q over a 2-hour run).
         jtu.tree_map(
             lambda a1, a2: self.assertTrue(
-                jnp.allclose(a1, a2, rtol=1e-2, atol=1e-2),
+                jnp.allclose(a1, a2, rtol=1e-4, atol=1e-4),
                 msg=f"max abs diff = {float(jnp.max(jnp.abs(a1 - a2)))}",
             ),
             true_avg_dynamics,
@@ -710,6 +712,127 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         self.assertTrue(
             any("op_split" in msg or "Phase 4" in msg for msg in cm.output),
             f"expected an op-split deprecation warning, got {cm.output!r}",
+        )
+
+    def test_op_split_carry_persists_across_resume(self):
+        """``run()`` + ``resume()`` matches a single ``run()`` of the
+        combined duration when the cross-step physics carry is
+        threaded through (Issue #471 P1).
+
+        Before P1 every call rebuilt the carry from
+        ``initial_carry_state``, which reset sub-cycled radiation /
+        prior-step TKE etc. at the API seam. With the persisted
+        carry the bisected and contiguous trajectories agree to
+        numerical roundoff.
+        """
+        import numpy as np
+
+        model_split = self._speedy_model()
+        # 5 + 5 step bisected run.
+        _ = model_split.run(
+            save_interval=1 / 48.0, total_time=5 / 48.0,
+            use_op_split=True,
+        )
+        preds_part2 = model_split.resume(
+            save_interval=1 / 48.0, total_time=5 / 48.0,
+            use_op_split=True,
+        )
+        final_bisected = float(
+            np.asarray(preds_part2.dynamics.temperature[-1]).mean()
+        )
+
+        # Contiguous 10-step run for the same total duration.
+        model_one = self._speedy_model()
+        preds_one = model_one.run(
+            save_interval=1 / 48.0, total_time=10 / 48.0,
+            use_op_split=True,
+        )
+        final_contiguous = float(
+            np.asarray(preds_one.dynamics.temperature[-1]).mean()
+        )
+
+        # Tight tolerance — pure jitting roundoff. If the carry isn't
+        # being threaded, this would fail by orders of magnitude more.
+        self.assertAlmostEqual(
+            final_bisected, final_contiguous, places=3,
+            msg="bisected run + resume diverged from contiguous run — "
+                "is the physics carry threaded across the API seam?",
+        )
+
+    def test_op_split_run_resets_carry(self):
+        """``run()`` discards any carry left from a previous trajectory.
+
+        Two ``run()`` calls on the same Model object (different initial
+        states, default seed) should produce the same answer the first
+        time and the second time — i.e. ``run()`` resets
+        ``_final_physics_state`` so the second trajectory is not
+        contaminated by leftover radiation cache / TKE from the first.
+        """
+        import numpy as np
+
+        m = self._speedy_model()
+        preds_a = m.run(
+            save_interval=1 / 48.0, total_time=2 / 48.0,
+            use_op_split=True,
+        )
+        T_a = float(np.asarray(preds_a.dynamics.temperature[-1]).mean())
+
+        preds_b = m.run(
+            save_interval=1 / 48.0, total_time=2 / 48.0,
+            use_op_split=True,
+        )
+        T_b = float(np.asarray(preds_b.dynamics.temperature[-1]).mean())
+
+        self.assertAlmostEqual(
+            T_a, T_b, places=4,
+            msg="repeated run() on same Model gave different answers — "
+                "stale physics carry not cleared between runs",
+        )
+
+    def test_op_split_snapshot_physics_uses_integration_carry(self):
+        """Snapshot ``predictions.physics`` is the carry the integration
+        actually consumed (Issue #471 P2).
+
+        Earlier revisions threw away the per-step carry and
+        recomputed physics inside ``_post_process`` with
+        ``prev_physics_data=None``, which silently reported a
+        freshly-seeded radiation cache (zero / IC values) on
+        non-radiation outer steps because the default
+        ``radiation_interval`` is 7200 s and the dycore reuses the
+        cached fields between recomputes. This test checks that the
+        saved physics dict actually has the populated radiation
+        fields the integration was using — not the zero-seeded IC.
+        """
+        import numpy as np
+
+        model = self._echam_hybrid_model()
+        # 30-minute outer save with a 3-second dt and grey radiation —
+        # plenty of timesteps for the radiation cache to have evolved
+        # well away from its zero-seeded initial value by the first
+        # save.
+        preds = model.run(
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+            use_op_split=True, output_averages=False,
+        )
+
+        self.assertIsNotNone(
+            preds.physics,
+            "snapshot mode must populate predictions.physics from the carry",
+        )
+
+        # Walk the physics carry dict for a leaf array we know the
+        # grey radiation term writes — any non-zero leaf is sufficient
+        # evidence that the saved carry is the integration's, not
+        # ``Physics.get_empty_data`` (which would be all zeros).
+        leaves = jax.tree_util.tree_leaves(preds.physics)
+        nonzero = any(
+            bool(np.any(np.asarray(leaf) != 0.0)) for leaf in leaves
+        )
+        self.assertTrue(
+            nonzero,
+            "all leaves in saved physics carry are zero — looks like a "
+            "freshly-seeded carry was saved instead of the one the "
+            "integration consumed",
         )
 
 
