@@ -2,9 +2,6 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import tree_math
-from packaging import version
-from flax import __version__ as flax_version
-from flax import nnx
 import jax_datetime as jdt
 from numpy import timedelta64
 import dinosaur
@@ -19,7 +16,7 @@ from jcm.terrain import TerrainData
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.nudging import Nudging
-from jcm.physics_interface import PhysicsState, Physics, get_physical_tendencies, dynamics_state_to_physics_state, compute_physics_step
+from jcm.physics_interface import PhysicsState, Physics, dynamics_state_to_physics_state, compute_physics_step
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.diffusion import DiffusionFilter
@@ -29,8 +26,6 @@ import logging
 
 # logging.basicConfig(format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
-
-_LEGACY_SCAN_API = version.parse(flax_version) < version.parse("0.10.0")
 
 PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
 
@@ -164,40 +159,6 @@ jax.tree_util.register_pytree_node(
 )
 
 
-class DiagnosticsCollector(nnx.Module):
-    """Running-mean accumulator for the legacy averaged-output path.
-
-    Phase 3 of #471 cleaned up the substage cache plumbing — the
-    collector no longer carries ``physics_data_cache`` (the cross-step
-    physics carry now flows through the integration scan as a first-
-    class pytree) or ``physical_step`` (the operator-split path calls
-    physics once per ``dt`` so substage gating is irrelevant). What's
-    left is simply: stack a running mean of per-step diagnostics.
-
-    The legacy inside-RK path is also deprecated (see #471 Phase 4) —
-    the collector is retained until that phase deletes the legacy
-    averaged-output path entirely.
-    """
-
-    data: nnx.Variable
-    i: nnx.Variable
-    steps_to_average: int
-
-    def __init__(self, steps_to_average):
-        """Initialize DiagnosticsCollector for accumulating physics diagnostics over multiple steps."""
-        self.i = nnx.Variable(0)
-        self.steps_to_average = steps_to_average
-
-    def accumulate(self, new_data):
-        """Add ``new_data / steps_to_average`` into ``data[i]``."""
-        self.data.value = tree_map(
-            lambda stacked_array, new_array: stacked_array.at[self.i.value].add(
-                new_array / self.steps_to_average
-            ),
-            self.data.value,
-            new_data,
-        )
-
 def _op_split_trajectory(
     step_fn: Callable[[Any, Any], tuple[Any, Any]],
     initial_physics_state: Any,
@@ -210,47 +171,39 @@ def _op_split_trajectory(
     """Trajectory builder for the operator-split path.
 
     The op-split ``step_fn`` has signature ``(state, physics_state) ->
-    (state_next, physics_state_next)``. ``physics_state`` is the cross-
-    step physics carry (radiation flux for sub-cycling, prev TKE for
-    the analytic source update, etc.). There is no ``DiagnosticsCollector``
-    with a ``physics_data_cache`` — physics is called exactly once per
-    ``dt`` and the carry is first-class.
+    (state_next, physics_state_next)``. ``physics_state`` is the
+    cross-step physics carry (radiation flux for sub-cycling, prev
+    TKE for the analytic source update, etc.) and flows through the
+    ``lax.scan`` as a first-class pytree.
 
     ``post_process_fn`` takes ``(state, physics_state)``. In snapshot
     mode the saved physics carry is exactly the one used by the
     integration — radiation sub-cycle cache, TKE memory, etc. — so
     diagnostics reported in ``predictions.physics`` match what the
-    dycore actually consumed. (Earlier revisions called
-    ``physics.compute_tendencies`` again at save time with no
-    ``prev_physics_data``, which silently replaced sub-cycled radiation
-    fields with their freshly-seeded counterparts.)
+    dycore actually consumed.
 
-    In averaged mode, the per-step output dict (the same dict that
-    becomes ``physics_state_next``) is also accumulated as a running
-    mean across the inner steps and saved per outer step. This
-    preserves the averaged-physics output the legacy path produces
-    via ``DiagnosticsCollector.data.value``.
-
-    The averaged running mean uses POST-step states (``x_next``)
-    rather than the legacy pre-step states. This matches the snapshot
-    path (which saves end-of-step states) so that ``mean(snapshots)``
-    and ``averaged(...)`` agree to a much tighter tolerance than the
-    legacy one-timestep offset allowed.
+    In averaged mode, the per-step physics dict (the same dict that
+    becomes ``physics_state_next``) is accumulated as a running mean
+    across the inner steps and saved per outer step. The running mean
+    uses POST-step states (``x_next``); this matches the snapshot
+    path's end-of-step samples, so ``mean(snapshots)`` and
+    ``averaged(...)`` agree to numerical roundoff.
 
     Args:
         step_fn: Operator-split per-``dt`` step.
-        initial_physics_state: Cross-step carry initial value (output of
-            :meth:`Physics.get_empty_data` until Phase 3, then
-            :meth:`ComposablePhysics.initial_carry_state`).
-        empty_diagnostics: Zero-shaped diagnostics dict used to seed the
-            running-mean accumulator in averaged mode. Same structure as
-            the per-step ``physics_state_next``.
+        initial_physics_state: Cross-step carry initial value (built
+            via :meth:`ComposablePhysics.initial_carry_state` unioned
+            with a structural template from
+            :meth:`ComposablePhysics.get_empty_data`).
+        empty_diagnostics: Zero-shaped diagnostics dict used to seed
+            the running-mean accumulator in averaged mode. Same
+            structure as the per-step ``physics_state_next``.
         outer_steps: Number of saved frames.
         inner_steps: Inner ``dt`` steps between saved frames.
         post_process_fn: Applied to the state at save time (snapshot
             mode) or to the running mean (averaged mode).
-        output_averages: When True, the saved frame is the running mean
-            of ``post_process_fn(state)`` over the inner steps.
+        output_averages: When True, the saved frame is the running
+            mean of ``post_process_fn(state)`` over the inner steps.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -275,12 +228,11 @@ def _op_split_trajectory(
             x, physics_state, x_sum, diag_sum = carry
             x_next, physics_state_next = step_fn(x, physics_state)
             # Sum POST-step states so that mean(state_1..state_N)
-            # matches the snapshot path (which saves state_N at
-            # outer steps). The legacy averaged path summed pre-step
-            # states and was off by exactly one timestep — tolerable
-            # for slow fields, but op-split's larger per-step
-            # transient amplified the offset enough to break
-            # ``test_speedy_model_averages`` at rtol=1e-2.
+            # matches the snapshot path (which saves state_N at outer
+            # steps). Summing pre-step states would be off by one
+            # timestep — tolerable for slow fields, but the op-split
+            # per-step transient is large enough to surface as test
+            # failures at the rtol=1e-3 the averaging test runs at.
             x_sum = tree_map(lambda a, b: a + b, x_sum, x_next)
             diag_sum = tree_map(
                 lambda acc, new: acc + new / inner_steps,
@@ -331,10 +283,8 @@ def _op_split_trajectory(
         if output_averages:
             empty_sum = tree_map(jnp.zeros_like, x_initial)
             # Cast accumulator leaves to float so that ``acc + new /
-            # N`` doesn't promote dtype mid-scan (jax.lax.scan
-            # rejects type changes in the carry). The legacy
-            # ``averaged_trajectory_from_step`` uses the same
-            # explicit-float cast on the stacked accumulator.
+            # N`` doesn't promote dtype mid-scan — jax.lax.scan
+            # rejects type changes in the carry.
             empty_diag_sum = tree_map(
                 lambda x: jnp.zeros(jnp.shape(x), dtype=float),
                 empty_diagnostics,
@@ -355,78 +305,6 @@ def _op_split_trajectory(
 
     return integrate
 
-
-def averaged_trajectory_from_step(
-    step_fn: typing.TimeStepFn,
-    outer_steps: int,
-    inner_steps: int,
-    post_process_fn=lambda x: x,
-    **kwargs
-) -> Callable[[typing.PyTreeState], tuple[typing.PyTreeState, Any]]:
-    """Return a function that accumulates repeated applications of `step_fn`.
-    Compute a trajectory by repeatedly calling `step_fn()`
-    `outer_steps * inner_steps` times.
-
-    Args:
-        step_fn: function that takes a state and returns state after one time step.
-        outer_steps: number of steps to save in the generated trajectory.
-        inner_steps: number of repeated calls to step_fn() between saved steps.
-        start_with_input: unused, kept to match dinosaur.time_integration.trajectory_from_step API.
-        post_process_fn: function to apply to trajectory outputs.
-
-    Returns:
-        A function that takes an initial state and returns a tuple consisting of:
-        (1) the final frame of the trajectory.
-        (2) trajectory of length `outer_steps` representing time evolution (averaged over the inner steps between each outer step).
-
-    """
-    def integrate(x_initial, empty_data):
-        diagnostics_collector = DiagnosticsCollector(steps_to_average=inner_steps)
-        stacked_empty_data = tree_map(
-            lambda x: jnp.zeros((outer_steps,) + jnp.array(x).shape, dtype=float),
-            empty_data
-        )
-        diagnostics_collector.data = nnx.Variable(stacked_empty_data)
-        graphdef, init_diag_state = nnx.split(diagnostics_collector)
-
-        empty_sum = tree_map(jnp.zeros_like, x_initial)
-
-        out_axes = (nnx.Carry,) if _LEGACY_SCAN_API else (nnx.Carry, 0)
-        empty_output = (None,) if _LEGACY_SCAN_API else None
-
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=out_axes, length=inner_steps)
-        @jax.checkpoint
-        def inner_step(carry):
-            x, x_sum, diag_state = carry
-            x_sum += x  # include initial state, not final state
-            temp_collector_inner = nnx.merge(graphdef, diag_state)
-            x_next = step_fn(temp_collector_inner)(x)
-            _, updated_diag_state = nnx.split(temp_collector_inner)
-            return (x_next, x_sum, updated_diag_state), empty_output
-
-        # `post_process_fn` is applied per-save inside the scan body so it
-        # sees a single instantaneous state, matching dinosaur's
-        # `trajectory_from_step`. Calling it once on the stacked trajectory
-        # would add a leading time axis to the surface pressure that
-        # `compute_diagnostic_state_hybrid` cannot broadcast against the
-        # `(nlev,)` hybrid `a/b_thickness` arrays — that bug only happens
-        # to slip through on sigma coords (where `a_thickness` is zero).
-        @nnx.scan(in_axes=(nnx.Carry,), out_axes=out_axes, length=outer_steps)
-        def outer_step(carry):
-            (x_final, x_sum, diag_state), _ = inner_step(carry)
-            temp_collector_outer = nnx.merge(graphdef, diag_state)
-            temp_collector_outer.i.value += 1
-            _, updated_diag_state = nnx.split(temp_collector_outer)
-            averaged_state = x_sum / inner_steps
-            return (x_final, empty_sum, updated_diag_state), (post_process_fn(averaged_state),)
-
-        carry = (x_initial, empty_sum, init_diag_state)
-        (x_final, _, final_diag_state), (preds,) = outer_step(carry)
-        return x_final, preds.replace(
-            physics=nnx.merge(graphdef, final_diag_state).data.value,
-        )
-
-    return integrate
 
 class Model:
     """Top level class for a JAX-GCM configuration using the Speedy physics on an aquaplanet."""
@@ -798,114 +676,13 @@ class Model:
 
         return step
 
-    def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
-        """For given surface forcing conditions, return a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
-
-        Args:
-            forcing: ForcingData object containing surface forcing conditions.
-
-        Returns:
-            A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
-
-        """
-        def _step_tendencies(state, diagnostics_collector):
-            date = self._date_from_sim_time(state.sim_time)
-            # Pre-slice the forcing for the current step so physics terms
-            # never see a leading time axis or have to know what date it is.
-            # `select` is a no-op for static fields (the common case for
-            # backward-compatible aquaplanet / climatology runs).
-            forcing_now = forcing.select(date, calendar=self.calendar)
-            return get_physical_tendencies(
-                state=state,
-                dynamics=self.primitive,
-                time_step=self.dt_si.m,
-                physics=self.physics,
-                forcing=forcing_now,
-                terrain=self.terrain,
-                diffusion=self.diffusion,
-                date=date,
-                diagnostics_collector=diagnostics_collector,
-            )
-
-        physics_forcing_eqn = lambda d: ExplicitODE.from_functions(
-            lambda state: _step_tendencies(state, d)
-        )
-
-        def _composed_eqn(d):
-            equations = [self.primitive, physics_forcing_eqn(d)]
-            if self.nudging is not None:
-                # Newtonian relaxation toward the (possibly time-varying)
-                # reference state. The tendency is built directly in
-                # spectral space so no per-step nodal round-trip is needed.
-                nudging_eqn = ExplicitODE.from_functions(
-                    lambda state: self.nudging.tendency(
-                        state,
-                        date=self._date_from_sim_time(state.sim_time),
-                        calendar=self.calendar,
-                    )
-                )
-                equations.append(nudging_eqn)
-            return dinosaur.time_integration.compose_equations(equations)
-
-        unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(_composed_eqn(d), self.dt)
-        return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
-
-    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
-        """Post-process a single state from the legacy inside-RK trajectory.
-
-        Converts the dynamical state to a physical state and, in
-        snapshot mode, re-runs ``physics.compute_tendencies`` to
-        produce diagnostic variables. The recompute is *not* safe for
-        sub-cycled physics (radiation cache, TKE memory, …) because it
-        runs with a freshly-seeded carry — see
-        :meth:`_op_split_post_process` for the op-split-safe path that
-        uses the actual integration carry.
-
-        Args:
-            state:
-                A `primitive_equations.State` object from the simulation.
-
-        Returns:
-            A dictionary containing the `PhysicsState` ('dynamics') and the
-            diagnostic physics variables (data structure determined by model.physics).
-
-        """
-        from jcm.physics_interface import verify_state
-        jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
-
-        tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
-        # Clamp non-negative tracers (specific_humidity, qc/qi, GHG
-        # VMRs) at the modal→nodal output boundary so spectral Gibbs
-        # ringing of the physics tendency doesn't leak negative values
-        # into user-visible output. Cheap (a single ``max``) and
-        # complementary to ``verify_state`` on the physics input side.
-        clamped_dynamics = verify_state(
-            dynamics_state_to_physics_state(state, self.primitive, tracer_specs=tracer_specs)
-        )
-        predictions = Predictions(
-            dynamics=clamped_dynamics,
-            physics=None,
-            times=None
-        )
-
-        if not output_averages:
-            date = self._date_from_sim_time(state.sim_time)
-            # Match the per-step path: hand physics a pre-sliced forcing so
-            # diagnostic recomputation here doesn't accidentally miss the
-            # time axis.
-            forcing_now = forcing.select(date, calendar=self.calendar)
-            _, physics_data = self.physics.compute_tendencies(clamped_dynamics, forcing_now, self.terrain, date)
-            predictions = predictions.replace(physics=physics_data)
-
-        return predictions
-
-    def _op_split_post_process(
+    def _post_process(
         self,
         state: primitive_equations.State,
         physics_state: Any,
         output_averages: bool,
     ) -> Predictions:
-        """Post-process for the operator-split trajectory.
+        """Post-process a single saved state from the op-split trajectory.
 
         The op-split scan threads ``physics_state`` — the cross-step
         carry returned by the prior ``compute_tendencies`` call — into
@@ -923,14 +700,18 @@ class Model:
         is discarded — we leave it as ``physics_state`` for symmetry
         and to keep the pytree structure stable.
 
+        Non-negative tracers (specific_humidity, qc/qi, GHG VMRs) get
+        a final ``verify_state`` clamp at the modal→nodal output
+        boundary so spectral Gibbs ringing of the physics tendency
+        doesn't leak negative values into user-visible output. Cheap
+        (one ``max``) and complementary to the ``verify_state`` that
+        runs on the physics input side inside ``compute_physics_step``.
+
         """
         from jcm.physics_interface import verify_state
         jax.debug.callback(lambda t: logger.info("Post processing: %s simulated seconds", t), state.sim_time)
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
-        # See ``_post_process`` for the rationale: clamp non-negative
-        # tracers at the modal→nodal output boundary instead of
-        # adding a spectral round-trip filter to ``self.filters``.
         return Predictions(
             dynamics=verify_state(dynamics_state_to_physics_state(
                 state, self.primitive, tracer_specs=tracer_specs,
@@ -938,41 +719,25 @@ class Model:
             physics=physics_state if not output_averages else None,
             times=None,
         )
-    
-    def _get_integrate_fn(self, step_fn, outer_steps, inner_steps, post_process_fn, output_averages, **kwargs):
-        trajectory_fn = averaged_trajectory_from_step if output_averages else dinosaur.time_integration.trajectory_from_step
-
-        def _integrate_fn(state):
-            integrate_fn = trajectory_fn(
-                step_fn=step_fn,
-                outer_steps=outer_steps,
-                inner_steps=inner_steps,
-                **kwargs,
-                post_process_fn=post_process_fn
-            )
-
-            # integrate_fn for avgs has different signature b/c empty physics data structure needed for DiagnosticsCollector initialization
-            return integrate_fn(state, self.physics.get_empty_data(self.coords)) if output_averages else integrate_fn(state)
-
-        return _integrate_fn
 
     def _build_initial_physics_carry(self) -> Any:
         """Build the cross-step physics carry seed for an op-split run.
 
         Pulls per-term initial state from
-        :meth:`Physics.initial_carry_state` — a deterministic build
-        that avoids the zero-state probe ``get_empty_data`` uses (the
-        probe is what produced the 0/0 = NaN cascade described in
-        #470). Missing keys fall back to ``get_empty_data`` while
-        terms that haven't yet overridden ``initial_carry_state`` are
-        migrated. Once every term with cross-step state has an
-        override this merge becomes a no-op and the fallback can drop.
+        :meth:`Physics.initial_carry_state` (deterministic, no
+        zero-state probe). Unions with the *structural template*
+        from :meth:`Physics.get_empty_data` so the ``lax.scan`` carry
+        pytree matches the post-step ``compute_tendencies`` output
+        structure on iteration 1 (within-step diagnostic keys terms
+        write are zero-filled). ``get_empty_data`` is internal-only
+        in this role: it discovers the post-step output pytree
+        structure via a one-shot probe — never used as live state.
         """
-        empty_diagnostics = self.physics.get_empty_data(self.coords)
+        template = self.physics.get_empty_data(self.coords)
         initial_carry = self.physics.initial_carry_state(self.coords)
-        if isinstance(initial_carry, dict) and isinstance(empty_diagnostics, dict):
-            return {**empty_diagnostics, **initial_carry}
-        return initial_carry or empty_diagnostics
+        if isinstance(initial_carry, dict) and isinstance(template, dict):
+            return {**template, **initial_carry}
+        return initial_carry or template
 
     def _get_op_split_integrate_fn(
         self,
@@ -987,16 +752,17 @@ class Model:
         Returns a closure ``(state, initial_physics_state) ->
         (final_state, final_physics_state, predictions)``. The
         running-mean accumulator template comes from
-        ``get_empty_data`` — the zero-shape template is fine for an
-        accumulator; the bug was using its output as cross-step cache.
+        :meth:`Physics.get_empty_data` — a zero-filled snapshot of
+        the dict ``compute_tendencies`` produces, which is exactly the
+        pytree structure the scan carries.
         """
-        empty_diagnostics = self.physics.get_empty_data(self.coords)
+        template = self.physics.get_empty_data(self.coords)
 
         def _integrate_fn(state, initial_physics_state):
             trajectory = _op_split_trajectory(
                 step_fn=step_fn,
                 initial_physics_state=initial_physics_state,
-                empty_diagnostics=empty_diagnostics,
+                empty_diagnostics=template,
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 post_process_fn=post_process_fn,
@@ -1006,7 +772,7 @@ class Model:
 
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 4, 5, 6, 7)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
+    @partial(jax.jit, static_argnums=(0, 4, 5, 6)) # Note: if model fields assumed to be static are changed, the changes will not be picked up here
     def _run_from_state(self,
                         initial_state: primitive_equations.State,
                         initial_physics_state: Any,
@@ -1014,26 +780,16 @@ class Model:
                         save_interval=10.0,
                         total_time=120.0,
                         output_averages=False,
-                        use_op_split=True,
     ) -> tuple[primitive_equations.State, Any, Predictions]:
         """JIT-compiled simulation loop. Returns raw Predictions pytree.
 
-        When ``use_op_split=True`` (default, issue #471), physics is
-        computed once per ``dt`` outside the IMEX-RK stages and applied
-        as a forward-Euler add to the dynamical state. The cross-step
-        physics carry is first-class — threaded in as
-        ``initial_physics_state`` and returned as the final carry so
-        callers can continue a run across API boundaries without
-        re-seeding (e.g. ``Model.resume``).
-
-        When False, the legacy inside-RK path is used: physics is
-        composed into the primitive-equations ``ExplicitODE`` and runs
-        at every RK stage (3× per ``dt`` for SIL3). The legacy path is
-        kept available during the Phase 1-4 transition and emits a
-        :class:`DeprecationWarning` — it will be removed in Phase 4.
-        For uniformity the legacy branch returns
-        ``initial_physics_state`` unchanged as the "final" carry; the
-        legacy path has no first-class carry of its own.
+        Physics is computed once per ``dt`` outside the IMEX-RK stages
+        and applied as a forward-Euler add to the dynamical state
+        (operator-split Lie a from #471). The cross-step physics carry
+        is first-class — threaded in as ``initial_physics_state`` and
+        returned as the final carry so callers can continue a run
+        across API boundaries without re-seeding (e.g.
+        ``Model.resume``).
         """
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
@@ -1041,53 +797,19 @@ class Model:
                 + (initial_state.sim_time*units.second).to(units.day).m \
                 + save_interval * jnp.arange(outer_steps)
 
-        if use_op_split:
-            op_split_step = self._get_op_split_step_fn(forcing)
-            integrate = self._get_op_split_integrate_fn(
-                op_split_step,
-                outer_steps=outer_steps,
-                inner_steps=inner_steps,
-                post_process_fn=lambda state, physics_state: self._op_split_post_process(
-                    state, physics_state, output_averages,
-                ),
-                output_averages=output_averages,
-            )
-            final_modal_state, final_physics_state, predictions = integrate(
-                initial_state, initial_physics_state,
-            )
-        else:
-            # Warn at trace-time. Using ``jax.debug.callback`` makes the
-            # warning surface even when ``_run_from_state`` is reached
-            # under a ``jit``; the legacy path is going away in Phase 4
-            # of issue #471 so we want this to be visible.
-            jax.debug.callback(
-                lambda: logger.warning(
-                    "use_op_split=False uses the legacy inside-RK physics "
-                    "path. This is being removed in Phase 4 of issue #471. "
-                    "Drop the kwarg (or pass True) to use operator-split "
-                    "physics."
-                )
-            )
-            step_fn_factory = self._get_step_fn_factory(forcing)
-            # If output_averages is True, pass step_fn_factory directly
-            # so that averaged_trajectory_from_step can pass in the
-            # DiagnosticsCollector.
-            step_fn = step_fn_factory if output_averages \
-                else jax.checkpoint(step_fn_factory())
-            integrate = self._get_integrate_fn(
-                step_fn,
-                outer_steps=outer_steps,
-                inner_steps=inner_steps,
-                start_with_input=True,
-                post_process_fn=lambda state: self._post_process(
-                    state, forcing, output_averages,
-                ),
-                output_averages=output_averages,
-            )
-            final_modal_state, predictions = integrate(initial_state)
-            # Legacy path has no first-class carry; pass the seed
-            # straight through so the return signature stays stable.
-            final_physics_state = initial_physics_state
+        op_split_step = self._get_op_split_step_fn(forcing)
+        integrate = self._get_op_split_integrate_fn(
+            op_split_step,
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            post_process_fn=lambda state, physics_state: self._post_process(
+                state, physics_state, output_averages,
+            ),
+            output_averages=output_averages,
+        )
+        final_modal_state, final_physics_state, predictions = integrate(
+            initial_state, initial_physics_state,
+        )
 
         return final_modal_state, final_physics_state, predictions.replace(times=times)
 
@@ -1097,7 +819,6 @@ class Model:
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
-                       use_op_split=True,
                        initial_physics_state: Any = None,
     ) -> tuple[primitive_equations.State, Any, ModelPredictions]:
         """Run the full simulation forward in time starting from given initial state.
@@ -1119,14 +840,6 @@ class Model:
                 Default 120.0 days.
             output_averages:
                 Whether to output time-averaged quantities (default False).
-            use_op_split:
-                Issue #471 — when True, physics runs once per ``dt`` and
-                is applied as a forward-Euler add to the state, followed
-                by a pure-dynamics IMEX-RK SIL3 step. The cross-step
-                physics carry is first-class (no ``DiagnosticsCollector``
-                cache). When False (default during Phase 1), the legacy
-                inside-RK physics path is used. Will become the default
-                in Phase 2.
             initial_physics_state:
                 Optional cross-step physics carry to seed the
                 operator-split integration. When ``None`` (default),
@@ -1142,9 +855,7 @@ class Model:
             ``final_physics_state`` is the cross-step physics carry
             after the last ``dt`` of integration; pass it back in as
             ``initial_physics_state`` on the next call to continue the
-            run without re-seeding physics. With ``use_op_split=False``
-            it echoes whatever was passed in (the legacy path doesn't
-            have a first-class carry).
+            run without re-seeding physics.
 
         """
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
@@ -1154,7 +865,7 @@ class Model:
         final_modal_state, final_physics_state, predictions = self._run_from_state(
             initial_state, initial_physics_state, forcing,
             save_interval_days, total_time_days,
-            output_averages, use_op_split,
+            output_averages,
         )
         return (
             final_modal_state,
@@ -1167,7 +878,6 @@ class Model:
                save_interval=10.0,
                total_time=120.0,
                output_averages=False,
-               use_op_split=True,
     ) -> ModelPredictions:
         """Run the full simulation forward in time starting from end of previous call to model.run or model.resume.
 
@@ -1190,8 +900,6 @@ class Model:
                 Total time to run the model. Same units as ``save_interval``.
             output_averages:
                 Whether to output time-averaged quantities (default False).
-            use_op_split:
-                Issue #471 — operator-split physics. See :meth:`run_from_state`.
 
         Returns:
             A ModelPredictions object containing the trajectory of post-processed model states.
@@ -1199,8 +907,8 @@ class Model:
         """
         # starts from preexisting self._final_modal_state, then updates self._final_modal_state
         jax.debug.callback(
-            lambda: logger.info("Model starting with params: save_interval: %s, total_time: %s, output_averages: %s, use_op_split: %s",
-                                save_interval, total_time, output_averages, use_op_split)
+            lambda: logger.info("Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
+                                save_interval, total_time, output_averages)
         )
         final_modal_state, final_physics_state, predictions = self.run_from_state(
             initial_state=self._final_modal_state,
@@ -1208,7 +916,6 @@ class Model:
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,
-            use_op_split=use_op_split,
             initial_physics_state=self._final_physics_state,
         )
         jax.debug.callback(lambda: logger.info("Run completed."))
@@ -1222,7 +929,6 @@ class Model:
             save_interval=10.0,
             total_time=120.0,
             output_averages=False,
-            use_op_split=True,
     ) -> ModelPredictions:
         """Set model.initial_nodal_state and model.start_date and run the full simulation forward in time.
 
@@ -1241,8 +947,6 @@ class Model:
                 Default 120.0 days.
             output_averages:
                 Whether to output time-averaged quantities (default False).
-            use_op_split:
-                Issue #471 — operator-split physics. See :meth:`run_from_state`.
 
         Returns:
             A ModelPredictions object containing the trajectory of post-processed model states.
@@ -1266,5 +970,4 @@ class Model:
         return self.resume(
             forcing=forcing, save_interval=save_interval,
             total_time=total_time, output_averages=output_averages,
-            use_op_split=use_op_split,
         )

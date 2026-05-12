@@ -4,23 +4,22 @@ class TestHeldSuarezUnit(unittest.TestCase):
     def test_held_suarez_forcing(self):
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-        from jcm.physics_interface import get_physical_tendencies
-        from jcm.diffusion import DiffusionFilter
+        from jcm.physics_interface import compute_physics_step
         from jcm.physics.held_suarez.utils import get_held_suarez_coords
 
         time_step = 10
         coords = get_held_suarez_coords()
         model = Model(coords=coords, time_step=time_step, physics=held_suarez_physics())
-    
-        dynamics_tendency = get_physical_tendencies(
+
+        dynamics_tendency, _ = compute_physics_step(
             state = model._prepare_initial_modal_state(),
             dynamics = model.primitive,
             time_step = time_step * 60,
             physics = model.physics,
             forcing = None,
             terrain = None,
-            diffusion = DiffusionFilter.default(),
-            date = None
+            date = None,
+            physics_state = model._build_initial_physics_carry(),
         )
 
         self.assertIsNotNone(dynamics_tendency)

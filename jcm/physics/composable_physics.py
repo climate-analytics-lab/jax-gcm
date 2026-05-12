@@ -209,36 +209,49 @@ class ComposablePhysics(nnx.Module, Physics):
         return tendencies, diagnostics
 
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
-        """Return an empty diagnostics dict suitable for DiagnosticsCollector.
+        """Return a zero-filled template of the per-step diagnostics dict.
 
-        This runs compute_tendencies once with zero state to discover the
-        diagnostic keys and their shapes, then zeros them out.
+        Internal helper used by ``Model._build_initial_physics_carry``
+        and ``Model._get_op_split_integrate_fn`` to discover the
+        pytree structure of ``compute_tendencies``' output dict. The
+        ``lax.scan`` carry needs to be that exact structure on
+        iteration 1; ``initial_carry_state`` alone only covers the
+        cross-step slots, so we union it with this structural template
+        (zero values, used only for shape).
 
-        .. deprecated::
-            Use :meth:`initial_carry_state` instead. ``get_empty_data``
-            probes the term loop with a zero ``PhysicsState`` to discover
-            shapes — that probe path produces 0/0 = NaN cascades on
-            radiation terms and is the architectural bug
-            `#470 <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
-            tracks. The operator-split path uses ``initial_carry_state``
-            which builds the cross-step carry deterministically from
-            ``coords``.
+        Implementation: runs ``compute_tendencies`` once at Model
+        construction time with a non-zero isothermal probe state
+        (288 K, q=0, etc.) so radiation terms don't hit 0/0=NaN.
+        The result is *only ever used as a zero-filled template* —
+        never as live cross-step physics state. (Mis-using its
+        output as live state was the architectural bug `#470
+        <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
+        tracks; the operator-split refactor in `#471` moved live
+        state to ``initial_carry_state``.)
 
         """
         from jax.tree_util import tree_map
 
-        # Build minimal zero state to probe diagnostic shapes
+        # Probe at a well-conditioned isothermal state. Using
+        # ``PhysicsState.zeros`` here produces 0/0 = NaN in radiation
+        # terms; the non-zero T=288 K probe walks the same code paths
+        # without the division-by-zero. We zero the output anyway
+        # so the probe values themselves don't matter — only the
+        # pytree structure / shapes do.
         nodal_shape = coords.horizontal.nodal_shape
         nlev = coords.nodal_shape[0]
         shape_3d = (nlev,) + nodal_shape
 
-        zero_state = PhysicsState.zeros(shape_3d)
-        zero_forcing = ForcingData.zeros(nodal_shape)
-        zero_terrain = TerrainData.aquaplanet(coords)
-        zero_date = DateData.zeros()
+        probe_state = PhysicsState.zeros(shape_3d).copy(
+            temperature=jnp.full(shape_3d, 288.0),
+            normalized_surface_pressure=jnp.ones(nodal_shape),
+        )
+        probe_forcing = ForcingData.zeros(nodal_shape)
+        probe_terrain = TerrainData.aquaplanet(coords)
+        probe_date = DateData.zeros()
 
         _, diagnostics = self.compute_tendencies(
-            zero_state, zero_forcing, zero_terrain, zero_date
+            probe_state, probe_forcing, probe_terrain, probe_date,
         )
         return tree_map(jnp.zeros_like, diagnostics)
 

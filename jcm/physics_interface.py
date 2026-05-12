@@ -639,73 +639,7 @@ def compute_physics_step(
     return dynamics_tendency, new_physics_state
 
 
-def get_physical_tendencies(
-    state: State,
-    dynamics: PrimitiveEquations,
-    time_step: float,
-    physics: Physics,
-    forcing: ForcingData,
-    terrain: TerrainData,
-    diffusion: DiffusionFilter,
-    date: DateData,
-    diagnostics_collector=None,
-) -> State:
-    """Compute the physical tendencies for the legacy inside-RK physics path.
-
-    Phase 3 of issue #471 dropped the substage cache gating — there is
-    no longer a cross-step ``physics_data_cache`` on the
-    ``DiagnosticsCollector``; ``prev_physics_data`` is always ``None``
-    in this path. Without per-step cache reuse the legacy averaged
-    path's IMEX-RK substage-disambiguation problem is moot, but its
-    radiation sub-cycling is also disabled (radiation now recomputes at
-    every substage). The whole legacy path is being removed in Phase 4
-    of #471; in the meantime ``use_op_split=True`` (the default) is the
-    correctness path.
-
-    Args:
-        state: Dynamic (dinosaur) State variables
-        dynamics: PrimitiveEquations object
-        time_step: Time step in seconds
-        physics: Physics object (e.g. composable physics from held_suarez_physics(), speedy_physics())
-        forcing: ForcingData object
-        terrain: TerrainData object
-        diffusion: DiffusionFilter (unused; preserved for API symmetry)
-        date: DateData object
-        diagnostics_collector: Optional ``DiagnosticsCollector`` for the
-            averaged-mode running mean. When provided, the per-step
-            diagnostics dict is accumulated into ``collector.data`` once
-            per substage call — this over-counts by the IMEX-RK
-            substage count in the legacy averaged path. Acknowledged
-            degradation; the legacy path is deprecated.
-
-    Returns:
-        Physical tendencies in dinosaur.primitive_equations.State format
-
-    """
-    del diffusion  # unused; retained for API symmetry with the legacy call sites.
-    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
-
-    physics_state = dynamics_state_to_physics_state(state, dynamics, tracer_specs=tracer_specs)
-
-    clamped_physics_state = verify_state(physics_state)
-
-    physics_tendency, physics_data = physics.compute_tendencies(
-        clamped_physics_state, forcing, terrain, date,
-        prev_physics_data=None,
-    )
-
-    physics_tendency = verify_tendencies(physics_state, physics_tendency, time_step)
-
-    if diagnostics_collector is not None:
-        diagnostics_collector.accumulate(physics_data)
-
-    dynamics_tendency = physics_tendency_to_dynamics_tendency(
-        physics_tendency, dynamics, tracer_specs=tracer_specs,
-    )
-
-    return dynamics_tendency
-
-def filter_tendencies(dynamics_tendency: State, 
+def filter_tendencies(dynamics_tendency: State,
                       diffusion: DiffusionFilter,
                       time_step, 
                       grid) -> State:

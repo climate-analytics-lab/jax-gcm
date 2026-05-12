@@ -563,7 +563,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         model = self._speedy_model()
         preds = model.run(
             save_interval=1 / 48.0, total_time=1 / 12.0,
-            use_op_split=True,
+            
         )
         T = np.asarray(preds.dynamics.temperature)
         u = np.asarray(preds.dynamics.u_wind)
@@ -583,7 +583,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         model = self._speedy_model()
         preds = model.run(
             save_interval=1 / 48.0, total_time=1 / 12.0,
-            use_op_split=True, output_averages=True,
+            output_averages=True,
         )
         T = np.asarray(preds.dynamics.temperature)
         self.assertFalse(np.isnan(T).any(), "op-split averaged T has NaN")
@@ -607,7 +607,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         model = self._echam_hybrid_model()
         preds = model.run(
             save_interval=1 / 24.0, total_time=2 / 24.0,
-            use_op_split=True, output_averages=True,
+            output_averages=True,
         )
         T = np.asarray(preds.dynamics.temperature)
         q = np.asarray(preds.dynamics.specific_humidity)
@@ -617,38 +617,6 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         self.assertFalse(np.isnan(u).any(), "op-split echam u has NaN")
         self.assertGreater(float(T.mean()), 200.0)
         self.assertLess(float(T.mean()), 320.0)
-
-    def test_op_split_close_to_legacy_short_run(self):
-        """For a short run (a few timesteps), op-split and the legacy
-        inside-RK path produce closely-agreeing state.
-
-        The Lie splitting error is :math:`O(dt^2)` per step from the
-        commutator of physics and dynamics tendency operators. Over a
-        handful of SPEEDY ``30 min`` steps the two paths should agree
-        to a few percent on temperature.
-        """
-        from jcm.model import Model
-        from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        coords = get_speedy_coords(layers=8, spectral_truncation=21)
-        import numpy as np
-
-        model_legacy = Model(coords=coords)
-        preds_legacy = model_legacy.run(
-            save_interval=1 / 48.0, total_time=1 / 12.0,
-            use_op_split=False,
-        )
-        model_split = Model(coords=coords)
-        preds_split = model_split.run(
-            save_interval=1 / 48.0, total_time=1 / 12.0,
-            use_op_split=True,
-        )
-        T_l = float(np.asarray(preds_legacy.dynamics.temperature).mean())
-        T_s = float(np.asarray(preds_split.dynamics.temperature).mean())
-        self.assertLess(
-            abs(T_l - T_s) / abs(T_l), 0.01,
-            f"op-split vs legacy global-mean T differ >1%: "
-            f"{T_l:.2f} vs {T_s:.2f}",
-        )
 
     def test_op_split_step_is_jax_pure(self):
         """The op-split single-step function is a pure JAX function:
@@ -664,20 +632,16 @@ class TestOperatorSplitPhysics(unittest.TestCase):
 
         forcing = default_forcing(model.coords.horizontal)
         step = model._get_op_split_step_fn(forcing)
-        initial_physics_state = model.physics.get_empty_data(model.coords)
+        initial_physics_state = model._build_initial_physics_carry()
 
         # Trace and execute one step under jit.
         jit_step = jax.jit(step)
         x1, ps1 = jit_step(initial_state, initial_physics_state)
 
-        # Both pytree halves should be valid.
+        # Dynamics state pytree should round-trip.
         self.assertEqual(
             jax.tree_util.tree_structure(x1),
             jax.tree_util.tree_structure(initial_state),
-        )
-        self.assertEqual(
-            jax.tree_util.tree_structure(ps1),
-            jax.tree_util.tree_structure(initial_physics_state),
         )
         self.assertFalse(bool(jnp.isnan(x1.temperature_variation).any()))
 
@@ -685,7 +649,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         """``physics_state`` returned by step N is the same pytree shape
         as the input to step N+1 — the contract :class:`jax.lax.scan`
         requires for the carry. Verified by running two steps in
-        sequence.
+        sequence with the integration carry (post-step shape).
         """
         from jcm.forcing import default_forcing
 
@@ -695,7 +659,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
 
         forcing = default_forcing(model.coords.horizontal)
         step = jax.jit(model._get_op_split_step_fn(forcing))
-        ps0 = model.physics.get_empty_data(model.coords)
+        ps0 = model._build_initial_physics_carry()
         x1, ps1 = step(initial_state, ps0)
         x2, ps2 = step(x1, ps1)
 
@@ -704,21 +668,6 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         s2 = jax.tree_util.tree_structure(ps2)
         self.assertEqual(s0, s1)
         self.assertEqual(s1, s2)
-
-    def test_op_split_deprecation_warning_on_legacy(self):
-        """Asking for the legacy inside-RK path logs a deprecation."""
-        import logging
-
-        model = self._speedy_model()
-        with self.assertLogs("jcm.model", level=logging.WARNING) as cm:
-            _ = model.run(
-                save_interval=1 / 48.0, total_time=1 / 48.0,
-                use_op_split=False,
-            )
-        self.assertTrue(
-            any("op_split" in msg or "Phase 4" in msg for msg in cm.output),
-            f"expected an op-split deprecation warning, got {cm.output!r}",
-        )
 
     def test_op_split_carry_persists_across_resume(self):
         """``run()`` + ``resume()`` matches a single ``run()`` of the
@@ -737,11 +686,11 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         # 5 + 5 step bisected run.
         _ = model_split.run(
             save_interval=1 / 48.0, total_time=5 / 48.0,
-            use_op_split=True,
+            
         )
         preds_part2 = model_split.resume(
             save_interval=1 / 48.0, total_time=5 / 48.0,
-            use_op_split=True,
+            
         )
         final_bisected = float(
             np.asarray(preds_part2.dynamics.temperature[-1]).mean()
@@ -751,7 +700,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         model_one = self._speedy_model()
         preds_one = model_one.run(
             save_interval=1 / 48.0, total_time=10 / 48.0,
-            use_op_split=True,
+            
         )
         final_contiguous = float(
             np.asarray(preds_one.dynamics.temperature[-1]).mean()
@@ -779,13 +728,13 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         m = self._speedy_model()
         preds_a = m.run(
             save_interval=1 / 48.0, total_time=2 / 48.0,
-            use_op_split=True,
+            
         )
         T_a = float(np.asarray(preds_a.dynamics.temperature[-1]).mean())
 
         preds_b = m.run(
             save_interval=1 / 48.0, total_time=2 / 48.0,
-            use_op_split=True,
+            
         )
         T_b = float(np.asarray(preds_b.dynamics.temperature[-1]).mean())
 
@@ -818,7 +767,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         # save.
         preds = model.run(
             save_interval=1 / 48.0, total_time=1 / 48.0,
-            use_op_split=True, output_averages=False,
+            output_averages=False,
         )
 
         self.assertIsNotNone(
@@ -842,85 +791,62 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         )
 
 
-class TestDiagnosticsCollectorCleanup(unittest.TestCase):
-    """Phase 3 cleanup of ``DiagnosticsCollector`` (issue #471).
+class TestLegacyPathRemoved(unittest.TestCase):
+    """Phase 4 of #471: legacy inside-RK physics path is gone.
 
-    The substage cache plumbing (``physics_data_cache``, ``physical_step``,
-    ``accumulate_if_physical_step``) has been replaced by:
-      - first-class cross-step carry threaded through the op-split scan;
-      - a simple ``accumulate`` method on the legacy averaged-path
-        accumulator (no substage gating).
+    Confirms the removed symbols cannot be imported and no production
+    code references the dead identifiers. ``DiagnosticsCollector``,
+    ``averaged_trajectory_from_step``, and ``get_physical_tendencies``
+    are all gone along with the ``use_op_split`` flag.
     """
 
-    def test_collector_has_no_physics_data_cache(self):
-        """The cache field is gone — its job moved to the integration carry."""
-        from jcm.model import DiagnosticsCollector
-        c = DiagnosticsCollector(steps_to_average=4)
+    def test_legacy_symbols_removed(self):
+        """Imports of legacy-path symbols should fail."""
+        from jcm import model, physics_interface
+        for name in (
+            "DiagnosticsCollector",
+            "averaged_trajectory_from_step",
+            "_get_step_fn_factory",
+            "_get_integrate_fn",
+        ):
+            self.assertFalse(
+                hasattr(model, name) or hasattr(getattr(model, "Model", None), name),
+                f"jcm.model.{name} should be removed (Phase 4)",
+            )
         self.assertFalse(
-            hasattr(c, "physics_data_cache"),
-            "physics_data_cache must be removed (issue #471 Phase 3)",
-        )
-
-    def test_collector_has_no_physical_step(self):
-        """Substage gating is gone — op-split has no substages."""
-        from jcm.model import DiagnosticsCollector
-        c = DiagnosticsCollector(steps_to_average=4)
-        self.assertFalse(
-            hasattr(c, "physical_step"),
-            "physical_step must be removed (issue #471 Phase 3)",
-        )
-
-    def test_collector_accumulate_method(self):
-        """``accumulate`` adds ``new / steps_to_average`` into ``data[i]``."""
-        import warnings
-
-        from flax import nnx
-        from jcm.model import DiagnosticsCollector
-
-        with warnings.catch_warnings():
-            # Suppress the nnx deprecation noise about ``.value`` —
-            # cleaning that up across the existing collector code is
-            # a separate refactor outside the #471 op-split scope.
-            warnings.simplefilter("ignore", DeprecationWarning)
-
-            c = DiagnosticsCollector(steps_to_average=4)
-            c.data = nnx.Variable({"foo": jnp.zeros((3, 5))})
-            c.accumulate({"foo": jnp.ones(5)})
-            stacked = c.data.value["foo"]
-        # Adding ones / 4 into data[0]; data[1:] still zeros.
-        import numpy as np
-        np.testing.assert_array_equal(
-            np.asarray(stacked[0]), 0.25 * np.ones(5),
-        )
-        np.testing.assert_array_equal(
-            np.asarray(stacked[1:]), np.zeros((2, 5)),
+            hasattr(physics_interface, "get_physical_tendencies"),
+            "get_physical_tendencies should be removed (Phase 4)",
         )
 
     def test_physics_carry_state_alias_exists(self):
-        """The :data:`PhysicsCarryState` type alias is importable."""
+        """The :data:`PhysicsCarryState` type alias is still importable."""
         from jcm.physics_interface import PhysicsCarryState
-        # The alias is currently ``Dict[str, Any]`` — just check it's
-        # imported, the precise type may evolve in later phases.
         self.assertIsNotNone(PhysicsCarryState)
 
-    def test_no_grep_physics_data_cache(self):
-        """Repository-level regression check: no production code identifier
-        references ``physics_data_cache``.
+    def test_no_grep_legacy_identifiers(self):
+        """Repository-level regression: no production code references
+        the removed legacy-path identifiers.
 
-        The substring can still appear in deprecation comments /
-        docstrings explaining what was removed, but no source files
-        should attribute-access or assign to it.
+        Excludes ``*_test.py`` (this file itself references the names
+        in string literals) and ``*.md`` (design docs document the
+        deletions).
         """
         import subprocess
         from pathlib import Path
 
         repo = Path(__file__).resolve().parent.parent
-        match_id = "physics" + "_data_" + "cache"  # defeat self-match
-        pattern = rf"\.{match_id}\b|^[^#]*\b{match_id}\b *(:|=|\()"
+        # Tokens defeat self-match by string concatenation.
+        legacy_tokens = [
+            "physics" + "_data_" + "cache",
+            "use_op" + "_split",
+            "Diagnostics" + "Collector",
+            "get_physical_" + "tendencies",
+            "averaged_trajectory_" + "from_step",
+        ]
+        pattern = "|".join(rf"\b{t}\b" for t in legacy_tokens)
         out = subprocess.run(
             [
-                "grep", "-rn",
-                "-E", pattern,
+                "grep", "-rEn", pattern,
                 "--include=*.py",
                 "--exclude=*_test.py",
                 "--exclude-dir=__pycache__",
@@ -931,6 +857,6 @@ class TestDiagnosticsCollectorCleanup(unittest.TestCase):
         lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
         self.assertEqual(
             lines, [],
-            f"physics_data_cache must be fully removed; found: {lines}",
+            f"Legacy identifiers must be fully removed; found: {lines}",
         )
 
