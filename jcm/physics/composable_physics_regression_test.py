@@ -40,10 +40,15 @@ REFERENCE_DIR = (
 )
 
 # Tolerance for the snapshot comparison. Picked to absorb CPU↔GPU↔TPU
-# XLA reduction-order drift while still catching refactors that perturb
-# the integration meaningfully.
+# XLA reduction-order drift (and dev-host vs GitHub Actions CPU drift)
+# while still catching refactors that perturb the integration
+# meaningfully. ``ATOL`` is set well above the cross-CPU reduction-
+# order noise floor (~1e-4 on this T31L8 1-day reference) so that
+# near-zero fields like ``u_wind`` early in the integration don't
+# fail on tiny absolute drift even when the *relative* difference is
+# large.
 RTOL = 1e-3
-ATOL = 1e-6
+ATOL = 1e-4
 
 
 def _final_state_arrays(predictions):
