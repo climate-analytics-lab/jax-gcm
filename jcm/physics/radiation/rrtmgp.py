@@ -683,7 +683,8 @@ class RRTMGPRadiation(PhysicsTerm):
     ``RadiationParameters(rrtmgp_chunk_size=...)``.
 
     Reads pressure / height / density from the moist-air diagnostics
-    dict, cloud water / ice from ``diagnostics["clouds"]``, ozone / CO2 from
+    dict, cloud fraction from ``diagnostics["clouds"]`` and
+    pre-cloud-step cloud water / ice from state tracers, ozone / CO2 from
     ``"chemistry"``, aerosol from ``"aerosol"``, surface temperature
     from the legacy ``"surface"`` key, and surface albedos /
     emissivity from the public ``"radiation"`` key. Caches its own

@@ -93,11 +93,15 @@ class CloudData:
 
 
 def radiation_cloud_fields(state, diagnostics):
-    """Return cloud fields for radiation from the current cloud diagnostic.
+    """Return ECHAM-ordered cloud fields for radiation.
 
-    Radiation must use the post-cloud-scheme condensate carried on
-    ``diagnostics["clouds"]``. Reading ``state.tracers["qc"/"qi"]`` here
-    reverts to the pre-physics values for the current split step.
+    ECHAM ``physc`` calls ``cover`` before radiation, then passes the
+    diagnosed cloud fraction plus the pre-cloud-step ``xlm1`` / ``xim1``
+    condensate fields into radiation. Large-scale cloud microphysics runs
+    later. Mirror that here: fresh cloud fraction comes from
+    ``diagnostics["clouds"]``, while condensate comes from state tracers.
     """
     clouds = diagnostics["clouds"]
-    return clouds.qc, clouds.qi, clouds.cloud_fraction
+    cloud_water = state.tracers.get("qc", jnp.zeros_like(state.temperature))
+    cloud_ice = state.tracers.get("qi", jnp.zeros_like(state.temperature))
+    return cloud_water, cloud_ice, clouds.cloud_fraction

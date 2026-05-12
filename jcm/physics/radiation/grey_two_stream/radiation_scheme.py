@@ -597,8 +597,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
     """Grey two-stream radiation as a composable PhysicsTerm.
 
     Wraps :func:`radiation_scheme`. Reads pressure / height / density
-    from the moist-air diagnostics dict; reads cloud water / ice and
-    cloud fraction from the public ``"clouds"`` key;
+    from the moist-air diagnostics dict; reads cloud fraction from the
+    public ``"clouds"`` key and pre-cloud-step cloud water / ice from
+    state tracers, matching ECHAM's ``cover`` then ``radiation`` order;
     reads ozone / CO2 from ``"chemistry"``; reads aerosol optical
     properties from ``"aerosol"``; reads surface temperature from
     ``"surface"`` (still legacy until the surface migration) and
