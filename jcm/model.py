@@ -737,7 +737,11 @@ class Model:
         initial_carry = self.physics.initial_carry_state(self.coords)
         if isinstance(initial_carry, dict) and isinstance(template, dict):
             return {**template, **initial_carry}
-        return initial_carry or template
+        # Explicit ``is None`` check: ``initial_carry or template``
+        # would trigger ``bool(carry)`` and raise an ambiguous-truth
+        # ``ValueError`` if a ``Physics`` subclass returns a JAX
+        # array (or any object with non-scalar truth semantics).
+        return template if initial_carry is None else initial_carry
 
     def _get_op_split_integrate_fn(
         self,
