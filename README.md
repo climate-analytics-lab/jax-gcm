@@ -102,6 +102,12 @@ python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpe
 # Long ECHAM + RRTMGP run with chunked health checks
 python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
 
+# Same, but resumable across preemptions: model state is saved to
+# ``run.checkpoint_path`` after each chunk; if the file already exists at
+# launch, the run picks up at the recorded sim-day.
+python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun \
+    run.checkpoint_path=/scratch/$JOB_ID.ckpt
+
 # Single-column physics evolution from a saved JCM run
 python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
     run.column.lat_deg=0 run.column.lon_deg=180

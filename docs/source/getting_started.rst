@@ -261,6 +261,45 @@ actually needs from disk, so this stays memory-efficient even for very
 long forcing records.
 
 
+Checkpointing for preemptible runs
+----------------------------------
+
+Multi-day integrations on preemptible compute (spot instances, Slurm
+``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
+``run.checkpoint_path`` to make a chunked run resumable: after each
+chunk the runner persists the modal + physics state and the elapsed
+sim-day count to that file (atomic write via tmpfile + rename, so a
+kill mid-write leaves the previous checkpoint intact). When the same
+command is launched again with the file already in place, the run
+restores from the checkpoint and only steps the remaining chunks.
+
+.. code-block:: bash
+
+   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
+       run=longrun run.checkpoint_path=/scratch/$JOB_ID.ckpt
+
+The same primitives are available directly to bring-your-own-driver
+workflows via :py:mod:`jcm.checkpoint`:
+
+.. code-block:: python
+
+   from jcm.checkpoint import save_checkpoint, load_checkpoint
+
+   model.run(forcing=forcing, total_time=10)
+   save_checkpoint(model, '/scratch/run.ckpt', elapsed_days=10.0)
+
+   # ... later, in a fresh process ...
+   model = build_model(cfg)            # same coords + physics
+   model.bootstrap_state()             # populate template pytrees
+   elapsed = load_checkpoint(model, '/scratch/run.ckpt')
+   model.resume(forcing=forcing, total_time=20 - elapsed)
+
+The on-disk format is flax's msgpack codec applied to flattened lists
+of arrays — small (state pytrees are a few MB even at T63L47) and
+portable across hosts as long as the destination ``Model`` was built
+with the same coords and physics term composition.
+
+
 Nudging the model toward an external state
 -------------------------------------------
 
