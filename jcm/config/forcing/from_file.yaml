@@ -3,3 +3,11 @@
 # the command line: ``forcing=from_file forcing.file=/path/to/forcing.nc``.
 kind: from_file
 file: ???
+
+# Optional CMIP6/ECHAM-style ozone climatology netCDF
+# (``(time, plev, lat, lon)`` mole/mole, e.g. ``T63_ozone_picontrol.nc``
+# or any SSP forcing file in the same format). When set, RRTMGP gets the
+# realistic stratospheric ozone profile instead of the term's analytical
+# Fortuin-Kelder surrogate. Must already be on the model's horizontal
+# grid; preprocess the file if not.
+ozone_file: null

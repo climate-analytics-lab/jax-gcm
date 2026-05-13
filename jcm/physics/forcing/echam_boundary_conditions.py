@@ -86,7 +86,12 @@ class EchamBoundaryConditions(PhysicsTerm):
 
     name: ClassVar[str] = "echam_boundary_conditions"
     category: ClassVar[str] = "forcing"
-    requires: ClassVar[tuple[str, ...]] = ()
+    requires: ClassVar[tuple[str, ...]] = (
+        # Needed by the analytical ozone profile (Fortuin & Kelder-style)
+        # that seeds ``chemistry.ozone_vmr`` each step. ``MoistAirColumnState``
+        # populates both diagnostics; this term must run after it.
+        "pressure_full", "surface_pressure",
+    )
     provides: ClassVar[tuple[str, ...]] = (
         "radiation", "surface", "chemistry",
     )
@@ -100,8 +105,35 @@ class EchamBoundaryConditions(PhysicsTerm):
         "chemistry": ChemistryData,
     }
 
-    def __init__(self):
-        """No tunables; nothing to initialise."""
+    def __init__(
+        self,
+        ozone_peak_ppmv: float = 8.0,
+        ozone_peak_height_m: float = 20_000.0,
+        ozone_scale_height_m: float = 7_000.0,
+    ):
+        """Hold the analytical-ozone profile parameters.
+
+        Defaults broadly track Fortuin & Kelder 1998 zonal-mean
+        climatology near the equator: ~8 ppmv peak at ~20 km height with
+        a 7 km e-folding scale above (and a linear ramp from surface to
+        peak below). Override per-Hydra to drive a different vertical
+        profile.
+
+        Args:
+            ozone_peak_ppmv: Stratospheric peak ozone volume mixing
+                ratio (ppmv).
+            ozone_peak_height_m: Altitude of the ozone maximum (m).
+            ozone_scale_height_m: e-folding height for decay above the
+                peak (m).
+
+        """
+        # Store as plain Python floats; the ``ChemistryParameters``
+        # struct (a ``tree_math.struct`` of JAX arrays) is built fresh
+        # inside ``__call__`` so it stays a JIT-friendly closure value
+        # rather than a stored pytree on this flax ``nnx`` term.
+        self._ozone_peak_ppmv = float(ozone_peak_ppmv)
+        self._ozone_peak_height_m = float(ozone_peak_height_m)
+        self._ozone_scale_height_m = float(ozone_scale_height_m)
 
     def __call__(
         self,
@@ -134,11 +166,53 @@ class EchamBoundaryConditions(PhysicsTerm):
         surface_temperature = surface_temperature.reshape(ncols)
         roughness_length = roughness_length.reshape(ncols)
 
-        # CH4 and O3 are still ECHAM-hardcoded; the forcing-field versions
-        # can land in a follow-up. CO2 already comes from ``forcing.co2_vmr``.
+        # CH4 is still ECHAM-hardcoded; the forcing-field version can land
+        # in a follow-up. CO2 already comes from ``forcing.co2_vmr``.
         co2_vmr_value = forcing.co2_vmr
         ch4_vmr_value = 1900.0e-3  # ppbv → ppmv: 1.9 ppmv
-        o3_vmr_value = 300.0e-3    # ppbv → ppmv: 0.3 ppmv
+
+        # O3: prefer the realistic CMIP6/ECHAM-style climatology carried
+        # on ``forcing.ozone_climatology`` (loaded from a netCDF in
+        # ``build_forcing``). Without that file, fall back to the
+        # analytical Fortuin & Kelder-style surrogate driven by this
+        # term's ``ozone_peak_*`` constructor kwargs. The analytical
+        # profile is known to be a poor match for the real climatology
+        # (peak in the wrong place, troposphere overestimated by ~50x,
+        # mesopause underestimated by ~30x — see validation against
+        # T63_ozone_picontrol.nc), so it should be treated as a
+        # placeholder for unit tests / SCM where no climatology is
+        # available.
+        #
+        # ``chemistry.ozone_vmr`` is consumed by RRTMGP as ppmv (a
+        # ``* 1e-6`` converts to mole fraction inside that term).
+        if forcing.ozone_climatology.is_loaded():
+            # Pre-interpolated to the model's hybrid grid offline (see
+            # ``jcm.data.bc.interpolate_ozone``) — straight slice, no
+            # online vertical interp.
+            ozone_vmr_ppmv = forcing.ozone_climatology.o3_ppmv
+        else:
+            from jcm.physics.chemistry.simple_chemistry import (
+                ChemistryParameters,
+                fixed_ozone_distribution,
+            )
+            defaults = ChemistryParameters.default()
+            ozone_params = ChemistryParameters(
+                ozone_scale_height=jnp.asarray(self._ozone_scale_height_m),
+                ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv * 1000.0),
+                ozone_tropopause_height=jnp.asarray(self._ozone_peak_height_m),
+                ozone_stratosphere_coeff=defaults.ozone_stratosphere_coeff,
+                methane_surface_vmr=defaults.methane_surface_vmr,
+                methane_lifetime=defaults.methane_lifetime,
+                methane_oh_scaling=defaults.methane_oh_scaling,
+                co2_vmr=defaults.co2_vmr,
+                co2_growth_rate=defaults.co2_growth_rate,
+            )
+            ozone_vmr_ppmv = fixed_ozone_distribution(
+                pressure=diagnostics["pressure_full"],
+                surface_pressure=diagnostics["surface_pressure"],
+                temperature=state.temperature,
+                config=ozone_params,
+            ) * 1e-3
 
         # Start from whatever the previous step (or upstream term) left us
         # so we don't clobber radiation cache or other sub-struct fields.
@@ -163,8 +237,7 @@ class EchamBoundaryConditions(PhysicsTerm):
             co2_vmr=jnp.ones_like(chemistry_zero.co2_vmr) * co2_vmr_value,
             methane_vmr=jnp.ones_like(chemistry_zero.methane_vmr)
             * ch4_vmr_value,
-            ozone_vmr=jnp.ones_like(chemistry_zero.ozone_vmr)
-            * o3_vmr_value,
+            ozone_vmr=ozone_vmr_ppmv,
         )
 
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)

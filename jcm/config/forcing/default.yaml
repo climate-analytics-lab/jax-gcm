@@ -1,3 +1,8 @@
 # Default surface forcing — aquaplanet built from ``coords.horizontal`` at
 # ``ForcingData.zeros``. Land + SST default to 288.15 K.
 kind: default
+
+# Optional CMIP6-style ozone climatology netCDF; see
+# ``forcing/from_file.yaml`` for the format. Null → use the analytical
+# fallback in ``EchamBoundaryConditions``.
+ozone_file: null

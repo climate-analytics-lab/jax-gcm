@@ -12,6 +12,17 @@ from jcm.date import (
     DEFAULT_CALENDAR,
     absolute_seconds_since_epoch,
 )
+from jcm.ozone_climatology import OzoneClimatology
+
+
+def _empty_ozone_climatology() -> OzoneClimatology:
+    """Sentinel ``OzoneClimatology`` used when no file is provided.
+
+    Indirected through a helper so a future forcing-extension can
+    swap the default without touching every ``zeros``/``ones``/``copy``
+    call site.
+    """
+    return OzoneClimatology.empty()
 
 
 def _validate_bc_fields(ds) -> None:
@@ -187,6 +198,13 @@ class ForcingData:
     # null SolarGeometry); populated by `select(date)` on every step.
     solar: SolarGeometry
 
+    # Pre-computed climatological ozone profile (annual mean today;
+    # ``select(date)`` will eventually slice monthly / scenario-year as
+    # needed). Empty sentinel when no climatology file is provided, in
+    # which case downstream radiation falls back to an analytical
+    # profile (see :class:`jcm.physics.chemistry.OzoneClimatology`).
+    ozone_climatology: OzoneClimatology
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -194,6 +212,7 @@ class ForcingData:
               co2_vmr=None,
               aerosol_year_weight=None,aerosol_ann_cycle=None,
               solar=None,
+              ozone_climatology=None,
               nplumes=9):
         # Land + SST temperatures default to ~15 °C — a sensible global
         # mean surface temperature — so that ``ForcingData.zeros(...)``
@@ -212,6 +231,10 @@ class ForcingData:
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
             solar=solar if solar is not None else SolarGeometry.zero(),
+            ozone_climatology=(
+                ozone_climatology if ozone_climatology is not None
+                else _empty_ozone_climatology()
+            ),
         )
 
     @classmethod
@@ -221,6 +244,7 @@ class ForcingData:
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
+             ozone_climatology=None,
              nplumes=9):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
@@ -233,6 +257,10 @@ class ForcingData:
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
             solar=solar if solar is not None else SolarGeometry.zero(),
+            ozone_climatology=(
+                ozone_climatology if ozone_climatology is not None
+                else _empty_ozone_climatology()
+            ),
         )
 
     @classmethod
@@ -369,7 +397,8 @@ class ForcingData:
              sea_surface_temperature=None,
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
-             solar=None):
+             solar=None,
+             ozone_climatology=None):
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
@@ -381,6 +410,10 @@ class ForcingData:
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else self.aerosol_year_weight,
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else self.aerosol_ann_cycle,
             solar=solar if solar is not None else self.solar,
+            ozone_climatology=(
+                ozone_climatology if ozone_climatology is not None
+                else self.ozone_climatology
+            ),
         )
 
     def isnan(self):

@@ -460,14 +460,49 @@ def build_forcing(cfg: DictConfig, coords):
     ``kind: default`` returns ``None`` — ``Model.run`` then falls back to the
     aquaplanet ``default_forcing(coords.horizontal)``. ``kind: from_file``
     loads a netCDF boundary file via ``ForcingData.from_file``.
+
+    Optionally attaches an ozone climatology if ``cfg.forcing.ozone_file``
+    is set; the file must be on the same horizontal grid as the model
+    (CMIP6-style ``(time, plev, lat, lon)`` mole/mole netCDF).
     """
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is None or forcing_cfg.kind == "default":
-        return None
+        return _attach_ozone(None, forcing_cfg, coords)
     if forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
-        return ForcingData.from_file(forcing_cfg.file, coords=coords)
+        forcing = ForcingData.from_file(forcing_cfg.file, coords=coords)
+        return _attach_ozone(forcing, forcing_cfg, coords)
     raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
+
+
+def _attach_ozone(forcing, forcing_cfg, coords):
+    """Load the ozone climatology and attach to ``forcing``.
+
+    No-op when the cfg has no ``ozone_file`` or the path is null. When
+    ``forcing`` is ``None`` (``kind: default``) and an ozone file IS
+    given, build a baseline ``ForcingData.zeros`` so the climatology has
+    a parent struct to ride on.
+    """
+    if forcing_cfg is None:
+        return forcing
+    ozone_file = forcing_cfg.get("ozone_file", None)
+    if ozone_file in (None, "", "null"):
+        return forcing
+    from jcm.forcing import ForcingData
+    from jcm.ozone_climatology import OzoneClimatology
+    nlon, nlat = coords.horizontal.nodal_shape
+    nlev = coords.nodal_shape[0]
+    climatology = OzoneClimatology.from_file(
+        ozone_file, nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
+    )
+    if forcing is None:
+        forcing = ForcingData.zeros(
+            nodal_shape=(int(nlon), int(nlat)),
+            ozone_climatology=climatology,
+        )
+    else:
+        forcing = forcing.copy(ozone_climatology=climatology)
+    return forcing
 
 
 # ---------------------------------------------------------------------------
