@@ -20,7 +20,6 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from jcm.checkpoint import load_checkpoint, save_checkpoint
 from jcm.model import Model

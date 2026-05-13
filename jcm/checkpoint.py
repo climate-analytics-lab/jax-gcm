@@ -43,6 +43,7 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
 
     Returns:
         ``Path(path)`` for chaining.
+
     """
     if model._final_modal_state is None or model._final_physics_state is None:
         raise ValueError(
@@ -83,6 +84,7 @@ def load_checkpoint(model, path) -> float:
     Returns:
         The ``elapsed_days`` count recorded when the checkpoint was
         saved.
+
     """
     if model._final_modal_state is None or model._final_physics_state is None:
         raise ValueError(
