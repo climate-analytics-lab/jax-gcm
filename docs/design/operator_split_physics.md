@@ -1,6 +1,6 @@
 # Operator-split physics
 
-**Status:** implemented (Strang split, first-class physics carry).
+**Status:** implemented (Lie split (a), first-class physics carry).
 **Issue:** [#471 — Operator-split physics from the IMEX-RK dynamical core](https://github.com/climate-analytics-lab/jax-gcm/issues/471)
 **Related:**
 - [#470 — Integration trajectory should not depend on output mode](https://github.com/climate-analytics-lab/jax-gcm/issues/470)
@@ -9,22 +9,19 @@
 ## Overview
 
 JCM evaluates physics exactly once per dynamics timestep `dt`, outside
-the IMEX-RK stages, and applies the resulting tendency as a Strang
-split bracketing the dynamics integral:
+the IMEX-RK stages, and applies the resulting tendency as a Lie split
+ahead of the dynamics integral:
 
 ```text
 state ─┐
        ├── compute_physics_step ─► dyn_tendency, new_physics_state
        │
        ▼
-state + ½ dt · dyn_tendency
+state + dt · dyn_tendency
        │
        ▼
    IMEX-RK SIL3 dynamics over dt   ← primitive equations (+ optional nudging)
        │                              + upper sponge, hyperdiffusion filters
-       ▼
-state_after_dynamics + ½ dt · dyn_tendency
-       │
        ▼
    filters (mean-Ps fix, level-dependent hyperdiffusion on
             divergence / vorticity-tracers / temperature)
@@ -33,15 +30,37 @@ state_after_dynamics + ½ dt · dyn_tendency
 state_next
 ```
 
-Physics is evaluated once on the input state; the same `dyn_tendency`
-is applied as two half-steps either side of the dynamics call. The
-splitting error is `O(dt²)`. The dynamics IMEX-RK is the only step
-that advances `sim_time` — `dyn_tendency` carries `sim_time = 0` so
-the half-step adds do not perturb it.
+The splitting error is `O(dt)` (Lie split (a), `state → physics →
+dynamics → next`). The dynamics IMEX-RK is the only step that advances
+`sim_time` — `dyn_tendency` carries `sim_time = 0` so the forward-Euler
+add does not perturb it.
 
 This mirrors operational GCM practice (ECHAM, CAM, IFS, E3SM): physics
 runs once per `dt` as forcing to the dynamics, rather than at each RK
 substage.
+
+### Why Lie and not Strang
+
+The natural next step from Lie is a Strang split (`state → ½dt
+physics → dynamics → ½dt physics → next`). Two forms exist:
+
+- **Single-evaluation** ("symmetric Lie"): reuse the same
+  `dyn_tendency` for both half-steps. 1× physics cost. But for
+  state-dependent physics (the normal case) this is *not* second-order
+  accurate — the local truncation analysis shows it misses the
+  `(dt²/2)(PD + P²)` term the exact propagator carries. Globally `O(dt)`,
+  same as Lie.
+- **Classical Strang**: re-evaluate physics on the post-dynamics state
+  for the second half-step. 2× physics cost (still cheaper than the
+  legacy 3× per-substage scheme). True `O(dt²)` accuracy.
+
+Neither is implemented today. Classical Strang is a worthwhile
+follow-up if a coarser-`dt` regime exposes the splitting error; at the
+current climate-rate `dt = 12-30 min`, the Santos 2021 analysis
+(JAMES 13, e2020MS002359) finds coupling error dominates self-feedback
+error and Lie/Strang are both adequate. The single-evaluation symmetric
+form was attempted in this PR's history but reverted after Codex review
+correctly flagged the order issue (PR #481 review thread).
 
 ## Key components
 
@@ -52,7 +71,8 @@ physics_state_next)`. Internals:
 
 1. Resolve the current step's date and forcing slice from `state.sim_time`.
 2. Call `compute_physics_step` for `(dyn_tendency, new_physics_state)`.
-3. Strang apply: `state → +½dt·tend → dynamics → +½dt·tend`.
+3. Lie apply: `state + dt·tend → dynamics_step` (full forward-Euler add
+   then full-`dt` IMEX-RK).
 4. Run the post-step filters (conserve global-mean surface pressure,
    level-dependent hyperdiffusion on divergence / vorticity+tracers /
    temperature).
@@ -199,11 +219,6 @@ negative tracer tendencies before user-visible output.
 
 Op-split coverage in `jcm/model_test.py::TestOperatorSplitPhysics`:
 
-- `test_op_split_step_matches_manual_strang` — rebuilds the Strang
-  reconstruction (and a Lie-split alternative) from the same
-  primitives the step uses and checks the step output is much closer
-  to Strang than to Lie. Catches regressions to a single full-step
-  apply.
 - `test_op_split_snapshot_speedy_finite` /
   `test_op_split_averaged_speedy_finite` /
   `test_op_split_averaged_echam_hybrid_finite` — both modes, SPEEDY
