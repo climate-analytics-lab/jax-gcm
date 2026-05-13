@@ -14,6 +14,7 @@ pytest-xdist
 # Sphinx
 sphinx
 furo
+myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+

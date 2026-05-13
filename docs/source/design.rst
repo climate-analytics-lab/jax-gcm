@@ -1,7 +1,15 @@
 Architecture & Design
 =====================
 
-JAX-GCM is designed to be a fully differentiable climate model that balances ease of use for novices with extensibility for experts. This document describes the key architectural decisions and design principles.
+JAX-GCM is designed to be a fully differentiable climate model that balances ease of use for novices with extensibility for experts. This document is the high-level architectural overview; the design references below cover the same machinery in depth.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: In-depth design references
+
+   design/composable_physics
+   design/operator_split_physics
+   design/writing_a_physics_scheme
 
 Core Architecture
 -----------------
@@ -9,7 +17,7 @@ Core Architecture
 Model Structure
 ^^^^^^^^^^^^^^^
 
-The :py:class:`jcm.model.Model` class serves as the central orchestrator, linking the Dinosaur dynamical core with physics implementations through a clean interface:
+The :py:class:`jcm.model.Model` class serves as the central orchestrator, linking the Dinosaur dynamical core with physics implementations through a clean interface. See :doc:`design/operator_split_physics` for the per-step coupling between the dynamics integrator and physics.
 
 .. code-block:: text
 
@@ -123,7 +131,7 @@ This design makes it easy to:
 Composability
 ^^^^^^^^^^^^^
 
-The model is composable at multiple levels through the ``ComposablePhysics`` framework.
+The model is composable at multiple levels through the ``ComposablePhysics`` framework. See :doc:`design/composable_physics` for the contract, validation rules, diagnostics-dict convention, and differentiability patterns; :doc:`design/writing_a_physics_scheme` for a single-file plugin walkthrough.
 
 **Composable Physics**: Individual parameterizations (``PhysicsTerm`` instances) can be mixed across packages:
 
@@ -268,7 +276,7 @@ For Experts
 
 Every component can be customized or extended:
 
-- **Custom Physics**: Implement the ``Physics`` interface for new parameterizations
+- **Custom Physics**: Add a new ``PhysicsTerm`` — see :doc:`design/writing_a_physics_scheme` for the one-file plugin contract.
 - **Custom Forcing**: Create specialized boundary condition handlers
 - **Custom Diagnostics**: Add new output variables and computations
 - **Integration**: Couple with other models or ML components

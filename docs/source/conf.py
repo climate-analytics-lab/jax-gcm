@@ -22,7 +22,22 @@ extensions = [
     'sphinx.ext.doctest',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
+    # MyST lets sphinx parse the design/*.md reference docs alongside
+    # the .rst pages. Without it the design folder is invisible to
+    # readthedocs.
+    'myst_parser',
 ]
+
+# Pick up both reStructuredText and CommonMark/MyST source.
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
+
+# Auto-generate anchors for h1/h2/h3 in markdown so intra-doc links
+# like ``[Validation](#validation)`` resolve without hand-written
+# ``.. _label:`` blocks.
+myst_heading_anchors = 3
 
 templates_path = ['_templates']
 exclude_patterns = []
