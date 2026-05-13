@@ -694,6 +694,13 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
+        # ``inject_*_profile`` only populates ``_final_modal_state`` —
+        # the physics carry is normally built lazily by ``resume``.
+        # ``load_checkpoint`` needs both pytrees as deserialization
+        # templates, so build the carry now if the inject path took it.
+        if model._final_physics_state is None:
+            model._final_physics_state = model._build_initial_physics_carry()
+
         elapsed_sim_days = load_checkpoint(model, ckpt_path)
         resumed_from_ckpt = True
         print(

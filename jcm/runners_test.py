@@ -246,6 +246,37 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
+    def test_chunked_resume_with_balanced_isothermal_init(self):
+        """Resume path bootstraps the physics carry for inject-based inits.
+
+        ``inject_balanced_isothermal_profile`` populates
+        ``_final_modal_state`` but leaves ``_final_physics_state`` for
+        ``Model.resume`` to lazy-build. The resume-from-checkpoint code
+        path must materialise the carry itself before calling
+        ``load_checkpoint``, otherwise the load raises on the
+        uninitialised template (codex review on PR #479). Held-Suarez is
+        the cheapest physics that supports ``init=balanced_isothermal``.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_path = f"{tmpdir}/run.ckpt"
+            base_overrides = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "init=balanced_isothermal",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={ckpt_path}",
+            ]
+            run(_compose(base_overrides + ["run.total_time=1"]))
+            self.assertTrue(Path(ckpt_path).exists())
+            reports2 = run(_compose(base_overrides + ["run.total_time=2"]))
+            self.assertEqual(len(reports2), 1)
+            self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
         # have a JCM-shaped state to load.
