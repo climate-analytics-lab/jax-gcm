@@ -636,15 +636,23 @@ class Model:
     def _get_op_split_step_fn(
         self, forcing: ForcingData,
     ) -> Callable[[primitive_equations.State, Any], tuple[primitive_equations.State, Any]]:
-        """Build the operator-split single-step function (Lie split a).
+        """Build the operator-split single-step function (Strang split).
 
         One call: ``state, physics_state -> state_next, physics_state_next``.
 
-        Order: ``state -> physics_tendency -> apply forward-Euler ->
-        IMEX-RK dynamics -> filters``. This is the structure described
-        in ``docs/design/operator_split_physics.md`` §1 (Lie split (a))
-        and mirrors ECHAM6's ``physc`` → ``sccd``/``scctp`` →
-        ``hdiff`` chain (`stepon.f90:271,280,309`).
+        Order: ``state -> physics_tendency -> ½dt forward-Euler ->
+        IMEX-RK dynamics over dt -> ½dt forward-Euler -> filters``.
+        Physics is evaluated *once* on the input state and the same
+        tendency is applied as two half-steps bracketing the dynamics
+        integral. This is symmetric, second-order accurate in ``dt``
+        (``O(dt²)`` splitting error vs Lie's ``O(dt)``) and costs no
+        extra physics work — the expensive call is the one
+        ``compute_physics_step`` below.
+
+        Mirrors ECHAM6's ``physc`` → ``sccd``/``scctp`` → ``hdiff``
+        chain (`stepon.f90:271,280,309`) but with the additional
+        symmetric half-step apply that Strang adds on top of a Lie
+        split.
 
         ``physics_state`` is the cross-step carry — the dict returned
         by the previous step's :meth:`ComposablePhysics.compute_tendencies`
@@ -665,17 +673,20 @@ class Model:
                 terrain=self.terrain,
                 physics_state=physics_state,
             )
-            # Forward-Euler add of the physics dynamics tendency. The
-            # dinosaur State is a tree_math.struct so + and * lift
-            # leaf-wise; physics tendency has ``sim_time = 0`` so the
-            # state's ``sim_time`` is not perturbed here — the dynamics
-            # IMEX-RK below is what advances sim_time by ``dt``.
-            state_after_physics = state + self.dt * dyn_tendency
-            state_after_dynamics = dynamics_step(state_after_physics)
+            # Strang split: ½dt physics, full-dt IMEX-RK dynamics,
+            # ½dt physics — the same ``dyn_tendency`` is reused on
+            # both sides. The dinosaur State is a tree_math.struct so
+            # + and * lift leaf-wise; ``dyn_tendency`` has
+            # ``sim_time = 0`` so neither half-step add perturbs
+            # sim_time and only ``dynamics_step`` advances it by
+            # ``dt``.
+            half_dt = 0.5 * self.dt
+            state_after_first_half = state + half_dt * dyn_tendency
+            state_after_dynamics = dynamics_step(state_after_first_half)
+            state_next = state_after_dynamics + half_dt * dyn_tendency
             # Run the same filters used in the legacy path. They receive
-            # the pre-step state and the post-dynamics state, matching
-            # the ``step_with_filters`` contract.
-            state_next = state_after_dynamics
+            # the pre-step state and the post-dynamics+physics state,
+            # matching the ``step_with_filters`` contract.
             for f in self.filters:
                 state_next = f(state, state_next)
             return state_next, new_physics_state
