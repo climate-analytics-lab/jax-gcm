@@ -123,11 +123,19 @@ class OzoneClimatology:
     def empty(cls) -> "OzoneClimatology":
         """Sentinel value used when no climatology file is provided.
 
-        Callers can check ``is_loaded()`` to decide whether to use this
-        forcing or fall back to an analytical profile.
+        Uses a zero-size array so ``is_loaded`` can distinguish the
+        sentinel from a legitimately-loaded single-column climatology
+        (e.g. an SCM run with ``nlon == nlat == 1``). Callers can
+        check ``is_loaded()`` to decide whether to use this forcing
+        or fall back to an analytical profile.
         """
-        return cls(o3_ppmv=jnp.zeros((1, 1), dtype=jnp.float32))
+        return cls(o3_ppmv=jnp.zeros((0, 0), dtype=jnp.float32))
 
     def is_loaded(self) -> bool:
-        """Cheap Python-side check that the climatology has real data."""
-        return bool(self.o3_ppmv.shape[1] > 1)
+        """Cheap Python-side check that the climatology has real data.
+
+        ``empty()`` returns a zero-size array so any non-empty profile
+        — including legitimate single-column ``(nlev, 1)`` SCM data —
+        evaluates to ``True`` here.
+        """
+        return bool(self.o3_ppmv.size > 0)

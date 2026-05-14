@@ -98,6 +98,20 @@ class TestOzoneClimatology(unittest.TestCase):
         clim = OzoneClimatology.empty()
         self.assertFalse(clim.is_loaded())
 
+    def test_single_column_grid_is_loaded(self):
+        """A legitimate ``(nlev, 1)`` SCM climatology must NOT look empty.
+
+        Regression for codex P2 review on PR #484: the previous
+        ``shape[1] > 1`` check treated single-column SCM forcing as
+        unloaded, silently falling back to the analytical profile.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            _write_pre_interpolated_ozone(path, nlon=1, nlat=1, nlev=8)
+            clim = OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=8)
+        self.assertTrue(clim.is_loaded())
+        self.assertEqual(clim.o3_ppmv.shape, (8, 1))
+
     def test_column_ordering_matches_reshape_convention(self):
         """``OzoneClimatology`` must flatten ``(nlat, nlon)`` to the same
         column order as :func:`jcm.physics.composable_physics._reshape_state_to_columns`
