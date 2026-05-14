@@ -1,11 +1,5 @@
 # Operator-split physics
 
-**Status:** implemented (Lie split (a), first-class physics carry).
-**Issue:** [#471 — Operator-split physics from the IMEX-RK dynamical core](https://github.com/climate-analytics-lab/jax-gcm/issues/471)
-**Related:**
-- [#470 — Integration trajectory should not depend on output mode](https://github.com/climate-analytics-lab/jax-gcm/issues/470)
-- [#388 — Pluggable dycore (pysces)](https://github.com/climate-analytics-lab/jax-gcm/issues/388)
-
 ## Overview
 
 JCM evaluates physics exactly once per dynamics timestep `dt`, outside
