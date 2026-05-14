@@ -1,9 +1,5 @@
 # Composable physics
 
-**Status:** implemented (the only physics API).
-**Issues:** [#206 — Make physics composable](https://github.com/climate-analytics-lab/jax-gcm/issues/206), [#388 — Pluggable dycore (pysces)](https://github.com/climate-analytics-lab/jax-gcm/issues/388)
-**Related:** [`writing_a_physics_scheme.md`](writing_a_physics_scheme.md) — how to add a new term.
-
 ## Overview
 
 A JCM physics package is a `ComposablePhysics` container holding an
