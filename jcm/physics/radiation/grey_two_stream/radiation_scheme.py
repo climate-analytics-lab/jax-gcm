@@ -706,6 +706,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         surface_emissivity = radiation.surface_emissivity.reshape(ncols)
 
         # Reshape aerosol fields so column is the leading (mapped) axis.
+        # Per-band fields are ``(n_bnd, nlev, ncols)`` — transpose so the
+        # column axis leads ``(ncols, n_bnd, nlev)``. Grey two-stream
+        # doesn't read them, but every leaf of ``AerosolData`` flows
+        # through the vmap so all leaves need a consistent leading axis.
         aerosol_in = diagnostics["aerosol"]
         aerosol_for_vmap = aerosol_in.copy(
             aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
@@ -716,6 +720,15 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
             aod_background=aerosol_in.aod_background.reshape(ncols),
             angstrom=aerosol_in.angstrom.reshape(ncols),
+            aod_sw_per_band=jnp.transpose(
+                aerosol_in.aod_sw_per_band, (2, 0, 1)
+            ),
+            ssa_sw_per_band=jnp.transpose(
+                aerosol_in.ssa_sw_per_band, (2, 0, 1)
+            ),
+            asy_sw_per_band=jnp.transpose(
+                aerosol_in.asy_sw_per_band, (2, 0, 1)
+            ),
         )
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
