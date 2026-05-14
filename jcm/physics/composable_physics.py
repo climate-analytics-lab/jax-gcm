@@ -30,6 +30,7 @@ from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+from jcm.physics.radiation.band_config import RadiationBandConfig
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -56,6 +57,7 @@ class ComposablePhysics(nnx.Module, Physics):
         checkpoint_terms: bool = True,
         vectorize_columns: bool = False,
         dt_seconds: float = 1800.0,
+        band_config: RadiationBandConfig | None = None,
     ):
         """Initialize ComposablePhysics.
 
@@ -73,12 +75,24 @@ class ComposablePhysics(nnx.Module, Physics):
                 read a single source of truth without needing model-wide
                 date plumbing. ``Model.__init__`` overrides this to its
                 own ``dt_si`` after the physics object is constructed.
+            band_config: Shared radiation band centers (LW + SW). Owned
+                here so wavelength-dependent terms (MACv2-SP aerosols,
+                future banded chemistry) read the *active* radiation
+                backend's bands instead of hardcoding constants. Injected
+                into ``diagnostics["_band_config"]`` each step. Defaults
+                to a single 550 nm SW band — runners override this via
+                ``RadiationBandConfig.from_rrtmgp(...)`` when RRTMGP is
+                in use, so terms see the real 14-band SW structure.
 
         """
         self.terms = nnx.List(terms)
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
+        self.band_config = (
+            band_config if band_config is not None
+            else RadiationBandConfig.broadband()
+        )
         self._validate_ordering()
 
     # ------------------------------------------------------------------
@@ -86,9 +100,17 @@ class ComposablePhysics(nnx.Module, Physics):
     # ------------------------------------------------------------------
 
     def cache_coords(self, coords) -> None:
-        """Delegate cache_coords to each term."""
+        """Delegate cache_coords (and band_config) to each term.
+
+        Also pushes ``self.band_config`` into every term that opts in via
+        :meth:`PhysicsTerm.cache_band_config`. Done here (not in
+        ``initial_carry_state``) because terms with band-shaped carry
+        slots — e.g. MACv2-SP aerosol's per-SW-band optics — need the
+        band count *before* their ``initial_carry_state`` runs.
+        """
         for term in self.terms:
             term.cache_coords(coords)
+            term.cache_band_config(self.band_config)
 
     def required_tracers(self) -> tuple[TracerSpec, ...]:
         """Union of TracerSpecs declared by every term.
@@ -159,6 +181,7 @@ class ComposablePhysics(nnx.Module, Physics):
             diagnostics = {**prev_physics_data}
 
         diagnostics["_dt_seconds"] = self.dt_seconds
+        diagnostics["_band_config"] = self.band_config
 
         tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
@@ -188,6 +211,7 @@ class ComposablePhysics(nnx.Module, Physics):
             diagnostics = {**prev_physics_data}
 
         diagnostics["_dt_seconds"] = self.dt_seconds
+        diagnostics["_band_config"] = self.band_config
 
         tracer_tends = {
             name: jnp.zeros((nlev, ncols))
@@ -305,6 +329,7 @@ class ComposablePhysics(nnx.Module, Physics):
     # the user-facing xarray output.
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_dt_seconds",
+        "_band_config",
         "_forcing_2d",
         "_echam_params",
         "_echam_coords",
@@ -415,6 +440,7 @@ class ComposablePhysics(nnx.Module, Physics):
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
+            band_config=self.band_config,
         )
 
     def __radd__(self, other):
@@ -448,6 +474,7 @@ class ComposablePhysics(nnx.Module, Physics):
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
+            band_config=self.band_config,
         )
 
     def remove(self, category: str) -> ComposablePhysics:
@@ -457,6 +484,7 @@ class ComposablePhysics(nnx.Module, Physics):
             checkpoint_terms=self.checkpoint_terms,
             vectorize_columns=self.vectorize_columns,
             dt_seconds=self.dt_seconds,
+            band_config=self.band_config,
         )
 
     # ------------------------------------------------------------------

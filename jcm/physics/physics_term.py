@@ -148,6 +148,24 @@ class PhysicsTerm(nnx.Module):
         Override in subclasses that need precomputed coordinate data.
         """
 
+    def cache_band_config(self, band_config) -> None:
+        """Capture the active radiation band config (in-place).
+
+        Called by :meth:`ComposablePhysics.cache_coords` immediately
+        after :meth:`cache_coords`, before :meth:`initial_carry_state`.
+        Override in subclasses with band-shaped carry slots (e.g.
+        MACv2-SP aerosol per-SW-band optics) so the carry sizes match
+        whichever radiation backend is in use. Default is a no-op —
+        most terms don't care about radiation bands.
+
+        Args:
+            band_config: A
+                :class:`~jcm.physics.radiation.band_config.RadiationBandConfig`
+                — frozen dataclass with ``lw_band_centers_nm`` and
+                ``sw_band_centers_nm`` tuples.
+
+        """
+
     def __call__(
         self,
         state: PhysicsState,

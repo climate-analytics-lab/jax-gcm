@@ -11,6 +11,7 @@ def get_simple_aerosol(
     aerosol_data,
     parameters: AerosolParameters,
     forcing: ForcingData,
+    sw_band_centers_nm: jnp.ndarray,
 ):
     """Apply MACv2-SP (Simple Plumes) aerosol scheme.
 
@@ -30,6 +31,12 @@ def get_simple_aerosol(
         parameters: Aerosol parameters wrapper exposing ``.aerosol``.
         forcing: Forcing data — uses ``aerosol_year_weight`` and
             ``aerosol_ann_cycle`` for time-varying emissions.
+        sw_band_centers_nm: 1-D array of SW band-center wavelengths (nm)
+            — comes from the ``RadiationBandConfig`` owned by
+            ``ComposablePhysics``, so the aerosol scheme tracks whichever
+            radiation backend is active. With ``broadband()`` (the
+            grey-radiation default) this is ``[550.0]`` and the per-band
+            outputs collapse to the 550 nm reference.
 
     Returns:
         Updated ``AerosolData`` with AOD profile, optical properties,
@@ -102,6 +109,19 @@ def get_simple_aerosol(
     # ``jcm.physics.aerosol.spa.spa_activated_cdnc`` for the consumer.
     Nccn = get_CDNC(aod_anthropogenic + aod_background)
 
+    # Per-band optical properties (Stevens 2017 wavelength scaling
+    # applied to the AOD-weighted plume-mean 550 nm fields). Output
+    # shape (n_bnd_sw, nlev, ncols). LW counterpart is omitted —
+    # MACv2-SP only models SW aerosol effects. ``sw_band_centers_nm``
+    # comes from the active radiation backend via the band config.
+    aod_sw_per_band, ssa_sw_per_band, asy_sw_per_band = (
+        per_band_optical_properties(
+            aod_profile, ssa_profile, asy_profile,
+            angstrom[jnp.newaxis, :],          # (1, ncols) for level-broadcast
+            sw_band_centers_nm,                # (n_bnd_sw,)
+        )
+    )
+
     return aerosol_data.copy(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
@@ -112,6 +132,9 @@ def get_simple_aerosol(
         cdnc_factor=cdnc_factor,
         Nccn=Nccn,
         angstrom=angstrom,
+        aod_sw_per_band=aod_sw_per_band,
+        ssa_sw_per_band=ssa_sw_per_band,
+        asy_sw_per_band=asy_sw_per_band,
     )
 
 def _per_feature_plume_gaussians(lats, lons, parameters):
@@ -356,6 +379,57 @@ def get_optical_properties(aod_profile, spatial_dist, parameters):
     return ssa_profile, asy_profile, angstrom_weighted
 
 
+def per_band_optical_properties(
+    aod_550: jnp.ndarray,
+    ssa550: jnp.ndarray,
+    asy550: jnp.ndarray,
+    angstrom: jnp.ndarray,
+    band_centers_nm: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Wavelength-dependent aerosol optical properties (Stevens 2017).
+
+    Implements the closed-form scaling from MACv2-SP
+    (``mo_bc_aeropt_splumes.f90:378-397``):
+
+        lfactor   = min(1, 700/λ_nm)
+        ssa(λ)    = ssa550·lfactor⁴ / [ssa550·lfactor⁴ + (1−ssa550)·lfactor]
+        asy(λ)    = asy550·√lfactor
+        aod(λ)    = aod550·exp(−angstrom·ln(λ/550))
+
+    The ``ssa`` formula is one minus the absorption-to-extinction ratio
+    derived from a Mie-style λ⁻¹ absorption and λ⁻⁴ scattering scaling
+    of the 550 nm reference; ``asy`` rescales the asymmetry parameter
+    by Hänel-style refractive-index dependence; ``aod`` uses the per-
+    plume Angstrom exponent. All three are independent per band.
+
+    Args:
+        aod_550: 550 nm AOD profile, shape ``(..., nlev, ncols)`` or
+            anything broadcastable against the band axis.
+        ssa550: 550 nm single-scattering albedo, broadcastable shape.
+        asy550: 550 nm asymmetry parameter, broadcastable shape.
+        angstrom: Angstrom exponent, broadcastable shape.
+        band_centers_nm: Band-center wavelengths in nm, shape ``(n_bnd,)``.
+
+    Returns:
+        Tuple ``(aod_per_band, ssa_per_band, asy_per_band)`` each shaped
+        ``(n_bnd, ...)`` with the band axis prepended.
+
+    """
+    # Cast to a safe shape for broadcasting against (n_bnd, ...).
+    lam = band_centers_nm[:, None, None]   # (n_bnd, 1, 1)
+    lfactor = jnp.minimum(1.0, 700.0 / lam)
+
+    ssa_num = ssa550 * lfactor ** 4
+    ssa_den = ssa_num + (1.0 - ssa550) * lfactor
+    ssa_per_band = ssa_num / jnp.maximum(ssa_den, 1e-30)
+
+    asy_per_band = asy550 * jnp.sqrt(lfactor)
+
+    aod_per_band = aod_550 * jnp.exp(-angstrom * jnp.log(lam / 550.0))
+
+    return aod_per_band, ssa_per_band, asy_per_band
+
+
 def get_CDNC(AOD, A=60, B=20):
     """Derive CDNC from AOD using a relationship of the form: CDNC = A * ln(B*AOD + 1)
     Ross' amazon work: A=410 B=5
@@ -405,6 +479,11 @@ class Macv2SpAerosol(PhysicsTerm):
         """Hold the scheme-native :class:`AerosolParameters`."""
         self.params = nnx.Param(params or AerosolParameters.default())
         self._coords_cached = False
+        # SW band count — overridden by ``cache_band_config`` once
+        # ``ComposablePhysics`` knows the active radiation backend.
+        # Default 14 covers the standard RRTMGP SW gas-optics file so
+        # standalone construction (no ComposablePhysics) still works.
+        self._n_bnd_sw: int = 14
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (degrees) from the coordinate system.
@@ -425,6 +504,29 @@ class Macv2SpAerosol(PhysicsTerm):
         self._lons = nnx.Variable(lon_2d.reshape(-1))
         self._coords_cached = True
 
+    def cache_band_config(self, band_config) -> None:
+        """Capture SW band count so the carry slot has the right shape.
+
+        Sized to match the active radiation backend (e.g. 14 for the
+        standard RRTMGP SW gas-optics file, 1 for grey/SPEEDY) so the
+        per-band ``aod/ssa/asy_sw_per_band`` arrays in the cross-step
+        ``aerosol`` carry agree with what ``__call__`` writes back.
+        """
+        self._n_bnd_sw = len(band_config.sw_band_centers_nm)
+
+    def initial_carry_state(self, coords):
+        """Zero-fill the aerosol carry slot at the active SW band count."""
+        ncols = (
+            coords.horizontal.nodal_shape[0]
+            * coords.horizontal.nodal_shape[1]
+        )
+        nlev = coords.nodal_shape[0]
+        return {
+            "aerosol": AerosolData.zeros(
+                (ncols,), nlev, n_bnd_sw=self._n_bnd_sw,
+            )
+        }
+
     def __call__(
         self,
         state,
@@ -436,8 +538,21 @@ class Macv2SpAerosol(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
 
+        # ``ComposablePhysics`` injects ``_band_config`` each step (a
+        # ``RadiationBandConfig`` matching the active radiation backend).
+        # Falls back to grey-radiation broadband defaults if a caller
+        # constructs the term outside ``ComposablePhysics``.
+        band_config = diagnostics.get("_band_config")
+        if band_config is None:
+            from jcm.physics.radiation.band_config import RadiationBandConfig
+            band_config = RadiationBandConfig.broadband()
+        sw_band_centers_nm = jnp.asarray(
+            band_config.sw_band_centers_nm, dtype=jnp.float32,
+        )
+        n_bnd_sw = sw_band_centers_nm.shape[0]
+
         prev = diagnostics.get(
-            "aerosol", AerosolData.zeros((ncols,), nlev),
+            "aerosol", AerosolData.zeros((ncols,), nlev, n_bnd_sw=n_bnd_sw),
         )
         new_aerosol = get_simple_aerosol(
             height_full=diagnostics["height_full"],
@@ -446,6 +561,7 @@ class Macv2SpAerosol(PhysicsTerm):
             aerosol_data=prev,
             parameters=params,
             forcing=forcing,
+            sw_band_centers_nm=sw_band_centers_nm,
         )
 
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)

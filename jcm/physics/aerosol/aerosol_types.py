@@ -42,8 +42,17 @@ class AerosolData:
     # Spectral scaling
     angstrom: jnp.ndarray            # Angstrom exponent [1] (ncols,)
 
+    # Per-SW-band optical properties for RRTMGP. Shape ``(n_bnd_sw, nlev,
+    # ncols)`` — RRTMGP consumes these directly via its
+    # ``aerosol_optics_sw`` kwarg. MACv2-SP only models SW aerosol effects
+    # (Stevens et al. 2017 / ``mo_bc_aeropt_splumes.f90``), so no LW
+    # counterpart yet — RRTMGP gets ``aerosol_optics_lw=None``.
+    aod_sw_per_band: jnp.ndarray
+    ssa_sw_per_band: jnp.ndarray
+    asy_sw_per_band: jnp.ndarray
+
     @classmethod
-    def zeros(cls, nodal_shape, nlev):
+    def zeros(cls, nodal_shape, nlev, n_bnd_sw=14):
         return cls(
             aod_profile=jnp.zeros((nlev,) + nodal_shape),
             ssa_profile=jnp.zeros((nlev,) + nodal_shape),
@@ -54,6 +63,9 @@ class AerosolData:
             cdnc_factor=jnp.ones(nodal_shape),  # Start with factor of 1.0
             Nccn=jnp.zeros(nodal_shape),
             angstrom=jnp.ones(nodal_shape) * 1.5,  # Typical fine-mode aerosol
+            aod_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
+            ssa_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
+            asy_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -67,6 +79,9 @@ class AerosolData:
             'cdnc_factor': self.cdnc_factor,
             'Nccn': self.Nccn,
             'angstrom': self.angstrom,
+            'aod_sw_per_band': self.aod_sw_per_band,
+            'ssa_sw_per_band': self.ssa_sw_per_band,
+            'asy_sw_per_band': self.asy_sw_per_band,
         }
         new_data.update(kwargs)
         return AerosolData(**new_data)

@@ -222,7 +222,28 @@ def build_physics(cfg: DictConfig):
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
+        band_config=_band_config_for_terms(terms),
     )
+
+
+def _band_config_for_terms(terms):
+    """Pick a ``RadiationBandConfig`` to match the active radiation backend.
+
+    Walks the term list for an ``RRTMGPRadiation`` instance and reads its
+    band centers; otherwise returns the broadband (single 550 nm SW band)
+    fallback. Centralised here so every wavelength-dependent term — not
+    just the aerosol scheme — sees the same band structure as whatever
+    radiation backend is actually running. The band config is owned by
+    ``ComposablePhysics`` and injected into ``diagnostics["_band_config"]``
+    each step (same pattern as ``_dt_seconds``).
+    """
+    from jcm.physics.radiation.band_config import RadiationBandConfig
+    from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
+
+    for t in terms:
+        if isinstance(t, RRTMGPRadiation):
+            return RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
+    return RadiationBandConfig.broadband()
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):

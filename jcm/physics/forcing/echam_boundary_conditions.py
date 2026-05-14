@@ -166,10 +166,10 @@ class EchamBoundaryConditions(PhysicsTerm):
         surface_temperature = surface_temperature.reshape(ncols)
         roughness_length = roughness_length.reshape(ncols)
 
-        # CH4 is still ECHAM-hardcoded; the forcing-field version can land
-        # in a follow-up. CO2 already comes from ``forcing.co2_vmr``.
+        # CO2 and CH4 both come from ``ForcingData`` (#347). Defaults are
+        # 360 ppmv (CO2) and 1.9 ppmv (CH4) — the legacy hardcoded values.
         co2_vmr_value = forcing.co2_vmr
-        ch4_vmr_value = 1900.0e-3  # ppbv → ppmv: 1.9 ppmv
+        ch4_vmr_value = forcing.ch4_vmr
 
         # O3: prefer the realistic CMIP6/ECHAM-style climatology carried
         # on ``forcing.ozone_climatology`` (loaded from a netCDF in

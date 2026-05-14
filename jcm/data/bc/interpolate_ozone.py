@@ -1,4 +1,4 @@
-"""Pre-interpolate a CMIP6/ECHAM-style ozone climatology onto the model's
+r"""Pre-interpolate a CMIP6/ECHAM-style ozone climatology onto the model's
 hybrid-level grid so the online code can drop the file straight into the
 forcing time slicer with no per-step interpolation.
 
@@ -50,6 +50,7 @@ def _vertical_interp_log_p(
 
     Returns:
         ``(time, nplev_target, lat, lon)`` interpolated array.
+
     """
     log_src = np.log(plev_source)
     log_tgt = np.log(plev_target)
@@ -86,6 +87,7 @@ def interpolate_ozone(
         var_name: Source variable name (default ``"O3"``).
         reference_ps_pa: Reference surface pressure used to evaluate the
             hybrid-level centers (default 1013.25 hPa).
+
     """
     input_path = Path(input_path)
     output_path = Path(output_path)

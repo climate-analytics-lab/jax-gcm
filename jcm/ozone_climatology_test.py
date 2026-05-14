@@ -14,7 +14,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 

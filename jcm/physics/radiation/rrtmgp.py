@@ -465,7 +465,8 @@ def radiation_scheme_rrtmgp(
     base_seed: int = 0,
     compute_cre: bool = True,
     ozone_vmr: Optional[jnp.ndarray] = None,
-    co2_vmr: float = 400e-6,
+    co2_vmr: Optional[jnp.ndarray] = None,
+    ch4_vmr: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -606,6 +607,48 @@ def radiation_scheme_rrtmgp(
     rrtmgp_input["q_ice"] = zero_3d
     rrtmgp_input["q_c"] = zero_3d
 
+    # Per-cell gas concentrations (#483 + jax-rrtmgp PR #4). The library
+    # merges this dict over the sounding-based defaults before calling
+    # gas optics; ``h2o`` is always overridden internally from ``q_t``.
+    # Each profile is shaped (1, 1, nz+2*halo) to match the rest of
+    # rrtmgp_input.
+    halo = 1
+    nlev = icon_state.temperature.shape[0]
+    vmr_fields: dict[str, jnp.ndarray] = {}
+    if ozone_vmr is not None:
+        # ``ozone_vmr`` arrives as a (nlev,) profile in mole fraction.
+        vmr_fields["o3"] = _to_3d_with_filled_halo(ozone_vmr, nlev, halo)
+    if co2_vmr is not None:
+        vmr_fields["co2"] = _to_3d_with_filled_halo(
+            jnp.broadcast_to(co2_vmr, (nlev,)), nlev, halo,
+        )
+    if ch4_vmr is not None:
+        vmr_fields["ch4"] = _to_3d_with_filled_halo(
+            jnp.broadcast_to(ch4_vmr, (nlev,)), nlev, halo,
+        )
+
+    # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
+    # rrtmgp PR #4). Each per-band field arrives as (n_bnd_sw, nlev)
+    # from the column-vmap; reshape to (n_bnd_sw, 1, 1, nlev+2*halo)
+    # for ``compute_heating_rate``. LW is omitted — MACv2-SP only models
+    # SW aerosol effects per ``mo_bc_aeropt_splumes.f90``.
+    def _to_4d_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        """(n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo) with edge halos."""
+        n_bnd = arr_2d.shape[0]
+        out = jnp.zeros((n_bnd, 1, 1, nlev + 2 * halo), dtype=arr_2d.dtype)
+        out = out.at[:, 0, 0, halo:halo + nlev].set(arr_2d)
+        out = out.at[:, 0, 0, 0].set(arr_2d[:, 0])
+        out = out.at[:, 0, 0, -1].set(arr_2d[:, -1])
+        return out
+
+    aerosol_optics_sw: Optional[dict[str, jnp.ndarray]] = None
+    if hasattr(aerosol_data, "aod_sw_per_band"):
+        aerosol_optics_sw = {
+            "optical_depth":   _to_4d_per_band(aerosol_data.aod_sw_per_band),
+            "ssa":             _to_4d_per_band(aerosol_data.ssa_sw_per_band),
+            "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_sw_per_band),
+        }
+
     zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
     irrad_val = jnp.maximum(toa_flux, 0.0)
 
@@ -615,15 +658,22 @@ def radiation_scheme_rrtmgp(
         cloud_path_ice_lw_per_gpt=cpi_lw_4d,
         cloud_path_liq_sw_per_gpt=cpl_sw_4d,
         cloud_path_ice_sw_per_gpt=cpi_sw_4d,
+        vmr_fields=vmr_fields or None,
+        aerosol_optics_sw=aerosol_optics_sw,
         **rrtmgp_input,
     )
 
     # Optional clear-sky call for the cloud radiative effect. With the
     # broadcast q_liq / q_ice already zero and no per-gpoint cloud
     # paths supplied, this collapses to a clear-sky calculation.
+    # Aerosols are intentionally included on the clear-sky branch — CMIP
+    # convention is that "clear-sky" means cloud-free, aerosols included.
     if compute_cre:
         rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
-            zenith=zenith_angle, irrad=irrad_val, **rrtmgp_input,
+            zenith=zenith_angle, irrad=irrad_val,
+            vmr_fields=vmr_fields or None,
+            aerosol_optics_sw=aerosol_optics_sw,
+            **rrtmgp_input,
         )
         toa_sw_up_clear = (
             rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0]
@@ -810,8 +860,9 @@ class RRTMGPRadiation(PhysicsTerm):
         )
 
         chemistry = diagnostics["chemistry"]
-        ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
+        ozone_vmr = chemistry.ozone_vmr * 1e-6     # (nlev, ncols)
+        co2_vmr = chemistry.co2_vmr * 1e-6         # (nlev, ncols)
+        ch4_vmr = chemistry.methane_vmr * 1e-6     # (nlev, ncols)
 
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
@@ -822,6 +873,10 @@ class RRTMGPRadiation(PhysicsTerm):
         surface_emissivity_col = radiation_in.surface_emissivity.reshape(ncols)
 
         aerosol_in = diagnostics["aerosol"]
+        # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
+        # transpose to ``(ncols, n_bnd_sw, nlev)`` so the column axis is
+        # leading (vmap-friendly).
+        n_bnd_sw = aerosol_in.aod_sw_per_band.shape[0]
         aerosol_for_vmap = aerosol_in.copy(
             aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
             ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
@@ -831,6 +886,12 @@ class RRTMGPRadiation(PhysicsTerm):
             aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
             aod_background=aerosol_in.aod_background.reshape(ncols),
             angstrom=aerosol_in.angstrom.reshape(ncols),
+            aod_sw_per_band=aerosol_in.aod_sw_per_band.reshape(
+                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
+            ssa_sw_per_band=aerosol_in.ssa_sw_per_band.reshape(
+                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
+            asy_sw_per_band=aerosol_in.asy_sw_per_band.reshape(
+                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
         )
 
         # Auto-pick chunk size from device HBM (see chunk_budget()).
@@ -871,6 +932,8 @@ class RRTMGPRadiation(PhysicsTerm):
             longitudes=split_col(longitudes),
             column_indices=split_col(column_indices),
             ozone_vmr=split_lev_first(ozone_vmr),
+            co2_vmr=split_lev_first(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
+            ch4_vmr=split_lev_first(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
             aerosol=aerosol_for_vmap.copy(
                 aod_profile=split_col(aerosol_for_vmap.aod_profile),
                 ssa_profile=split_col(aerosol_for_vmap.ssa_profile),
@@ -881,6 +944,9 @@ class RRTMGPRadiation(PhysicsTerm):
                 aod_background=split_col(aerosol_for_vmap.aod_background),
                 Nccn=split_col(aerosol_in.Nccn.reshape(ncols)),
                 angstrom=split_col(aerosol_for_vmap.angstrom),
+                aod_sw_per_band=split_col(aerosol_for_vmap.aod_sw_per_band),
+                ssa_sw_per_band=split_col(aerosol_for_vmap.ssa_sw_per_band),
+                asy_sw_per_band=split_col(aerosol_for_vmap.asy_sw_per_band),
             ),
         )
 
@@ -897,7 +963,7 @@ class RRTMGPRadiation(PhysicsTerm):
                     None, 0, 0,
                     None, 0,
                     0, None, None, None,    # column_index, model_step, base_seed, compute_cre
-                    0, None,                # ozone_vmr, co2_vmr
+                    0, 0, 0,                # ozone_vmr, co2_vmr, ch4_vmr
                 ),
                 out_axes=(0, 0),
                 axis_size=chunk_size,
@@ -915,7 +981,9 @@ class RRTMGPRadiation(PhysicsTerm):
                 params, chunk_inputs['aerosol'],
                 chunk_inputs['column_indices'],
                 model_step, base_seed, compute_cre,
-                chunk_inputs['ozone_vmr'], co2_vmr,
+                chunk_inputs['ozone_vmr'],
+                chunk_inputs['co2_vmr'],
+                chunk_inputs['ch4_vmr'],
             )
 
         chunked_results = jax.lax.map(_vmap_one_chunk, chunked_inputs)

@@ -77,6 +77,7 @@ class OzoneClimatology:
             ``OzoneClimatology`` whose ``o3_ppmv`` is the annual mean,
             flattened to the model's column ordering ``(nlev, nlon * nlat)``
             with longitude as the slower index.
+
         """
         import xarray as xr
 

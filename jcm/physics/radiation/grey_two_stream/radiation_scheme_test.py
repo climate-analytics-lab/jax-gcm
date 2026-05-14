@@ -54,6 +54,15 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
     aod_background = jnp.ones(ncols) * 0.005     # Small background contribution
     cdnc_factor = jnp.ones(ncols)                # No aerosol-cloud interaction
     
+    # Single-band per-band optics. The radiation_scheme entrypoints
+    # (grey, rrtmgp_per_column) consume per-band fields shaped
+    # ``(n_bnd, nlev)`` — they're called downstream of the term-level
+    # vmap over columns. Tests calling the entrypoints directly mirror
+    # that single-column convention. Production AerosolData uses
+    # ``(n_bnd, nlev, ncols)`` for the multi-column term API.
+    aod_per_band = aod_profile[jnp.newaxis, :, 0]   # (1, nlev)
+    ssa_per_band = ssa_profile[jnp.newaxis, :, 0]
+    asy_per_band = asy_profile[jnp.newaxis, :, 0]
     return AerosolData(
         aod_profile=aod_profile,
         ssa_profile=ssa_profile,
@@ -64,6 +73,9 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
         cdnc_factor=cdnc_factor,
         Nccn=jnp.ones(ncols),
         angstrom=jnp.ones(ncols) * 1.5,
+        aod_sw_per_band=aod_per_band,
+        ssa_sw_per_band=ssa_per_band,
+        asy_sw_per_band=asy_per_band,
     )
 
 
