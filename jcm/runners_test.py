@@ -9,6 +9,7 @@ T85x47 grid here.
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 
@@ -159,6 +160,50 @@ class TestBuilders(unittest.TestCase):
         ])
         model = build_model(cfg)
         self.assertEqual(model.coords.horizontal.nodal_shape, (96, 48))
+
+
+class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
+    """Regression test for #484 codex P1.
+
+    With ``forcing.kind == default`` and ``ozone_file`` set, the
+    attach-ozone helper must keep the aquaplanet cos²-latitude SST
+    profile from ``default_forcing(...)`` rather than swap it for the
+    uniform 288.15 K placeholder that ``ForcingData.zeros`` would yield.
+    """
+
+    def test_default_forcing_with_ozone_keeps_cos2_sst(self):
+        import tempfile
+        import xarray as xr
+        from jcm.forcing import default_forcing
+        from jcm.runners import build_coords, build_forcing
+
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma"])
+        coords = build_coords(cfg)
+        nlon, nlat = coords.horizontal.nodal_shape
+        nlev = coords.nodal_shape[0]
+
+        # Synthetic 12-month ozone file in the (time, level, lat, lon)
+        # layout that ``OzoneClimatology.from_file`` expects. Values are
+        # arbitrary — the test only checks that the SST field is the
+        # aquaplanet cos² profile, not the uniform 288.15 K placeholder.
+        with tempfile.TemporaryDirectory() as tmp:
+            ozone_path = Path(tmp) / "ozone.nc"
+            xr.Dataset({
+                "O3": (
+                    ("time", "level", "lat", "lon"),
+                    np.full((12, nlev, nlat, nlon), 1e-6, dtype=np.float32),
+                ),
+            }).to_netcdf(ozone_path)
+            cfg.forcing.kind = "default"
+            cfg.forcing.ozone_file = str(ozone_path)
+
+            forcing_with_ozone = build_forcing(cfg, coords)
+
+        baseline = default_forcing(coords.horizontal)
+        np.testing.assert_array_equal(
+            np.asarray(forcing_with_ozone.sea_surface_temperature),
+            np.asarray(baseline.sea_surface_temperature),
+        )
 
 
 class TestEndToEnd(unittest.TestCase):

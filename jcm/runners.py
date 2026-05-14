@@ -501,15 +501,18 @@ def _attach_ozone(forcing, forcing_cfg, coords):
 
     No-op when the cfg has no ``ozone_file`` or the path is null. When
     ``forcing`` is ``None`` (``kind: default``) and an ozone file IS
-    given, build a baseline ``ForcingData.zeros`` so the climatology has
-    a parent struct to ride on.
+    given, build the parent struct via ``default_forcing(...)`` so the
+    aquaplanet cos²-latitude SST climatology is preserved — using
+    ``ForcingData.zeros`` here would silently swap it for the uniform
+    288.15 K placeholder, materially changing the boundary conditions
+    for any run configured with only ``ozone_file``.
     """
     if forcing_cfg is None:
         return forcing
     ozone_file = forcing_cfg.get("ozone_file", None)
     if ozone_file in (None, "", "null"):
         return forcing
-    from jcm.forcing import ForcingData
+    from jcm.forcing import default_forcing
     from jcm.ozone_climatology import OzoneClimatology
     nlon, nlat = coords.horizontal.nodal_shape
     nlev = coords.nodal_shape[0]
@@ -517,13 +520,8 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         ozone_file, nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
     )
     if forcing is None:
-        forcing = ForcingData.zeros(
-            nodal_shape=(int(nlon), int(nlat)),
-            ozone_climatology=climatology,
-        )
-    else:
-        forcing = forcing.copy(ozone_climatology=climatology)
-    return forcing
+        forcing = default_forcing(coords.horizontal)
+    return forcing.copy(ozone_climatology=climatology)
 
 
 # ---------------------------------------------------------------------------
