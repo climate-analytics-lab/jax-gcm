@@ -183,17 +183,25 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
         nlev = coords.nodal_shape[0]
 
         # Synthetic 12-month ozone file in the (time, level, lat, lon)
-        # layout that ``OzoneClimatology.from_file`` expects. Values are
-        # arbitrary — the test only checks that the SST field is the
-        # aquaplanet cos² profile, not the uniform 288.15 K placeholder.
+        # layout that ``OzoneClimatology.from_file`` expects. Lat/lon
+        # coords match the model grid (degrees from radians) so the
+        # loader's coordinate-value check passes.
+        model_lat_deg = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
+        model_lon_deg = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
         with tempfile.TemporaryDirectory() as tmp:
             ozone_path = Path(tmp) / "ozone.nc"
-            xr.Dataset({
-                "O3": (
+            xr.Dataset(
+                {"O3": (
                     ("time", "level", "lat", "lon"),
                     np.full((12, nlev, nlat, nlon), 1e-6, dtype=np.float32),
-                ),
-            }).to_netcdf(ozone_path)
+                )},
+                coords={
+                    "time": np.arange(12),
+                    "level": np.arange(nlev, dtype=np.int32),
+                    "lat": model_lat_deg,
+                    "lon": model_lon_deg,
+                },
+            ).to_netcdf(ozone_path)
             cfg.forcing.kind = "default"
             cfg.forcing.ozone_file = str(ozone_path)
 

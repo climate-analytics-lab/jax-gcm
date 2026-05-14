@@ -512,12 +512,22 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     ozone_file = forcing_cfg.get("ozone_file", None)
     if ozone_file in (None, "", "null"):
         return forcing
+    import numpy as np
+
     from jcm.forcing import default_forcing
     from jcm.ozone_climatology import OzoneClimatology
     nlon, nlat = coords.horizontal.nodal_shape
     nlev = coords.nodal_shape[0]
+    # Pass the model's lat/lon (degrees) so the loader catches files
+    # with the right shape but flipped/shifted grids — same N points,
+    # wrong column mapping, would otherwise wire ozone into the wrong
+    # latitudes silently. Dinosaur stores both in radians.
+    lat_deg = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
+    lon_deg = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
     climatology = OzoneClimatology.from_file(
-        ozone_file, nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
+        ozone_file,
+        nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
+        lat_deg=lat_deg, lon_deg=lon_deg,
     )
     if forcing is None:
         forcing = default_forcing(coords.horizontal)

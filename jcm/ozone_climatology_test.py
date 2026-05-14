@@ -138,6 +138,98 @@ class TestOzoneClimatology(unittest.TestCase):
             )
 
 
+    def test_transient_file_routes_to_by_date_alignment(self):
+        """A multi-year monthly file (``ntime != 12``) must use
+        ``BY_DATE`` alignment so the same fraction-of-year doesn't
+        sample the same source month every year. Otherwise
+        ``WRAP_YEAR`` would silently corrupt SSP / historical runs.
+        """
+        import datetime as _dt
+
+        from jcm.forcing import BY_DATE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3_transient.nc"
+            nlon, nlat, nlev = 4, 2, 4
+            ntime = 24   # 2 years of monthly data
+            o3 = np.zeros((ntime, nlev, nlat, nlon), dtype=np.float32)
+            for t in range(ntime):
+                o3[t] = float(t) * 1e-7
+            # CF-encoded time axis the loader can decode.
+            base = _dt.datetime(2024, 1, 15)
+            time_values = np.array(
+                [(base + _dt.timedelta(days=30 * i)).timestamp()
+                 for i in range(ntime)],
+            ) - _dt.datetime(1970, 1, 1).timestamp()
+            ds = xr.Dataset(
+                {"O3": (("time", "level", "lat", "lon"), o3,
+                        {"units": "mole mole-1"})},
+                coords={
+                    "time": ("time", time_values / 86400.0,
+                             {"units": "days since 1970-01-01",
+                              "calendar": "standard"}),
+                    "level": np.arange(nlev, dtype=np.int32),
+                    "lat": np.linspace(-88, 88, nlat).astype(np.float64),
+                    "lon": np.linspace(0, 360, nlon,
+                                       endpoint=False).astype(np.float64),
+                },
+            )
+            ds.to_netcdf(path)
+
+            clim = OzoneClimatology.from_file(
+                path, nlon=nlon, nlat=nlat, nlev=nlev,
+            )
+
+        self.assertEqual(clim.o3_ppmv.values.shape, (ntime, nlev, nlon * nlat))
+        self.assertEqual(int(clim.o3_ppmv.align_mode), BY_DATE)
+
+    def test_lat_mismatch_raises_value_error(self):
+        """Same shape but flipped latitude axis must fail loudly,
+        not silently wire ozone into the wrong latitudes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            nlon, nlat, nlev = 8, 4, 4
+            _write_pre_interpolated_ozone(path, nlon, nlat, nlev)
+
+            # File built ascending (-88..88) — model expects descending.
+            model_lat_descending = np.linspace(88.0, -88.0, nlat)
+            with self.assertRaisesRegex(ValueError, "latitudes don't match"):
+                OzoneClimatology.from_file(
+                    path, nlon=nlon, nlat=nlat, nlev=nlev,
+                    lat_deg=model_lat_descending,
+                )
+
+    def test_lon_mismatch_raises_value_error(self):
+        """Shifted longitude grid must fail loudly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            nlon, nlat, nlev = 8, 4, 4
+            _write_pre_interpolated_ozone(path, nlon, nlat, nlev)
+
+            # File built [0, 360) — model expects [-180, 180).
+            shifted_lon = np.linspace(-180.0, 180.0, nlon, endpoint=False)
+            with self.assertRaisesRegex(ValueError, "longitudes don't match"):
+                OzoneClimatology.from_file(
+                    path, nlon=nlon, nlat=nlat, nlev=nlev,
+                    lon_deg=shifted_lon,
+                )
+
+    def test_matching_coords_pass_validation(self):
+        """When file lat/lon match the model exactly, the load succeeds."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            nlon, nlat, nlev = 8, 4, 4
+            _write_pre_interpolated_ozone(path, nlon, nlat, nlev)
+
+            model_lat = np.linspace(-88.0, 88.0, nlat)
+            model_lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+            clim = OzoneClimatology.from_file(
+                path, nlon=nlon, nlat=nlat, nlev=nlev,
+                lat_deg=model_lat, lon_deg=model_lon,
+            )
+        self.assertTrue(clim.is_loaded())
+
     def test_monthly_seasonal_cycle_rides_through_select(self):
         """``ForcingData.select(date)`` must slice the 12-month ozone
         climatology to the date's month (WRAP_YEAR mode), so different
