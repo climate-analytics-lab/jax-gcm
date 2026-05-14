@@ -67,9 +67,12 @@ class TestOzoneClimatology(unittest.TestCase):
                 path, nlon=nlon, nlat=nlat, nlev=nlev,
             )
 
-        self.assertEqual(clim.o3_ppmv.shape, (nlev, nlon * nlat))
+        # ``from_file`` returns a 12-month ``TimeSeries`` (WRAP_YEAR
+        # mode) so the seasonal cycle rides through
+        # ``ForcingData.select(date)``. ``.values`` carries the data.
+        self.assertEqual(clim.o3_ppmv.values.shape, (12, nlev, nlon * nlat))
         # File peak 8e-6 mole/mole → ~8 ppmv after the *1e6.
-        self.assertAlmostEqual(float(clim.o3_ppmv.max()), 8.8, delta=1.0)
+        self.assertAlmostEqual(float(clim.o3_ppmv.values.max()), 8.8, delta=1.0)
         self.assertTrue(clim.is_loaded())
 
     def test_horizontal_grid_mismatch_raises(self):
@@ -109,12 +112,13 @@ class TestOzoneClimatology(unittest.TestCase):
             _write_pre_interpolated_ozone(path, nlon=1, nlat=1, nlev=8)
             clim = OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=8)
         self.assertTrue(clim.is_loaded())
-        self.assertEqual(clim.o3_ppmv.shape, (8, 1))
+        self.assertEqual(clim.o3_ppmv.values.shape, (12, 8, 1))
 
     def test_column_ordering_matches_reshape_convention(self):
         """``OzoneClimatology`` must flatten ``(nlat, nlon)`` to the same
         column order as :func:`jcm.physics.composable_physics._reshape_state_to_columns`
-        (lon-major, lat-minor — i.e. ``col = i_lon * nlat + i_lat``).
+        (lon-major, lat-minor — i.e. ``col = i_lon * nlat + i_lat``)
+        — checked on every one of the 12 monthly slices.
         """
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "o3.nc"
@@ -125,13 +129,74 @@ class TestOzoneClimatology(unittest.TestCase):
             )
 
             ds = xr.open_dataset(path, decode_times=False)
-            ann_mean = ds.O3.mean(dim="time").values  # (nlev, nlat, nlon)
-            ann_mean_lon_major = np.transpose(ann_mean, (0, 2, 1)) * 1e6
-            expected = ann_mean_lon_major.reshape(nlev, nlon * nlat)
+            all_months = ds.O3.values  # (12, nlev, nlat, nlon)
+            lon_major = np.transpose(all_months, (0, 1, 3, 2)) * 1e6
+            expected = lon_major.reshape(12, nlev, nlon * nlat)
 
             np.testing.assert_allclose(
-                np.asarray(clim.o3_ppmv), expected, rtol=1e-5,
+                np.asarray(clim.o3_ppmv.values), expected, rtol=1e-5,
             )
+
+
+    def test_monthly_seasonal_cycle_rides_through_select(self):
+        """``ForcingData.select(date)`` must slice the 12-month ozone
+        climatology to the date's month (WRAP_YEAR mode), so different
+        dates produce different post-select ``o3_ppmv`` profiles.
+        """
+        import jax.numpy as jnp
+        import jax_datetime as jdt
+        from datetime import datetime
+
+        from jcm.date import DateData
+        from jcm.forcing import default_forcing
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            nlon, nlat, nlev = 4, 2, 4
+            # Hand-write a file whose monthly anomalies are large so we
+            # can detect that the slicer picks the right month.
+            o3 = np.zeros((12, nlev, nlat, nlon), dtype=np.float32)
+            for m in range(12):
+                o3[m] = float(m) * 1e-6   # 0..11 ppmv per month after *1e6
+            ds = xr.Dataset(
+                {"O3": (("time", "level", "lat", "lon"), o3,
+                        {"units": "mole mole-1"})},
+                coords={
+                    "time": np.arange(12),
+                    "level": np.arange(nlev, dtype=np.int32),
+                    "lat": np.linspace(-88, 88, nlat).astype(np.float64),
+                    "lon": np.linspace(0, 360, nlon,
+                                       endpoint=False).astype(np.float64),
+                },
+            )
+            ds.to_netcdf(path)
+
+            clim = OzoneClimatology.from_file(
+                path, nlon=nlon, nlat=nlat, nlev=nlev,
+            )
+
+        forcing = default_forcing(
+            type("G", (), {
+                "nodal_shape": (nlon, nlat),
+                "latitudes": jnp.linspace(-jnp.pi / 2, jnp.pi / 2, nlat),
+                "longitudes": jnp.linspace(0, 2 * jnp.pi, nlon),
+            })(),
+        )
+        forcing = forcing.copy(ozone_climatology=clim)
+
+        def _date(month_zero_based: int) -> DateData:
+            dt = jdt.Datetime.from_pydatetime(
+                datetime(2026, month_zero_based + 1, 15),
+            )
+            return DateData.zeros(dt=dt)
+
+        # WRAP_YEAR splits the year evenly into 12 bins; mid-January
+        # lands in bin 0, mid-July in bin 6.
+        jan = forcing.select(_date(0))
+        jul = forcing.select(_date(6))
+
+        self.assertAlmostEqual(float(jan.ozone_climatology.o3_ppmv.max()), 0.0)
+        self.assertAlmostEqual(float(jul.ozone_climatology.o3_ppmv.max()), 6.0)
 
 
 if __name__ == "__main__":

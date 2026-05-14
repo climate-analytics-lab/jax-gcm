@@ -9,11 +9,13 @@ hybrid-level centers happens **offline** in the prep script so the
 online code is just an array slice — no per-step ``vmap`` of
 ``jnp.interp``.
 
-Phase 1 returns the **annual mean** so the field is static across the
-integration. The class still loads and stores all 12 months internally,
-so adding a date-aware monthly selector later — for the seasonal cycle,
-then for transient SSP scenarios where the profile changes year over
-year — is a one-line change in the public accessor.
+The 12-month seasonal cycle is preserved by wrapping ``o3_ppmv`` in a
+:class:`~jcm.forcing.TimeSeries` with ``align_mode=WRAP_YEAR``. The
+existing ``ForcingData.select(date)`` walker descends into this struct
+(it is a ``tree_math.struct``, i.e. a pytree) and replaces the
+``TimeSeries`` leaf with that step's monthly slice. Downstream consumers
+(``EchamBoundaryConditions``) therefore always read a single
+``(nlev, ncols)`` array — they don't need to know about the time axis.
 
 Expected file layout (output of ``jcm/data/bc/interpolate_ozone.py``):
 - ``O3``: ``(time, level, lat, lon)`` in mole/mole.
@@ -30,6 +32,7 @@ etc.) should be passed through ``jcm.data.bc.interpolate_ozone`` first.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -41,17 +44,25 @@ class OzoneClimatology:
     """Per-column ozone profiles in ppmv on the model's vertical grid.
 
     Carried on :class:`~jcm.forcing.ForcingData` so the seasonal /
-    scenario evolution can ride through the same ``select(date)`` slicer
-    that already drives SST, sea ice, CO2, etc. (Phase 1 holds the
-    annual mean directly; the slicing hook lands when the seasonal
-    cycle is wired in.)
+    scenario evolution rides through the same ``select(date)`` slicer
+    that already drives SST, sea ice, CO2, etc. Pre-select,
+    :attr:`o3_ppmv` is a :class:`~jcm.forcing.TimeSeries` of shape
+    ``(12, nlev, ncols)`` (monthly climatology, ``WRAP_YEAR`` align
+    mode); post-select it is a plain ``jnp.ndarray`` of shape
+    ``(nlev, ncols)`` for the current step.
+
+    The empty sentinel (no climatology file loaded) stays a plain
+    zero-size ``jnp.ndarray`` — never a ``TimeSeries`` — so
+    :meth:`is_loaded` can structurally distinguish "no data" from
+    "loaded but a tiny grid" (SCM column).
     """
 
-    # Annual-mean O3 (ppmv) per column on the model's hybrid-level grid.
-    # Shape: ``(nlev, ncols)`` matching the column convention
-    # (lon-major / lat-minor; see
-    # :func:`jcm.physics.composable_physics._reshape_state_to_columns`).
-    o3_ppmv: jnp.ndarray
+    # Either a ``jnp.ndarray`` (post-select slice OR empty sentinel) or a
+    # ``TimeSeries`` (pre-select monthly climatology). The annotation is
+    # intentionally generic — the same field name is reused on both
+    # sides of ``ForcingData.select(date)`` to match how
+    # ``sea_surface_temperature`` and friends behave.
+    o3_ppmv: Any
 
     @classmethod
     def from_file(
@@ -62,7 +73,11 @@ class OzoneClimatology:
         nlev: int,
         var_name: str = "O3",
     ) -> "OzoneClimatology":
-        """Load a pre-interpolated ozone climatology and annual-mean it.
+        """Load a pre-interpolated 12-month ozone climatology.
+
+        Wraps the full ``(12, nlev, ncols)`` array in a
+        :class:`~jcm.forcing.TimeSeries` so the seasonal cycle is
+        preserved through ``ForcingData.select(date)``.
 
         Args:
             path: Path to the netCDF file produced by
@@ -74,12 +89,15 @@ class OzoneClimatology:
             var_name: Source variable name (default ``"O3"``).
 
         Returns:
-            ``OzoneClimatology`` whose ``o3_ppmv`` is the annual mean,
-            flattened to the model's column ordering ``(nlev, nlon * nlat)``
-            with longitude as the slower index.
+            ``OzoneClimatology`` whose ``o3_ppmv`` is a 12-month
+            ``TimeSeries`` shaped ``(12, nlev, nlon * nlat)`` with
+            longitude as the slower index, in ppmv.
 
         """
         import xarray as xr
+        # Local import: ``jcm.forcing`` already imports this module via
+        # ``ForcingData``, so importing it at module top would cycle.
+        from jcm.forcing import WRAP_YEAR, make_time_series
 
         path = Path(path)
         # ``decode_times=False`` — the source CMIP6 file uses
@@ -108,35 +126,52 @@ class OzoneClimatology:
 
         # mole/mole → ppmv (consumed as ppmv by ``RRTMGPRadiation``).
         o3_ppmv_raw = o3 * 1e6
-        # Annual mean across the 12 months (Phase 1; future date-aware
-        # slicing keeps the time axis).
-        o3_annual = o3_ppmv_raw.mean(axis=0)  # (nlev, nlat, nlon)
-        # Reorder to (nlev, nlon, nlat) then flatten to ncols, matching
-        # ``ComposablePhysics._reshape_state_to_columns`` (3-D
+        # Reorder each month to (nlev, nlon, nlat) then flatten to ncols
+        # matching ``ComposablePhysics._reshape_state_to_columns`` (3-D
         # ``(nlev, nlon, nlat) → reshape(nlev, ncols)`` ⇒ lon-major,
         # lat-minor in memory).
-        o3_annual = np.transpose(o3_annual, (0, 2, 1))
-        o3_cols = o3_annual.reshape(nlev, nlon * nlat)
+        o3_per_month = np.transpose(o3_ppmv_raw, (0, 1, 3, 2))  # (T, lev, lon, lat)
+        o3_per_month_cols = o3_per_month.reshape(ntime, nlev, nlon * nlat)
 
-        return cls(o3_ppmv=jnp.asarray(o3_cols, dtype=jnp.float32))
+        # ``time_seconds`` is structurally required by ``TimeSeries`` but
+        # ignored under ``WRAP_YEAR`` selection. Use month-center seconds
+        # within a reference year so the array is well-formed for any
+        # ``by_date`` consumer that might appear later.
+        seconds_per_month = 30.4375 * 86400.0  # 365.25/12 days
+        time_seconds = jnp.asarray(
+            (np.arange(ntime) + 0.5) * seconds_per_month, dtype=jnp.float32,
+        )
+
+        ts = make_time_series(
+            jnp.asarray(o3_per_month_cols, dtype=jnp.float32),
+            time_seconds,
+            align_mode=WRAP_YEAR,
+        )
+        return cls(o3_ppmv=ts)
 
     @classmethod
     def empty(cls) -> "OzoneClimatology":
         """Sentinel value used when no climatology file is provided.
 
-        Uses a zero-size array so ``is_loaded`` can distinguish the
-        sentinel from a legitimately-loaded single-column climatology
-        (e.g. an SCM run with ``nlon == nlat == 1``). Callers can
-        check ``is_loaded()`` to decide whether to use this forcing
-        or fall back to an analytical profile.
+        Uses a zero-size ``jnp.ndarray`` (not a ``TimeSeries``) so
+        :meth:`is_loaded` can distinguish the sentinel from a
+        legitimately-loaded single-column climatology (e.g. an SCM run
+        with ``nlon == nlat == 1``). Callers can check
+        :meth:`is_loaded` to decide whether to use this forcing or fall
+        back to an analytical profile.
         """
         return cls(o3_ppmv=jnp.zeros((0, 0), dtype=jnp.float32))
 
     def is_loaded(self) -> bool:
         """Cheap Python-side check that the climatology has real data.
 
-        ``empty()`` returns a zero-size array so any non-empty profile
-        — including legitimate single-column ``(nlev, 1)`` SCM data —
-        evaluates to ``True`` here.
+        Works at both stages of the forcing pipeline:
+        - Pre-select, ``o3_ppmv`` is a ``TimeSeries`` whose ``.values``
+          carries the data.
+        - Post-select (and for the empty sentinel), ``o3_ppmv`` is a
+          plain ``jnp.ndarray``.
+
+        Both expose ``.size``.
         """
-        return bool(self.o3_ppmv.size > 0)
+        arr = getattr(self.o3_ppmv, "values", self.o3_ppmv)
+        return bool(arr.size > 0)
