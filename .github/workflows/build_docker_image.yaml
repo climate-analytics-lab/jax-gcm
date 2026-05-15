@@ -1,0 +1,106 @@
+# Build the JCM container image and push to GHCR on each published release.
+#
+# Why `release: published` instead of `push: tags: [v*]`? Matches the
+# convention used by python-publish.yml so a single GitHub Release fires
+# both PyPI and image publication, keeping the tag-to-artifact mapping
+# consistent. The `Verify tag is on main` step rejects releases cut from
+# a non-main branch — without it, `release: published` would happily run
+# on any tagged commit.
+name: Build Docker image
+
+on:
+  release:
+    types: [published]
+  # Allow maintainers to trigger a build out-of-band (e.g. to retry a
+  # failed release run). The image is tagged with `manual-<sha>` so it
+  # can't shadow a real release artifact.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (commit SHA, branch, or tag)'
+        required: false
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          # Need full history so `merge-base --is-ancestor` can resolve
+          # main and the tagged commit.
+          fetch-depth: 0
+
+      - name: Resolve checked-out commit
+        id: commit
+        # `$GITHUB_SHA` reflects the workflow's dispatched ref, not the
+        # `inputs.ref` we just checked out — so for a workflow_dispatch
+        # with a non-default `ref` they differ. Read the SHA out of the
+        # working tree so tag computation and OCI labels match the code
+        # we actually build.
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag is on main
+        if: github.event_name == 'release'
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${{ steps.commit.outputs.sha }}" origin/main; then
+            echo "::error::Release commit ${{ steps.commit.outputs.sha }} is not reachable from origin/main — refusing to build a release image from an off-main branch."
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/jcm"
+          SHORT_SHA="${{ steps.commit.outputs.short_sha }}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # e.g. v1.2.3 -> push :latest, :v1.2.3, :<short-sha>
+            TAGS="$IMAGE:latest,$IMAGE:${{ github.event.release.tag_name }},$IMAGE:$SHORT_SHA"
+          else
+            # workflow_dispatch — don't poison :latest from an ad-hoc run
+            TAGS="$IMAGE:manual-$SHORT_SHA"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "Pushing tags: $TAGS"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # GHA cache cuts subsequent builds from ~40min (local QEMU) to
+          # a few minutes when only requirements.txt / source changed.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # OCI metadata: lets `docker inspect` / GHCR show the source.
+          # `steps.commit.outputs.sha` (not `github.sha`) so the revision
+          # label matches the code we built — see the comment above.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.commit.outputs.sha }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name || steps.commit.outputs.sha }}
