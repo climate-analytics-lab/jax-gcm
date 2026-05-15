@@ -892,6 +892,7 @@ def _saturation_adjustment_layer(
         condensate; negative values are evaporation of cloud water/ice.
         ``dq = -(dqc + dqi)`` by construction so the column-integrated
         vapour balance closes.
+
     """
     # Imported here rather than at module top to keep the dependency
     # explicit and to avoid pulling sundqvist into the module-load path
