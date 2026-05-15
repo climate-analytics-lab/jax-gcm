@@ -1,33 +1,38 @@
+import jax
+print("Devices: ", jax.devices())
+
 import jax.numpy as jnp
+
+import jcm
+print(f"Note: jcm.__file__ = {str(jcm.__file__)}")
+
 from jcm.model import Model
-from jcm.forcing import ForcingData
+from jcm.forcing import default_forcing
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 coords = get_speedy_coords()
 
+
 # Default forcing with reference CO2 absorptivity (6.0)
-forcing_default = ForcingData.zeros(
-    nodal_shape=coords.horizontal.nodal_shape,
-    ablco2=6.0,
-)
+forcing_default = default_forcing(coords.horizontal).copy(ablco2=jnp.asarray(6.0))
 
 # Elevated CO2 — double the reference value
-forcing_high_co2 = forcing_default.copy(ablco2=jnp.asarray(12.0))
+forcing_high_co2 = default_forcing(coords.horizontal).copy(ablco2=jnp.asarray(12.0))
 
 model = Model(coords=coords)
-
-# Run with default CO2
+total_time = 360.0
+print("Run with default CO2")
 preds_default = model.run(
     forcing=forcing_default,
     save_interval=1.0,
-    total_time=2.0,
+    total_time=total_time,
 )
 
-# Run with elevated CO2
+print("Run with elevated CO2")
 preds_high = model.run(
     forcing=forcing_high_co2,
     save_interval=1.0,
-    total_time=2.0,
+    total_time=total_time,
 )
 
 # Check ablco2 appears in output and differs between runs
@@ -40,3 +45,7 @@ print("ablco2 high:   ", ds_high["mod_radcon.ablco2"].values)
 # Temperature should differ due to changed CO2 absorptivity
 temp_diff = (ds_high["temperature"] - ds_default["temperature"]).values
 print("max |ΔT|:", abs(temp_diff).max())
+
+
+ds_default.to_netcdf("atm_default.nc")
+ds_high.to_netcdf("atm_doubleco2.nc")
