@@ -12,20 +12,22 @@ output: longrun.nc
 log_level: INFO
 
 # Production sponge config — settled on after the 2026-05-14/15 T63L47
-# sweep. ``target_T_K=270`` adds an absolute-target relaxation that
+# sweep. ``target_T_K=250`` adds an absolute-target relaxation that
 # catches the m=0 (zonal-mean) mode that pure zonal-mean damping by
 # construction can't touch; without it the lev46 zonal mean drifts
 # ~4 K/hr from a JW-dry cold-cap init and NaN's before the first save.
-# Top-5 vs top-10 sponge depth is nearly indistinguishable after spin-up
-# (verified day-365 column-mean Ts within 0.5 K) so we keep the smaller
-# footprint. ``damp_temperature`` is True by default on UpperSponge —
-# explicit here for clarity.
+# Top-10 sponge depth ramps the damping smoothly into the stratosphere
+# (with ``enspodi=2`` the timescale doubles per level away from TOA,
+# so the level-10 sponge is ~768 h, essentially inactive); paired with
+# the colder ``target_T_K=250`` it gives the cleanest year-1 mesospheric
+# climatology in the 2026-05-14/15 three-way sweep. ``damp_temperature``
+# is True by default on UpperSponge — explicit here for clarity.
 sponge:
-  levels: 5
+  levels: 10
   timescale_h: 1.5
   enspodi: 2.0
   damp_temperature: true
-  target_T_K: 270.0
+  target_T_K: 250.0
 
 chunk_days: 30
 output_prefix: longrun
