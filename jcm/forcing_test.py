@@ -31,6 +31,12 @@ class TestForcingDataZeros(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.soilw_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.stl_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.sea_surface_temperature, 0.0))
+        self.assertTrue(jnp.allclose(forcing.ablco2, 6.0))
+
+    def test_zeros_custom_ablco2(self):
+        """Zeros with custom ablco2 should store the provided value."""
+        forcing = ForcingData.zeros((64, 32), ablco2=12.0)
+        self.assertTrue(jnp.allclose(forcing.ablco2, 12.0))
 
     def test_zeros_with_custom_sst(self):
         """Zeros with custom SST should use provided values."""
@@ -79,6 +85,7 @@ class TestForcingDataOnes(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.soilw_am, 1.0))
         self.assertTrue(jnp.allclose(forcing.stl_am, 1.0))
         self.assertTrue(jnp.allclose(forcing.sea_surface_temperature, 1.0))
+        self.assertTrue(jnp.allclose(forcing.ablco2, 6.0))
 
     def test_ones_with_custom_field(self):
         """Ones with custom field should use provided value, rest are ones."""
@@ -108,6 +115,7 @@ class TestForcingDataCopy(unittest.TestCase):
         self.assertTrue(jnp.allclose(copied.alb0, forcing.alb0))
         self.assertTrue(jnp.allclose(copied.sice_am, forcing.sice_am))
         self.assertTrue(jnp.allclose(copied.sea_surface_temperature, forcing.sea_surface_temperature))
+        self.assertTrue(jnp.allclose(copied.ablco2, forcing.ablco2))
 
     def test_copy_with_changes(self):
         """Copy with args should replace those fields."""
@@ -121,10 +129,11 @@ class TestForcingDataCopy(unittest.TestCase):
         new_sst = jnp.ones(nodal_shape) * 290.
         new_alb0 = jnp.ones(nodal_shape) * 0.5
 
-        copied = forcing.copy(sea_surface_temperature=new_sst, alb0=new_alb0)
+        copied = forcing.copy(sea_surface_temperature=new_sst, alb0=new_alb0, ablco2=jnp.asarray(12.0))
 
         self.assertTrue(jnp.allclose(copied.alb0, 0.5))
         self.assertTrue(jnp.allclose(copied.sea_surface_temperature, 290.))
+        self.assertTrue(jnp.allclose(copied.ablco2, 12.0))
         # Unchanged fields
         self.assertTrue(jnp.allclose(copied.sice_am, forcing.sice_am))
 
@@ -290,6 +299,7 @@ class TestDefaultForcing(unittest.TestCase):
         self.assertTrue(jnp.allclose(forcing.snowc_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.soilw_am, 0.0))
         self.assertTrue(jnp.allclose(forcing.stl_am, 0.0))
+        self.assertTrue(jnp.allclose(forcing.ablco2, 6.0))
 
     def test_default_forcing_different_resolutions(self):
         """default_forcing should work for different resolutions."""
