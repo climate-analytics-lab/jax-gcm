@@ -1,14 +1,14 @@
 import jax
 print("Devices: ", jax.devices())
 
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: E402
 
-import jcm
+import jcm  # noqa: E402
 print(f"Note: jcm.__file__ = {str(jcm.__file__)}")
 
-from jcm.model import Model
-from jcm.forcing import default_forcing
-from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.model import Model  # noqa: E402
+from jcm.forcing import default_forcing  # noqa: E402
+from jcm.physics.speedy.speedy_coords import get_speedy_coords  # noqa: E402
 
 coords = get_speedy_coords()
 

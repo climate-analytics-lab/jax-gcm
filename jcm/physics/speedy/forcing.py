@@ -15,8 +15,6 @@ def set_forcing(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     # 2. daily-mean radiative forcing
     physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, terrain=terrain)
-    tyear = physics_data.date.tyear
-    model_year = physics_data.date.model_year
 
     # total surface albedo
     fmask = terrain.fmask
