@@ -798,25 +798,37 @@ class TestColumnSweepMicrophysics:
     def test_subsaturated_column_evaporates_rain(self):
         """A dry column under a cloud must evaporate falling rain.
 
-        Without Rotstayn rain evaporation, a cloud aloft would always
-        deliver its precipitation to the surface. With rain evap, the
-        surface flux is *less* than the column-integrated rain source
-        in a column with sub-saturated layers below the cloud.
+        Setup: a near-saturated cloud aloft (so the in-sweep saturation
+        adjustment doesn't immediately evaporate the cloud water before
+        autoconv fires) with strongly sub-saturated layers below the
+        cloud. Rotstayn rain evap should consume some of the falling
+        rain so the surface flux is strictly less than the
+        column-integrated rain source.
         """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
         cfg = MicrophysicsParameters.default()
         nlev = 20
         T = jnp.linspace(280.0, 300.0, nlev)
-        # Dry column (q ~ 5e-3 ≪ qsw ≈ 0.02 at 290K).
-        qc = jnp.zeros(nlev).at[5].set(2e-3)
-        T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop = self._column(
-            nlev=nlev, qc_top=qc, T_profile=T,
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        # Near-saturated where the cloud lives (level 5); dry below.
+        cloud_level = 5
+        q = jnp.where(
+            jnp.arange(nlev) == cloud_level, 0.95 * qsw, 0.3 * qsw,
         )
+        qc = jnp.zeros(nlev).at[cloud_level].set(2e-3)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
         _, state = cloud_microphysics_column_sweep(
-            T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
         )
         rain_source_total = float(jnp.sum(state.rain_flux))
         # surface precip should be strictly LESS than the local rain
         # source when rain evap is active in subsaturated air below cloud.
+        assert rain_source_total > 0.0, "autoconv didn't fire — adjust q profile"
         assert float(state.precip_rain) < rain_source_total
 
     def test_snow_above_warm_layer_melts_to_rain(self):
@@ -912,6 +924,49 @@ class TestColumnSweepMicrophysics:
         )
         assert jnp.allclose(
             state.precip_rain, jnp.sum(state.rain_flux), rtol=1e-5,
+        )
+
+    def test_column_water_budget_closes(self):
+        """Column-integrated d/dt(q+qc+qi) = -precip_surface within dt.
+
+        Locks the mass-conservation invariant of the merged column sweep:
+        the per-layer (dq + dqc + dqi) tendencies integrated over column
+        mass, plus the surface precip flux, must sum to zero — i.e. the
+        only sink for total water in the column is the falling precip
+        that exits at the surface. With the in-sweep saturation
+        adjustment moving mass between q ↔ qc/qi this is the right
+        invariant to track; the per-level scheme could not close it
+        because it discarded rain each step.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(220.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.9 * qsw                     # near-saturated everywhere
+        qc = jnp.zeros(nlev).at[10].set(1.5e-3).at[12].set(1e-3)
+        qi = jnp.zeros(nlev).at[3].set(2e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        dt = 1800.0
+        tend, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
+        )
+        mref = rho * dz                                       # kg/m² per layer
+        # Column-integrated total water tendency (kg/m²/s)
+        total_water_tend = jnp.sum(
+            (tend.dqdt + tend.dqcdt + tend.dqidt) * mref,
+        )
+        surface_precip = state.precip_rain + state.precip_snow    # kg/m²/s
+        # Budget: ∫(dq+dqc+dqi) dm/dt = -surface_precip
+        residual = float(total_water_tend + surface_precip)
+        scale = float(jnp.maximum(jnp.abs(surface_precip), 1e-9))
+        assert abs(residual) / scale < 1e-3, (
+            f"column water budget residual {residual:.3e} kg/m²/s, "
+            f"surface precip {float(surface_precip):.3e} kg/m²/s"
         )
 
     print("All tests passed!")

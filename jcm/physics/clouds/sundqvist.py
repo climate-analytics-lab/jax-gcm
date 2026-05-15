@@ -508,16 +508,31 @@ from jcm.terrain import TerrainData  # noqa: E402
 class SundqvistCloudFraction(PhysicsTerm):
     """Sundqvist (1989) / Lohmann-Roeckner (1996) diagnostic cloud fraction.
 
-    Diagnoses cloud fraction as ``cc = 1 - sqrt(1 - b0)`` with
-    ``b0 = (RH - RH_crit) / (1 - RH_crit)`` and emits the associated
-    condensation tendencies. Operates on column-vectorized state
-    ``(nlev, ncols)``. Reads ``pressure_full``, ``surface_pressure``
-    from the moist-air diagnostics dict and ``qc`` / ``qi`` from
-    ``state.tracers``. Writes the post-condensation cloud fraction,
-    cloud water, and cloud ice into the public ``"clouds"`` key
-    (a :class:`CloudData` typed sub-struct shared with the downstream
+    Pure cloud-fraction diagnostic — operates on column-vectorized state
+    ``(nlev, ncols)``. Reads ``pressure_full`` / ``surface_pressure`` from
+    the moist-air diagnostics dict and ``qc`` / ``qi`` from
+    ``state.tracers``. Writes ``cloud_fraction``, plus a pass-through of
+    the input ``qc`` / ``qi``, into the public ``"clouds"`` key
+    (:class:`CloudData` typed sub-struct, shared with the downstream
     microphysics terms) and updates the public ``"relative_humidity"``
-    moist-air key.
+    key with ``q / qsat``.
+
+    **No q ↔ qc/qi condensation tendency is emitted.** Saturation
+    adjustment (cuadjtq Newton step) lives in the downstream microphysics
+    term — the 1M scheme
+    (:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics`) does it
+    inside its column sweep
+    (:func:`~jcm.physics.clouds.echam_1m._saturation_adjustment_layer`),
+    and the 2M scheme
+    (:class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics`) does
+    it via :func:`mixed_phase_deposition_and_corrections`. This matches
+    ECHAM's ``mo_cloud.f90`` where condensation, autoconversion, rain
+    evap, and flux propagation all live in the cloud routine alongside
+    the cloud-fraction diagnostic — splitting condensation out into a
+    separate upstream term (the previous JCM layout) double-counted
+    against 2M and created a rain-evap ↔ re-condensation feedback with
+    the 1M column-sweep variant, both of which are resolved by this
+    structure.
     """
 
     name: ClassVar[str] = "sundqvist_cloud_fraction"
@@ -552,9 +567,8 @@ class SundqvistCloudFraction(PhysicsTerm):
         forcing: ForcingData,
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
-        """Compute cloud-fraction tendencies + diagnostics."""
+        """Diagnose cloud fraction + relative humidity, no q tendency."""
         nlev, ncols = state.temperature.shape
-        dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
@@ -562,41 +576,45 @@ class SundqvistCloudFraction(PhysicsTerm):
         qc = state.tracers.get("qc", jnp.zeros_like(state.temperature))
         qi = state.tracers.get("qi", jnp.zeros_like(state.temperature))
 
-        cloud_tend, cloud_state = jax.vmap(
-            shallow_cloud_scheme,
-            in_axes=(1, 1, 1, 1, 1, 0, None, None),
+        # Cloud fraction is purely diagnostic: ``cc = 1 - sqrt(1 - b0)``
+        # with ``b0 = (RH - RH_crit) / (1 - RH_crit)``. Vmap over columns
+        # so :func:`calculate_cloud_fraction` works on (nlev,) slices.
+        cf_T, rh_T = jax.vmap(
+            calculate_cloud_fraction,
+            in_axes=(1, 1, 1, 0, None),
             out_axes=(0, 0),
         )(
             state.temperature, state.specific_humidity, pressure_full,
-            qc, qi, surface_pressure, dt, params,
+            surface_pressure, params,
         )
+        cloud_fraction = cf_T.T  # back to (nlev, ncols)
+        rel_humidity = rh_T.T
 
+        # No condensation tendency — the downstream microphysics term
+        # owns saturation adjustment now (see class docstring).
+        zeros = jnp.zeros_like(state.temperature)
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
             v_wind=jnp.zeros_like(state.v_wind),
-            temperature=cloud_tend.dtedt.T,
-            specific_humidity=cloud_tend.dqdt.T,
-            tracers={
-                "qc": cloud_tend.dqcdt.T,
-                "qi": cloud_tend.dqidt.T,
-            },
+            temperature=zeros,
+            specific_humidity=zeros,
+            tracers={"qc": zeros, "qi": zeros},
         )
 
-        # Preserve any other CloudData fields written upstream (none today,
-        # but the downstream microphysics term writes precip_rain/snow etc.
-        # to the same key on subsequent steps) by copying onto the previous
-        # value or zeros.
+        # Write cloud_fraction (the only thing this term computes) plus a
+        # pass-through of the input qc / qi so downstream terms see a
+        # populated CloudData with the latest state values.
         prev_clouds = diagnostics.get(
             "clouds", CloudData.zeros((ncols,), nlev),
         )
         clouds = prev_clouds.copy(
-            cloud_fraction=cloud_state.cloud_fraction.T,
-            qc=cloud_state.cloud_water.T,
-            qi=cloud_state.cloud_ice.T,
+            cloud_fraction=cloud_fraction,
+            qc=qc,
+            qi=qi,
         )
 
         return tendency, {
             **diagnostics,
             "clouds": clouds,
-            "relative_humidity": cloud_state.rel_humidity.T,
+            "relative_humidity": rel_humidity,
         }
