@@ -1,0 +1,42 @@
+# ECHAM with RRTMGP radiation and the Lohmann 2-moment microphysics
+# (Lohmann2MMicrophysics) in place of the 1-moment Echam1MMicrophysics.
+#
+# Same term list as ``echam-rrtmgp.yaml`` with one term swap. The 2M
+# scheme carries qc / qi / qnc / qni / qr / qs as prognostic tracers and
+# does its own saturation adjustment internally via
+# ``mixed_phase_deposition_and_corrections``, so it pairs with the pure-
+# cf ``SundqvistCloudFraction`` upstream just like the merged 1M does.
+#
+# Use it as::
+#
+#     python -m jcm.main physics=echam-rrtmgp-2m
+
+vectorize_columns: true
+checkpoint_terms: true
+radiation_chunk_size: null
+
+terms:
+  moist_air_state:
+    _target_: jcm.physics.diagnostics.moist_air_state.MoistAirColumnState
+  echam_boundary_conditions:
+    _target_: jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions
+  macv2_sp_aerosol:
+    _target_: jcm.physics.aerosol.Macv2SpAerosol
+  simple_chemistry:
+    _target_: jcm.physics.chemistry.SimpleChemistry
+  sundqvist_cloud_fraction:
+    _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
+  rrtmgp_radiation:
+    _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
+  tiedtke_convection:
+    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+  lohmann_2m_microphysics:
+    _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+  tte_tke_vertical_diffusion:
+    _target_: jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion
+  echam_surface:
+    _target_: jcm.physics.surface.echam.surface_physics.EchamSurface
+  hines_gwd:
+    _target_: jcm.physics.gravity_waves.hines.HinesGwd
+  lott_miller_sso:
+    _target_: jcm.physics.gravity_waves.sso.LottMillerSso
