@@ -71,12 +71,36 @@ class DiffusionFilter:
         toward 3 h (T85 sits between T63 and T127). Levels 1-4 use del²,
         5-7 del⁴, 8-9 del⁶, 10+ del⁸. Applied equally to div/vor_q/temp.
         """
+        return cls._echam_l47(base_tau_h=3.0)
+
+    @classmethod
+    def echam_t63_l47(cls):
+        """Level-dependent hyperdiffusion profile matching ECHAM6.3 T63 lmidatm.
+
+        Per ``setdyn.f90``: ``dampth = 7 h`` for ``nn = 63`` selects the base
+        vorticity timescale; the level-order profile from ``mo_hdiff.f90::sudif``
+        for ``(nn = 63, nlev = 47)`` is ``[del², del², del², del², del⁴, del⁴,
+        del⁴, del⁶, del⁶, del⁸, ...]`` (levels 1-4 del², 5-7 del⁴, 8-9 del⁶,
+        10+ del⁸). Equivalent to ``echam_t85_l47()`` but with the T63 7-hour
+        base timescale instead of the T85 3-hour value, and so applied at
+        ``physics=echam`` runs on a T63L47 grid.
+        """
+        return cls._echam_l47(base_tau_h=7.0)
+
+    @classmethod
+    def _echam_l47(cls, base_tau_h: float):
+        """Shared constructor for ECHAM lmidatm L47 hyperdiffusion profiles.
+
+        ``base_tau_h`` is the ECHAM ``dampth`` value in hours (T63→7, T85→3,
+        T127→1.5, T255→0.5; see ``setdyn.f90``).
+        """
         orders = [1] * 4 + [2] * 3 + [3] * 2 + [4] * 38  # 4+3+2+38 = 47
         level_orders = jnp.asarray(orders, dtype=jnp.int32)
-        base_tau = 3 * 60 * 60  # 3 h -- between T63 (7h) and T127 (1.5h)
+        base_tau = base_tau_h * 3600.0
         return cls(
             # Effective timescale for each variable is ``base_tau * factor``;
-            # factors match ECHAM's difvo / difd / dift proportions.
+            # factors match ECHAM's difvo / difd / dift proportions
+            # (``mo_hdiff.f90``: ``difd = 5*difvo``, ``dift = 0.4*difvo``).
             div_timescale=base_tau / 5.0,        # divergence 5x stronger
             div_order=1,
             vor_q_timescale=base_tau,            # vorticity baseline
@@ -110,8 +134,16 @@ def level_dependent_scaling(
 
     For each level ``k`` with order ``p_k``:
 
-        scale_k = time_step / (timescale * |eigenvalues[-1]| ** p_k)
-        scaling[k, 0, n] = exp( - scale_k * (-eigenvalues[n]) ** p_k )
+        scaling[k, 0, n] = exp( -(dt/timescale) * (|eig[n]| / |eig[-1]|) ** p_k )
+
+    Algebraically equivalent to the textbook formulation
+    ``exp(-dt/(τ·|eig_max|^p) · |eig|^p)`` but float-stable: the
+    eigenvalues ``|eig|`` are O(1e-10) (nondimensional Laplacian
+    eigenvalues for spherical harmonics), so for ``p=4`` the textbook
+    form computes ``|eig_max|^4 ≈ 1e-40``, which underflows in float32
+    to 0 → ``dt/0 = inf`` → ``inf · 0 = NaN`` in the leading-edge
+    coefficient. Computing the ``|eig|/|eig_max|`` ratio first keeps the
+    intermediate in ``[0, 1]``.
 
     Args:
         eigenvalues: Negative-definite Laplacian eigenvalues from
@@ -125,13 +157,12 @@ def level_dependent_scaling(
         ``(nlev, 1, lat_modes)`` scaling.
 
     """
-    pos_eig = -eigenvalues                                          # (lat_modes,)
-    pos_eig_max = jnp.abs(eigenvalues[-1])                          # scalar
+    pos_eig = jnp.abs(eigenvalues)                                  # (lat_modes,)
+    pos_eig_max = pos_eig[-1]                                       # scalar
     p = orders_per_level[:, None].astype(jnp.float32)               # (nlev, 1)
-    scale_per_level = time_step / (timescale * pos_eig_max ** p)    # (nlev, 1)
-    pow_eig = pos_eig[None, :] ** p                                 # (nlev, lat_modes)
-    # Insert lon-modes singleton so we can broadcast against (nlev, M, N)
-    return jnp.exp(-scale_per_level * pow_eig)[:, None, :]
+    norm_eig = pos_eig[None, :] / pos_eig_max                       # (1, lat_modes), in [0, 1]
+    pow_norm = norm_eig ** p                                        # (nlev, lat_modes)
+    return jnp.exp(-(time_step / timescale) * pow_norm)[:, None, :]
 
 
 def uniform_scaling(
@@ -143,8 +174,10 @@ def uniform_scaling(
     """Uniform-order damping scaling, shape ``(lat_modes,)``.
 
     Equivalent to ``dinosaur.filtering.horizontal_diffusion_filter`` with a
-    single ``(timescale, order)``.
+    single ``(timescale, order)``. Float-stable rewrite — see
+    :func:`level_dependent_scaling` for the underflow note (matters
+    once ``order >= 4``).
     """
-    pos_eig_max = jnp.abs(eigenvalues[-1])
-    scale = time_step / (timescale * pos_eig_max ** order)
-    return jnp.exp(-scale * (-eigenvalues) ** order)
+    pos_eig = jnp.abs(eigenvalues)
+    norm_eig = pos_eig / pos_eig[-1]
+    return jnp.exp(-(time_step / timescale) * norm_eig ** order)

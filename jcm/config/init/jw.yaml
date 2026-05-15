@@ -1,3 +1,7 @@
-# Jablonowski-Williamson lapse-rate temperature with 60% RH humidity.
-# Better moist-physics initial condition than isothermal-rest.
+# Jablonowski-Williamson lapse-rate temperature with default 60% RH humidity.
+# Override ``init.rh=0.0`` for a fully-dry JW init (useful during spin-up
+# debugging — radiation + surface fluxes will moisten the atmosphere
+# themselves and avoid a moist-init day-12 NaN). Better moist-physics
+# initial condition than isothermal-rest.
 kind: jw
+rh: 0.6

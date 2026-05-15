@@ -1,3 +1,13 @@
-# SPEEDY-default uniform-order hyperdiffusion. ``scale=1`` keeps the
-# original timescales (24h temp, 12h vor_q, 2h div).
+# Hyperdiffusion configuration.
+#
+# ``kind: auto`` (default) picks a profile from the grid: L47 hybrid grids
+# get the matching ECHAM ``lmidatm`` level-dependent profile
+# (del² at top 4 levels, ..., del⁸ below); everything else gets SPEEDY's
+# uniform-order default.
+#
+# Override with ``kind: default`` (SPEEDY uniform, 24h temp / 12h vor_q
+# / 2h div), ``kind: echam_t63_l47`` (T63 lmidatm 7h base), or
+# ``kind: echam_t85_l47`` (T85 lmidatm 3h base). ``scale`` multiplies
+# the chosen profile's timescales.
+kind: auto
 scale: 1.0

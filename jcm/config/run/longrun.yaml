@@ -1,19 +1,33 @@
-# Long ICON run: chunked into 90-day pieces with health checks between each
-# chunk, monthly snapshots inside each chunk, conservative timestep, sponge
-# enabled. Replaces the old ``utils/run_echam_longrun.py`` script.
+# Long ECHAM run: 30-day chunks with health checks between each chunk,
+# 5-day saves inside each chunk, conservative timestep, sponge enabled
+# with T-damping toward an absolute target so the JW-dry init can spin
+# up against realistic ozone without a runaway at the model top.
+# Replaces the old ``utils/run_echam_longrun.py`` script. See
+# ``feat: ECHAM lmidatm stability stack`` PR for the calibration.
 time_step: 12
-save_interval: 30
+save_interval: 5
 total_time: 365
-output_averages: false
+output_averages: true
 output: longrun.nc
 log_level: INFO
 
+# Production sponge config — settled on after the 2026-05-14/15 T63L47
+# sweep. ``target_T_K=270`` adds an absolute-target relaxation that
+# catches the m=0 (zonal-mean) mode that pure zonal-mean damping by
+# construction can't touch; without it the lev46 zonal mean drifts
+# ~4 K/hr from a JW-dry cold-cap init and NaN's before the first save.
+# Top-5 vs top-10 sponge depth is nearly indistinguishable after spin-up
+# (verified day-365 column-mean Ts within 0.5 K) so we keep the smaller
+# footprint. ``damp_temperature`` is True by default on UpperSponge —
+# explicit here for clarity.
 sponge:
   levels: 5
-  timescale_h: 3.0
+  timescale_h: 1.5
   enspodi: 2.0
+  damp_temperature: true
+  target_T_K: 270.0
 
-chunk_days: 90
+chunk_days: 30
 output_prefix: longrun
 
 mode: full

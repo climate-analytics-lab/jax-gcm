@@ -1,13 +1,29 @@
-"""ICON vertical hybrid sigma-pressure coordinate definitions.
+"""ECHAM/ICON hybrid sigma-pressure level tables.
 
-This module provides ICON's vertical coordinate tables for various numbers
-of atmospheric levels, parsed from the official ICON vertical_coord_tables.
+The 47-level table here matches both ECHAM6.3 ``L47 lmidatm`` (verified
+bit-for-bit against a production ECHAM6.3-HAM T63L47 ``vct_a/vct_b``
+log on 2026-05-14) and ICON's standard ``L47`` table — these are
+shared heritage tables, not separate. The module was originally named
+after ICON because that's where the values came from in this codebase;
+the actual numerical values are equally the ECHAM6.3 lmidatm
+production grid (top at p=0, three trailing zero ``a`` boundaries
+intentionally degenerate at the top). When pairing this grid with
+ECHAM-style physics, the model needs ECHAM's ``lmidatm`` stability
+stack — upper sponge with T damping on m≠0 modes
+(``mo_upper_sponge.f90``) and level-dependent del²→del⁸ horizontal
+diffusion at the top 4 levels (``mo_hdiff.f90::sudif``) — otherwise
+the thin top layer (~2 Pa mass) runs away under any radiative
+imbalance, the failure mode documented in the
+``echam_rrtmgp_t63_real_orog_nan`` memory.
 
-The `a_boundaries` values stored here are in **Pascals** (Pa) — the native
-ICON convention. `dinosaur.primitive_equations.PrimitiveEquationsHybrid`
-expects `a` values to be nondimensionalized by its `hpa_quantity` unit
-(defaulting to hPa); the Model class overrides this to `units.pascal` when
-constructed with `HybridCoordinates` from this module.
+ECHAM stores the actual numerical table in initial-condition netCDFs
+(``vct_a``/``vct_b`` variables, ``nvclev`` dim) read at runtime by
+``mo_io.f90``; the source code itself contains no level numbers.
+
+The ``a_boundaries`` values are in **Pascals** (Pa).
+``dinosaur.primitive_equations.PrimitiveEquationsHybrid`` expects ``a``
+in its ``hpa_quantity`` unit (default hPa); ``Model`` overrides this
+to ``units.pascal`` when constructed with these ``HybridCoordinates``.
 """
 
 import jax.numpy as jnp

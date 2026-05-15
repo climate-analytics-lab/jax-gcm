@@ -336,6 +336,19 @@ class ComposablePhysics(nnx.Module, Physics):
         "_speedy_coords",
     })
 
+    # Sub-struct fields that survive the flatten step but should be dropped
+    # before reaching xarray. These are typically per-RRTMGP-band optical
+    # properties — they're plumbing for the radiation coupling, have a
+    # 14-element ``sw_band`` axis that ``data_to_xarray`` has no dim entry
+    # for, and balloon save_intervals netCDFs by ~3× without adding
+    # scientific value. Filter is applied to the full dotted key
+    # (e.g. ``aerosol.aod_sw_per_band``).
+    _EXCLUDED_OUTPUT_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "aerosol.aod_sw_per_band",
+        "aerosol.ssa_sw_per_band",
+        "aerosol.asy_sw_per_band",
+    })
+
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
     ) -> dict[str, Any]:
@@ -375,7 +388,10 @@ class ComposablePhysics(nnx.Module, Physics):
                 except (ValueError, AttributeError):
                     continue
                 for sk, sv in sub.items():
-                    items[f"{out_key}{sep}{sk}"] = sv
+                    full_key = f"{out_key}{sep}{sk}"
+                    if full_key in self._EXCLUDED_OUTPUT_KEYS:
+                        continue
+                    items[full_key] = sv
 
         # Reshape column-vectorized diagnostics (a flattened ncols axis,
         # produced when ``vectorize_columns=True``) back to ``(lon, lat)``

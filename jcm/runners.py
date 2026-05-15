@@ -252,10 +252,14 @@ def maybe_add_sponge(physics, cfg: DictConfig):
     if sponge is None or sponge.get("levels", 0) <= 0:
         return physics
     from jcm.physics.dissipation import UpperSponge
+    raw_target_T_K = sponge.get("target_T_K", None)
+    target_T_K = None if raw_target_T_K is None else float(raw_target_T_K)
     return physics + UpperSponge(
         n_sponge_levels=int(sponge.levels),
         sponge_timescale_s=float(sponge.timescale_h) * 3600.0,
         enspodi=float(sponge.enspodi),
+        damp_temperature=bool(sponge.get("damp_temperature", True)),
+        target_T_K=target_T_K,
     )
 
 
@@ -288,9 +292,54 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
 # ---------------------------------------------------------------------------
 
 def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
-    base = DiffusionFilter.default()
+    """Build a ``DiffusionFilter`` honouring ``cfg.diffusion`` + the grid.
+
+    Resolution selector: when ``cfg.diffusion.kind`` is ``"auto"`` (the
+    default) and the grid is an L47 hybrid, return the matching
+    ECHAM ``lmidatm`` level-dependent profile (del² at top 4 levels, del⁴
+    at 5-7, del⁶ at 8-9, del⁸ below) — that's the stability stack the
+    grid was tuned for in ECHAM. T63L47 picks the 7-hour base timescale;
+    T85L47 picks 3 h. Set ``cfg.diffusion.kind: default`` to force the
+    uniform SPEEDY del² profile (24h temp / 12h vor_q / 2h div), or
+    ``cfg.diffusion.kind: echam_t63_l47`` / ``echam_t85_l47`` to pin a
+    specific factory regardless of grid. ``cfg.diffusion.scale`` still
+    multiplies the chosen profile's timescales — keep the existing
+    SPEEDY-tuned configs working unchanged.
+    """
     diffusion = cfg.get("diffusion", None)
+    kind = "auto" if diffusion is None else str(diffusion.get("kind", "auto"))
     scale = 1.0 if diffusion is None else float(diffusion.get("scale", 1.0))
+
+    if kind == "auto":
+        # Pick by grid: ECHAM lmidatm profile for L47 hybrid grids, SPEEDY
+        # default otherwise. Match on the (vertical=hybrid, layers, truncation)
+        # triple so this fires for both echam_t63_l47_hybrid and
+        # echam_t85_l47_hybrid — and stays inert for SPEEDY T31L8 / Held-Suarez.
+        grid_cfg = cfg.get("grid", None)
+        layers = int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0
+        truncation = int(grid_cfg.get("spectral_truncation", 0)) if grid_cfg is not None else 0
+        vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
+        if vertical == "hybrid" and layers == 47:
+            if truncation == 63:
+                base = DiffusionFilter.echam_t63_l47()
+            elif truncation == 85:
+                base = DiffusionFilter.echam_t85_l47()
+            else:
+                base = DiffusionFilter.default()
+        else:
+            base = DiffusionFilter.default()
+    elif kind == "default":
+        base = DiffusionFilter.default()
+    elif kind == "echam_t63_l47":
+        base = DiffusionFilter.echam_t63_l47()
+    elif kind == "echam_t85_l47":
+        base = DiffusionFilter.echam_t85_l47()
+    else:
+        raise ValueError(
+            f"Unknown diffusion.kind={kind!r}; expected one of "
+            "'auto', 'default', 'echam_t63_l47', 'echam_t85_l47'."
+        )
+
     if scale == 1.0:
         return base
     return DiffusionFilter(
@@ -300,6 +349,9 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
         vor_q_order=base.vor_q_order,
         temp_timescale=base.temp_timescale * scale,
         temp_order=base.temp_order,
+        level_orders_div=base.level_orders_div,
+        level_orders_vor_q=base.level_orders_vor_q,
+        level_orders_temp=base.level_orders_temp,
     )
 
 
@@ -587,7 +639,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
         )
     if cfg.init.kind == "jw":
-        inject_jw_profile(model)
+        inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
         return model.resume(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
@@ -752,7 +804,7 @@ def run_chunked(
         # the template values are immediately overwritten by the
         # checkpoint's contents.
         if cfg.init.kind == "jw":
-            inject_jw_profile(model)
+            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
         elif cfg.init.kind == "balanced_isothermal":
             inject_balanced_isothermal_profile(model)
         else:
@@ -782,7 +834,7 @@ def run_chunked(
         t0 = time.perf_counter()
         first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
         if first_fresh_chunk and cfg.init.kind == "jw":
-            inject_jw_profile(model)
+            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
             preds = model.resume(
                 forcing=forcing,
                 save_interval=save_interval,
