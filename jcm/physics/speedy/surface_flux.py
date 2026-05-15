@@ -1,6 +1,8 @@
 import jax
 import jax.numpy as jnp
 from jax import jit
+from dataclasses import dataclass
+from functools import partial
 
 # importing custom functions from library
 from jcm.terrain import TerrainData
@@ -12,13 +14,24 @@ from jcm.physics.speedy.physical_constants import p0, rgas, cp, alhc, sbc, grav
 from jcm.physics.speedy.humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.utils import pass_fn
 
-@jit
+
+@dataclass(frozen=True)
+class SurfaceFluxPrescribedConfig:
+    """Static config controlling which surface fluxes are prescribed from ForcingData."""
+    prescribe_evap: bool = False
+    prescribe_ustr: bool = False
+    prescribe_vstr: bool = False
+    prescribe_rlus: bool = False
+
+
+@partial(jit, static_argnames=('surface_flux_prescribed_config',))
 def get_surface_fluxes(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    terrain: TerrainData
+    terrain: TerrainData,
+    surface_flux_prescribed_config: SurfaceFluxPrescribedConfig = None,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Parameters
     ----------
@@ -272,6 +285,16 @@ def get_surface_fluxes(
 
     tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
     tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
+
+    if surface_flux_prescribed_config is not None:
+        if surface_flux_prescribed_config.prescribe_evap:
+            evap = evap.at[:,:,2].set(forcing.prescribed_evap)
+        if surface_flux_prescribed_config.prescribe_ustr:
+            ustr = ustr.at[:,:,2].set(forcing.prescribed_ustr)
+        if surface_flux_prescribed_config.prescribe_vstr:
+            vstr = vstr.at[:,:,2].set(forcing.prescribed_vstr)
+        if surface_flux_prescribed_config.prescribe_rlus:
+            rlus = rlus.at[:,:,2].set(forcing.prescribed_rlus)
 
     surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, rlus=rlus,
                                                       hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)

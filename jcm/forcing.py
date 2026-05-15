@@ -15,33 +15,49 @@ class ForcingData:
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
     ablco2: float # CO2 absorptivity (prescribed constant)
+    prescribed_evap: jnp.ndarray # evaporation (ix, il) — used when SurfaceFluxPrescribedConfig.prescribe_evap is True
+    prescribed_ustr: jnp.ndarray # zonal wind stress (ix, il) — used when SurfaceFluxPrescribedConfig.prescribe_ustr is True
+    prescribed_vstr: jnp.ndarray # meridional wind stress (ix, il) — used when SurfaceFluxPrescribedConfig.prescribe_vstr is True
+    prescribed_rlus: jnp.ndarray # upward LW emission at surface (ix, il) — used when SurfaceFluxPrescribedConfig.prescribe_rlus is True
 
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
-              soilw_am=None,stl_am=None,sea_surface_temperature=None,ablco2=None):
+              soilw_am=None,stl_am=None,sea_surface_temperature=None,ablco2=None,
+              prescribed_evap=None,prescribed_ustr=None,
+              prescribed_vstr=None,prescribed_rlus=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
-            stl_am =stl_am if stl_am is not None else jnp.zeros((nodal_shape)),
+            stl_am=stl_am if stl_am is not None else jnp.zeros((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros((nodal_shape)),
             ablco2=jnp.asarray(ablco2 if ablco2 is not None else 6.0),
+            prescribed_evap=prescribed_evap if prescribed_evap is not None else jnp.zeros((nodal_shape)),
+            prescribed_ustr=prescribed_ustr if prescribed_ustr is not None else jnp.zeros((nodal_shape)),
+            prescribed_vstr=prescribed_vstr if prescribed_vstr is not None else jnp.zeros((nodal_shape)),
+            prescribed_rlus=prescribed_rlus if prescribed_rlus is not None else jnp.zeros((nodal_shape)),
         )
 
     @classmethod
     def ones(cls,nodal_shape,
              alb0=None,sice_am=None,snowc_am=None,
-             soilw_am=None,stl_am=None,sea_surface_temperature=None,ablco2=None):
+             soilw_am=None,stl_am=None,sea_surface_temperature=None,ablco2=None,
+             prescribed_evap=None,prescribed_ustr=None,
+             prescribed_vstr=None,prescribed_rlus=None):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
-            stl_am =stl_am if stl_am is not None else jnp.ones((nodal_shape)),
+            stl_am=stl_am if stl_am is not None else jnp.ones((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
             ablco2=jnp.asarray(ablco2 if ablco2 is not None else 6.0),
+            prescribed_evap=prescribed_evap if prescribed_evap is not None else jnp.ones((nodal_shape)),
+            prescribed_ustr=prescribed_ustr if prescribed_ustr is not None else jnp.ones((nodal_shape)),
+            prescribed_vstr=prescribed_vstr if prescribed_vstr is not None else jnp.ones((nodal_shape)),
+            prescribed_rlus=prescribed_rlus if prescribed_rlus is not None else jnp.ones((nodal_shape)),
         )
     
     @classmethod
@@ -112,16 +128,22 @@ class ForcingData:
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
-             sea_surface_temperature=None,ablco2=None):
+             sice_am=None,snowc_am=None,soilw_am=None,stl_am=None,
+             sea_surface_temperature=None,ablco2=None,
+             prescribed_evap=None,prescribed_ustr=None,
+             prescribed_vstr=None,prescribed_rlus=None):
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
-            soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
-            stl_am =stl_am if stl_am is not None else self.stl_am,
+            soilw_am=soilw_am if soilw_am is not None else self.soilw_am,
+            stl_am=stl_am if stl_am is not None else self.stl_am,
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else self.sea_surface_temperature,
             ablco2=ablco2 if ablco2 is not None else self.ablco2,
+            prescribed_evap=prescribed_evap if prescribed_evap is not None else self.prescribed_evap,
+            prescribed_ustr=prescribed_ustr if prescribed_ustr is not None else self.prescribed_ustr,
+            prescribed_vstr=prescribed_vstr if prescribed_vstr is not None else self.prescribed_vstr,
+            prescribed_rlus=prescribed_rlus if prescribed_rlus is not None else self.prescribed_rlus,
         )
 
     def isnan(self):
