@@ -1113,8 +1113,14 @@ def cloud_microphysics_column_sweep(
         # 1M spin-up of this branch (extreme tropical column produced
         # 4561 mm/day surface precip; a unit-correct cap on per-step
         # depletion fixes this).
+        # Density-correction factors used by accretion (zxrp1 needs the
+        # *forward* sqrt(rho/1.3)) and rain evap (Rotstayn needs the
+        # *inverse* sqrt(1.3/rho)). They are reciprocals of each other,
+        # but computing both directly avoids the float32 noise that a
+        # single ``1/sqrt(...)`` would carry into the other.
         zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
         zqrho_sqrt = jnp.sqrt(jnp.maximum(rho / 1.3, config.epsilon))
+        zqrho_sqrt_inv = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
         zxrp1 = jnp.where(
             (zrfl > config.epsilon) & (zclcpre > config.epsilon),
             jnp.power(
@@ -1185,9 +1191,17 @@ def cloud_microphysics_column_sweep(
         zbst = T1 / jnp.maximum(zdv * esw, config.epsilon)
         zthermo = jnp.maximum(zast + zbst, config.epsilon)
         zrfl_in_cf = zrfl / zclcpre_safe
+        # Rotstayn (1997) per-area rate. The density factor here is the
+        # *inverse* of the one accretion uses: see ECHAM mo_cloud.f90:415
+        # — ``870 * sub * (zrfl/zclcpre)**0.61 * zqrho/cqtmin / zthermo``
+        # where ``zqrho = sqrt(1.3/rho)``. Earlier drafts of this routine
+        # mistakenly reused the accretion-direction ``sqrt(rho/1.3)``
+        # here, which inverted the density dependence (suppressing
+        # rain-evap in low-density layers and amplifying it in dense
+        # layers — the opposite of physical).
         zzepr_rate = (
             870.0 * zsusatw * jnp.power(jnp.maximum(zrfl_in_cf, 0.0), 0.61)
-            * zqrho_sqrt / jnp.sqrt(1.3) / zthermo
+            * zqrho_sqrt_inv / jnp.sqrt(1.3) / zthermo
         )
         zevp_unbounded = -zzepr_rate * dt * zclcpre
         zevp_max_rain = zrfl / jnp.maximum(mref, config.epsilon) * dt
