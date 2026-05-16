@@ -1202,16 +1202,6 @@ def cloud_microphysics_column_sweep(
         dTdt_evap = -zlvdcp * (dq_evap / dt)                          # K/s
         rain_evap_flux = zevp * mref / dt                             # kg/m²/s
 
-        # NOTE: an earlier draft of this routine ran a second
-        # ``_saturation_adjustment_layer`` here as a "cleanup pass" to
-        # absorb any super-saturation the rain evap might have produced.
-        # In practice the ``0.99·(qs-q1)`` cap above means rain-evap can
-        # never push the layer past saturation, so the cleanup pass is
-        # always a no-op — but it ALSO opens up the same rain-evap ↔
-        # re-condensation feedback PR #458 originally caught (the cooling
-        # from rain evap drops qs slightly, allowing the cleanup pass to
-        # re-condense → more autoconv → more rain → ...). Removed.
-
         # ---------- (6) flux update ----------
         # ICON ``mo_cloud.f90:984-985 / 1030-1031``.
         rain_source = (qcaut + rain_accr) * mref          # kg/m²/s

@@ -15,27 +15,39 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 from jcm.constants import (
-    tmelt, alhc, alhs, cp, eps
+    tmelt, alhc, alhs, cp, eps, rd, grav
 )
 
 
 @tree_math.struct
 class CloudParameters:
     """Configuration parameters for shallow cloud scheme"""
-    
+
     # Cloud fraction parameters
     crt: float           # Critical relative humidity aloft
     crs: float           # Critical relative humidity near surface
     nex: float           # Exponent for RH threshold profile
-    csatsc: float        # Saturation factor for stratocumulus
-    
+
+    # Stratocumulus inversion enhancement (ECHAM ``mo_cover.f90:219-244``).
+    # When the column has a low-level inversion (or strongest-stable
+    # layer) at altitudes between ``inversion_z_max`` and the surface,
+    # cf at that level is enhanced by ``zsat = csatsc + zgam`` ≤ 1
+    # where zgam captures the lapse-rate stability — at a true inversion
+    # zgam=0 and zsat=csatsc, boosting the apparent RH that drives cf.
+    csatsc: float        # Saturation factor for stratocumulus (0.7 = strong)
+    cinv: float          # dT/dz threshold (fraction of dry adiabatic) below
+                         # which a layer is considered too unstable to support
+                         # the stratocumulus enhancement
+    inversion_z_max: float   # Highest altitude for inversion search (m)
+    inversion_z_min: float   # Lowest altitude for inversion search (m)
+
     # Cloud droplet parameters
     ceffmin: float       # Minimum cloud droplet radius (microns)
     ceffmax: float       # Maximum cloud droplet radius (microns)
 
     # Numerical parameters
     epsilon: float       # Small number for numerical stability
-    
+
     # Cloud ice temperature thresholds
     t_ice: float         # Temperature below which all cloud is ice (K)
     t_mix_min: float     # Lower bound of mixed phase (K)
@@ -43,15 +55,30 @@ class CloudParameters:
 
     @classmethod
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
-                 csatsc=0.7, ceffmin=10.0,
+                 csatsc=0.7, cinv=0.25,
+                 inversion_z_max=2000.0, inversion_z_min=500.0,
+                 ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
-        """Return default cloud parameters"""
+        """Return default cloud parameters.
+
+        Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
+        (``crt=0.75``, ``crs=0.975``, ``nex=2``, ``csatsc=0.7``,
+        ``cinv=0.25``). The inversion altitude range
+        (``inversion_z_max=2000`` m, ``inversion_z_min=500`` m)
+        replaces ECHAM's ``jbmin`` / ``jbmax`` level indices with
+        a portable height-based equivalent (ECHAM derives its level
+        indices from the same 2000 m / 500 m thresholds anyway, see
+        ``mo_echam_cloud_params.f90:152-162``).
+        """
         return cls(
             crt=jnp.array(crt),
             crs=jnp.array(crs),
             nex=jnp.array(nex),
             csatsc=jnp.array(csatsc),
+            cinv=jnp.array(cinv),
+            inversion_z_max=jnp.array(inversion_z_max),
+            inversion_z_min=jnp.array(inversion_z_min),
             ceffmin=jnp.array(ceffmin),
             ceffmax=jnp.array(ceffmax),
             epsilon=jnp.array(epsilon),
@@ -161,6 +188,100 @@ def saturation_specific_humidity(
     return jnp.clip(qs, 0.0, 0.5)
 
 
+def _stratocumulus_zsat(
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    config: CloudParameters,
+) -> jnp.ndarray:
+    """Per-layer stratocumulus saturation factor ``zsat`` ∈ (0, 1].
+
+    Ports the ECHAM ``mo_cover.f90:160-244`` low-level inversion
+    enhancement: for each column we find the level with the most
+    inversion-like lapse rate (``zdtdz`` closest to 0 / most positive)
+    inside the boundary layer (between ``inversion_z_min`` and
+    ``inversion_z_max`` above the surface), provided it exceeds the
+    ECHAM stability threshold ``-cinv·g/cp``. At that single level
+    only, ``zsat = min(1, csatsc + max(0, -dT/dz · cp/g))``; everywhere
+    else ``zsat = 1`` (no enhancement). Multiplying ``q/qsat`` by
+    ``1/zsat`` boosts the apparent RH that drives cf, which is how
+    ECHAM injects extra cloud cover at the BL-top inversion that
+    persistent stratocumulus decks live on.
+
+    Inputs are single-column arrays of shape ``(nlev,)`` in physics
+    convention (level=0 TOA, level=N-1 surface).
+
+    Returns:
+        ``zsat`` of shape ``(nlev,)`` — multiply ``qsat`` by this in
+        the cf formula.
+
+    """
+    nlev = temperature.shape[0]
+
+    # Approximate height per layer using hydrostatic balance from the
+    # surface up: ``dz_k = (R_d * T_k / g) * ln(p_lower/p_upper)``.
+    # In physics ordering, lower (higher pressure) is at level k+1 and
+    # upper (lower pressure) is at level k, so for each layer we use
+    # the layer below as the reference. Column-cumulative sum from the
+    # surface gives height above surface.
+    p_safe = jnp.maximum(pressure, 1.0)
+    # ``log(p_below / p_above)`` between adjacent levels (k+1 below, k above).
+    # Shape (nlev-1,). Layer thickness assigned to the upper level k.
+    log_ratio = jnp.log(p_safe[1:] / p_safe[:-1])  # +ve when going up
+    T_avg = 0.5 * (temperature[:-1] + temperature[1:])
+    dz_layer = rd * T_avg / grav * log_ratio       # (nlev-1,), m
+    # height above surface at each full level: 0 at surface, accumulating up
+    z_full = jnp.concatenate([
+        jnp.cumsum(dz_layer[::-1])[::-1],   # height of each upper-level w.r.t. surface
+        jnp.zeros(1),                       # surface (level=N-1) has z=0
+    ])
+
+    # dT/dz at each interior level k: between level k and k+1 (the layer
+    # immediately below k). Positive = inversion (T rises with height),
+    # negative = normal lapse.
+    dT = temperature[:-1] - temperature[1:]              # (nlev-1,)
+    dz = jnp.maximum(dz_layer, 1.0)                      # avoid /0
+    dTdz_layer = dT / dz                                 # (nlev-1,) at upper level k
+    # Pad to (nlev,): no zdtdz defined at the surface (no layer below it).
+    dTdz = jnp.concatenate([dTdz_layer, jnp.zeros(1)])
+
+    # ECHAM's ``zdtdz = MIN(0, zdtdz)`` clip — clips inversions (zdtdz>0)
+    # to 0, leaving normal lapses unchanged. The argmax then finds the
+    # level with the LEAST-NEGATIVE lapse, which is the BL-top inversion
+    # if there is one (clip→0 is the maximum value), otherwise the most
+    # stable lapse near the surface.
+    dTdz_clipped = jnp.minimum(dTdz, 0.0)
+
+    # Mask: only consider levels in the BL altitude range AND whose
+    # zdtdz exceeds the ECHAM stability threshold ``-cinv*g/cp``
+    # (otherwise the layer is too unstable to sustain stratocumulus).
+    # Use the SAME ``-cinv*g/cp`` initial value ECHAM seeds ``zdtmin``
+    # with, so any ``dTdz_clipped > -cinv*g/cp`` qualifies.
+    dtdz_threshold = -config.cinv * grav / cp
+    in_bl = (z_full >= config.inversion_z_min) & (z_full <= config.inversion_z_max)
+    valid = in_bl & (dTdz_clipped > dtdz_threshold)
+    # Set invalid levels to a strongly-negative sentinel so argmax skips them.
+    masked = jnp.where(valid, dTdz_clipped, -1e10)
+    knvb = jnp.argmax(masked)
+    has_inversion = jnp.any(valid)
+
+    # zgam = max(0, -zdtdz · cp/g). At a TRUE inversion (zdtdz > 0),
+    # the MIN(0, zdtdz) clip already drove dTdz_clipped to 0 → zgam = 0
+    # → zsat = csatsc (full enhancement). At a "stable but not inverted"
+    # layer (zdtdz slightly negative), zgam > 0 → zsat = csatsc + zgam,
+    # weakening the enhancement until ``zsat = 1`` and it has no effect.
+    zgam_at_knvb = jnp.maximum(-dTdz_clipped[knvb] * cp / grav, 0.0)
+    zsat_value = jnp.where(
+        has_inversion,
+        jnp.minimum(1.0, config.csatsc + zgam_at_knvb),
+        1.0,
+    )
+
+    # Build zsat array: 1 everywhere, zsat_value at knvb only.
+    zsat = jnp.ones(nlev)
+    zsat = zsat.at[knvb].set(zsat_value)
+    return zsat
+
+
 def calculate_cloud_fraction(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -168,40 +289,60 @@ def calculate_cloud_fraction(
     surface_pressure: float,
     config: CloudParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate cloud fraction using relative humidity scheme
-    
-    Based on Lohmann and Roeckner (1996) diagnostic cloud scheme.
-    
+    """Diagnose cloud fraction following ECHAM ``mo_cover.f90``.
+
+    Implements the full ECHAM scheme:
+
+    1. ``rhc = crt + (crs - crt)·exp(1 - (p_surf/p)^nex)`` (crit RH profile,
+       :func:`critical_relative_humidity`)
+    2. Stratocumulus inversion enhancement at the BL-top level (when one
+       is present in the column): ``zsat = min(1, csatsc + zgam)`` where
+       ``zgam`` captures lapse-rate stability — see
+       :func:`_stratocumulus_zsat`. zsat = 1 elsewhere.
+    3. ``zqr = q / (qsat · zsat)`` — apparent RH after the inversion boost
+    4. ``b₀ = (zqr - rhc) / (1 - rhc)``, clipped to ``[0, 1]``
+    5. ``cc = 1 - sqrt(1 - b₀)``
+
+    Returns the diagnosed cloud fraction and a *grid-mean* relative
+    humidity ``q/qsat`` (NOT clipped to ≤1; supersaturated cells carry
+    RH > 1 so downstream code can act on the actual super-saturation
+    rather than seeing a saturated diagnostic).
+
     Args:
-        temperature: Temperature (K)
-        specific_humidity: Specific humidity (kg/kg)
-        pressure: Pressure (Pa)
-        surface_pressure: Surface pressure (Pa)
-        config: Cloud configuration
-        
+        temperature: Temperature (K) — single column, shape (nlev,).
+        specific_humidity: Specific humidity (kg/kg) — shape (nlev,).
+        pressure: Full-level pressure (Pa) — shape (nlev,).
+        surface_pressure: Surface pressure (Pa) — scalar.
+        config: Cloud configuration (``crt``, ``crs``, ``nex``,
+            ``csatsc``, ``cinv``, ``inversion_z_min/max``).
+
     Returns:
-        Tuple of (cloud_fraction, relative_humidity)
+        Tuple of ``(cloud_fraction, relative_humidity)`` of shape
+        ``(nlev,)``.
 
     """
-    # Calculate saturation specific humidity
     qs = saturation_specific_humidity(pressure, temperature)
-    
-    # Calculate relative humidity
+
+    # Diagnostic relative humidity — NOT clipped at 1. ECHAM uses
+    # ``zqr = q/(qsat·zsat)`` directly without clipping; super-saturated
+    # cells naturally drive ``b₀ > 1`` which gets clipped to 1 below
+    # (giving ``cc = 1``). Clipping RH itself loses information that
+    # callers (e.g. downstream microphysics) may want to act on.
     rel_humidity = specific_humidity / (qs + config.epsilon)
-    rel_humidity = jnp.clip(rel_humidity, 0.0, 1.0)
-    
-    # Calculate critical relative humidity threshold following ECHAM
-    # ``mo_cover.f90``.
+
     rhc = critical_relative_humidity(pressure, surface_pressure, config)
-    
-    # Calculate cloud fraction using quadratic relationship
-    # b_0 = (RH - RH_crit) / (1 - RH_crit)
-    b0 = (rel_humidity - rhc) / (1.0 - rhc + config.epsilon)
+
+    # Stratocumulus inversion enhancement (1 everywhere except at BL-top
+    # inversion where it drops to ``csatsc`` ≤ 1, boosting ``zqr``).
+    zsat = _stratocumulus_zsat(temperature, pressure, config)
+    zqr = specific_humidity / (qs * zsat + config.epsilon)
+
+    b0 = (zqr - rhc) / (1.0 - rhc + config.epsilon)
     b0 = jnp.clip(b0, 0.0, 1.0)
-    
-    # Cloud fraction: cc = 1 - sqrt(1 - b0); guard sqrt against b0 > 1 due to
-    # FP error. Use the double-where pattern so jax.grad through cells where
-    # ``1 - b0 <= 0`` doesn't pick up a ``0 * inf`` from ``d(sqrt)/dx`` at 0.
+
+    # Cloud fraction: cc = 1 - sqrt(1 - b0). Guard sqrt against b0 == 1
+    # via the double-where pattern so ``jax.grad`` doesn't pick up a
+    # 0*inf from d(sqrt)/dx at 0.
     sqrt_arg_raw = 1.0 - b0
     sqrt_arg_safe = jnp.where(sqrt_arg_raw > 0.0, sqrt_arg_raw, 1.0)
     cloud_fraction = jnp.where(
@@ -209,10 +350,10 @@ def calculate_cloud_fraction(
         1.0 - jnp.sqrt(sqrt_arg_safe),
         1.0,                     # b0 >= 1 → cc = 1
     )
-    
-    # Apply minimum cloud fraction threshold
+
+    # Apply minimum cloud fraction threshold (matches ECHAM convention).
     cloud_fraction = jnp.where(cloud_fraction < 0.01, 0.0, cloud_fraction)
-    
+
     return cloud_fraction, rel_humidity
 
 
