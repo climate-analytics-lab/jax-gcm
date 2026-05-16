@@ -14,7 +14,7 @@ from jcm.utils import (
 
 logging.basicConfig(format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
 
-__version__ = "1.1.1"
+__version__ = "2.0.0_beta"
 
 __all__ = [
     "Model",

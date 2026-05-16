@@ -1,9 +1,3 @@
-.. role:: py:class(xref)
-.. role:: py:meth(xref)
-.. role:: py:func(xref)
-.. role:: py:attr(xref)
-.. role:: py:mod(xref)
-
 Developer Guide
 ===============
 
@@ -71,7 +65,7 @@ Before submitting your PR, ensure:
    ☐ Documentation is updated if needed
    ☐ The PR description clearly explains what and why
    ☐ The PR is linked to a relevant issue
-   ☐ Code is rebased on the latest main branch
+   ☐ Code is rebased on the latest dev branch
 
 Testing Your Changes
 ^^^^^^^^^^^^^^^^^^^^^
@@ -86,11 +80,14 @@ Run the test suite to ensure your changes don't break existing functionality:
    # Run specific test file
    $ pytest jcm/model_test.py
 
-   # Run with verbose output
-   $ pytest -v
-
    # Run only fast tests (skip slow integration tests)
    $ pytest -m "not slow"
+
+   # Match the CI fast-test coverage gate
+   $ pytest -m "not slow" --cov=jcm --cov-fail-under=90
+
+   # Run the linter
+   $ ruff check .
 
 Write tests for your changes in the appropriate test file (e.g., ``jcm/module_name_test.py``). We aim for high unit test coverage to support the increasing complexity of physics going forward.
 

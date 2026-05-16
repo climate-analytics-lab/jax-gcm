@@ -619,7 +619,7 @@ Comparison with Other Physics Packages
 
    * - Feature
      - SPEEDY
-     - ICON
+     - ECHAM
      - Comprehensive GCMs
    * - Complexity
      - Intermediate
@@ -643,11 +643,11 @@ Comparison with Other Physics Packages
      - Prognostic+Microphysics
    * - Aerosols
      - Fixed climatology
-     - Interactive
+     - Prescribed MACv2-SP
      - Fully interactive
    * - Use Case
      - Dynamics, ML
-     - Research
+     - Climate-quality beta runs
      - Climate projections
 
 Next Steps

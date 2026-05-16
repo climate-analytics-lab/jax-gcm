@@ -1,13 +1,21 @@
-Welcome to Jax-GCM's documentation!
+Welcome to JAX-GCM's documentation!
 ====================================
 
-Jax-GCM is a Python library for climate modeling. It uses a `Dinosaur <https://github.com/neuralgcm/dinosaur?tab=readme-ov-file>`_ dycore and physics based on `Speedy <https://github.com/samhatfield/speedy.f90>`_.
+JAX-GCM is a differentiable atmospheric general circulation model written
+in JAX. It couples the `Dinosaur <https://github.com/neuralgcm/dinosaur>`_
+spectral dynamical core to modular SPEEDY, Held-Suarez, and ECHAM-style
+physics packages.
 
-Check out the Getting Started section for further information, including how to install the project.
+For the current beta release line, the main target configuration is ECHAM
+physics on the T63L47 hybrid grid with RRTMGP radiation
+(``physics=echam-rrtmgp grid=echam_t63_l47_hybrid``). The SPEEDY package
+remains the lightweight default for quick tests, tutorials, and
+optimization examples.
 
 .. note::
 
-   This project is under active development.
+   New development targets the ``dev`` branch. Tagged release candidates
+   and clean releases are promoted through ``main``.
 
 Contents
 --------
@@ -23,4 +31,3 @@ Contents
    api
    design
    developer
-

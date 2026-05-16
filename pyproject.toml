@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=40.4", "setuptools_scm"]
+requires = ["setuptools>=40.4"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jcm"
-dynamic = ["version", "dependencies"]
+version = "2.0.0_beta"
+dynamic = ["dependencies"]
 description = "JAX-based General Circulation Model"
 authors = [
     {email = "dwatsonparris@ucsd.edu"}
@@ -13,20 +14,28 @@ license = {text = "Apache"}
 requires-python = ">=3.11"
 keywords = ["climate", "machine-learning"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Topic :: Scientific/Engineering",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
 ]
 
-[tool.setuptools]
-packages = ["jcm"]
+[tool.setuptools.packages.find]
+include = ["jcm*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+jcm = [
+    "config/**/*.yaml",
+    "data/**/*.nc",
+    "data/**/*.npy",
+    "data/**/*.npz",
+    "*.csv",
+    "physics/speedy/*.csv",
+]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
-
-[tool.setuptools_scm]
-fallback_version = "999"
 
 [tool.pytest.ini_options]
 python_files = "*_test.py"

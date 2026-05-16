@@ -95,9 +95,9 @@ The physics code follows functional programming principles:
 
    def compute_convection(
        state: PhysicsState,
-       physics_data: PhysicsData,
+       diagnostics: dict,
        parameters: Parameters,
-   ) -> tuple[PhysicsTendency, ConvectionData]:
+   ) -> tuple[PhysicsTendency, dict]:
        """Pure function computing convective tendencies."""
        # No global state, no mutations
        tendencies = ...
@@ -114,10 +114,11 @@ The physics code follows functional programming principles:
            SpeedyFlags(),
            SpeedyForcing(...),
            SpeedyConvection(params.convection),
-           SpeedyCondensation(params.condensation),
+           SpeedyLargeScaleCondensation(params.condensation),
            SpeedyShortwaveRadiation(params.shortwave_radiation),
-           SpeedyLongwaveRadiation(...),
+           SpeedyDownwardLongwaveRadiation(...),
            SpeedySurfaceFlux(params.surface_flux),
+           SpeedyUpwardLongwaveRadiation(...),
            SpeedyVerticalDiffusion(params.vertical_diffusion),
        ])
 
@@ -138,19 +139,20 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
 .. code-block:: python
 
    from jcm.physics.speedy.speedy_terms import speedy_physics
-   from jcm.physics.echam.echam_terms import echam_physics, EchamRadiationRRTMGP
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
    # Use pre-built SPEEDY defaults
    physics = speedy_physics()
 
-   # Use ICON with NN radiation emulator
+   # Use ECHAM with the NN radiation emulator
    physics = echam_physics(radiation_scheme="emulated")
 
-   # Replace SPEEDY's shortwave radiation with an ICON scheme
-   physics = speedy_physics().replace("radiation_sw", EchamRadiationRRTMGP())
+   # Replace SPEEDY radiation with the RRTMGP backend
+   physics = speedy_physics().replace("radiation", RRTMGPRadiation())
 
    # Remove a term
-   physics = echam_physics().remove("gravity_waves")
+   physics = echam_physics().remove("hines")
 
 Each ``PhysicsTerm`` is a ``flax.nnx.Module`` that stores its own tunable parameters as ``nnx.Param`` attributes and coordinate caches as ``nnx.Variable``. Terms communicate through a ``diagnostics`` dict threaded through the term list. The dict serves a dual role: keys without a leading underscore are exposed as user-facing diagnostic output (written to xarray); keys prefixed with ``_`` (e.g. ``_radiation``, ``_convection``) are internal inter-term state and are filtered out of the user-facing output.
 
@@ -293,7 +295,7 @@ The codebase maintains high standards to support future complexity:
    # Tests are co-located with source in process directories
    pytest jcm/physics/convection/speedy_convection_test.py
    pytest jcm/physics/radiation/speedy_shortwave_test.py
-   pytest jcm/physics/radiation/icon/radiation_test.py
+   pytest jcm/physics/radiation/grey_two_stream/radiation_scheme_test.py
    # ... etc
 
 **Documentation**: All public APIs are documented with clear docstrings.
@@ -313,7 +315,7 @@ beside existing ones without nesting:
 
    jcm/physics/
    ├── radiation/
-   │   ├── grey_two_stream/      # ICON-style grey two-stream package
+   │   ├── grey_two_stream/      # fast grey two-stream package
    │   ├── rrtmgp.py             # RRTMGP wrapper
    │   ├── nn_emulator.py        # NN radiation emulator
    │   ├── speedy_shortwave.py
@@ -332,13 +334,13 @@ beside existing ones without nesting:
    ├── gravity_waves/             # hines/ (Hines 1997), sso/ (Lott-Miller 1997), simple/
    ├── aerosol/macv2_sp.py       # Stevens MACv2-SP simple plumes
    ├── chemistry/simple_chemistry.py
-   ├── surface/                  # speedy + icon (multi-tile bundle in icon/)
+   ├── surface/                  # SPEEDY and ECHAM surface schemes
    ├── speedy/                   # SPEEDY infrastructure (params, coords)
-   └── icon/                     # ICON infrastructure (params, coords)
+   └── echam/                    # ECHAM infrastructure (params, coords)
 
 Model-specific *infrastructure* (parameter containers, coordinate caches,
-data structs) lives under ``speedy/`` and ``icon/``. Everything else is
-named after the scheme so an "ICON" port and a "CAM" port of the same
+data structs) lives under ``speedy/`` and ``echam/``. Everything else is
+named after the scheme so an ECHAM port and a CAM port of the same
 parameterization sit side-by-side without per-model subfolders.
 
 Future Directions

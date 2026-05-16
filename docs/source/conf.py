@@ -9,8 +9,8 @@ import jcm
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'Jax-GCM'
-copyright = '2025 Jax-GCM team'
+project = 'JAX-GCM'
+copyright = '2025 JAX-GCM team'
 author = 'J. Varan Madan, Ellen Davenport, Nicholas Ho, Rebecca Gjini, Duncan Watson-Parris'
 release = jcm.__version__
 

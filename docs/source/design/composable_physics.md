@@ -176,7 +176,7 @@ category into the single replacement, inserted at the position of the
 first one — so you can swap an entire process category in one call:
 
 ```python
-# SPEEDY with ICON's RRTMGP radiation
+# SPEEDY with RRTMGP radiation
 physics = speedy_physics().replace("radiation", RRTMGPRadiation())
 
 # ECHAM with a custom convection scheme
@@ -358,7 +358,7 @@ jcm/physics/
 ├── physics_term.py             # PhysicsTerm base class
 ├── composable_physics.py       # ComposablePhysics container
 ├── radiation/
-│   ├── grey_two_stream/        # ICON-style grey two-stream package
+│   ├── grey_two_stream/        # fast grey two-stream package
 │   ├── rrtmgp.py               # RRTMGP wrapper
 │   ├── nn_emulator.py          # NN radiation emulator
 │   ├── speedy_shortwave.py
@@ -377,12 +377,12 @@ jcm/physics/
 ├── gravity_waves/{hines,sso,simple}/
 ├── aerosol/macv2_sp.py         # Stevens MACv2-SP simple plumes
 ├── chemistry/simple_chemistry.py
-├── surface/                    # speedy + icon (multi-tile bundle in icon/)
+├── surface/                    # SPEEDY and ECHAM surface schemes
 ├── speedy/                     # SPEEDY infrastructure (params, coords)
-└── icon/                       # ICON infrastructure (params, coords)
+└── echam/                      # ECHAM infrastructure (params, coords)
 ```
 
 Model-specific *infrastructure* (parameter containers, coordinate
-caches, data structs) lives under `speedy/` and `icon/`. Everything
-else is named after the scheme so an "ICON" port and a "CAM" port of
+caches, data structs) lives under `speedy/` and `echam/`. Everything
+else is named after the scheme so an ECHAM port and a CAM port of
 the same parameterisation sit side-by-side.
