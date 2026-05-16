@@ -997,28 +997,36 @@ def cloud_microphysics_column_sweep(
 
     1. **Snow melt** for incoming flux at ``T > 273 K``: convert
        ``zsfl`` → ``zrfl`` (``mo_cloud.f90:319-323``).
-    2. **Pre-microphysics saturation adjustment**
-       (``_saturation_adjustment_layer``): linearised Newton step on the
-       layer ``(T, q, qc, qi)`` so the layer is non-supersaturated *and*
-       any subsaturated cloud water/ice evaporates. Mirrors ECHAM's
-       ``mo_cloud.f90`` lines 696-784.
+    2. **Saturation adjustment** (``_saturation_adjustment_layer``):
+       linearised Newton step on the layer ``(T, q, qc, qi)`` so the
+       layer is non-supersaturated *and* any subsaturated cloud
+       water/ice evaporates. Mirrors ECHAM ``mo_cloud.f90`` lines
+       696-784.
     3. **Microphysics** from the *post-condensation* ``(T', q', qc', qi')``:
        Beheng/KK2000 autoconversion (``qc' → rain``), Lin-style ice
        autoconversion (``qi' → snow``), rain accretion of cloud water,
        snow riming of cloud water (T < ``tmelt``), snow aggregation of
-       cloud ice.
+       cloud ice. Accretion / riming / aggregation use ECHAM's
+       implicit-Euler form
+       ``zrac1 = zxlb·(1 - exp(-ccracl·zxrp1·dt))`` with the
+       Marshall-Palmer in-precipitating-area concentration ``zxrp1``
+       (mo_cloud.f90:800-877), so per-step depletion is bounded in
+       ``[0, qc]`` and can't drive ``qc`` negative even at high
+       incoming rain flux.
     4. **Rotstayn (1997) rain evaporation** below cloud, using the
        *post-condensation* ``q'`` so it can't push the layer above
        saturation (``zevp_max_subsat = 0.99·(qs - q')``).
-    5. **Post-rain-evap cleanup**: a second pass of
-       ``_saturation_adjustment_layer`` on the now-moister
-       ``(T'', q'', qc'', qi'')`` absorbs any residual oversaturation
-       and any cloud water/ice depleted by step 3. In practice it's
-       almost always a no-op (step 4's cap leaves headroom) but the
-       pass closes the rain-evap ↔ condensation loop *within this dt*,
-       so the two-step feedback that motivated PR #458's revert can't
-       fire across timesteps.
-    6. **Flux update** for ``zrfl`` / ``zsfl`` / ``zclcpre`` carry.
+    5. **Flux update** for ``zrfl`` / ``zsfl`` / ``zclcpre`` carry.
+
+    Why no within-step cleanup pass: the 0.99·(qs - q') cap on rain
+    evap means the layer cannot be pushed past saturation in step 4,
+    so a second saturation-adjustment pass would always be a no-op.
+    An earlier draft of this routine ran one anyway as a defensive
+    measure; in practice it re-condensed the slight super-saturation
+    that rain-evap-cooling produced (qs drops with T → small
+    super-saturation appears → cleanup condenses → more autoconv →
+    more rain), reigniting the rain-evap ↔ re-condensation feedback
+    PR #458 originally caught. The cap alone is sufficient.
 
     Bottom-of-column ``zrfl`` / ``zsfl`` become the surface precipitation
     flux (``state.precip_rain`` / ``state.precip_snow``).
@@ -1083,23 +1091,74 @@ def cloud_microphysics_column_sweep(
         qcaut = autoconversion(qc1, cf, rho, ndrop, dt, config)
         qiaut = ice_autoconversion(qi1, T1, cf, dt, config)
 
-        # Accretion / riming / aggregation — proportional to the incoming
-        # rain (zrfl) and snow (zsfl) flux through the layer.
-        rain_accr = jnp.where(
+        # Accretion / riming / aggregation — implicit-Euler depletion of
+        # the local condensate by the falling rain (``zrfl``) and snow
+        # (``zsfl``) fluxes. Mirrors ECHAM ``mo_cloud.f90:795-877``.
+        #
+        # ECHAM converts the falling FLUX to an in-precipitating-area
+        # MIXING RATIO via inverse Marshall-Palmer:
+        #
+        #     zxrp1 = (zrfl/zclcpre / (12.45 * sqrt(rho/1.3)))^(8/9)   [kg/kg]
+        #     zxsp1 = (zsfl/zclcpre / cvtfall)^(1/1.16)                [kg/kg]
+        #
+        # then takes an implicit-Euler depletion fraction:
+        #
+        #     zrac1 = zxlb * (1 - exp(-ccracl * zxrp1 * dt))
+        #
+        # bounded by construction in [0, zxlb]. The previous JCM version
+        # used an explicit form ``ccracl * zrfl * qc / rho`` that has the
+        # wrong dimensions (m/s rather than kg/kg/s) AND can drive qc
+        # negative when ``ccracl * zrfl * dt / rho`` exceeds 1 — it was
+        # the dominant trigger for the day-30 NaN cascade in the first
+        # 1M spin-up of this branch (extreme tropical column produced
+        # 4561 mm/day surface precip; a unit-correct cap on per-step
+        # depletion fixes this).
+        zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
+        zqrho_sqrt = jnp.sqrt(jnp.maximum(rho / 1.3, config.epsilon))
+        zxrp1 = jnp.where(
+            (zrfl > config.epsilon) & (zclcpre > config.epsilon),
+            jnp.power(
+                jnp.maximum(zrfl / zclcpre_safe / (12.45 * zqrho_sqrt), 0.0),
+                8.0 / 9.0,
+            ),
+            0.0,
+        )
+        zxsp1 = jnp.where(
+            (zsfl > config.epsilon) & (zclcpre > config.epsilon),
+            jnp.power(
+                jnp.maximum(zsfl / zclcpre_safe / config.cvtfall, 0.0),
+                1.0 / 1.16,
+            ),
+            0.0,
+        )
+
+        # Implicit-Euler depletion fractions in [0, 1].
+        # The ``- min(arg, 50)`` clamp on the exponent argument is purely
+        # numerical: at the float32 precision the model runs at, larger
+        # values overflow ``exp(-x)`` to denormalised zero anyway, but
+        # gradient computation through ``exp`` of an enormous negative
+        # value is unstable.
+        rain_accr_frac = jnp.where(
             qc1 > config.epsilon,
-            config.ccracl * zrfl * qc1 / jnp.maximum(rho, config.epsilon),
+            1.0 - jnp.exp(-jnp.minimum(config.ccracl * zxrp1 * dt, 50.0)),
             0.0,
         )
-        snow_rime = jnp.where(
+        snow_rime_frac = jnp.where(
             (qc1 > config.epsilon) & (T1 < tmelt),
-            config.ccracl * zsfl * qc1 / jnp.maximum(rho, config.epsilon),
+            1.0 - jnp.exp(-jnp.minimum(config.ccracl * zxsp1 * dt, 50.0)),
             0.0,
         )
-        snow_aggr = jnp.where(
+        snow_aggr_frac = jnp.where(
             qi1 > config.epsilon,
-            config.ccracl * zsfl * qi1 / jnp.maximum(rho, config.epsilon),
+            1.0 - jnp.exp(-jnp.minimum(config.ccracl * zxsp1 * dt, 50.0)),
             0.0,
         )
+        # Convert depletion fraction (kg/kg over dt) to rate (kg/kg/s).
+        rain_accr = qc1 * rain_accr_frac / dt
+        snow_rime = qc1 * snow_rime_frac / dt
+        snow_aggr = qi1 * snow_aggr_frac / dt
+        # snow_rime cannot fire above freezing (no liquid riming above
+        # tmelt — the where-clause above already enforces this via T1).
 
         # Cloud water / ice depletion rates (kg/kg/s).
         dqcdt_micro = -(qcaut + rain_accr + snow_rime)
@@ -1113,10 +1172,10 @@ def cloud_microphysics_column_sweep(
         # sub-saturation w.r.t. liquid; ``zast+zbst`` are Rotstayn's
         # thermodynamic + vapour-diffusion coefficients. Using ``q1``
         # (not ``q0``) means rain evap can't push the layer above
-        # saturation — the 0.99·(qs - q1) cap leaves headroom for the
-        # cleanup pass in step (5).
+        # saturation — the 0.99·(qs - q1) cap is what enforces this and
+        # makes the original PR #458 within-step re-condensation pass
+        # unnecessary in this version.
         qsw, esw = _qsat_water(p, T1)
-        zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
         zsusatw = jnp.minimum(q1 / jnp.maximum(qsw, config.epsilon) - 1.0, 0.0)
         zdv = 2.21 / jnp.maximum(p, config.epsilon)
         zast = (
@@ -1126,7 +1185,6 @@ def cloud_microphysics_column_sweep(
         zbst = T1 / jnp.maximum(zdv * esw, config.epsilon)
         zthermo = jnp.maximum(zast + zbst, config.epsilon)
         zrfl_in_cf = zrfl / zclcpre_safe
-        zqrho_sqrt = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
         zzepr_rate = (
             870.0 * zsusatw * jnp.power(jnp.maximum(zrfl_in_cf, 0.0), 0.61)
             * zqrho_sqrt / jnp.sqrt(1.3) / zthermo
@@ -1144,21 +1202,15 @@ def cloud_microphysics_column_sweep(
         dTdt_evap = -zlvdcp * (dq_evap / dt)                          # K/s
         rain_evap_flux = zevp * mref / dt                             # kg/m²/s
 
-        # ---------- (5) post-rain-evap cleanup saturation adjustment ----------
-        # Re-run the Newton step on the layer after rain evap moistened
-        # ``q`` and microphysics depleted ``qc`` / ``qi``. With the
-        # 0.99·(qs-q1) cap this is normally a no-op, but it closes the
-        # rain-evap ↔ re-condensation loop within ``dt`` so any residual
-        # supersat is condensed back this step rather than spilling into
-        # next step's Sundqvist call (which is what was destabilising the
-        # column sweep in PR #458).
-        T_post_evap = T1 + dTdt_evap * dt
-        q_post_evap = q1 + dq_evap
-        qc_post_micro = jnp.maximum(qc1 + dqcdt_micro * dt, 0.0)
-        qi_post_micro = jnp.maximum(qi1 + dqidt_micro * dt, 0.0)
-        dT_cond_b, dq_cond_b, dqc_cond_b, dqi_cond_b = _saturation_adjustment_layer(
-            T_post_evap, q_post_evap, qc_post_micro, qi_post_micro, p, config,
-        )
+        # NOTE: an earlier draft of this routine ran a second
+        # ``_saturation_adjustment_layer`` here as a "cleanup pass" to
+        # absorb any super-saturation the rain evap might have produced.
+        # In practice the ``0.99·(qs-q1)`` cap above means rain-evap can
+        # never push the layer past saturation, so the cleanup pass is
+        # always a no-op — but it ALSO opens up the same rain-evap ↔
+        # re-condensation feedback PR #458 originally caught (the cooling
+        # from rain evap drops qs slightly, allowing the cleanup pass to
+        # re-condense → more autoconv → more rain → ...). Removed.
 
         # ---------- (6) flux update ----------
         # ICON ``mo_cloud.f90:984-985 / 1030-1031``.
@@ -1183,15 +1235,13 @@ def cloud_microphysics_column_sweep(
 
         # Pool every contribution into per-step rates (kg/kg/s, K/s) that
         # the composable physics integrator multiplies by dt and adds to
-        # the dynamics state. The two condensation passes return absolute
-        # increments over dt, so divide by dt to convert to rates.
-        dTdt = (
-            dTdt_melt + dTdt_rime + dTdt_evap
-            + (dT_cond_a + dT_cond_b) / dt
-        )
-        dqdt = (dq_evap / dt) + (dq_cond_a + dq_cond_b) / dt
-        dqcdt = dqcdt_micro + (dqc_cond_a + dqc_cond_b) / dt
-        dqidt = dqidt_micro + (dqi_cond_a + dqi_cond_b) / dt
+        # the dynamics state. The single condensation pass returns
+        # absolute increments over dt, so divide by dt to convert to a
+        # rate.
+        dTdt = dTdt_melt + dTdt_rime + dTdt_evap + dT_cond_a / dt
+        dqdt = (dq_evap / dt) + dq_cond_a / dt
+        dqcdt = dqcdt_micro + dqc_cond_a / dt
+        dqidt = dqidt_micro + dqi_cond_a / dt
 
         out = (dTdt, dqdt, dqcdt, dqidt, rain_source, snow_source, qcaut)
         return (zrfl_out, zsfl_out, zclcpre_out), out
