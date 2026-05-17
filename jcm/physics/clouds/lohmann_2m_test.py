@@ -1249,6 +1249,6 @@ class TestIcon2MPipeline:
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))
         assert jnp.all(jnp.isfinite(preds.dynamics.specific_humidity))
         # Initial state should have seeded all six required tracers.
-        assert set(model._final_modal_state.tracers.keys()) >= {
+        assert set(model._final_dycore_state.tracers.keys()) >= {
             "specific_humidity", "qc", "qi", "qnc", "qni", "qr", "qs",
         }

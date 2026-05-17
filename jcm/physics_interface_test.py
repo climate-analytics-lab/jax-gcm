@@ -3,7 +3,10 @@ import jax.numpy as jnp
 from dinosaur import primitive_equations_states
 from dinosaur.scales import units
 from jcm.constants import p0
-from jcm.physics_interface import PhysicsState, physics_state_to_dynamics_state, dynamics_state_to_physics_state
+from jcm.physics_interface import PhysicsState
+from jcm.dycore.dinosaur.state_bridge import (
+    dynamics_state_to_physics_state, physics_state_to_dynamics_state,
+)
 
 class TestPhysicsInterfaceUnit(unittest.TestCase):
     def test_initial_state_conversion(self):

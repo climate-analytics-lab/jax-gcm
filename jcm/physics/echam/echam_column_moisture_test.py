@@ -41,7 +41,6 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.runners import inject_balanced_isothermal_profile
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
@@ -84,21 +83,18 @@ def _build_model_and_step(physics_factory, n_steps: int):
     forcing = ForcingData.from_file(_T63_BC_DIR / "forcing.nc", coords=coords)
     physics = physics_factory()
     model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
-    model._final_modal_state = model._prepare_initial_modal_state()
+    model._final_dycore_state = model._prepare_initial_dycore_state()
     inject_balanced_isothermal_profile(model)
 
     levels = get_echam_levels(47)
     a = np.asarray(levels.a_boundaries)
     b = np.asarray(levels.b_boundaries)
-    tracer_specs = {sp.name: sp for sp in physics.required_tracers()}
     dt_days = 12.0 / (60.0 * 24.0)
 
     history = []  # list of (step, T_col, q_col, p_full)
     for step in range(1, n_steps + 1):
         model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
-        s = dynamics_state_to_physics_state(
-            model._final_modal_state, model.primitive, tracer_specs=tracer_specs,
-        )
+        s = model.dycore.to_physics_state(model._final_dycore_state)
         T = np.asarray(s.temperature[:, _TIBET_I, _TIBET_J])
         q = np.asarray(s.specific_humidity[:, _TIBET_I, _TIBET_J])
         ps = float(s.normalized_surface_pressure[_TIBET_I, _TIBET_J]) * 1e5

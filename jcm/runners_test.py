@@ -303,7 +303,7 @@ class TestModeDispatch(unittest.TestCase):
         """Resume path bootstraps the physics carry for inject-based inits.
 
         ``inject_balanced_isothermal_profile`` populates
-        ``_final_modal_state`` but leaves ``_final_physics_state`` for
+        ``_final_dycore_state`` but leaves ``_final_physics_state`` for
         ``Model.resume`` to lazy-build. The resume-from-checkpoint code
         path must materialise the carry itself before calling
         ``load_checkpoint``, otherwise the load raises on the

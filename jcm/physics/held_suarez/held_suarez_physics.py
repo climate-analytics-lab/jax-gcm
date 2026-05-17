@@ -14,7 +14,7 @@ from dinosaur import coordinate_systems
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.model import PHYSICS_SPECS
+from jcm.dycore.dinosaur.dycore import PHYSICS_SPECS
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.composable_physics import ComposablePhysics
 

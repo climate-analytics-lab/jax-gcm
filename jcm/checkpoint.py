@@ -1,6 +1,6 @@
 """Model state checkpointing for long, preemptible runs.
 
-Persists ``Model._final_modal_state`` and ``Model._final_physics_state``
+Persists ``Model._final_dycore_state`` and ``Model._final_physics_state``
 plus an elapsed sim-day count to a single file using flax's msgpack
 serialization. ``run_chunked`` (in :mod:`jcm.runners`) integrates with
 these primitives via ``cfg.run.checkpoint_path`` — when set, it writes a
@@ -10,11 +10,11 @@ without redoing completed chunks.
 
 The state pytrees are flattened to plain lists of arrays before
 serialization because flax's msgpack codec can't handle ``tree_math``
-structs (e.g. ``primitive_equations.State``) directly. The ``treedef``
-is reconstructed at load time from the destination model's bootstrapped
-templates — this makes a checkpoint portable only across runs with
-matching coords + physics term composition (where the leaf order and
-dtypes line up), which is the intended usage.
+structs (e.g. dinosaur's ``primitive_equations.State``) directly. The
+``treedef`` is reconstructed at load time from the destination model's
+bootstrapped templates — this makes a checkpoint portable only across
+runs with matching dycore + coords + physics term composition (where the
+leaf order and dtypes line up), which is the intended usage.
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ def _flatten_arrays(tree):
 
 
 def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
-    """Persist the model's current modal + physics state to ``path``.
+    """Persist the model's current dycore + physics state to ``path``.
 
     Args:
-        model: A ``jcm.model.Model`` whose ``_final_modal_state`` and
+        model: A ``jcm.model.Model`` whose ``_final_dycore_state`` and
             ``_final_physics_state`` have been populated, either by a
             prior ``run`` / ``resume`` call or by ``bootstrap_state``.
         path: Output file path (parent directories are created).
@@ -45,7 +45,7 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
         ``Path(path)`` for chaining.
 
     """
-    if model._final_modal_state is None or model._final_physics_state is None:
+    if model._final_dycore_state is None or model._final_physics_state is None:
         raise ValueError(
             "Model has no state to checkpoint — call Model.run(...), "
             "Model.resume(...), or Model.bootstrap_state(...) first."
@@ -54,7 +54,7 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "elapsed_days": float(elapsed_days),
-        "modal_leaves": _flatten_arrays(model._final_modal_state),
+        "dycore_leaves": _flatten_arrays(model._final_dycore_state),
         "physics_leaves": _flatten_arrays(model._final_physics_state),
     }
     # Write to a sibling tmp file then rename atomically. If the run is
@@ -68,7 +68,7 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
 
 
 def load_checkpoint(model, path) -> float:
-    """Restore ``_final_modal_state`` + ``_final_physics_state`` from ``path``.
+    """Restore ``_final_dycore_state`` + ``_final_physics_state`` from ``path``.
 
     The model must already have been bootstrapped (e.g. by an earlier
     ``Model.run``, ``Model.bootstrap_state``, or one of the
@@ -86,25 +86,25 @@ def load_checkpoint(model, path) -> float:
         saved.
 
     """
-    if model._final_modal_state is None or model._final_physics_state is None:
+    if model._final_dycore_state is None or model._final_physics_state is None:
         raise ValueError(
             "Model state is uninitialised — call Model.bootstrap_state(...) "
             "before load_checkpoint so the destination has templates to "
             "rebuild the pytrees from."
         )
-    modal_leaves_template = _flatten_arrays(model._final_modal_state)
+    dycore_leaves_template = _flatten_arrays(model._final_dycore_state)
     physics_leaves_template = _flatten_arrays(model._final_physics_state)
     template = {
         "elapsed_days": 0.0,
-        "modal_leaves": modal_leaves_template,
+        "dycore_leaves": dycore_leaves_template,
         "physics_leaves": physics_leaves_template,
     }
     payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
 
-    _, modal_treedef = jax.tree_util.tree_flatten(model._final_modal_state)
+    _, dycore_treedef = jax.tree_util.tree_flatten(model._final_dycore_state)
     _, physics_treedef = jax.tree_util.tree_flatten(model._final_physics_state)
-    model._final_modal_state = jax.tree_util.tree_unflatten(
-        modal_treedef, payload["modal_leaves"])
+    model._final_dycore_state = jax.tree_util.tree_unflatten(
+        dycore_treedef, payload["dycore_leaves"])
     model._final_physics_state = jax.tree_util.tree_unflatten(
         physics_treedef, payload["physics_leaves"])
     return float(payload["elapsed_days"])

@@ -837,7 +837,7 @@ class TestTracerSpec(unittest.TestCase):
         from dinosaur import primitive_equations
         from dinosaur.scales import SI_SCALE
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        from jcm.physics_interface import (
+        from jcm.dycore.dinosaur.state_bridge import (
             dynamics_state_to_physics_state,
             physics_state_to_dynamics_state,
         )
@@ -890,9 +890,9 @@ class TestModelSeedsTracers(unittest.TestCase):
 
         physics = ComposablePhysics(terms=[NeedsQC()])
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=720)
-        # _prepare_initial_modal_state runs inside .run(), but we can call the
+        # _prepare_initial_dycore_state runs inside .run(), but we can call the
         # underlying prep directly to verify the tracer dict.
-        state = model._prepare_initial_modal_state()
+        state = model._prepare_initial_dycore_state()
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)

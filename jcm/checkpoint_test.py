@@ -51,7 +51,7 @@ class TestCheckpointRoundTrip(unittest.TestCase):
     def test_save_load_reproduces_state(self):
         model = _build_model()
         model.run(save_interval=1, total_time=2)
-        modal_before = model._final_modal_state
+        dycore_before = model._final_dycore_state
         physics_before = model._final_physics_state
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,7 +64,7 @@ class TestCheckpointRoundTrip(unittest.TestCase):
             elapsed = load_checkpoint(fresh, path)
 
         self.assertAlmostEqual(elapsed, 2.0)
-        self.assertEqual(_max_abs_diff(modal_before, fresh._final_modal_state), 0.0)
+        self.assertEqual(_max_abs_diff(dycore_before, fresh._final_dycore_state), 0.0)
         self.assertEqual(_max_abs_diff(physics_before, fresh._final_physics_state), 0.0)
 
     def test_save_without_state_raises(self):
@@ -93,7 +93,7 @@ class TestCheckpointResumptionEquivalence(unittest.TestCase):
         # Baseline: continuous 4-day integration.
         baseline = _build_model()
         baseline.run(save_interval=1, total_time=4)
-        baseline_modal = baseline._final_modal_state
+        baseline_dycore = baseline._final_dycore_state
         baseline_physics = baseline._final_physics_state
 
         # Split: 2 days → checkpoint → new model → load → resume 2 days.
@@ -111,7 +111,7 @@ class TestCheckpointResumptionEquivalence(unittest.TestCase):
 
             second_half.resume(save_interval=1, total_time=2)
 
-        modal_diff = _max_abs_diff(baseline_modal, second_half._final_modal_state)
+        modal_diff = _max_abs_diff(baseline_dycore, second_half._final_dycore_state)
         physics_diff = _max_abs_diff(baseline_physics, second_half._final_physics_state)
 
         # Equivalence is exact in the absence of host-side RNG: Held-

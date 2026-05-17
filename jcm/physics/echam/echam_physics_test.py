@@ -77,7 +77,7 @@ class TestEchamPhysicsIntegration(unittest.TestCase):
                          "normalized_surface_pressure should not contain NaN values")
         
         # Check that final state is reasonable
-        final_state = model._final_modal_state  # In this simple test, predictions are the final state
+        final_state = model._final_dycore_state  # In this simple test, predictions are the final state
         self.assertFalse(jnp.any(jnp.isnan(final_state.vorticity)), 
                          "Final state vorticity should not contain NaN")
         self.assertFalse(jnp.any(jnp.isnan(final_state.divergence)), 

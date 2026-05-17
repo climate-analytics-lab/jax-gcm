@@ -36,7 +36,7 @@ class TestNudgingConfig(unittest.TestCase):
 
     def setUp(self):
         coords = get_speedy_coords()
-        self.specs = Model(coords=coords, physics=speedy_physics()).primitive.physics_specs
+        self.specs = Model(coords=coords, physics=speedy_physics()).dycore.primitive.physics_specs
         self.nlev = coords.vertical.layers
 
     def test_winds_only_zeros_T_and_ps(self):
@@ -73,13 +73,13 @@ class TestNudgingTendencyDirection(unittest.TestCase):
         ds = _zero_winds_target_dataset(nlev, nlon, nlat)
         target = NudgingTarget.from_dataset(
             ds, coords,
-            reference_temperature=model.primitive.reference_temperature,
-            physics_specs=model.primitive.physics_specs,
+            reference_temperature=model.dycore.primitive.reference_temperature,
+            physics_specs=model.dycore.primitive.physics_specs,
             time_var=None,
         )
         # Nudge everything (winds + T + ps) at ~1 day timescale.
-        tau_nd = model.primitive.physics_specs.nondimensionalize(
-            86400.0 * model.primitive.physics_specs.units.second
+        tau_nd = model.dycore.primitive.physics_specs.nondimensionalize(
+            86400.0 * model.dycore.primitive.physics_specs.units.second
         ) if False else 1.0  # use 1.0 nondim for clean math in this unit test
         config = NudgingConfig(
             inv_tau_vorticity=jnp.ones(nlev) * tau_nd,
@@ -90,7 +90,7 @@ class TestNudgingTendencyDirection(unittest.TestCase):
 
         # Build a state whose vorticity/divergence are slightly positive;
         # the target is zero everywhere, so the tendency should be negative.
-        state = model._prepare_initial_modal_state()
+        state = model._prepare_initial_dycore_state()
         bumped = state.replace(
             vorticity=state.vorticity + 1e-3,
             divergence=state.divergence + 1e-3,
@@ -117,13 +117,13 @@ class TestNudgingShrinksWinds(unittest.TestCase):
         ds = _zero_winds_target_dataset(nlev, nlon, nlat)
         target = NudgingTarget.from_dataset(
             ds, coords,
-            reference_temperature=model.primitive.reference_temperature,
-            physics_specs=model.primitive.physics_specs,
+            reference_temperature=model.dycore.primitive.reference_temperature,
+            physics_specs=model.dycore.primitive.physics_specs,
             time_var=None,
         )
         config = NudgingConfig.winds_only(
             nlev=nlev, tau_seconds=86400.0,
-            physics_specs=model.primitive.physics_specs,
+            physics_specs=model.dycore.primitive.physics_specs,
         )
 
         preds_nudged = Model(

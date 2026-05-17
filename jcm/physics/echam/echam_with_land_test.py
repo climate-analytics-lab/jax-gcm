@@ -100,11 +100,11 @@ def _run_one_step(physics, terrain):
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    model._final_modal_state = model._prepare_initial_modal_state()
+    model._final_dycore_state = model._prepare_initial_dycore_state()
     inject_balanced_isothermal_profile(model)
     dt_days = 12.0 / (60.0 * 24.0)
     model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
-    return model._final_modal_state
+    return model._final_dycore_state
 
 
 @pytest.mark.slow

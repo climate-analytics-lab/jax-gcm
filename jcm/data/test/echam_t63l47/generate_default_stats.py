@@ -192,7 +192,7 @@ def generate():
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    model._final_modal_state = model._prepare_initial_modal_state()
+    model._final_dycore_state = model._prepare_initial_dycore_state()
     inject_balanced_isothermal_profile(model)
     spin_up = model.resume(
         forcing=forcing, save_interval=5.0, total_time=5.0,

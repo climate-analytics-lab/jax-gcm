@@ -32,7 +32,7 @@ class TestModelUnit(unittest.TestCase):
             total_time=total_time,
             save_interval=save_interval,
         )
-        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
+        final_state, dynamics_predictions = model._final_dycore_state, predictions.dynamics
 
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
@@ -75,7 +75,7 @@ class TestModelUnit(unittest.TestCase):
             save_interval=save_interval,
             total_time=total_time,
         )
-        final_state, dynamics_predictions = model._final_modal_state, predictions.dynamics
+        final_state, dynamics_predictions = model._final_dycore_state, predictions.dynamics
 
         modal_zxy, nodal_zxy = model.coords.modal_shape, model.coords.nodal_shape
         nodal_tzxy = (int(total_time / save_interval),) + nodal_zxy
@@ -239,12 +239,12 @@ class TestModelUnit(unittest.TestCase):
         # Create model that goes through one timestep
         
         model = Model(coords=get_speedy_coords())
-        state = model._prepare_initial_modal_state()
+        state = model._prepare_initial_dycore_state()
 
         def fn(state):
             _ = model.run(total_time=0) # to set up model fields
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_modal_state, predictions
+            return model._final_dycore_state, predictions
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(fn, state)
@@ -267,11 +267,11 @@ class TestModelUnit(unittest.TestCase):
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         model = Model(coords=get_speedy_coords())
-        state = model._prepare_initial_modal_state()
+        state = model._prepare_initial_dycore_state()
 
         def fn(state):
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/24.))
-            return model._final_modal_state, predictions
+            return model._final_dycore_state, predictions
 
         # Calculate gradients
         primals, f_vjp = jax.vjp(fn, state)
@@ -371,12 +371,12 @@ class TestModelUnit(unittest.TestCase):
 
         # Create model that goes through one timestep
         model = Model(coords=get_speedy_coords())
-        state = model._prepare_initial_modal_state()
+        state = model._prepare_initial_dycore_state()
 
         def f(state_f):
             _ = model.run(total_time=0) # to set up model fields
             predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_modal_state, predictions
+            return model._final_dycore_state, predictions
         
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
@@ -628,7 +628,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         model = self._speedy_model()
         # Set up an initial state via the public API.
         _ = model.run(total_time=0)
-        initial_state = model._final_modal_state
+        initial_state = model._final_dycore_state
 
         forcing = default_forcing(model.coords.horizontal)
         step = model._get_op_split_step_fn(forcing)
@@ -655,7 +655,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
 
         model = self._speedy_model()
         _ = model.run(total_time=0)
-        initial_state = model._final_modal_state
+        initial_state = model._final_dycore_state
 
         forcing = default_forcing(model.coords.horizontal)
         step = jax.jit(model._get_op_split_step_fn(forcing))

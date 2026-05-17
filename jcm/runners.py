@@ -389,16 +389,16 @@ def inject_balanced_isothermal_profile(model: Model) -> None:
     starting state for moist-physics runs over real terrain when the
     full JW lapse-rate profile is unstable at the chosen resolution.
 
-    Mutates ``model._final_modal_state`` in place. Follow with
+    Mutates ``model._final_dycore_state`` in place. Follow with
     ``model.resume(...)`` rather than ``model.run(...)``.
     """
     from dinosaur.scales import units
     from jcm.constants import grav, p0s1_bg, rd
 
-    model._final_modal_state = model._prepare_initial_modal_state(
+    model._final_dycore_state = model._prepare_initial_dycore_state(
         physics_state=None, random_seed=0,
     )
-    state = model._final_modal_state
+    state = model._final_dycore_state
     p0_pa = p0s1_bg
 
     orog = jnp.asarray(model.terrain.orog)
@@ -408,18 +408,18 @@ def inject_balanced_isothermal_profile(model: Model) -> None:
         # JW lapse-rate profile). Using the matching T avoids an
         # initial-step pressure-temperature inconsistency.
         ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _JW_T_SFC))
-        scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
+        scale = float(model.dycore.physics_specs.nondimensionalize(1.0 * units.pascal))
         log_ps_nodal = jnp.log(ps_pa_nodal * scale)
         state.log_surface_pressure = model.coords.horizontal.to_modal(
             log_ps_nodal[None, ...]
         )
-    model._final_modal_state = state
+    model._final_dycore_state = state
 
 
 def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     """Inject a Jablonowski-Williamson-style lapse-rate initial condition.
 
-    Replaces ``model._final_modal_state`` (set up by the default isothermal
+    Replaces ``model._final_dycore_state`` (set up by the default isothermal
     rest atmosphere) with a vertical profile suitable for moist physics:
 
     * Temperature: 288 K at the surface, ICAO standard lapse 6.5 K/km, capped
@@ -430,7 +430,7 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     * Humidity: ``rh`` × q_sat(T) below ~200 hPa, zero above; clipped to a
       sensible range for q.
 
-    Mutates ``model._final_modal_state`` in place. Follow with
+    Mutates ``model._final_dycore_state`` in place. Follow with
     ``model.resume(...)`` rather than ``model.run(...)``.
     """
     from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -438,10 +438,10 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
 
     from jcm.constants import grav, p0s1_bg, rd
 
-    model._final_modal_state = model._prepare_initial_modal_state(
+    model._final_dycore_state = model._prepare_initial_dycore_state(
         physics_state=None, random_seed=0,
     )
-    state = model._final_modal_state
+    state = model._final_dycore_state
 
     nlon, nlat = model.coords.horizontal.nodal_shape
     p0_pa = p0s1_bg
@@ -464,13 +464,13 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     orog = jnp.asarray(model.terrain.orog)
     if jnp.any(orog > 1.0):
         ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _HYDROSTATIC_T_REF))
-        scale = float(model.physics_specs.nondimensionalize(1.0 * units.pascal))
+        scale = float(model.dycore.physics_specs.nondimensionalize(1.0 * units.pascal))
         log_ps_nodal = jnp.log(ps_pa_nodal * scale)
         state.log_surface_pressure = model.coords.horizontal.to_modal(
             log_ps_nodal[None, ...]
         )
 
-    T_ref = jnp.asarray(model.primitive.reference_temperature)
+    T_ref = jnp.asarray(model.dycore.primitive.reference_temperature)
     T_var_profile = T_profile - T_ref
     T_var_nodal = jnp.broadcast_to(
         T_var_profile[:, None, None], (nlev, nlon, nlat)
@@ -489,7 +489,7 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     state.tracers = {
         "specific_humidity": model.coords.horizontal.to_modal(q_nodal),
     }
-    model._final_modal_state = state
+    model._final_dycore_state = state
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +810,7 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
-        # ``inject_*_profile`` only populates ``_final_modal_state`` —
+        # ``inject_*_profile`` only populates ``_final_dycore_state`` —
         # the physics carry is normally built lazily by ``resume``.
         # ``load_checkpoint`` needs both pytrees as deserialization
         # templates, so build the carry now if the inject path took it.

@@ -45,11 +45,8 @@ class TestHybridInitialGeopotential(unittest.TestCase):
         monotonically decrease from level 0 (TOA) to level nlev-1 (surface).
         """
         model = _build_test_model(use_hybrid=True)
-        model._final_modal_state = model._prepare_initial_modal_state(None, 0)
-        from jcm.physics_interface import dynamics_state_to_physics_state
-        ps = dynamics_state_to_physics_state(
-            model._final_modal_state, model.primitive
-        )
+        model._final_dycore_state = model._prepare_initial_dycore_state(None, 0)
+        ps = model.dycore.to_physics_state(model._final_dycore_state)
         # Mean geopotential per level (spatial mean)
         phi_profile = jnp.mean(ps.geopotential, axis=(1, 2))
         dphi = jnp.diff(phi_profile)
@@ -62,11 +59,8 @@ class TestHybridInitialGeopotential(unittest.TestCase):
     def test_surface_geopotential_near_zero_aquaplanet(self):
         """On an aquaplanet (no orography), surface geopotential ≈ 0."""
         model = _build_test_model(use_hybrid=True)
-        model._final_modal_state = model._prepare_initial_modal_state(None, 0)
-        from jcm.physics_interface import dynamics_state_to_physics_state
-        ps = dynamics_state_to_physics_state(
-            model._final_modal_state, model.primitive
-        )
+        model._final_dycore_state = model._prepare_initial_dycore_state(None, 0)
+        ps = model.dycore.to_physics_state(model._final_dycore_state)
         # Surface layer geopotential should be much smaller than TOA
         # (scales with hypsometric height * g; aquaplanet surface ≈ 0)
         surface_mean = float(jnp.mean(jnp.abs(ps.geopotential[-1])))

@@ -41,11 +41,10 @@ def build_moist_initial_state(model, q_surface_gkg=10.0, scale_height_km=2.0,
     """
     import jax.numpy as jnp
     import numpy as np
-    from jcm.physics_interface import dynamics_state_to_physics_state
 
-    # Get the default initial modal state (isothermal 288 K or JW profile).
-    modal_state = model._prepare_initial_modal_state(None, random_seed=0)
-    ps = dynamics_state_to_physics_state(modal_state, model.primitive)
+    # Get the default initial dycore-native state (isothermal 288 K or JW profile).
+    dycore_state = model._prepare_initial_dycore_state(None, random_seed=0)
+    ps = model.dycore.to_physics_state(dycore_state)
 
     # Altitude profile from geopotential.
     grav = 9.81
