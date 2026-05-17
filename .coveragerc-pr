@@ -29,3 +29,20 @@ omit =
     jcm/terrain.py
     jcm/date.py
     jcm/diagnostics.py
+    # Same rationale for the v2 dycore-protocol scaffolding: the fast
+    # suite drives the registry directly and runs every method on the
+    # fake-cubed-sphere stand-in (layout-flexibility canary). Slow
+    # tests only hit the registered DinosaurDycore through
+    # ``Model.run``.
+    jcm/dycore/registry.py
+    jcm/dycore/_fake_cubed_sphere/*
+    # ``DinosaurDycore`` itself is main-path code that ``Model.run``
+    # routes through every step, but the branches outside the
+    # SPEEDY/ECHAM default path — level-dependent diffusion at L47,
+    # the IMEX-RK + nudging composition — only fire under
+    # GPU-gated slow tests (``test_echam_model_default_statistics``,
+    # the nudging-shrinks-winds suite) that the CPU CI skips. Fast
+    # tests exercise both branches; PR coverage matches the existing
+    # ``runners.py`` / ``utils.py`` omit pattern for code the slow
+    # suite touches only through entry-point shims.
+    jcm/dycore/dinosaur/dycore.py

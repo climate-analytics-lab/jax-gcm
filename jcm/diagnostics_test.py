@@ -9,15 +9,21 @@ import xarray as xr
 from jcm.diagnostics import check_health, print_report
 
 
-def _make_dataset(T_min: float, T_max: float, q_max: float = 0.01,
+def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
                   nan_frac: float = 0.0):
+    """Build a synthetic xarray dataset for the health-check tests.
+
+    ``q_max_gkg`` is the per-cell upper bound on specific_humidity in g/kg
+    (matches the unit convention :func:`dynamics_state_to_physics_state` writes
+    into the saved netCDF). Healthy tropical surface q runs ~10-25 g/kg.
+    """
     nx, ny, nt = 4, 4, 2
     rng = np.random.default_rng(0)
     T = T_min + (T_max - T_min) * rng.random((nt, nx, ny))
     if nan_frac > 0:
         mask = rng.random(T.shape) < nan_frac
         T = np.where(mask, np.nan, T)
-    q = q_max * rng.random((nt, nx, ny))
+    q = q_max_gkg * rng.random((nt, nx, ny))
     return xr.Dataset({
         "temperature": (("time", "lon", "lat"), T),
         "specific_humidity": (("time", "lon", "lat"), q),
@@ -45,7 +51,9 @@ class TestCheckHealth(unittest.TestCase):
         self.assertTrue(any("T_max" in reason for reason in report["reasons"]))
 
     def test_extreme_humidity(self):
-        ds = _make_dataset(T_min=240.0, T_max=300.0, q_max=0.2)
+        # 200 g/kg is unphysical (max physical tropical surface q ~30 g/kg),
+        # well above the 100 g/kg threshold ``check_health`` flags.
+        ds = _make_dataset(T_min=240.0, T_max=300.0, q_max_gkg=200.0)
         ok, report = check_health(ds, 0, 10.0)
         self.assertFalse(ok)
         self.assertTrue(any("q_max" in reason for reason in report["reasons"]))
