@@ -22,7 +22,6 @@ entirely. Tracked as a follow-up; not a Phase-1 blocker.
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any, Mapping, Sequence
 
 import jax
@@ -76,6 +75,7 @@ class DinosaurDycore(DynamicalCore):
         calendar: Calendar string for the same date conversion.
         diffusion: :class:`DiffusionFilter` describing horizontal hyperdiffusion
             scaling. Defaults to :meth:`DiffusionFilter.default`.
+
     """
 
     def __init__(
@@ -90,6 +90,7 @@ class DinosaurDycore(DynamicalCore):
         calendar: str = "365_day",
         diffusion: DiffusionFilter | None = None,
     ):
+        """Initialise the dinosaur backend; see the class docstring for argument semantics."""
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
@@ -97,7 +98,7 @@ class DinosaurDycore(DynamicalCore):
         self.calendar = calendar
         self.nudging = nudging
         self.diffusion = diffusion or DiffusionFilter.default()
-        self._tracer_specs = dict(tracer_specs) if tracer_specs else {}
+        self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
 
         # Nondimensional timestep used throughout the dinosaur path.
         self._physics_specs = PHYSICS_SPECS
@@ -308,7 +309,7 @@ class DinosaurDycore(DynamicalCore):
         ``isothermal_rest_atmosphere`` default state is used with a small
         per-cell pressure perturbation seeded by ``random_seed``.
         """
-        specs = dict(tracer_specs) if tracer_specs is not None else dict(self._tracer_specs)
+        specs = dict(tracer_specs) if tracer_specs is not None else dict(self.tracer_specs)
 
         if physics_state is not None:
             state = physics_state_to_dynamics_state(
@@ -342,7 +343,7 @@ class DinosaurDycore(DynamicalCore):
 
     def to_physics_state(self, state: State) -> PhysicsState:
         return dynamics_state_to_physics_state(
-            state, self._primitive, tracer_specs=self._tracer_specs,
+            state, self._primitive, tracer_specs=self.tracer_specs,
         )
 
     def step(
@@ -365,7 +366,7 @@ class DinosaurDycore(DynamicalCore):
             )
         if physics_tendency is not None:
             dyn_tendency = physics_tendency_to_dynamics_tendency(
-                physics_tendency, self._primitive, tracer_specs=self._tracer_specs,
+                physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
             )
             state_after_physics = state + self._dt * dyn_tendency
         else:

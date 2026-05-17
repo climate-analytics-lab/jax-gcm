@@ -106,7 +106,7 @@ def _check_or_regenerate(name: str, actual: dict[str, np.ndarray]) -> None:
 
 
 def _build_speedy_t21l8_aquaplanet():
-    """The single canonical configuration the baseline freezes.
+    """Build the single canonical configuration the baseline freezes.
 
     Kept simple so changes to any default elsewhere don't accidentally
     invalidate the baseline.

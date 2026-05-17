@@ -48,6 +48,7 @@ class ModelPredictions:
         dynamics (PhysicsState): The physical state variables.
         physics (Any): Diagnostic physics data.
         times (Any): Timestamps of the predictions.
+
     """
 
     def __init__(self, predictions: Predictions, coords, physics: Physics):  # noqa: D107
@@ -72,6 +73,7 @@ class ModelPredictions:
 
         Returns:
             An xarray.Dataset ready for analysis and plotting.
+
         """
         from jcm.utils import data_to_xarray
 
@@ -199,6 +201,7 @@ def _op_split_trajectory(
         a 5d + resume(5d) integration matches a single 10d integration. In
         averaged mode the returned trajectory's ``physics`` field is the
         time-averaged diagnostics dict.
+
     """
     # Snapshot and averaged modes only differ in what the inner scan
     # accumulates and what the outer step saves; the surrounding outer
@@ -343,6 +346,7 @@ class Model:
                 etc.). When ``None``, the default :class:`DinosaurDycore` is
                 constructed from the explicit kwargs.
             log_level: Logging verbosity level.
+
         """
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
@@ -363,6 +367,7 @@ class Model:
 
         self.physics = physics if physics is not None else speedy_physics()
 
+        tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         if dycore is None:
             if coords is None:
                 raise ValueError(
@@ -371,7 +376,6 @@ class Model:
                     "DinosaurDycore)."
                 )
             terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-            tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
             dycore = DinosaurDycore(
                 coords=coords,
                 terrain=terrain,
@@ -383,6 +387,15 @@ class Model:
                 diffusion=diffusion or DiffusionFilter.default(),
             )
         self.dycore = dycore
+        # Synchronise the dycore's tracer specs with the active physics every
+        # time the Model is constructed — even when the caller passes a
+        # pre-built dycore. Without this the explicit-dycore path can ship
+        # with default (empty) specs and silently mis-scale tracers whose
+        # ``TracerSpec.nondimensionalize=False`` (e.g. ``co2_vmr`` / number
+        # concentrations) during state-bridge conversions. See codex review
+        # P2 on PR #489.
+        self.dycore.required_tracers_ok(self.physics.required_tracers())
+        self.dycore.tracer_specs = tracer_specs
         # Convenience aliases — these point at the dycore's own metadata so
         # callers don't have to know about ``self.dycore.coords``.
         self.coords = dycore.coords
@@ -628,6 +641,7 @@ class Model:
 
         Returns:
             A tuple ``(final_dycore_state, ModelPredictions)``.
+
         """
         final_state, _, predictions = self.run_from_state_with_carry(
             initial_state,

@@ -404,6 +404,7 @@ def compute_physics_step_gridpoint(
         ``(physics_tendency, new_physics_state_carry)``. The dycore is
         responsible for converting ``physics_tendency`` into its own native
         tendency representation before integrating.
+
     """
     clamped_physics_state = verify_state(physics_state)
     physics_tendency, new_carry = physics.compute_tendencies(

@@ -12,11 +12,11 @@ from jcm.dycore.registry import register_dycore
 
 @register_dycore("dinosaur")
 def _build_dinosaur_dycore(**kwargs):
-    """Factory registered under the ``"dinosaur"`` name in the dycore registry.
+    """Build a :class:`DinosaurDycore` from registry kwargs.
 
-    Keyword arguments are forwarded straight through to
-    :class:`DinosaurDycore` — the Hydra runner (Phase 4) is responsible for
-    mapping ``cfg.dycore.<...>`` keys onto these kwargs.
+    Registered under the ``"dinosaur"`` name. Keyword arguments are forwarded
+    straight through; the Hydra runner (Phase 4) maps ``cfg.dycore.<...>``
+    keys onto these kwargs.
     """
     return DinosaurDycore(**kwargs)
 

@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import tree_math
@@ -149,10 +148,14 @@ class FakeCubedSphereDycore(DynamicalCore):
         nlev: int = 8,
         dt_seconds: float = 1800.0,
     ):
+        """Initialise the fake; see the class docstring for argument semantics."""
         self.nelem = int(nelem)
         self.gll = int(gll)
         self.nlev = int(nlev)
         self.coords = _build_cubed_sphere_coords(self.nelem, self.gll, self.nlev)
+        # Populated by Model.__init__ from physics.required_tracers(); kept on
+        # the dycore so that to_physics_state / step can read it consistently.
+        self.tracer_specs = {}
         self.dt_seconds = float(dt_seconds)
         self.terrain = TerrainData.aquaplanet(self.coords)
 

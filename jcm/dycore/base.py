@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     import numpy as np
     import xarray as xr
 
-    from jcm.forcing import ForcingData
     from jcm.physics_interface import PhysicsState, PhysicsTendency
     from jcm.physics.physics_term import TracerSpec
     from jcm.terrain import TerrainData
@@ -62,6 +61,7 @@ class Predictions:
         physics: Diagnostic physics dict for this frame (per-step snapshot or
             inner-step running mean, depending on the integration mode).
         times: Frame timestamps (filled in by :class:`Model` after the scan).
+
     """
 
     dynamics: Any
@@ -101,11 +101,17 @@ class DynamicalCore(abc.ABC):
             ``dt_seconds`` (or the override passed to ``step``).
         terrain: Boundary conditions (orography, land/sea mask, SSO descriptors).
             Built via :meth:`build_terrain` or passed in at construction.
+        tracer_specs: Public mapping ``name -> TracerSpec`` declaring every
+            tracer the dycore should carry. :class:`Model` writes this every
+            time it is constructed (so callers who pass a pre-built dycore
+            still get the right specs); backends read it from
+            :meth:`initial_state`, :meth:`to_physics_state`, and :meth:`step`.
     """
 
     coords: Any
     dt_seconds: float
     terrain: "TerrainData"
+    tracer_specs: dict
 
     # ------------------------------------------------------------------
     # State construction
@@ -134,6 +140,7 @@ class DynamicalCore(abc.ABC):
 
         Returns:
             A backend-native state pytree.
+
         """
 
     # ------------------------------------------------------------------
@@ -179,6 +186,7 @@ class DynamicalCore(abc.ABC):
 
         Returns:
             The dycore-native state at ``t + dt``.
+
         """
 
     # ------------------------------------------------------------------

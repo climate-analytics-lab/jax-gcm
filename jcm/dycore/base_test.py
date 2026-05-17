@@ -13,7 +13,6 @@ drives real Held-Suarez physics through :class:`Model`.
 from __future__ import annotations
 
 import unittest
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -46,6 +45,7 @@ class _TrivialDycore(DynamicalCore):
         self.dt_seconds = 60.0
         # Terrain is opaque to the protocol; ``None`` is fine for the stub.
         self.terrain = None  # type: ignore[assignment]
+        self.tracer_specs = {}
 
     def initial_state(self, physics_state, *, sim_time=0.0, random_seed=0, tracer_specs=None):
         return {"sim_time": jnp.asarray(sim_time, dtype=jnp.float64)}
