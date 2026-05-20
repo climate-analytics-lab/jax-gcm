@@ -13,7 +13,7 @@ import xarray as xr
 
 from jcm.model import Model
 from jcm.nudging import (
-    NudgingConfig, NudgingTarget, NudgingTerm,
+    NudgingConfig, NudgingTarget,
     nudging_tendency, with_nudging,
 )
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
