@@ -498,6 +498,8 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
 
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config."""
+    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
     coords = build_coords(cfg)
     physics = build_physics(cfg)
     physics = maybe_add_sponge(physics, cfg)
@@ -512,12 +514,22 @@ def build_model(cfg: DictConfig) -> Model:
     physics_cfg = getattr(cfg, 'physics', None)
     if physics_cfg is not None:
         rad_chunk = getattr(physics_cfg, 'radiation_chunk_size', None)
-    return Model(
+    # Build the dycore explicitly so the diffusion config flows in via the
+    # dycore constructor (Model itself no longer takes a diffusion kwarg —
+    # that's a dinosaur-backend concern).
+    time_step = float(cfg.run.time_step)
+    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
+    dycore = DinosaurDycore(
         coords=coords,
-        physics=physics,
         terrain=terrain,
+        dt_seconds=time_step * 60.0,
+        tracer_specs=tracer_specs,
         diffusion=diffusion,
-        time_step=cfg.run.time_step,
+    )
+    return Model(
+        dycore,
+        physics=physics,
+        time_step=time_step,
         radiation_chunk_size=rad_chunk,
         log_level=log_level,
     )

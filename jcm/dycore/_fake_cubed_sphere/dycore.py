@@ -223,10 +223,8 @@ class FakeCubedSphereDycore(DynamicalCore):
         self,
         state: FakeCubedSphereState,
         physics_tendency: PhysicsTendency | None,
-        *,
-        dt_seconds: float | None = None,
     ) -> FakeCubedSphereState:
-        dt = float(dt_seconds) if dt_seconds is not None else self.dt_seconds
+        dt = self.dt_seconds
         if physics_tendency is None:
             return state.replace(sim_time=state.sim_time + dt)
         new_tracers = dict(state.tracers)

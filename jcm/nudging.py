@@ -1,48 +1,46 @@
-"""Newtonian relaxation toward an external reference state (#129).
+"""Newtonian relaxation toward an external reference state.
 
-Implements model nudging as a spectral-space tendency that gets composed
-with the dycore + physics. Per-variable, per-level relaxation timescales
-are configurable so the common case ("nudge winds above the PBL") is
-expressible without subclassing or special-casing the rest of the model.
+Implements nudging as a composable :class:`PhysicsTerm`. The relaxation
+tendency ``dX/dt = inv_tau · (X_ref − X)`` is computed in gridpoint space
+on the physics-facing :class:`PhysicsState`, returned as a
+:class:`PhysicsTendency`, and folded into the same forward-Euler op-split
+add the rest of the physics stack uses. The dycore stays nudging-free.
 
-Architecture:
+Per-variable, per-level relaxation timescales are configurable so the
+common case ("nudge winds above the PBL") is expressible without
+subclassing. Time-varying targets are supported via
+:class:`jcm.forcing.TimeSeries` leaves and the existing ``select(date,
+calendar)`` machinery; the current ``DateData`` is plumbed into the
+physics path through the diagnostics dict (``ComposablePhysics`` injects
+``_date`` at the top of every ``compute_tendencies`` call). The calendar
+is held on :class:`NudgingTerm` itself — a Python ``str`` can't ride
+through ``jax.checkpoint`` in the diagnostics dict.
 
-    dynamics + physics + nudging   (composed via ``compose_equations``)
-                                              │
-                                              ▼
-                              ``dX/dt|_nudge = (X_ref - X) / τ``
+The previous version of this module composed the relaxation tendency
+directly into the dinosaur IMEX-RK substages by transforming everything
+to modal space at load time. That coupled the relaxation API to a single
+dycore. Moving to a :class:`PhysicsTerm` keeps it physics-agnostic — any
+dycore that satisfies the :class:`DynamicalCore` protocol gets nudging
+for free.
 
-The tendency is built directly in spectral space, matching the dycore's
-own state representation (``vorticity``, ``divergence``,
-``temperature_variation``, ``log_surface_pressure``). Reference fields
-are loaded as nodal data and transformed to modal once at construction
-time, so the per-step cost is just an array slice + element-wise
-multiplication. Time-varying targets are supported via
-:class:`jcm.forcing.TimeSeries` leaves and the existing
-``select(date, calendar)`` machinery.
-
-The scheme is physics-agnostic by construction — it acts on the dycore
-state, so any physics package (SPEEDY, ICON, future ones) gets nudging
-"for free" as long as it composes with the dynamical core.
-
-Reference: Krishnamurti et al. (1991), *Tellus 43AB*, 53–81. Implementation
-patterned after ECHAM ``mo_nudging.f90``.
+Reference: Krishnamurti et al. (1991), *Tellus 43AB*, 53–81.
 """
 
 from __future__ import annotations
 
+from typing import ClassVar, Optional
+
 import jax
 import jax.numpy as jnp
 import tree_math
-from dinosaur.coordinate_systems import CoordinateSystem
-from dinosaur.primitive_equations import State
-from dinosaur.scales import units
-from dinosaur.spherical_harmonic import uv_nodal_to_vor_div_modal
-from typing import Optional
+from flax import nnx
 
-from jcm.constants import p0
 from jcm.date import DateData, DEFAULT_CALENDAR
-from jcm.forcing import TimeSeries, BY_DATE, _select_time_series, make_time_series
+from jcm.forcing import ForcingData, TimeSeries, BY_DATE, _select_time_series, make_time_series
+from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.terrain import TerrainData
 
 
 # ---------------------------------------------------------------------------
@@ -52,28 +50,29 @@ from jcm.forcing import TimeSeries, BY_DATE, _select_time_series, make_time_seri
 
 @tree_math.struct
 class NudgingTarget:
-    """Modal-space reference fields the nudging relaxes toward.
+    """Gridpoint reference fields the relaxation drives the state toward.
 
-    Each field is either a bare ``jnp.ndarray`` (static, applied at every
-    step) or a :class:`jcm.forcing.TimeSeries` leaf (with a leading time
-    axis that ``select(date, calendar)`` slices per step). Fields are in
-    spectral form, matching the dycore's own state.
+    All fields are dimensional in the model's native conventions: ``u_wind``
+    and ``v_wind`` in m/s, ``temperature`` in K, on the
+    ``(nlev, *horizontal_shape)`` layout the dycore exposes via
+    ``coords.horizontal.nodal_shape``. Each leaf can be a bare
+    ``jnp.ndarray`` (static target) or a :class:`jcm.forcing.TimeSeries`
+    leaf with a leading time axis that ``select(date, calendar)`` slices
+    per step.
 
     Use :meth:`from_dataset` to build one from an xarray Dataset of
-    nodal (lat / lon / level) reference fields — the loader handles the
-    nodal-to-modal transform once at construction time.
+    nodal (lat / lon / level) reference fields.
     """
 
-    vorticity: jnp.ndarray              # (nlev, m, n) or TimeSeries((n_time, nlev, m, n))
-    divergence: jnp.ndarray
-    temperature_variation: jnp.ndarray
-    log_surface_pressure: jnp.ndarray   # (1, m, n) or TimeSeries leaf
+    u_wind: jnp.ndarray
+    v_wind: jnp.ndarray
+    temperature: jnp.ndarray
 
     def select(self, date: DateData, calendar: str = DEFAULT_CALENDAR) -> "NudgingTarget":
         """Collapse every TimeSeries leaf to its current-step slice.
 
-        No-op for static targets. The Model calls this once per step so
-        downstream tendency code sees plain modal arrays.
+        No-op for static targets. Called by :class:`NudgingTerm` once per
+        physics step so downstream tendency math sees plain arrays.
         """
         def slice_leaf(leaf):
             if isinstance(leaf, TimeSeries):
@@ -85,34 +84,25 @@ class NudgingTarget:
         )
 
     @classmethod
-    def from_dataset(cls, ds, coords: CoordinateSystem, *,
-                     reference_temperature: jnp.ndarray,
-                     physics_specs,
+    def from_dataset(cls, ds, *,
                      u_var: str = "u", v_var: str = "v",
-                     T_var: str = "T", ps_var: str = "ps",
-                     time_var: Optional[str] = "time"):
-        """Build a NudgingTarget from an xarray Dataset of nodal reference
-        fields. Performs the nodal-to-modal transform at load time.
+                     T_var: str = "T",
+                     time_var: Optional[str] = "time") -> "NudgingTarget":
+        """Build a :class:`NudgingTarget` from an xarray Dataset.
 
         Args:
-            ds: ``xarray.Dataset`` carrying ``u``, ``v``, ``T``, ``ps`` (or
-                names overridden by the *_var keyword args). u/v/T are
-                expected with axes ``(time, lev, lat, lon)`` (time is
-                optional — see ``time_var``); ps is ``(time, lat, lon)``.
-            coords: The same ``CoordinateSystem`` the Model will run on.
-                Used to look up the spectral transform.
-            reference_temperature: Per-level reference profile that the
-                dycore subtracts before storing temperature; pull from
-                ``Model.primitive.reference_temperature`` so the nudging
-                target is consistent with the dycore's representation.
-            physics_specs: ``PhysicsSpecs`` for nondimensionalisation
-                (also from ``Model.primitive.physics_specs``).
-            u_var, v_var, T_var, ps_var: netCDF variable names.
+            ds: ``xarray.Dataset`` carrying ``u``, ``v``, ``T`` (or names
+                overridden by the ``*_var`` kwargs). Each is expected with
+                axes ``(time, lev, lat, lon)`` — time is optional, see
+                ``time_var``. Loaded verbatim onto the model grid;
+                regridding is the user's responsibility before loading.
+            u_var, v_var, T_var: netCDF variable names.
             time_var: Time coord name. ``None`` for static (climatology)
                 reference data.
 
         Returns:
-            A :class:`NudgingTarget` ready to attach to ``Nudging``.
+            A :class:`NudgingTarget` ready to attach to a
+            :class:`NudgingTerm`.
 
         """
         import numpy as np
@@ -123,43 +113,18 @@ class NudgingTarget:
         def to_jax(name):
             return jnp.asarray(np.asarray(ds[name].values))
 
-        u = to_jax(u_var)   # (time?, lev, lat, lon)
+        u = to_jax(u_var)
         v = to_jax(v_var)
         T = to_jax(T_var)
-        ps = to_jax(ps_var)  # (time?, lat, lon)
 
         if is_time_varying:
             time_seconds = _time_axis_seconds_from_ds(ds.rename({time_var: "time"}))
-
-            def transform_step(u_t, v_t, T_t, ps_t):
-                vor, div = uv_nodal_to_vor_div_modal(coords.horizontal, u_t, v_t)
-                T_var_nodal = T_t - reference_temperature[:, jnp.newaxis, jnp.newaxis]
-                T_modal = coords.horizontal.to_modal(T_var_nodal)
-                ps_norm = ps_t / physics_specs.nondimensionalize(p0 * units.pascal)
-                log_ps_modal = coords.horizontal.to_modal(jnp.log(ps_norm))
-                return vor, div, T_modal, log_ps_modal[jnp.newaxis, ...]
-
-            vors, divs, Ts, log_sps = jax.vmap(transform_step)(u, v, T, ps)
-
             return cls(
-                vorticity=make_time_series(vors, time_seconds, align_mode=BY_DATE),
-                divergence=make_time_series(divs, time_seconds, align_mode=BY_DATE),
-                temperature_variation=make_time_series(Ts, time_seconds, align_mode=BY_DATE),
-                log_surface_pressure=make_time_series(log_sps, time_seconds, align_mode=BY_DATE),
+                u_wind=make_time_series(u, time_seconds, align_mode=BY_DATE),
+                v_wind=make_time_series(v, time_seconds, align_mode=BY_DATE),
+                temperature=make_time_series(T, time_seconds, align_mode=BY_DATE),
             )
-
-        # Static case: collapse a single timestep through the same transform.
-        vor, div = uv_nodal_to_vor_div_modal(coords.horizontal, u, v)
-        T_var_nodal = T - reference_temperature[:, jnp.newaxis, jnp.newaxis]
-        T_modal = coords.horizontal.to_modal(T_var_nodal)
-        ps_norm = ps / physics_specs.nondimensionalize(p0 * units.pascal)
-        log_ps_modal = coords.horizontal.to_modal(jnp.log(ps_norm))
-        return cls(
-            vorticity=vor,
-            divergence=div,
-            temperature_variation=T_modal,
-            log_surface_pressure=log_ps_modal[jnp.newaxis, ...],
-        )
+        return cls(u_wind=u, v_wind=v, temperature=T)
 
 
 # ---------------------------------------------------------------------------
@@ -171,129 +136,161 @@ class NudgingTarget:
 class NudgingConfig:
     """Per-variable, per-level inverse relaxation timescales (1 / s).
 
-    Zero entries mean "no nudging" for that variable / level — that's how
-    the common "winds above the PBL only" pattern is expressed: keep
-    ``inv_tau_vorticity`` and ``inv_tau_divergence`` non-zero from the
-    free troposphere upwards and zero below, and zero out everything else.
+    All values are dimensional (per second). Zero entries mean "no nudging"
+    for that variable / level — that's how the common "winds above the PBL
+    only" pattern is expressed: ``inv_tau_wind`` non-zero from the free
+    troposphere upwards, zero below; ``inv_tau_temperature`` zero everywhere.
 
-    All timescales are *nondimensional* under the Model's ``physics_specs``
-    — the Model converts per-second values from the user-facing
-    constructors before storing them so the spectral tendency math works
-    in the same units the dycore uses.
+    Wind nudging applies symmetrically to ``u_wind`` and ``v_wind`` (one
+    inverse-timescale profile covers both). Surface-pressure nudging is
+    deliberately not supported through the physics path — the dycore
+    advances surface pressure via the continuity equation, and a ps
+    nudging tendency would require extending :class:`PhysicsTendency` with
+    a ``normalized_surface_pressure`` field. Add it only when a concrete
+    use case lands.
     """
 
-    inv_tau_vorticity: jnp.ndarray              # (nlev,)
-    inv_tau_divergence: jnp.ndarray             # (nlev,)
-    inv_tau_temperature: jnp.ndarray            # (nlev,)
-    inv_tau_log_surface_pressure: jnp.ndarray   # scalar — ps has no level axis
+    inv_tau_wind: jnp.ndarray         # (nlev,) — applied to both u and v
+    inv_tau_temperature: jnp.ndarray  # (nlev,)
 
     @classmethod
     def winds_only(cls, nlev: int, *, tau_seconds: float = 21600.0,
-                   pbl_levels: int = 0, physics_specs=None) -> "NudgingConfig":
-        """Nudge vorticity and divergence everywhere except the bottom
-        ``pbl_levels`` layers; leave temperature and surface pressure free.
+                   pbl_levels: int = 0) -> "NudgingConfig":
+        """Nudge winds everywhere except the bottom ``pbl_levels`` layers.
 
         Args:
             nlev: Number of vertical levels.
             tau_seconds: Relaxation timescale in seconds (default 6 h).
-            pbl_levels: Number of levels at the *bottom* of the column
+            pbl_levels: Number of levels at the bottom of the column
                 (highest sigma) where wind nudging is suppressed. Default
                 0 (nudge all levels).
-            physics_specs: Required — used to nondimensionalise ``tau``.
-                Pass ``Model.primitive.physics_specs``.
 
         """
-        if physics_specs is None:
-            raise ValueError("`physics_specs` is required so τ can be nondimensionalised "
-                             "consistently with the dycore.")
-        tau_nd = physics_specs.nondimensionalize(tau_seconds * units.second)
-        inv_tau = 1.0 / tau_nd
-
+        inv_tau = 1.0 / float(tau_seconds)
         # Convention: level 0 is TOA, level nlev-1 is the surface.
         mask = jnp.ones(nlev).at[nlev - pbl_levels:].set(0.0) if pbl_levels else jnp.ones(nlev)
-        inv_tau_winds = inv_tau * mask
-        zero_lev = jnp.zeros(nlev)
         return cls(
-            inv_tau_vorticity=inv_tau_winds,
-            inv_tau_divergence=inv_tau_winds,
-            inv_tau_temperature=zero_lev,
-            inv_tau_log_surface_pressure=jnp.array(0.0),
+            inv_tau_wind=inv_tau * mask,
+            inv_tau_temperature=jnp.zeros(nlev),
         )
 
 
 # ---------------------------------------------------------------------------
-# Tendency
+# Tendency helper (split out so unit tests can call it without a Model)
 # ---------------------------------------------------------------------------
 
 
-def nudging_tendency(state: State, target: NudgingTarget,
-                     config: NudgingConfig) -> State:
-    """Newtonian relaxation tendency in spectral space.
+def nudging_tendency(state: PhysicsState, target: NudgingTarget,
+                     config: NudgingConfig) -> PhysicsTendency:
+    """Newtonian relaxation tendency in gridpoint space.
 
-    For each relaxed variable: ``dX/dt = inv_tau · (X_ref − X)``. Inside
-    the dycore time integration this is composed with the primitive-
-    equation tendencies and the physics tendencies.
+    ``dX/dt = inv_tau · (X_ref − X)`` per relaxed variable. Variables with
+    zero ``inv_tau`` get zero tendency. Tracers and specific humidity are
+    not nudged — the tendency carries zeros for them so the
+    :class:`PhysicsTendency` pytree shape matches the state's tracer dict.
 
     Args:
-        state: Current dynamics state (modal).
-        target: Reference fields (modal). Use ``target.select(date)``
-            *before* calling this for time-varying references.
+        state: Current gridpoint state.
+        target: Reference fields. Call ``target.select(date)`` *before*
+            this for time-varying references.
         config: Per-variable inverse-tau profiles.
 
     Returns:
-        A ``State`` whose fields are the relaxation tendencies. Variables
-        with zero ``inv_tau`` get zero tendency.
+        A :class:`PhysicsTendency` with the relaxation tendencies. Caller
+        is responsible for converting it to the dycore's native tendency
+        representation if needed.
 
     """
-    # Per-level inverse-tau broadcasts across the spectral (m, n) axes.
-    def _level_relax(inv_tau_lev, x, x_ref):
-        return inv_tau_lev[:, jnp.newaxis, jnp.newaxis] * (x_ref - x)
+    inv_tau_wind = config.inv_tau_wind[:, jnp.newaxis, jnp.newaxis]
+    inv_tau_temp = config.inv_tau_temperature[:, jnp.newaxis, jnp.newaxis]
 
-    vor_t = _level_relax(config.inv_tau_vorticity, state.vorticity, target.vorticity)
-    div_t = _level_relax(config.inv_tau_divergence, state.divergence, target.divergence)
-    temp_t = _level_relax(
-        config.inv_tau_temperature, state.temperature_variation, target.temperature_variation,
-    )
-    log_sp_t = config.inv_tau_log_surface_pressure * (
-        target.log_surface_pressure - state.log_surface_pressure
-    )
-
-    # Tracers are not nudged (they're physics-package-specific). Pass
-    # zero tendencies to keep the State pytree shape consistent.
+    u_t = inv_tau_wind * (target.u_wind - state.u_wind)
+    v_t = inv_tau_wind * (target.v_wind - state.v_wind)
+    T_t = inv_tau_temp * (target.temperature - state.temperature)
+    q_zeros = jnp.zeros_like(state.specific_humidity)
     tracer_zeros = {name: jnp.zeros_like(t) for name, t in state.tracers.items()}
 
-    return State(
-        vorticity=vor_t,
-        divergence=div_t,
-        temperature_variation=temp_t,
-        log_surface_pressure=log_sp_t,
-        tracers=tracer_zeros,
+    return PhysicsTendency(
+        u_wind=u_t, v_wind=v_t, temperature=T_t,
+        specific_humidity=q_zeros, tracers=tracer_zeros,
     )
 
 
 # ---------------------------------------------------------------------------
-# Top-level container the Model accepts
+# Composable PhysicsTerm
 # ---------------------------------------------------------------------------
 
 
-class Nudging:
-    """User-facing handle bundling the relaxation target and config.
+class NudgingTerm(PhysicsTerm):
+    """Composable Newtonian-relaxation physics term.
 
-    Build once, pass to ``Model(..., nudging=...)``; the Model takes care
-    of slicing the (possibly time-varying) target and adding the
-    relaxation tendency to the dycore time integration.
+    Holds a :class:`NudgingTarget`, a :class:`NudgingConfig`, and the
+    calendar string used to align time-varying targets. On every physics
+    step it slices the target against the current date (read from
+    ``diagnostics["_date"]`` — injected by
+    :class:`~jcm.physics.composable_physics.ComposablePhysics`) and emits
+    the gridpoint relaxation tendency.
+
+    Drop it into any ``ComposablePhysics`` term list to add nudging::
+
+        physics = speedy_physics() + NudgingTerm(target, config)
+
+    The calendar is held on the term rather than threaded through the
+    diagnostics dict because the dict rides through ``jax.checkpoint``,
+    which only accepts traceable types (not Python ``str``). Match it to
+    the calendar you pass to :class:`Model` for time-varying targets.
     """
 
-    def __init__(self, target: NudgingTarget, config: NudgingConfig):
-        """Initialize the Nudging container."""
+    name: ClassVar[str] = "nudging"
+    category: ClassVar[str] = "nudging"
+
+    # ``target`` and ``config`` are tree_math structs containing JAX
+    # arrays — annotate them with ``nnx.data`` so flax's pytree machinery
+    # traverses them (rather than rejecting them as unrecognised types).
+    # ``calendar`` is a Python ``str`` and stays as a non-pytree class
+    # attribute by default.
+    target: NudgingTarget = nnx.data(None)
+    config: NudgingConfig = nnx.data(None)
+
+    def __init__(self, target: NudgingTarget, config: NudgingConfig,
+                 calendar: str = DEFAULT_CALENDAR):
+        """Initialise the term with a reference target, timescales, and calendar."""
         self.target = target
         self.config = config
+        self.calendar = calendar
 
-    def tendency(self, state: State, date: DateData,
-                 calendar: str = DEFAULT_CALENDAR) -> State:
-        """Compute the per-step nudging tendency. Slices the target via
-        ``target.select(date, calendar)`` so static and time-varying
-        references take the same code path.
+    def __call__(self, state: PhysicsState, diagnostics: dict,
+                 forcing: ForcingData, terrain: TerrainData):
+        """Compute the per-step relaxation tendency.
+
+        Reads ``_date`` from ``diagnostics`` if present; falls back to the
+        static target otherwise — that's the right behaviour when the
+        target carries no ``TimeSeries`` leaves.
         """
-        target_now = self.target.select(date, calendar=calendar)
-        return nudging_tendency(state, target_now, self.config)
+        date = diagnostics.get("_date")
+        target_now = (
+            self.target.select(date, calendar=self.calendar)
+            if date is not None else self.target
+        )
+        return nudging_tendency(state, target_now, self.config), diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Convenience helper for the common "free-running physics + nudging" case
+# ---------------------------------------------------------------------------
+
+
+def with_nudging(physics, target: NudgingTarget, config: NudgingConfig,
+                 calendar: str = DEFAULT_CALENDAR):
+    """Return ``physics`` extended with a :class:`NudgingTerm`.
+
+    Equivalent to ``physics + NudgingTerm(target, config, calendar)`` for any
+    :class:`ComposablePhysics`; the explicit helper exists so callers can
+    discover the pattern via :mod:`jcm.nudging` rather than having to know
+    that ``ComposablePhysics`` overloads ``+``.
+    """
+    if not isinstance(physics, ComposablePhysics):
+        raise TypeError(
+            f"with_nudging expects a ComposablePhysics, got {type(physics).__name__}"
+        )
+    return physics + NudgingTerm(target, config, calendar=calendar)

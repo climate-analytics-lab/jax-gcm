@@ -99,32 +99,7 @@ def load_checkpoint(model, path) -> float:
         "dycore_leaves": dycore_leaves_template,
         "physics_leaves": physics_leaves_template,
     }
-    raw = Path(path).read_bytes()
-    try:
-        payload = flax.serialization.from_bytes(template, raw)
-    except (KeyError, ValueError) as exc:
-        # v2 introduced the dycore protocol and renamed the on-disk payload
-        # key ``modal_leaves`` -> ``dycore_leaves`` (PR #489). flax's msgpack
-        # codec raises on the key mismatch when an old checkpoint is loaded
-        # under the new code; surface the cause clearly rather than letting
-        # the underlying ``KeyError: 'dycore_leaves'`` confuse users.
-        old_template = {
-            "elapsed_days": 0.0,
-            "modal_leaves": dycore_leaves_template,
-            "physics_leaves": physics_leaves_template,
-        }
-        try:
-            flax.serialization.from_bytes(old_template, raw)
-        except Exception:
-            raise exc from None
-        raise ValueError(
-            f"Checkpoint at {path} appears to be from a pre-v2 jcm run "
-            "(payload key 'modal_leaves' instead of 'dycore_leaves'). "
-            "The on-disk format changed with the dynamical-core refactor "
-            "(PR #489); pre-v2 checkpoints are not supported by v2 jcm. "
-            "Re-run the integration from the relevant init kind to "
-            "regenerate the checkpoint under the v2 format."
-        ) from None
+    payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
 
     _, dycore_treedef = jax.tree_util.tree_flatten(model._final_dycore_state)
     _, physics_treedef = jax.tree_util.tree_flatten(model._final_physics_state)

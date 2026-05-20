@@ -33,6 +33,14 @@ jcm/outputs
 outputs/
 runs/
 
+# Local refactor regression baseline + tight-tolerance test — kept locally
+# for the duration of the dycore-protocol work to self-check that follow-up
+# refactors don't drift the dinosaur numerics. Not committed; the
+# cross-hardware ``composable_physics_regression_test`` is the shipped
+# regression guardrail.
+jcm/data/test/dycore_refactor_baseline/
+jcm/dycore/dinosaur/regression_test.py
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.

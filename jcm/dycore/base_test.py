@@ -53,9 +53,8 @@ class _TrivialDycore(DynamicalCore):
     def to_physics_state(self, state):
         return state  # the trivial dycore stores its state as a PhysicsState
 
-    def step(self, state, physics_tendency, *, dt_seconds=None):
-        new_t = state["sim_time"] + (dt_seconds if dt_seconds is not None else self.dt_seconds)
-        return {**state, "sim_time": new_t}
+    def step(self, state, physics_tendency):
+        return {**state, "sim_time": state["sim_time"] + self.dt_seconds}
 
     def sim_time(self, state):
         return state["sim_time"]
@@ -102,11 +101,11 @@ class DynamicalCoreContractTest(unittest.TestCase):
         # The default implementation accepts anything without raising.
         _TrivialDycore().required_tracers_ok([])
 
-    def test_step_uses_dt_override(self):
+    def test_step_advances_sim_time(self):
         d = _TrivialDycore()
         s0 = d.initial_state(None, sim_time=0.0)
-        s1 = d.step(s0, None, dt_seconds=120.0)
-        self.assertAlmostEqual(float(d.sim_time(s1)), 120.0)
+        s1 = d.step(s0, None)
+        self.assertAlmostEqual(float(d.sim_time(s1)), d.dt_seconds)
 
 
 class PredictionsTest(unittest.TestCase):

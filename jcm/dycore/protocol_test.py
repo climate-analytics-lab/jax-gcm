@@ -108,7 +108,8 @@ class TestFakeCubedSphereDycoreProtocol(unittest.TestCase):
             def required_tracers(self):
                 return ()
 
-            def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+            def compute_tendencies(self, state, forcing, terrain,
+                                   prev_physics_data=None, date=None):
                 tend = PhysicsTendency(
                     u_wind=jnp.zeros_like(state.u_wind),
                     v_wind=jnp.zeros_like(state.v_wind),

@@ -167,8 +167,6 @@ class DynamicalCore(abc.ABC):
         self,
         state: DycoreState,
         physics_tendency: "PhysicsTendency | None",
-        *,
-        dt_seconds: float | None = None,
     ) -> DycoreState:
         """Advance the state by one ``dt``.
 
@@ -181,8 +179,6 @@ class DynamicalCore(abc.ABC):
             state: Current dycore-native state.
             physics_tendency: Gridpoint physics tendencies (may be ``None`` for
                 a pure-dynamics step, e.g. dry baroclinic-wave tests).
-            dt_seconds: Override the construction-time ``dt_seconds`` for a
-                single call (rare — only useful for adaptive-step harnesses).
 
         Returns:
             The dycore-native state at ``t + dt``.

@@ -1,23 +1,10 @@
 """Dinosaur-backed implementation of the :class:`DynamicalCore` protocol.
 
 Wraps the spectral primitive-equations dycore from the external ``dinosaur``
-package. The implementation is a relocation of code that previously lived
-inside :class:`jcm.model.Model`: the IMEX-RK SIL3 step, the three diffusion
-filter closures, the global-mean ps-conservation filter, the modal-orography
-truncation, and the gridpoint↔modal conversions all live here.
-
-The Phase-1 :mod:`jcm.dycore.dinosaur.regression_test` baseline (rtol=1e-10)
-asserts that this relocation is numerically a no-op.
-
-A note on nudging
------------------
-Newtonian relaxation toward a reference state is composed into the IMEX-RK
-substages via :func:`dinosaur.time_integration.compose_equations`. The closure
-needs the date, which it derives from ``state.sim_time`` plus the dycore's
-``start_date`` and ``calendar``. That is the *only* date plumbing the dycore
-sees — a more thoroughgoing refactor would promote :class:`jcm.nudging.Nudging`
-to a :class:`PhysicsTerm`, removing date/calendar from the dycore's surface
-entirely. Tracked as a follow-up; not a Phase-1 blocker.
+package. Owns the IMEX-RK SIL3 step, the three diffusion filter closures,
+the global-mean ps-conservation filter, the modal-orography truncation,
+and the gridpoint↔modal conversions. Outside this subpackage the rest of
+jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
 """
 
 from __future__ import annotations
@@ -26,7 +13,6 @@ from typing import Any, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
 import numpy as np
 
 import dinosaur
@@ -36,10 +22,8 @@ from dinosaur.filtering import horizontal_diffusion_filter
 from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import State
 from dinosaur.scales import SI_SCALE, units
-from dinosaur.time_integration import ExplicitODE
 
 from jcm.constants import p0
-from jcm.date import DateData
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.state_bridge import (
@@ -65,14 +49,8 @@ class DinosaurDycore(DynamicalCore):
             attached physics package needs. Used to seed the initial state and
             to drive the nondimensionalisation flag in
             :mod:`jcm.dycore.dinosaur.state_bridge`. May be ``None`` for
-            dry-only runs.
-        nudging: Optional :class:`jcm.nudging.Nudging` handle. When provided,
-            the dynamics step is composed with a Newtonian relaxation tendency
-            inside the IMEX-RK substages.
-        start_date: Anchor for converting ``state.sim_time`` into a calendar
-            date; only used by nudging today (and only when ``nudging`` is
-            non-``None``).
-        calendar: Calendar string for the same date conversion.
+            dry-only runs. The user-facing :class:`jcm.model.Model` writes
+            this every time it is constructed.
         diffusion: :class:`DiffusionFilter` describing horizontal hyperdiffusion
             scaling. Defaults to :meth:`DiffusionFilter.default`.
 
@@ -85,18 +63,12 @@ class DinosaurDycore(DynamicalCore):
         dt_seconds: float,
         *,
         tracer_specs: Mapping[str, Any] | None = None,
-        nudging: Any = None,
-        start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
-        calendar: str = "365_day",
         diffusion: DiffusionFilter | None = None,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics."""
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
-        self.start_date = start_date
-        self.calendar = calendar
-        self.nudging = nudging
         self.diffusion = diffusion or DiffusionFilter.default()
         self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
 
@@ -251,43 +223,18 @@ class DinosaurDycore(DynamicalCore):
         ]
 
     # ------------------------------------------------------------------
-    # Dynamics step (IMEX-RK SIL3 + optional nudging)
+    # Dynamics step (IMEX-RK SIL3)
     # ------------------------------------------------------------------
 
-    def _date_from_sim_time(self, sim_time) -> DateData:
-        # Stop-gradient the date computation: floor/round/int casts are
-        # non-differentiable and don't belong in the AD graph.
-        sim_time = jax.lax.stop_gradient(sim_time)
-        return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(
-                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
-            ),
-            model_step=jnp.int32(sim_time / self.dt_seconds),
-            dt_seconds=float(self.dt_seconds),
-            calendar=self.calendar,
-        )
-
     def _build_dynamics_step_fn(self):
-        """Build the IMEX-RK SIL3 step over pure dynamics (+ optional nudging).
+        """Build the IMEX-RK SIL3 step over pure dynamics.
 
-        Equivalent to the original :meth:`Model._get_dynamics_step_fn`. Nudging
-        and sponge stay inside the RK stages — they are stiff / fast-linear
-        couplings that benefit from intermediate-state evaluation. Physics is
-        the only thing applied operator-split outside the stage loop.
+        The op-split caller adds the physics dynamics-tendency to the state
+        forward-Euler-style before invoking this; the integrator advances
+        ``state.sim_time`` by ``dt`` and applies the implicit-explicit RK
+        stages.
         """
-        equations = [self._primitive]
-        if self.nudging is not None:
-            nudging_eqn = ExplicitODE.from_functions(
-                lambda state: self.nudging.tendency(
-                    state,
-                    date=self._date_from_sim_time(state.sim_time),
-                    calendar=self.calendar,
-                ),
-            )
-            equations.append(nudging_eqn)
-        composed = dinosaur.time_integration.compose_equations(equations)
-        return dinosaur.time_integration.imex_rk_sil3(composed, self._dt)
+        return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
 
     # ------------------------------------------------------------------
     # DynamicalCore protocol implementation
@@ -350,20 +297,12 @@ class DinosaurDycore(DynamicalCore):
         self,
         state: State,
         physics_tendency: PhysicsTendency | None,
-        *,
-        dt_seconds: float | None = None,
     ) -> State:
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        IMEX-RK SIL3 dynamics step → spectral filters. Mirrors the original
-        :meth:`Model._get_op_split_step_fn` body.
+        IMEX-RK SIL3 dynamics step → spectral filters.
         """
-        if dt_seconds is not None and dt_seconds != self.dt_seconds:
-            raise NotImplementedError(
-                "DinosaurDycore.step does not currently support a per-call "
-                "dt override; the IMEX-RK step is built once at construction."
-            )
         if physics_tendency is not None:
             dyn_tendency = physics_tendency_to_dynamics_tendency(
                 physics_tendency, self._primitive, tracer_specs=self.tracer_specs,

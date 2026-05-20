@@ -1,12 +1,18 @@
 """User-facing :class:`Model` class.
 
 The :class:`Model` orchestrates a simulation: forcing, run/resume/run_from_state,
-chunked op-split scan, post-processing, and xarray conversion. The actual
-dynamical-core operations (state initialisation, the per-``dt`` step, the
-gridpoint↔native bridge) live behind a :class:`DynamicalCore` (Phase-1 of
-issue #388). The dinosaur spectral backend is in
-:mod:`jcm.dycore.dinosaur.dycore`; other backends register themselves in
-:mod:`jcm.dycore.registry`.
+chunked op-split scan, post-processing, and xarray conversion. The two
+component contracts it routes between are:
+
+* the :class:`DynamicalCore` (state initialisation, the per-``dt`` step,
+  the gridpoint↔native bridge) — see :mod:`jcm.dycore`;
+* the :class:`Physics` (parameterizations producing gridpoint
+  :class:`PhysicsTendency` from a :class:`PhysicsState`) — see
+  :mod:`jcm.physics`.
+
+The Model itself owns nothing dynamics- or physics-specific; it just
+threads the cross-step physics carry through the scan, handles the
+sim-time / date bookkeeping, and produces an xarray trajectory.
 """
 
 import jax
@@ -22,14 +28,12 @@ import logging
 
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
-from jcm.nudging import Nudging
 from jcm.physics_interface import (
     PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
-from jcm.diffusion import DiffusionFilter
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
@@ -298,59 +302,49 @@ class Model:
     """
 
     def __init__(self,
+                 dycore: DynamicalCore | None = None,
+                 *,
                  coords=None,
                  time_step: float = 30.0,
                  terrain: TerrainData = None,
                  physics: Physics = None,
-                 diffusion: DiffusionFilter = None,
                  start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
                  calendar: str = "365_day",
-                 nudging: Nudging | None = None,
                  radiation_chunk_size: int | None = None,
-                 dycore: DynamicalCore | None = None,
                  log_level=logging.CRITICAL) -> None:
         """Initialise the model.
 
         Args:
-            coords: CoordinateSystem describing the model coordinates. Required
-                when ``dycore`` is ``None`` (so that a default
-                :class:`DinosaurDycore` can be constructed). To enable SPMD
-                parallelization, pass ``spmd_mesh`` to the coords helper
-                (e.g. :func:`get_speedy_coords`).
+            dycore: The :class:`DynamicalCore` driving the integration. When
+                ``None``, a default :class:`DinosaurDycore` is constructed
+                from ``coords`` and ``terrain`` for convenience. Backend-
+                specific knobs (diffusion, nudging-as-PhysicsTerm targets,
+                IMEX stepper details) belong to the dycore's own constructor
+                — wire them there, then pass the dycore in.
+            coords: CoordinateSystem. Required when ``dycore`` is ``None``.
+                To enable SPMD parallelization, pass ``spmd_mesh`` to the
+                coords helper (e.g. :func:`get_speedy_coords`).
             time_step: Model time step in minutes.
-            terrain: :class:`TerrainData` describing boundary conditions
-                (orography, land-sea mask, etc.). Defaults to an aquaplanet.
+            terrain: :class:`TerrainData` (orography, land-sea mask, etc.).
+                Defaults to an aquaplanet when building the default dycore.
             physics: :class:`Physics` describing the model physics. Defaults
-                to :func:`speedy_physics`.
-            diffusion: :class:`DiffusionFilter` describing horizontal diffusion
-                filter parameters. Used by the default :class:`DinosaurDycore`;
-                ignored when a non-dinosaur dycore is passed in.
+                to :func:`speedy_physics`. Add nudging via the
+                :class:`jcm.nudging.NudgingTerm` PhysicsTerm.
             start_date: ``jax_datetime.Datetime`` for the start of the run.
-            calendar: Calendar string for ``tyear`` / ``model_year`` /
-                forcing-axis alignment. ``"365_day"`` (no leap years) matches
-                SPEEDY's climatology tables; ``"gregorian"`` (365.2425
-                days/year) is available for ICON-style runs that align against
-                real Gregorian timestamps in their forcing files.
-            nudging: Optional :class:`jcm.nudging.Nudging` handle. When provided
-                and ``dycore`` is ``None``, the default :class:`DinosaurDycore`
-                composes a Newtonian relaxation tendency into its IMEX-RK
-                substages.
+                Used to convert ``state.sim_time`` to a :class:`DateData`
+                that's threaded into the physics-step diagnostics dict (so
+                forcing-driven and date-aware terms can read it).
+            calendar: Calendar string (``"365_day"`` or ``"gregorian"``) for
+                the same date conversion.
             radiation_chunk_size: Override the RRTMGP chunked-vmap chunk size
                 (cells per chunk). Default ``None`` auto-detects from the JAX
-                device's HBM. Has no effect when the radiation backend is not
+                device's HBM. No-op when the active radiation scheme is not
                 RRTMGP.
-            dycore: An explicit :class:`DynamicalCore` instance. When provided,
-                ``coords``, ``terrain``, ``diffusion``, ``nudging`` are
-                expected to have been baked into it already — they are still
-                read for convenience attributes on the Model (``self.coords``,
-                etc.). When ``None``, the default :class:`DinosaurDycore` is
-                constructed from the explicit kwargs.
             log_level: Logging verbosity level.
 
         """
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
-        self.nudging = nudging
         self.start_date = start_date
 
         # Wire the RRTMGP chunked-vmap chunk-size override (only takes
@@ -361,10 +355,6 @@ class Model:
             _rrtmgp_mod.set_chunk_size(radiation_chunk_size)
 
         self.dt_si = (time_step * units.minute).to(units.second)
-        # Nondimensional dt is owned by the dycore; the Model only needs
-        # ``dt_si`` for sim-time bookkeeping and to pass to physics tendency
-        # capping (``verify_tendencies``).
-
         self.physics = physics if physics is not None else speedy_physics()
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
@@ -381,26 +371,17 @@ class Model:
                 terrain=terrain,
                 dt_seconds=float(self.dt_si.m),
                 tracer_specs=tracer_specs,
-                nudging=nudging,
-                start_date=start_date,
-                calendar=calendar,
-                diffusion=diffusion or DiffusionFilter.default(),
             )
         self.dycore = dycore
-        # Synchronise the dycore's tracer specs with the active physics every
-        # time the Model is constructed — even when the caller passes a
-        # pre-built dycore. Without this the explicit-dycore path can ship
-        # with default (empty) specs and silently mis-scale tracers whose
-        # ``TracerSpec.nondimensionalize=False`` (e.g. ``co2_vmr`` / number
-        # concentrations) during state-bridge conversions. See codex review
-        # P2 on PR #489.
+        # Synchronise the dycore's tracer specs with the active physics so
+        # the explicit-dycore path can ship with default (empty) specs and
+        # still mis-scale-correctly on tracers whose
+        # ``TracerSpec.nondimensionalize=False``.
         self.dycore.required_tracers_ok(self.physics.required_tracers())
         self.dycore.tracer_specs = tracer_specs
-        # Convenience aliases — these point at the dycore's own metadata so
-        # callers don't have to know about ``self.dycore.coords``.
+        # Convenience aliases so callers don't have to type ``self.dycore.coords``.
         self.coords = dycore.coords
         self.terrain = dycore.terrain
-        self.diffusion = getattr(dycore, "diffusion", diffusion)
 
         self.physics.cache_coords(self.coords)
         # Hand the model's timestep to the physics. ``ComposablePhysics``
@@ -470,6 +451,7 @@ class Model:
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,
                 time_step=self.dt_si.m,
+                date=date,
             )
             state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state

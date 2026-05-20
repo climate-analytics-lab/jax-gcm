@@ -8,9 +8,6 @@ It is **dycore-agnostic**: no spectral transforms or ``dinosaur`` symbols
 appear here. The actual dycore↔physics conversion is owned by each backend
 under ``jcm/dycore/<backend>/state_bridge.py`` (see
 :mod:`jcm.dycore.dinosaur.state_bridge` for the canonical example).
-
-Date originally 2/7/2024. Refactored 2026-05-17 to drop the dinosaur-specific
-conversion helpers into :mod:`jcm.dycore.dinosaur.state_bridge`.
 """
 
 import jax
@@ -34,6 +31,15 @@ import logging
 PhysicsCarryState: TypeAlias = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
+
+
+# ``PhysicsState`` is the *physics-facing* common gridpoint type. Every
+# physics scheme — radiation, convection, vertical diffusion, surface flux
+# — consumes winds in physical space, so the boundary is u/v. A dycore
+# whose native prognostic representation is something else (e.g. spectral
+# vorticity / divergence for the dinosaur backend) is free to do so — the
+# conversion to u/v happens inside the dycore's ``to_physics_state`` and
+# is not visible to physics packages.
 
 
 @tree_math.struct
@@ -196,20 +202,29 @@ class Physics:
         """
         return ()
 
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None, date=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
             state: Current state variables
             forcing: Forcing data — pre-sliced for the current step;
                 ``forcing.solar`` carries the orbital geometry physics
-                needs, so no calendar is plumbed in here.
+                needs.
             terrain: Terrain data (boundary conditions)
             prev_physics_data: Previous step's physics carry (a
                 :data:`PhysicsCarryState`) — used by radiation sub-cycling,
                 the analytic TKE source update, etc. ``None`` means "no
                 carry available" (snapshot mode under the legacy path, or
                 op-split's first ``dt``).
+            date: Optional current :class:`DateData`. The
+                :class:`ComposablePhysics` container injects it into the
+                term-facing diagnostics dict as ``"_date"`` so date-aware
+                terms (e.g. :class:`NudgingTerm` with a time-varying
+                target) can slice themselves. Plain subclasses are free
+                to ignore it. The calendar string is **not** plumbed
+                through the dict (it's a Python ``str`` and ``jax.checkpoint``
+                only accepts traceable types); date-aware terms hold their
+                own calendar at construction.
 
         Returns:
             Physical tendencies in PhysicsTendency format
@@ -378,16 +393,14 @@ def compute_physics_step_gridpoint(
     *,
     physics: Physics,
     time_step: float,
+    date=None,
 ) -> Tuple[PhysicsTendency, Any]:
     """Run the operator-split physics step in gridpoint space.
 
-    Replaces the old :func:`compute_physics_step` whose responsibility was
-    spectral state → gridpoint → physics → gridpoint tendency → spectral
-    tendency. The spectral conversion now lives in
-    :class:`jcm.dycore.dinosaur.dycore.DinosaurDycore.step`; this function is
-    the part the dycore doesn't own — pure gridpoint flow:
-    :func:`verify_state` → ``physics.compute_tendencies`` →
-    :func:`verify_tendencies`.
+    Pure gridpoint flow: :func:`verify_state` →
+    ``physics.compute_tendencies`` → :func:`verify_tendencies`. The dycore
+    is responsible for the gridpoint↔native conversions either side; this
+    function carries no dycore knowledge.
 
     Args:
         physics_state: Current gridpoint state (already projected from the
@@ -399,6 +412,9 @@ def compute_physics_step_gridpoint(
         physics: The active physics package.
         time_step: Model timestep in seconds. Used by :func:`verify_tendencies`
             to cap negative-going tracer tendencies.
+        date: Optional :class:`DateData` for the current step. Passed through
+            to :meth:`Physics.compute_tendencies` so date-aware terms (e.g.
+            nudging) can read it from the diagnostics dict.
 
     Returns:
         ``(physics_tendency, new_physics_state_carry)``. The dycore is
@@ -410,6 +426,7 @@ def compute_physics_step_gridpoint(
     physics_tendency, new_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
+        date=date,
     )
     physics_tendency = verify_tendencies(
         clamped_physics_state, physics_tendency, time_step,
