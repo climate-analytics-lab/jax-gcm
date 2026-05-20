@@ -136,24 +136,18 @@ class ComposablePhysics(nnx.Module, Physics):
         forcing: ForcingData,
         terrain: TerrainData,
         prev_physics_data=None,
-        date=None,
     ) -> tuple[PhysicsTendency, dict[str, jnp.ndarray]]:
         """Compute total physics tendencies by iterating over terms.
 
         Args:
             state: Current atmospheric state.
-            forcing: Boundary condition forcing data.
+            forcing: Boundary condition forcing data. The Model pre-slices
+                every time-varying leaf (SST, ozone, nudging target, …)
+                before calling this; terms see static-for-this-step arrays.
             terrain: Terrain boundary conditions.
             prev_physics_data: Previous step's diagnostics dict for caching
                 expensive computations (e.g. radiation sub-stepping).
                 None on the first step.
-            date: Current :class:`DateData`, injected into the diagnostics
-                dict as ``"_date"`` so date-aware terms (e.g.
-                :class:`NudgingTerm` slicing a time-varying target) can
-                read it. ``None`` if the caller doesn't need date plumbing.
-                The calendar is **not** plumbed through the dict (it's a
-                Python str and so can't ride through ``jax.checkpoint``);
-                date-aware terms hold their own calendar at construction.
 
         Returns:
             Summed tendencies and the final diagnostics dict.
@@ -161,11 +155,11 @@ class ComposablePhysics(nnx.Module, Physics):
         """
         if self.vectorize_columns:
             tendencies, diagnostics = self._compute_tendencies_columns(
-                state, forcing, terrain, prev_physics_data, date=date,
+                state, forcing, terrain, prev_physics_data,
             )
         else:
             tendencies, diagnostics = self._compute_tendencies_3d(
-                state, forcing, terrain, prev_physics_data, date=date,
+                state, forcing, terrain, prev_physics_data,
             )
         # Strip pure-plumbing keys (timestep snapshot, sliced forcing,
         # parameter snapshot) before returning. These are re-injected at
@@ -182,7 +176,6 @@ class ComposablePhysics(nnx.Module, Physics):
 
     def _compute_tendencies_3d(
         self, state, forcing, terrain, prev_physics_data=None,
-        *, date=None,
     ):
         """Iterate terms on the full 3D grid (e.g. SPEEDY)."""
         diagnostics: dict[str, jnp.ndarray] = {}
@@ -191,8 +184,6 @@ class ComposablePhysics(nnx.Module, Physics):
 
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
-        if date is not None:
-            diagnostics["_date"] = date
 
         tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
@@ -205,7 +196,6 @@ class ComposablePhysics(nnx.Module, Physics):
 
     def _compute_tendencies_columns(
         self, state, forcing, terrain, prev_physics_data=None,
-        *, date=None,
     ):
         """Column-vectorized term iteration.
 
@@ -224,8 +214,6 @@ class ComposablePhysics(nnx.Module, Physics):
 
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
-        if date is not None:
-            diagnostics["_date"] = date
 
         tracer_tends = {
             name: jnp.zeros((nlev, ncols))
@@ -348,7 +336,6 @@ class ComposablePhysics(nnx.Module, Physics):
         "_echam_params",
         "_echam_coords",
         "_speedy_coords",
-        "_date",
     })
 
     # Sub-struct fields that survive the flatten step but should be dropped

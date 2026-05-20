@@ -202,29 +202,20 @@ class Physics:
         """
         return ()
 
-    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None, date=None) -> Tuple[PhysicsTendency, Any]:
+    def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 
         Args:
-            state: Current state variables
-            forcing: Forcing data — pre-sliced for the current step;
-                ``forcing.solar`` carries the orbital geometry physics
-                needs.
-            terrain: Terrain data (boundary conditions)
+            state: Current state variables.
+            forcing: Forcing data — pre-sliced for the current step (the
+                Model collapses every time-varying leaf, including
+                ``solar`` and ``nudging_target``, before calling here).
+            terrain: Terrain data (boundary conditions).
             prev_physics_data: Previous step's physics carry (a
                 :data:`PhysicsCarryState`) — used by radiation sub-cycling,
                 the analytic TKE source update, etc. ``None`` means "no
                 carry available" (snapshot mode under the legacy path, or
                 op-split's first ``dt``).
-            date: Optional current :class:`DateData`. The
-                :class:`ComposablePhysics` container injects it into the
-                term-facing diagnostics dict as ``"_date"`` so date-aware
-                terms (e.g. :class:`NudgingTerm` with a time-varying
-                target) can slice themselves. Plain subclasses are free
-                to ignore it. The calendar string is **not** plumbed
-                through the dict (it's a Python ``str`` and ``jax.checkpoint``
-                only accepts traceable types); date-aware terms hold their
-                own calendar at construction.
 
         Returns:
             Physical tendencies in PhysicsTendency format
@@ -393,7 +384,6 @@ def compute_physics_step_gridpoint(
     *,
     physics: Physics,
     time_step: float,
-    date=None,
 ) -> Tuple[PhysicsTendency, Any]:
     """Run the operator-split physics step in gridpoint space.
 
@@ -412,9 +402,6 @@ def compute_physics_step_gridpoint(
         physics: The active physics package.
         time_step: Model timestep in seconds. Used by :func:`verify_tendencies`
             to cap negative-going tracer tendencies.
-        date: Optional :class:`DateData` for the current step. Passed through
-            to :meth:`Physics.compute_tendencies` so date-aware terms (e.g.
-            nudging) can read it from the diagnostics dict.
 
     Returns:
         ``(physics_tendency, new_physics_state_carry)``. The dycore is
@@ -426,7 +413,6 @@ def compute_physics_step_gridpoint(
     physics_tendency, new_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
-        date=date,
     )
     physics_tendency = verify_tendencies(
         clamped_physics_state, physics_tendency, time_step,

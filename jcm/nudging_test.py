@@ -1,8 +1,9 @@
 """Tests for ``jcm/nudging.py``.
 
 The previous spectral-space implementation has been promoted to a
-:class:`PhysicsTerm` (see PR #489); these tests cover the new gridpoint
-target / config / term plumbing.
+:class:`PhysicsTerm` whose reference target rides on :class:`ForcingData`
+(sliced per step by the Model). These tests cover the new gridpoint
+plumbing.
 """
 
 import unittest
@@ -11,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
+from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.nudging import (
     NudgingConfig, NudgingTarget,
@@ -25,8 +27,8 @@ from jcm.terrain import TerrainData
 def _zero_winds_target_dataset(nlev, nlon, nlat, T_K=250.0):
     """Synthetic 'observation' dataset on the model grid (no time axis).
 
-    Zero winds, isothermal T. Used as a deterministic relaxation target to
-    pin the sign of the tendency.
+    Zero winds, isothermal T. Used as a deterministic relaxation target
+    to pin the sign of the tendency.
     """
     return xr.Dataset({
         'u':  (('lev', 'lon', 'lat'), np.zeros((nlev, nlon, nlat), dtype=np.float32)),
@@ -67,8 +69,6 @@ class TestNudgingTendencyDirection(unittest.TestCase):
             inv_tau_wind=jnp.ones(nlev),
             inv_tau_temperature=jnp.ones(nlev),
         )
-        # State has positive winds and warmer T than the target — tendency
-        # should be negative (drives toward zero / cooler).
         state = PhysicsState(
             u_wind=jnp.full(shape, 5.0),
             v_wind=jnp.full(shape, -3.0),
@@ -85,7 +85,11 @@ class TestNudgingTendencyDirection(unittest.TestCase):
 
 
 class TestNudgingTermInPhysicsStack(unittest.TestCase):
-    """``NudgingTerm`` runs cleanly inside a ``ComposablePhysics`` term list."""
+    """``NudgingTerm`` runs cleanly inside a ``ComposablePhysics`` term list.
+
+    The user adds the term to physics and attaches the target to forcing;
+    the Model slices the target per step via ``forcing.select(date, ...)``.
+    """
 
     def test_aquaplanet_winds_shrink_with_nudging(self):
         coords = get_speedy_coords()
@@ -97,14 +101,17 @@ class TestNudgingTermInPhysicsStack(unittest.TestCase):
         target = NudgingTarget.from_dataset(ds, time_var=None)
         config = NudgingConfig.winds_only(nlev=nlev, tau_seconds=86400.0)
 
-        nudged_physics = with_nudging(speedy_physics(), target, config)
+        forcing = ForcingData.zeros(coords.horizontal.nodal_shape)
+        nudging_forcing = forcing.replace(nudging_target=target)
+
+        nudged_physics = with_nudging(speedy_physics(), config)
         preds_nudged = Model(
             coords=coords, terrain=terrain, physics=nudged_physics,
-        ).run(save_interval=1, total_time=2)
+        ).run(forcing=nudging_forcing, save_interval=1, total_time=2)
 
         preds_free = Model(
             coords=coords, terrain=terrain, physics=speedy_physics(),
-        ).run(save_interval=1, total_time=2)
+        ).run(forcing=forcing, save_interval=1, total_time=2)
 
         u_n = float(jnp.mean(jnp.abs(preds_nudged.dynamics.u_wind[-1])))
         u_f = float(jnp.mean(jnp.abs(preds_free.dynamics.u_wind[-1])))
@@ -112,7 +119,31 @@ class TestNudgingTermInPhysicsStack(unittest.TestCase):
                         msg=f"nudging didn't shrink winds: |u_n|={u_n} vs |u_f|={u_f}")
 
 
-class TestNudgingTermNoOpWithoutTarget(unittest.TestCase):
+class TestNudgingTermInertWithoutTarget(unittest.TestCase):
+    """A ``NudgingTerm`` whose forcing carries no target emits zero tendency."""
+
+    def test_default_forcing_makes_term_a_noop(self):
+        coords = get_speedy_coords()
+        terrain = TerrainData.aquaplanet(coords)
+        nlev = coords.vertical.layers
+        config = NudgingConfig.winds_only(nlev=nlev, tau_seconds=86400.0)
+
+        # Forcing has nudging_target=None by default — the term should
+        # produce no change relative to a baseline run.
+        nudged = Model(
+            coords=coords, terrain=terrain,
+            physics=with_nudging(speedy_physics(), config),
+        ).run(save_interval=1, total_time=1)
+        plain = Model(
+            coords=coords, terrain=terrain, physics=speedy_physics(),
+        ).run(save_interval=1, total_time=1)
+
+        self.assertTrue(jnp.allclose(
+            nudged.dynamics.u_wind, plain.dynamics.u_wind, atol=1e-6,
+        ))
+
+
+class TestModelRunsNormallyWithoutNudging(unittest.TestCase):
     """A Model without any ``NudgingTerm`` runs as before."""
 
     def test_default_model_runs_normally(self):

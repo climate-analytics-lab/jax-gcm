@@ -1,27 +1,27 @@
 """Newtonian relaxation toward an external reference state.
 
 Implements nudging as a composable :class:`PhysicsTerm`. The relaxation
-tendency ``dX/dt = inv_tau · (X_ref − X)`` is computed in gridpoint space
-on the physics-facing :class:`PhysicsState`, returned as a
+tendency ``dX/dt = inv_tau · (X_ref − X)`` is computed in gridpoint
+space on the physics-facing :class:`PhysicsState`, returned as a
 :class:`PhysicsTendency`, and folded into the same forward-Euler op-split
 add the rest of the physics stack uses. The dycore stays nudging-free.
 
+The reference target rides on :class:`ForcingData` like every other
+per-step input: the user assembles a :class:`NudgingTarget` (static or
+:class:`TimeSeries`-backed) and attaches it via
+``forcing.copy(nudging_target=target)``. The Model slices it per step
+inside ``forcing.select(date, calendar)`` so :class:`NudgingTerm` only
+ever sees an already-current target — physics never touches the date.
+
 Per-variable, per-level relaxation timescales are configurable so the
 common case ("nudge winds above the PBL") is expressible without
-subclassing. Time-varying targets are supported via
-:class:`jcm.forcing.TimeSeries` leaves and the existing ``select(date,
-calendar)`` machinery; the current ``DateData`` is plumbed into the
-physics path through the diagnostics dict (``ComposablePhysics`` injects
-``_date`` at the top of every ``compute_tendencies`` call). The calendar
-is held on :class:`NudgingTerm` itself — a Python ``str`` can't ride
-through ``jax.checkpoint`` in the diagnostics dict.
+subclassing.
 
-The previous version of this module composed the relaxation tendency
-directly into the dinosaur IMEX-RK substages by transforming everything
-to modal space at load time. That coupled the relaxation API to a single
-dycore. Moving to a :class:`PhysicsTerm` keeps it physics-agnostic — any
-dycore that satisfies the :class:`DynamicalCore` protocol gets nudging
-for free.
+The previous version composed the relaxation tendency directly into the
+dinosaur IMEX-RK substages by transforming everything to modal space at
+load time. That coupled the relaxation API to a single dycore. Moving to
+a :class:`PhysicsTerm` keeps it physics-agnostic — any dycore that
+satisfies the :class:`DynamicalCore` protocol gets nudging for free.
 
 Reference: Krishnamurti et al. (1991), *Tellus 43AB*, 53–81.
 """
@@ -30,13 +30,11 @@ from __future__ import annotations
 
 from typing import ClassVar, Optional
 
-import jax
 import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
-from jcm.date import DateData, DEFAULT_CALENDAR
-from jcm.forcing import ForcingData, TimeSeries, BY_DATE, _select_time_series, make_time_series
+from jcm.forcing import ForcingData, BY_DATE, make_time_series
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -67,21 +65,6 @@ class NudgingTarget:
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
-
-    def select(self, date: DateData, calendar: str = DEFAULT_CALENDAR) -> "NudgingTarget":
-        """Collapse every TimeSeries leaf to its current-step slice.
-
-        No-op for static targets. Called by :class:`NudgingTerm` once per
-        physics step so downstream tendency math sees plain arrays.
-        """
-        def slice_leaf(leaf):
-            if isinstance(leaf, TimeSeries):
-                return _select_time_series(leaf, date, calendar=calendar)
-            return leaf
-        return jax.tree_util.tree_map(
-            slice_leaf, self,
-            is_leaf=lambda x: isinstance(x, TimeSeries),
-        )
 
     @classmethod
     def from_dataset(cls, ds, *,
@@ -224,55 +207,52 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
 class NudgingTerm(PhysicsTerm):
     """Composable Newtonian-relaxation physics term.
 
-    Holds a :class:`NudgingTarget`, a :class:`NudgingConfig`, and the
-    calendar string used to align time-varying targets. On every physics
-    step it slices the target against the current date (read from
-    ``diagnostics["_date"]`` — injected by
-    :class:`~jcm.physics.composable_physics.ComposablePhysics`) and emits
-    the gridpoint relaxation tendency.
+    Holds only the :class:`NudgingConfig` (timescales). The reference
+    target rides on :class:`ForcingData` and the Model has already
+    sliced it for the current step by the time this term is invoked, so
+    :class:`NudgingTerm` never sees the date.
 
-    Drop it into any ``ComposablePhysics`` term list to add nudging::
+    Drop it into any ``ComposablePhysics`` term list and attach the
+    target to forcing::
 
-        physics = speedy_physics() + NudgingTerm(target, config)
+        physics = speedy_physics() + NudgingTerm(config)
+        forcing = forcing.copy(nudging_target=target)
+        model.run(forcing=forcing)
 
-    The calendar is held on the term rather than threaded through the
-    diagnostics dict because the dict rides through ``jax.checkpoint``,
-    which only accepts traceable types (not Python ``str``). Match it to
-    the calendar you pass to :class:`Model` for time-varying targets.
+    A ``NudgingTerm`` whose ``forcing.nudging_target`` is ``None`` emits a
+    zero tendency — that's the right behaviour when the user adds the
+    term but hasn't (yet) wired a target into forcing.
     """
 
     name: ClassVar[str] = "nudging"
     category: ClassVar[str] = "nudging"
 
-    # ``target`` and ``config`` are tree_math structs containing JAX
-    # arrays — annotate them with ``nnx.data`` so flax's pytree machinery
-    # traverses them (rather than rejecting them as unrecognised types).
-    # ``calendar`` is a Python ``str`` and stays as a non-pytree class
-    # attribute by default.
-    target: NudgingTarget = nnx.data(None)
+    # ``config`` is a tree_math struct of JAX arrays — annotate with
+    # ``nnx.data`` so flax's pytree machinery traverses it.
     config: NudgingConfig = nnx.data(None)
 
-    def __init__(self, target: NudgingTarget, config: NudgingConfig,
-                 calendar: str = DEFAULT_CALENDAR):
-        """Initialise the term with a reference target, timescales, and calendar."""
-        self.target = target
+    def __init__(self, config: NudgingConfig):
+        """Initialise the term with the relaxation timescales."""
         self.config = config
-        self.calendar = calendar
 
     def __call__(self, state: PhysicsState, diagnostics: dict,
                  forcing: ForcingData, terrain: TerrainData):
         """Compute the per-step relaxation tendency.
 
-        Reads ``_date`` from ``diagnostics`` if present; falls back to the
-        static target otherwise — that's the right behaviour when the
-        target carries no ``TimeSeries`` leaves.
+        Reads ``forcing.nudging_target`` (already sliced by the Model via
+        ``forcing.select(date, calendar)``). If no target is wired,
+        emits zero — keeping the term inert until forcing is set up.
         """
-        date = diagnostics.get("_date")
-        target_now = (
-            self.target.select(date, calendar=self.calendar)
-            if date is not None else self.target
-        )
-        return nudging_tendency(state, target_now, self.config), diagnostics
+        target = getattr(forcing, "nudging_target", None)
+        if target is None:
+            zero = jnp.zeros_like(state.temperature)
+            tend = PhysicsTendency(
+                u_wind=zero, v_wind=zero, temperature=zero,
+                specific_humidity=zero,
+                tracers={name: jnp.zeros_like(t) for name, t in state.tracers.items()},
+            )
+            return tend, diagnostics
+        return nudging_tendency(state, target, self.config), diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -280,17 +260,17 @@ class NudgingTerm(PhysicsTerm):
 # ---------------------------------------------------------------------------
 
 
-def with_nudging(physics, target: NudgingTarget, config: NudgingConfig,
-                 calendar: str = DEFAULT_CALENDAR):
+def with_nudging(physics, config: NudgingConfig):
     """Return ``physics`` extended with a :class:`NudgingTerm`.
 
-    Equivalent to ``physics + NudgingTerm(target, config, calendar)`` for any
-    :class:`ComposablePhysics`; the explicit helper exists so callers can
-    discover the pattern via :mod:`jcm.nudging` rather than having to know
-    that ``ComposablePhysics`` overloads ``+``.
+    Equivalent to ``physics + NudgingTerm(config)`` for any
+    :class:`ComposablePhysics`. Discoverable as a paired helper with the
+    forcing-side ``forcing.copy(nudging_target=target)`` — the canonical
+    way to wire nudging is "add the term to physics; attach the target
+    to forcing".
     """
     if not isinstance(physics, ComposablePhysics):
         raise TypeError(
             f"with_nudging expects a ComposablePhysics, got {type(physics).__name__}"
         )
-    return physics + NudgingTerm(target, config, calendar=calendar)
+    return physics + NudgingTerm(config)

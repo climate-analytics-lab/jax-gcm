@@ -451,7 +451,6 @@ class Model:
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,
                 time_step=self.dt_si.m,
-                date=date,
             )
             state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state

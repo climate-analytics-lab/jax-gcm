@@ -1,4 +1,5 @@
 import warnings
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -13,6 +14,12 @@ from jcm.date import (
     absolute_seconds_since_epoch,
 )
 from jcm.ozone_climatology import OzoneClimatology
+
+
+# Sentinel for ``ForcingData.copy(nudging_target=...)`` so the field can be
+# explicitly cleared by passing ``None`` (which would otherwise fall back to
+# ``self.nudging_target`` under a naive ``x if x is not None else self.x``).
+_UNSET = object()
 
 
 def _empty_ozone_climatology() -> OzoneClimatology:
@@ -216,6 +223,13 @@ class ForcingData:
     # profile (see :class:`jcm.physics.chemistry.OzoneClimatology`).
     ozone_climatology: OzoneClimatology
 
+    # Optional nudging reference fields. Each can be a static array or a
+    # :class:`TimeSeries` leaf; ``ForcingData.select`` slices the whole
+    # struct, so :class:`jcm.nudging.NudgingTerm` sees a target that has
+    # already been collapsed for the current step — no date plumbing into
+    # the physics path. Default ``None`` for runs without nudging.
+    nudging_target: Any = None
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -414,7 +428,12 @@ class ForcingData:
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
              ozone_climatology=None,
-             ch4_vmr=None):
+             ch4_vmr=None,
+             nudging_target=_UNSET):
+        # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
+        # the natural value for "no nudging target wired" — falling back to
+        # ``self.nudging_target`` only when the caller didn't supply the
+        # kwarg lets ``.copy(nudging_target=None)`` *clear* the field.
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
@@ -430,6 +449,10 @@ class ForcingData:
             ozone_climatology=(
                 ozone_climatology if ozone_climatology is not None
                 else self.ozone_climatology
+            ),
+            nudging_target=(
+                nudging_target if nudging_target is not _UNSET
+                else self.nudging_target
             ),
         )
 
