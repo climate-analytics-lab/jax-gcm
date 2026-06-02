@@ -3690,14 +3690,19 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             tke = jnp.zeros_like(state.temperature)
 
-        # SPA-style activated-CDNC floor from the column-mean Nccn (cm^-3).
-        Nccn = diagnostics["aerosol"].Nccn
-        activated_cdnc = spa_activated_cdnc(
-            Nccn=Nccn[jnp.newaxis, :],
-            cloud_fraction=cloud_fraction,
-            prefactor=self._spa_prefactor.get_value(),
-            exponent=self._spa_exponent.get_value(),
-        )
+        # Activated CDNC source: prefer an explicit ``activated_cdnc`` from an
+        # upstream activation term (e.g. HAM's ARG, #461) if present; otherwise
+        # fall back to the inline SPA floor derived from the MACv2-SP Nccn.
+        # Both are differentiable and produce the same (nlev, ncols) field.
+        activated_cdnc = diagnostics.get("activated_cdnc")
+        if activated_cdnc is None:
+            Nccn = diagnostics["aerosol"].Nccn
+            activated_cdnc = spa_activated_cdnc(
+                Nccn=Nccn[jnp.newaxis, :],
+                cloud_fraction=cloud_fraction,
+                prefactor=self._spa_prefactor.get_value(),
+                exponent=self._spa_exponent.get_value(),
+            )
 
         tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
             cloud_microphysics_2m,

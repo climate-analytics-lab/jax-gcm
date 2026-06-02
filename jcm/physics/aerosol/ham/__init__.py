@@ -10,6 +10,7 @@ core.
 """
 
 from jcm.physics.aerosol.ham.ham_state import HamAerosolState
+from jcm.physics.aerosol.ham.ham_terms import ham_aerosol_physics
 from jcm.physics.aerosol.ham.microphysics import (
     MAM4_JAX_COMMIT,
     MAM4_SPEC,
@@ -32,6 +33,7 @@ __all__ = [
     "AerosolSpecies",
     "ModalAerosolSpec",
     "HamAerosolState",
+    "ham_aerosol_physics",
     "ModalMicrophysicsTerm",
     "PlaceholderMicrophysics",
     "MAM4_SPEC",

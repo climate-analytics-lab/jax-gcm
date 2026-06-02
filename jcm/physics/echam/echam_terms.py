@@ -68,6 +68,9 @@ def echam_physics(
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
+    aerosol_module: str = "macv2sp",
+    ham_microphysics: str = "placeholder",
+    ham_arg_variant: str = "arg2000",
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -99,6 +102,18 @@ def echam_physics(
             ``"emulated"``, or a custom radiation ``PhysicsTerm``.
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
+        aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
+            ``"ham"`` (online HAM harness — emissions, microphysics core,
+            ARG activation, deposition, sedimentation; #461). The HAM path
+            *augments* MACv2-SP rather than replacing it: MACv2-SP is kept for
+            the aerosol radiative optics and Twomey factor that radiation and
+            the cloud schemes require, while HAM adds the prognostic aerosol
+            tracers and an ``activated_cdnc`` that the 2M scheme prefers over
+            the SPA floor. The online aerosol *direct radiative* effect that
+            would let HAM fully replace MACv2-SP optics is tracked in #495.
+        ham_microphysics: HAM core when ``aerosol_module="ham"`` —
+            ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+        ham_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
 
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
@@ -151,11 +166,30 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
+    # MACv2-SP always provides the ``aerosol`` optics/Twomey diagnostic that
+    # radiation and the cloud schemes require. The HAM harness, when enabled,
+    # is appended after it to add prognostic aerosol + ARG activation.
+    if aerosol_module == "macv2sp":
+        aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
+    elif aerosol_module == "ham":
+        from jcm.physics.aerosol.ham.ham_terms import ham_aerosol_physics
+        aerosol_terms = [
+            Macv2SpAerosol(params=aerosol_p),
+            *ham_aerosol_physics(
+                microphysics=ham_microphysics, arg_variant=ham_arg_variant,
+            ),
+        ]
+    else:
+        raise ValueError(
+            f"Unknown aerosol_module={aerosol_module!r}. Choose 'macv2sp' "
+            "or 'ham'."
+        )
+
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
             EchamBoundaryConditions(),
-            Macv2SpAerosol(params=aerosol_p),
+            *aerosol_terms,
             SimpleChemistry(),
             SundqvistCloudFraction(params=clouds_p),
             rad_term,
