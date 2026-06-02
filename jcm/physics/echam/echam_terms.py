@@ -169,16 +169,26 @@ def echam_physics(
     # MACv2-SP always provides the ``aerosol`` optics/Twomey diagnostic that
     # radiation and the cloud schemes require. The HAM harness, when enabled,
     # is appended after it to add prognostic aerosol + ARG activation.
+    #
+    # Wet deposition is split out and placed *after* the cloud microphysics
+    # term so it scavenges against the current step's precip/condensate (the
+    # rest of the HAM chain runs in the pre-cloud aerosol block — activation
+    # must precede the cloud term that consumes ``activated_cdnc``).
+    ham_post_cloud_terms: list[PhysicsTerm] = []
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
     elif aerosol_module == "ham":
         from jcm.physics.aerosol.ham.ham_terms import ham_aerosol_physics
-        aerosol_terms = [
-            Macv2SpAerosol(params=aerosol_p),
-            *ham_aerosol_physics(
-                microphysics=ham_microphysics, arg_variant=ham_arg_variant,
-            ),
+        ham_terms = ham_aerosol_physics(
+            microphysics=ham_microphysics, arg_variant=ham_arg_variant,
+        )
+        ham_post_cloud_terms = [
+            t for t in ham_terms if t.category == "aerosol_wetdep"
         ]
+        ham_pre_cloud_terms = [
+            t for t in ham_terms if t.category != "aerosol_wetdep"
+        ]
+        aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *ham_pre_cloud_terms]
     else:
         raise ValueError(
             f"Unknown aerosol_module={aerosol_module!r}. Choose 'macv2sp' "
@@ -195,6 +205,7 @@ def echam_physics(
             rad_term,
             TiedtkeConvection(params=convection_p),
             micro_term,
+            *ham_post_cloud_terms,
             TteTkeVerticalDiffusion(params=vertical_diffusion_p),
             EchamSurface(params=surface_p),
             HinesGwd(params=hines_p),

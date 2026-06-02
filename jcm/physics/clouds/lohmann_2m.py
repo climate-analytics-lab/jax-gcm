@@ -3690,19 +3690,25 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             tke = jnp.zeros_like(state.temperature)
 
-        # Activated CDNC source: prefer an explicit ``activated_cdnc`` from an
-        # upstream activation term (e.g. HAM's ARG, #461) if present; otherwise
-        # fall back to the inline SPA floor derived from the MACv2-SP Nccn.
-        # Both are differentiable and produce the same (nlev, ncols) field.
-        activated_cdnc = diagnostics.get("activated_cdnc")
-        if activated_cdnc is None:
-            Nccn = diagnostics["aerosol"].Nccn
-            activated_cdnc = spa_activated_cdnc(
-                Nccn=Nccn[jnp.newaxis, :],
-                cloud_fraction=cloud_fraction,
-                prefactor=self._spa_prefactor.get_value(),
-                exponent=self._spa_exponent.get_value(),
-            )
+        # Activated CDNC source. The inline SPA floor (from the MACv2-SP Nccn)
+        # is always computed as a baseline. An upstream activation term (e.g.
+        # HAM's ARG, #461) may write an explicit ``activated_cdnc``; when it
+        # does we use it, but fall back to the SPA floor wherever that online
+        # source is empty (≈0) — e.g. before the prognostic HAM aerosol tracers
+        # spin up — so the default HAM+2M run still activates droplets. Both
+        # paths are differentiable and produce the same (nlev, ncols) field.
+        Nccn = diagnostics["aerosol"].Nccn
+        spa_floor = spa_activated_cdnc(
+            Nccn=Nccn[jnp.newaxis, :],
+            cloud_fraction=cloud_fraction,
+            prefactor=self._spa_prefactor.get_value(),
+            exponent=self._spa_exponent.get_value(),
+        )
+        arg_cdnc = diagnostics.get("activated_cdnc")
+        if arg_cdnc is None:
+            activated_cdnc = spa_floor
+        else:
+            activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, spa_floor)
 
         tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
             cloud_microphysics_2m,

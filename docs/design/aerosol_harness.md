@@ -57,6 +57,12 @@ ARG variant) is a compose-time Python decision with no traced branching.
    impaction scavenging, built from the cloud scheme's existing precip /
    condensate diagnostics.
 
+In `echam_physics` the chain is *split*: terms 1–5 run in the pre-cloud
+aerosol block (activation must precede the cloud microphysics term that
+consumes `activated_cdnc`), while `HamWetDeposition` is placed immediately
+**after** the cloud microphysics term so it scavenges against the current
+step's precipitation and condensate rather than the previous step's.
+
 ## Usage
 
 ```python
@@ -75,6 +81,11 @@ for the aerosol radiative optics and Twomey factor that radiation and the
 cloud schemes hard-require, while HAM adds prognostic aerosol and ARG
 activation. Letting online aerosol fully replace MACv2-SP optics (its direct
 radiative effect) is tracked in #495.
+
+The 2M scheme uses ARG's `activated_cdnc` where it is non-empty and falls back
+to the MACv2-SP SPA floor wherever the online source is ≈0 (e.g. before the
+prognostic HAM tracers spin up from a zero-seeded initial state), so the
+default HAM+2M run always activates droplets.
 
 ## Status and caveats
 
