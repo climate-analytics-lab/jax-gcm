@@ -9,7 +9,7 @@ parameterisation that reads the prognostic state and a shared
 into the dict for downstream terms to consume.
 
 ```text
-Model.compute_physics_step
+Model._get_op_split_step_fn
    └─ ComposablePhysics.compute_tendencies(state, forcing, terrain, prev_carry)
         diagnostics = {**prev_carry}    ← cross-step physics carry seed
         for term in terms:
@@ -176,8 +176,8 @@ category into the single replacement, inserted at the position of the
 first one — so you can swap an entire process category in one call:
 
 ```python
-# SPEEDY with RRTMGP radiation
-physics = speedy_physics().replace("radiation", RRTMGPRadiation())
+# ECHAM with RRTMGP radiation
+physics = echam_physics().replace("radiation", RRTMGPRadiation())
 
 # ECHAM with a custom convection scheme
 physics = echam_physics().replace("convection", MyConvection())

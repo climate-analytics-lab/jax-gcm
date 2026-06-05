@@ -3,31 +3,29 @@
 ## Overview
 
 JCM evaluates physics exactly once per dynamics timestep `dt`, outside
-the IMEX-RK stages, and applies the resulting tendency as a Lie split
-ahead of the dynamics integral:
+the dycore's internal integration stages, and applies the resulting
+tendency as a Lie split ahead of the dynamics integral:
 
 ```text
 state ─┐
-       ├── compute_physics_step ─► dyn_tendency, new_physics_state
+       ├── dycore.to_physics_state
+       │
+       ├── compute_physics_step_gridpoint ─► physics_tendency, new_physics_state
        │
        ▼
-state + dt · dyn_tendency
+   dycore.step(state, physics_tendency)
        │
-       ▼
-   IMEX-RK SIL3 dynamics over dt   ← primitive equations (+ optional nudging)
-       │                              + upper sponge, hyperdiffusion filters
-       ▼
-   filters (mean-Ps fix, level-dependent hyperdiffusion on
-            divergence / vorticity-tracers / temperature)
+       ├── apply tendency in the backend's native representation
+       ├── advance backend dynamics over dt
+       └── apply backend-specific filters / remapping
        │
        ▼
 state_next
 ```
 
 The splitting error is `O(dt)` (Lie split (a), `state → physics →
-dynamics → next`). The dynamics IMEX-RK is the only step that advances
-`sim_time` — `dyn_tendency` carries `sim_time = 0` so the forward-Euler
-add does not perturb it.
+dynamics → next`). The dycore step is the only operation that advances
+`sim_time`.
 
 This mirrors operational GCM practice (ECHAM, CAM, IFS, E3SM): physics
 runs once per `dt` as forcing to the dynamics, rather than at each RK
@@ -52,9 +50,7 @@ Neither is implemented today. Classical Strang is a worthwhile
 follow-up if a coarser-`dt` regime exposes the splitting error; at the
 current climate-rate `dt = 12-30 min`, the Santos 2021 analysis
 (JAMES 13, e2020MS002359) finds coupling error dominates self-feedback
-error and Lie/Strang are both adequate. The single-evaluation symmetric
-form was attempted in this PR's history but reverted after Codex review
-correctly flagged the order issue (PR #481 review thread).
+error and Lie/Strang are both adequate.
 
 ## Key components
 
@@ -63,40 +59,39 @@ correctly flagged the order issue (PR #481 review thread).
 Builds the per-`dt` step closure `(state, physics_state) -> (state_next,
 physics_state_next)`. Internals:
 
-1. Resolve the current step's date and forcing slice from `state.sim_time`.
-2. Call `compute_physics_step` for `(dyn_tendency, new_physics_state)`.
-3. Lie apply: `state + dt·tend → dynamics_step` (full forward-Euler add
-   then full-`dt` IMEX-RK).
-4. Run the post-step filters (conserve global-mean surface pressure,
-   level-dependent hyperdiffusion on divergence / vorticity+tracers /
-   temperature).
+1. Resolve the current step's date and forcing slice from
+   `dycore.sim_time(state)`.
+2. Project the backend-native state with `dycore.to_physics_state`.
+3. Call `compute_physics_step_gridpoint` for
+   `(physics_tendency, new_physics_state)`.
+4. Pass the native state and gridpoint tendency to `dycore.step`.
 
 The step is a pure function of `(state, physics_state)`. The
 `physics_state` carry is a JAX pytree and is the only cross-step state
 the integrator threads.
 
-### `Model._get_dynamics_step_fn` (`jcm/model.py`)
+### `DynamicalCore.step` (`jcm/dycore/base.py`)
 
-Builds the IMEX-RK SIL3 integrator over the dynamics composition. The
-dynamics composition is the primitive equations plus, optionally, a
-Newtonian nudging tendency. Sponge and hyperdiffusion stay inside the
-IMEX-RK stage loop / `step_with_filters` path — they are stiff /
-fast-linear couplings that benefit from intermediate-state evaluation
-and would lose stability if migrated to op-split.
+Owns one backend-specific dynamics step, including conversion of the
+gridpoint `PhysicsTendency` into the backend's native representation.
+The backend also owns its integrator, hyperdiffusion, filters, vertical
+remapping, and other representation-specific operations.
 
-This is the function a future pysces backend (#388) would replace.
-Its interface is `state -> state'` over `dt` with no physics knowledge.
+The shipped `DinosaurDycore` converts the tendency to a spectral
+primitive-equation tendency, applies the forward-Euler physics update,
+runs IMEX-RK SIL3, then applies the surface-pressure conservation and
+spectral diffusion filters.
 
-### `compute_physics_step` (`jcm/physics_interface.py`)
+### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
-Converts the spectral dynamics `State` to a nodal `PhysicsState`, runs
-`verify_state` (non-negativity clamp on tracers), calls
+Accepts an already-gridpoint `PhysicsState`, runs `verify_state`
+(non-negativity clamp on tracers), calls
 `Physics.compute_tendencies(state, forcing, terrain,
 prev_physics_data=physics_state)`, applies `verify_tendencies` (caps
-negative-going tracer tendencies at `-state/dt`), and converts the
-result back to a dinosaur dynamics tendency.
+negative-going tracer tendencies at `-state/dt`), and returns the
+gridpoint tendency unchanged by any backend-specific conversion.
 
-Returns `(dynamics_tendency, new_physics_state)`. The new carry is the
+Returns `(physics_tendency, new_physics_state)`. The new carry is the
 dict the physics call writes to (radiation cache, prior-step TKE,
 cloud / aerosol / chemistry diagnostics, …) — exactly the input shape
 of the next step.
@@ -139,8 +134,8 @@ in-stage scheme.
 
 `Model` holds two slots of cross-step state:
 
-- `_final_modal_state` — dinosaur spectral state at the end of the
-  last `run()` / `resume()` call.
+- `_final_dycore_state` — backend-native state at the end of the last
+  `run()` / `resume()` call.
 - `_final_physics_state` — the cross-step physics carry at the end of
   the last call.
 
@@ -171,10 +166,10 @@ directly for callers that need explicit control.
   matches the post-step output on iteration 1 for any diagnostic keys
   whose owning term has not overridden `initial_carry_state`.
 
-The isothermal probe (rather than a zero-state probe) avoids the
-`0/0 = NaN` cascade that motivated the cache-cleanup in PR #469. The
-result of `get_empty_data` is never used as live state — only as a
-shape template.
+The isothermal probe (rather than a zero-state probe) avoids a
+`0/0 = NaN` cascade in schemes that cannot diagnose a valid state from
+all-zero thermodynamic inputs. The result of `get_empty_data` is never
+used as live state — only as a shape template.
 
 ### Coupling within physics
 
@@ -190,10 +185,11 @@ process pairs but introduces order-dependence. Process-parallel is
 adequate at JCM's climate-rate `dt`; sequential coupling is available
 as a follow-up for terms that need it (cf. E3SM's CLUBB+MG2 loop).
 
-### Filters and dycore composition
+### Dinosaur filters
 
-The post-step filter chain runs on `(pre_step_state, post_dynamics_state)`
-in this order:
+Filtering is a dycore concern, not part of the shared physics interface.
+The shipped `DinosaurDycore` runs this post-step spectral filter chain on
+`(pre_step_state, post_dynamics_state)`:
 
 1. `conserve_global_mean_surface_pressure` — pins the 0,0,0 spectral
    mode of `log_surface_pressure` to its pre-step value.
@@ -202,12 +198,12 @@ in this order:
    (specific humidity + microphysics tracers + GHG VMRs).
 4. `diffuse_temp` — hyperdiffusion on temperature variation.
 
-The level-dependent scaling is precomputed once at `Model.__init__`
-and inlined as a JIT constant.
+The level-dependent scaling is precomputed once at
+`DinosaurDycore.__init__` and inlined as a JIT constant.
 
-A final `verify_state` clamp runs in `_post_process` at the
-modal→nodal output boundary to mask any spectral Gibbs-ringing of
-negative tracer tendencies before user-visible output.
+A final `verify_state` clamp runs in `Model._post_process` after
+`dycore.to_physics_state` to mask any negative tracer values before
+user-visible output.
 
 ## Tests
 
@@ -230,8 +226,8 @@ Op-split coverage in `jcm/model_test.py::TestOperatorSplitPhysics`:
   snapshot `predictions.physics` is the carry the integration
   consumed, not a freshly-seeded copy (the P2 fix).
 
-The legacy in-stage path was removed in Phase 4 (`TestLegacyPathRemoved`);
-no flag remains to switch back. The deleted symbols are
+The legacy in-stage path has been removed; no flag remains to switch
+back. The deleted symbols are
 `_step_tendencies`, `physics_forcing_eqn`, `DiagnosticsCollector`,
 `averaged_trajectory_from_step`, `get_physical_tendencies`,
 `_get_step_fn_factory`, `_get_integrate_fn`, and the `use_op_split`
@@ -284,10 +280,10 @@ called exactly once per dynamics timestep.**
 Two structural differences from JCM:
 
 1. **Dynamics integrator.** ECHAM uses leapfrog + semi-implicit
-   (spectral); JCM uses IMEX-RK SIL3 (also spectral, via dinosaur).
+   (spectral); JCM's shipped Dinosaur backend uses IMEX-RK SIL3.
    The split point is the same — operator-split physics — but the
    dynamics integrator on each side differs. ECHAM's split is forced
-   by leapfrog's single RHS evaluation per `dt`; JCM's SIL3 has
+   by leapfrog's single RHS evaluation per `dt`; Dinosaur's SIL3 has
    substages and *could* in principle evaluate physics at each one,
    so for JCM operator-splitting is a real design choice. CAM (HOMME
    spectral element), E3SM (HOMME with sub-cycled advection), and IFS

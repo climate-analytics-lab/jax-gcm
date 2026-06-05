@@ -2,8 +2,9 @@
 
 Backends register themselves at import time via the :func:`register_dycore`
 decorator. :func:`build_dycore` looks up a registered name and invokes the
-factory with the supplied kwargs; this is what the Hydra runner calls when it
-sees ``cfg.dycore.kind`` (Phase 4).
+factory with the supplied kwargs. The v2.0 Hydra runner still constructs the
+shipped Dinosaur backend explicitly; the registry is currently used by
+Python-API integrations and tests.
 
 The registry is deliberately minimal: it carries names and factories and nothing
 else. Anything that needs to vary per-backend (config schema, default kwargs,

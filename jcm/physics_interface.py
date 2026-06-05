@@ -234,11 +234,13 @@ class Physics:
         return {}
 
     def get_empty_data(self, coords) -> Any:
-        """Return a zero-shape diagnostics dict (deprecated).
+        """Return a zero-filled diagnostics structure.
 
-        Used by the legacy ``output_averages=True`` path as the
-        stacked-running-mean accumulator seed. Will be removed in Phase
-        4 of issue #471 when the legacy path is deleted.
+        ``Model`` uses this as the structural template for the cross-step
+        physics carry and as the running-mean accumulator seed when
+        ``output_averages=True``. Implementations should return the same
+        pytree structure that ``compute_tendencies`` returns as its updated
+        physics data.
         """
         return None
 

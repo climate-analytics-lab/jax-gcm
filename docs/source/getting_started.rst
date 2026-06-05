@@ -26,7 +26,7 @@ Requirements
 
 - Python ≥ 3.11
 - JAX
-- Dinosaur (dynamical core)
+- Dinosaur (the dynamical-core backend shipped with v2.0)
 - XArray (for I/O and data handling)
 
 See ``requirements.txt`` for the complete list of dependencies.
@@ -178,6 +178,29 @@ You can customize various aspects of the model:
       physics=physics
    )
 
+**Dynamical core**: Pass a backend explicitly when you need backend-specific
+configuration. ``Model(coords=...)`` remains the shorthand for constructing
+the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
+uses Dinosaur; explicit backend selection is currently a Python-API workflow.
+Keep the backend's ``dt_seconds`` equal to ``Model(time_step=...)``.
+
+.. code-block:: python
+
+   from jcm.diffusion import DiffusionFilter
+   from jcm.dycore.dinosaur import DinosaurDycore
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.terrain import TerrainData
+
+   coords = get_speedy_coords()
+   dycore = DinosaurDycore(
+       coords=coords,
+       terrain=TerrainData.aquaplanet(coords),
+       dt_seconds=1800.0,
+       diffusion=DiffusionFilter.default(),
+   )
+   model = Model(dycore=dycore, time_step=30.0)
+
 **Initial Conditions**: Start from a specific state
 
 .. code-block:: python
@@ -309,15 +332,15 @@ to suppress internal variability that's unrelated to the question you're
 asking — useful for comparing model fields to specific dates of
 observations, or for reducing noise in calibration runs.
 
-Nudging is implemented as a Newtonian relaxation in spectral space:
+Nudging is implemented as a gridpoint-space ``PhysicsTerm``:
 
 .. math::
 
    \frac{\mathrm{d}X}{\mathrm{d}t}\bigg|_\mathrm{nudge}
    = \frac{X_\mathrm{ref} - X}{\tau}
 
-where ``X`` is one of the dycore state variables (vorticity, divergence,
-temperature, log surface pressure) and ``τ`` is the relaxation timescale.
+where ``X`` is a gridpoint wind or temperature field and ``τ`` is the
+relaxation timescale.
 The most common pattern is to nudge winds above the boundary layer and
 let everything else evolve freely, so the model gets the right
 synoptic-scale circulation while its physics still has the freedom to

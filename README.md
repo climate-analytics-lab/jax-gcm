@@ -10,13 +10,13 @@
 <img src="logo.png" alt="JAX-GCM logo" width="180">
 
 JAX-GCM is a differentiable atmospheric general circulation model written
-in JAX. It couples the
-[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral dynamical core
-to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages, with
-support for gradient-based calibration, ML-physics experiments, and
+in JAX. Its pluggable dynamical-core interface currently ships with the
+[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral backend and
+couples it to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages,
+with support for gradient-based calibration, ML-physics experiments, and
 accelerated CPU/GPU/TPU runs.
 
-The current beta focus is the ECHAM T63L47 hybrid-coordinate stack with
+The v2.0 release focus is the ECHAM T63L47 hybrid-coordinate stack with
 RRTMGP radiation:
 
 ```bash
@@ -26,7 +26,8 @@ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
 ## Highlights
 
 - Fully differentiable JAX implementation compatible with `jit`, `grad`, and `vmap`
-- Operator-split physics coupled to a spectral primitive-equation dycore
+- Pluggable dynamical-core protocol with a shipped Dinosaur spectral backend
+- Dycore-agnostic, operator-split gridpoint physics coupling
 - SPEEDY, Held-Suarez, and composable ECHAM physics configurations
 - ECHAM T63L47 hybrid-coordinate target setup with grey, RRTMGP, or neural-emulated radiation
 - xarray/netCDF output, chunked long-run health checks, and resumable checkpoints
@@ -100,7 +101,7 @@ testing, and optimization examples: simplified convection, large-scale
 condensation, radiation, surface fluxes, vertical diffusion, and
 orographic drag.
 
-**ECHAM** is the beta release target for climate-quality integrations. It
+**ECHAM** is the v2.0 release target for climate-quality integrations. It
 includes Tiedtke-Nordeng convection, Sundqvist cloud cover, 1M/2M cloud
 microphysics, TTE-TKE vertical diffusion, multi-tile surface physics,
 gravity-wave drag, MACv2-SP aerosols, simple chemistry, and selectable

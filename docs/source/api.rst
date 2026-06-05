@@ -7,6 +7,9 @@ API
 
    jcm.model
    jcm.model.Model
+   jcm.dycore
+   jcm.dycore.base.DynamicalCore
+   jcm.dycore.dinosaur.DinosaurDycore
    jcm.physics_interface
    jcm.physics_interface.PhysicsState
    jcm.physics_interface.PhysicsTendency

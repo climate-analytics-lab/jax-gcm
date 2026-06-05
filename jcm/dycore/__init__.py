@@ -13,7 +13,7 @@ cubed-sphere spectral-element backend, etc. There is no horizontal regrid at the
 physics-dynamics seam; lat/lon regridding (when it happens) is a dycore-internal step
 on the way to xarray output.
 
-See ``docs/source/design/writing_a_dycore.md`` for the full guide.
+See ``docs/source/design.rst`` for the architecture overview.
 """
 
 from jcm.dycore.base import DynamicalCore, Predictions

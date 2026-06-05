@@ -38,7 +38,13 @@ The ECHAM physics package includes the following components, executed in sequenc
 Process Coupling
 ^^^^^^^^^^^^^^^^
 
-Following ICON-A, radiation, vertical diffusion with surface processes, and gravity wave drag operate in a **parallel split** (each receives the same input state, and tendencies are summed). These initial processes and convection/cloud processes are coupled via **serial split** (output of one feeds into the next).
+JAX-GCM's outer ``ComposablePhysics`` coupling is **process-parallel**:
+every term receives the same prognostic input state and the returned tendencies
+are summed. Terms execute in a validated order and may consume diagnostics
+produced by earlier terms, but they do not see earlier tendency contributions
+applied to the prognostic state until the next model step. Tightly coupled
+calculations that require internal sequential updates are implemented inside a
+single process term.
 
 Each parameterization is described in detail below.
 
@@ -746,27 +752,20 @@ To customize physics parameters:
 .. code-block:: python
 
    from jcm.physics.echam.echam_terms import echam_physics
-   from jcm.physics.echam.parameters import Parameters
+   from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import ConvectionParameters
+   from jcm.physics.radiation.radiation_types import RadiationParameters
 
-   # Get default parameters
-   params = Parameters.default()
-
-   # Modify convection parameters
-   params = params.with_convection(
+   convection = ConvectionParameters.default(
        tau=7200.0,        # Slower CAPE closure (2 hours)
        entrpen=2.0e-4     # Stronger entrainment
    )
 
-   # Modify radiation parameters
-   params = params.with_radiation(
+   radiation = RadiationParameters.default(
        solar_constant=1360.0
    )
 
-   # Ensure all physics timesteps match model dt
-   params = params.with_timestep(dt_seconds=1800.0)
-
-   # Create composable ECHAM physics with all standard terms
-   physics = echam_physics(parameters=params)
+   # Pass per-scheme parameter structs to the ECHAM factory
+   physics = echam_physics(convection=convection, radiation=radiation)
 
 
 Composable Physics API
@@ -774,34 +773,34 @@ Composable Physics API
 
 The ECHAM physics is composable: each parameterization is a
 ``PhysicsTerm`` (``flax.nnx.Module``), and ``echam_physics()`` returns a
-``ComposableEchamPhysics`` (a subclass of ``ComposablePhysics``) with the
-standard ordering wired up. Schemes can be swapped in or out without
-touching the orchestrator:
+``ComposablePhysics`` configured for column vectorization with the standard
+ordering wired up. Schemes can be swapped in or out without touching the
+orchestrator:
 
 .. code-block:: python
 
    from jcm.physics.echam.echam_terms import echam_physics
 
    # Create composable ECHAM physics with all standard terms
-   physics = echam_physics(parameters=params)
+   physics = echam_physics()
 
    # Use neural network radiation emulator instead of grey radiation
    physics = echam_physics(radiation_scheme="emulated")
 
-   # Remove gravity waves for a simplified configuration
-   physics = echam_physics().remove("gravity_waves")
+   # Remove non-orographic Hines gravity-wave drag
+   physics = echam_physics().remove("hines")
 
    # Replace a single term
-   from jcm.physics.echam.echam_terms import EchamRadiationRRTMGP
-   physics = echam_physics().replace("radiation", EchamRadiationRRTMGP())
+   from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+   physics = echam_physics().replace("radiation", RRTMGPRadiation())
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,
 keeping startup fast and avoiding circular dependencies.
 
-The ``ComposableEchamPhysics`` subclass automatically handles ECHAM's column
-vectorization: it reshapes the 3D state to ``(nlev, ncols)`` format before
-iterating terms, and reshapes accumulated tendencies back to 3D afterward.
+The returned ``ComposablePhysics`` enables column vectorization: it reshapes
+the 3D state to ``(nlev, ncols)`` before iterating terms, and reshapes
+accumulated tendencies back to 3D afterward.
 
 Module Locations
 ^^^^^^^^^^^^^^^^
@@ -838,8 +837,9 @@ respective process directories:
    * - Diagnostics (WMO tropopause)
      - ``jcm.physics.diagnostics.wmo_tropopause``
 
-ECHAM-specific infrastructure (parameters, coordinates, ``PhysicsData``)
-remains at ``jcm.physics.echam``.
+ECHAM-specific infrastructure such as coordinate helpers and the package
+factory remains at ``jcm.physics.echam``; individual scheme parameter
+types live beside their implementations.
 
 
 Scientific References

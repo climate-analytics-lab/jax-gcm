@@ -444,6 +444,7 @@ To customize physics parameters:
 
    from jcm.physics.speedy.speedy_terms import speedy_physics
    from jcm.physics.speedy.params import Parameters
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
    from jcm.model import Model
 
    # Get default parameters
@@ -468,7 +469,7 @@ To customize physics parameters:
    physics = speedy_physics(parameters=params)
 
    # Use in model
-   model = Model(physics=physics)
+   model = Model(coords=get_speedy_coords(), physics=physics)
 
 Viewing All Parameters
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -494,10 +495,6 @@ The SPEEDY physics is also available as composable ``PhysicsTerm`` instances:
 
    # Create composable SPEEDY physics with all standard terms
    physics = speedy_physics(parameters=params)
-
-   # Replace radiation with a different scheme
-   from jcm.physics.echam.echam_terms import EchamRadiationRRTMGP
-   physics = speedy_physics().replace("radiation_sw", EchamRadiationRRTMGP())
 
    # Remove a term
    physics = speedy_physics().remove("vertical_diffusion")
