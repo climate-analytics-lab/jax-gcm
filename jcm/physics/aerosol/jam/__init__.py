@@ -12,7 +12,6 @@ core.
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
 from jcm.physics.aerosol.jam.microphysics import (
-    MAM4_JAX_COMMIT,
     MAM4_SPEC,
     ModalMicrophysicsTerm,
     PlaceholderMicrophysics,
@@ -37,7 +36,6 @@ __all__ = [
     "ModalMicrophysicsTerm",
     "PlaceholderMicrophysics",
     "MAM4_SPEC",
-    "MAM4_JAX_COMMIT",
     "mass_name",
     "number_name",
     "tracer_specs",

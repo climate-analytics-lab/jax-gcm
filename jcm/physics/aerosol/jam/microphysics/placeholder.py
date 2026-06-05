@@ -127,7 +127,7 @@ def equilibrium_modal_state(
 class PlaceholderMicrophysics(ModalMicrophysicsTerm):
     """Zero-tendency κ-Köhler equilibrium core on the MAM4 4-mode population."""
 
-    name: ClassVar[str] = "ham_placeholder_microphysics"
+    name: ClassVar[str] = "jam_placeholder_microphysics"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full",)
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
 

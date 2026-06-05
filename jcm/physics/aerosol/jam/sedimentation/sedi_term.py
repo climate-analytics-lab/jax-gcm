@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import tree_math
 from flax import nnx
@@ -86,7 +87,7 @@ def sediment_column(
 class StokesSedimentation(PhysicsTerm):
     """Per-mode gravitational settling of interstitial aerosol tracers."""
 
-    name: ClassVar[str] = "ham_sedimentation"
+    name: ClassVar[str] = "jam_sedimentation"
     category: ClassVar[str] = "aerosol_sedimentation"
     requires: ClassVar[tuple[str, ...]] = (
         "_jam_state", "air_density", "layer_thickness", "pressure_full",
@@ -111,23 +112,32 @@ class StokesSedimentation(PhysicsTerm):
         pressure = diagnostics["pressure_full"]
         temperature = state.temperature
 
-        tracer_tends: dict[str, jnp.ndarray] = {}
+        # Gather every interstitial tracer to settle and the (per-mode)
+        # settling velocity that transports it, then run the donor-cell
+        # transport once over the whole stack so XLA batches it (rather than
+        # emitting an unrolled op per tracer).
+        names: list[str] = []
+        q_list: list[jnp.ndarray] = []
+        v_list: list[jnp.ndarray] = []
         for i, mode in enumerate(self._spec.modes):
             if not mode.sediments:
                 continue
             v = params.velocity_scale * stokes_velocity(
                 aer.r_wet[i], aer.rho[i], temperature, pressure,
             )
-            # Same velocity transports every interstitial tracer of the mode.
-            names = [number_name(mode.short)] + [
+            for nm in [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
-            ]
-            for nm in names:
-                q = state.tracers.get(nm)
-                if q is None:
-                    continue
-                dq, _ = sediment_column(q, v, air_density, dz)
-                tracer_tends[nm] = dq
+            ]:
+                names.append(nm)
+                q_list.append(state.tracers[nm])
+                v_list.append(v)
+
+        q_stack = jnp.stack(q_list)            # (K, nlev, ncols)
+        v_stack = jnp.stack(v_list)            # (K, nlev, ncols)
+        dq_stack, _ = jax.vmap(
+            sediment_column, in_axes=(0, 0, None, None),
+        )(q_stack, v_stack, air_density, dz)
+        tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

@@ -20,9 +20,6 @@ from __future__ import annotations
 from jcm.physics.aerosol.jam.population import AerosolMode, ModalAerosolSpec
 from jcm.physics.aerosol.jam.species import SPECIES
 
-#: Upstream MAM4-JAX commit the constants below were cross-checked against.
-MAM4_JAX_COMMIT = "ccd872b6592d0f1ffa7ee43e51f7952b999fd57b"
-
 # Per-mode species membership, decoded from ``lspectype_amode`` (indices into
 # SPECNAME_AMODE) into our canonical tokens. Order matches the Fortran slots.
 #   accum (7):  sulfate, p-organic, s-organic, black-c, dust, seasalt, m-organic

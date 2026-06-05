@@ -48,7 +48,7 @@ class DryDepParameters:
 class SlinnDryDeposition(PhysicsTerm):
     """Surface dry deposition of interstitial aerosol tracers."""
 
-    name: ClassVar[str] = "ham_dry_deposition"
+    name: ClassVar[str] = "jam_dry_deposition"
     category: ClassVar[str] = "aerosol_drydep"
     requires: ClassVar[tuple[str, ...]] = (
         "_jam_state", "air_density", "layer_thickness", "pressure_full",
@@ -99,11 +99,10 @@ class SlinnDryDeposition(PhysicsTerm):
                 mass_name(sp, mode.short) for sp in mode.species
             ]
             for nm in names:
-                q = state.tracers.get(nm)
-                if q is None:
-                    continue
-                dq = jnp.zeros_like(q).at[-1].set(-loss_rate * q[-1])
-                tracer_tends[nm] = dq
+                q = state.tracers[nm]
+                tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(
+                    -loss_rate * q[-1]
+                )
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

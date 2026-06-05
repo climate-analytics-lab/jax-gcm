@@ -57,7 +57,7 @@ class EmissionParameters:
 class JamEmissions(PhysicsTerm):
     """Online natural + prescribed aerosol emissions term."""
 
-    name: ClassVar[str] = "ham_emissions"
+    name: ClassVar[str] = "jam_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
     provides: ClassVar[tuple[str, ...]] = ()
@@ -88,12 +88,26 @@ class JamEmissions(PhysicsTerm):
         land = self._land_fraction(terrain, ncols)
         ocean = 1.0 - land
 
+        # NOTE: these are deliberately *simplified placeholder* source laws,
+        # not ports of a specific scheme. Sea salt is a bare u10 power law in
+        # the spirit of Monahan (1986) / Gong (2003) but without their size-
+        # resolved whitecap form; dust is a crude threshold-cubed wind law
+        # (cf. Marticorena & Bergametti 1995) with no soil/erodibility map;
+        # DMS→SO4 is a linear wind proxy standing in for a Nightingale (2000)
+        # sea–air flux + oxidation chain. The coefficients are differentiable
+        # EmissionParameters with order-of-magnitude defaults, NOT calibrated
+        # to an inventory. Prescribed CEDS anthropogenic emissions (the real
+        # source) and HAMMOZ-grounded characteristics are tracked in #498.
         seasalt = ocean * p.seasalt_coeff * u10 ** p.seasalt_wind_exp
         dust = land * p.dust_coeff * jnp.maximum(u10 - p.dust_u_threshold, 0.0) ** 3
         dms_so4 = ocean * p.dms_coeff * u10
         volc = jnp.full((ncols,), p.volcanic_so4)
         bio = jnp.full((ncols,), p.biogenic_soa)
 
+        # Mode splits below are ad-hoc placeholders (fine sea salt → accum,
+        # coarse → coarse; dust mostly coarse; DMS sulfate → Aitken/accum) —
+        # the size-resolved, source-specific mode assignment from HAMMOZ
+        # (cmr_ff/bb, primary-SO4 Aitken/accum split) lands with #498.
         fluxes = [
             ("ss", "acc", seasalt * p.seasalt_accum_frac),
             ("ss", "cor", seasalt * (1.0 - p.seasalt_accum_frac)),

@@ -6,16 +6,18 @@ microphysics terms are untouched):
 
 * **In-cloud nucleation scavenging** — the activated fraction of aerosol is in
   cloud droplets and is removed at the rate cloud condensate converts to
-  precipitation. The per-level precip-formation rate is reconstructed by
-  distributing the column surface precip (``CloudData.precip_rain/snow``)
-  across the cloudy column weighted by in-cloud condensate.
+  precipitation. As an interim, the per-level precip-formation rate is
+  *reconstructed* by distributing the column surface precip
+  (``CloudData.precip_rain/snow``) across the cloudy column weighted by
+  in-cloud condensate; exposing the true per-level formation (and
+  evaporation) rate from the cloud schemes — and adding re-evaporation
+  re-injection — is tracked in #499.
 * **Below-cloud impaction scavenging** — falling precipitation collects
   interstitial aerosol in clear air, with a size-dependent (∝ r²) collection
   efficiency so coarse particles are scavenged far faster than accumulation
   mode.
 
-Mirrors ``mo_hammoz_wetdep``. Precip re-evaporation re-injection is deferred
-(no per-level evaporation-rate diagnostic is exposed yet).
+Mirrors ``mo_hammoz_wetdep``.
 """
 
 from __future__ import annotations
@@ -97,10 +99,11 @@ def below_cloud_rate(
 class WetScavenging(PhysicsTerm):
     """In-cloud + below-cloud scavenging of interstitial aerosol."""
 
-    name: ClassVar[str] = "ham_wet_deposition"
+    name: ClassVar[str] = "jam_wet_deposition"
     category: ClassVar[str] = "aerosol_wetdep"
     requires: ClassVar[tuple[str, ...]] = (
-        "_jam_state", "activated_fraction", "air_density", "layer_thickness",
+        "_jam_state", "activated_fraction", "clouds",
+        "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = ()
 
@@ -120,17 +123,11 @@ class WetScavenging(PhysicsTerm):
         activated_fraction = diagnostics["activated_fraction"]
         air_density = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]
-        nlev, ncols = state.temperature.shape
 
-        clouds = diagnostics.get("clouds")
-        if clouds is not None:
-            precip_col = clouds.precip_rain + clouds.precip_snow
-            cloud_fraction = clouds.cloud_fraction
-            qc = clouds.qc
-        else:
-            precip_col = jnp.zeros((ncols,))
-            cloud_fraction = jnp.zeros((nlev, ncols))
-            qc = jnp.zeros((nlev, ncols))
+        clouds = diagnostics["clouds"]
+        precip_col = clouds.precip_rain + clouds.precip_snow
+        cloud_fraction = clouds.cloud_fraction
+        qc = clouds.qc
 
         p_form = precip_formation_rate(
             precip_col, cloud_fraction, qc, air_density, dz,
@@ -139,21 +136,27 @@ class WetScavenging(PhysicsTerm):
             activated_fraction, p_form, qc,
         )
 
-        tracer_tends: dict[str, jnp.ndarray] = {}
+        # Build a per-tracer scavenging rate and stack with the matching
+        # tracers, so the elementwise removal runs as one batched op (rather
+        # than an unrolled tendency per mode×species).
+        names: list[str] = []
+        q_list: list[jnp.ndarray] = []
+        rate_list: list[jnp.ndarray] = []
         for i, mode in enumerate(self._spec.modes):
             rate_below = below_cloud_rate(
                 precip_col, cloud_fraction, aer.r_wet[i], params,
             )
             # In-cloud only removes from activatable (soluble) modes.
             rate = rate_below + (rate_incloud if mode.can_activate else 0.0)
-            names = [number_name(mode.short)] + [
+            for nm in [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
-            ]
-            for nm in names:
-                q = state.tracers.get(nm)
-                if q is None:
-                    continue
-                tracer_tends[nm] = -rate * q
+            ]:
+                names.append(nm)
+                q_list.append(state.tracers[nm])
+                rate_list.append(rate)
+
+        dq_stack = -jnp.stack(rate_list) * jnp.stack(q_list)
+        tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
