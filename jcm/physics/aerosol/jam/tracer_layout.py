@@ -2,16 +2,19 @@
 
 Aerosol mass and number live as ordinary entries in ``state.tracers`` so the
 dynamical core transports them and the existing diagnostics infrastructure
-works unchanged. MAM4 carries both an *interstitial* population and a
-*cloud-borne* mirror, so every quantity has an interstitial and a
-cloud-borne key.
+works unchanged. The ``<class>`` token below is a per-class short name — a
+mode short for a modal scheme, a bin label for a sectional one — so the same
+conventions serve any population family. The *cloud-borne* mirror keys are
+emitted for cores that prognose an interstitial + cloud-borne population
+(e.g. MAM4); a core without that distinction simply declares only the
+interstitial keys.
 
 Flat key conventions (the ``state.tracers`` API is flat-keyed):
 
-    mass, interstitial   ``m_<species>_<mode_short>``    [kg/kg]
-    mass, cloud-borne    ``mc_<species>_<mode_short>``   [kg/kg]
-    number, interstitial ``n_<mode_short>``              [kg^-1]
-    number, cloud-borne  ``nc_<mode_short>``             [kg^-1]
+    mass, interstitial   ``m_<species>_<class>``    [kg/kg]
+    mass, cloud-borne    ``mc_<species>_<class>``   [kg/kg]
+    number, interstitial ``n_<class>``              [kg^-1]
+    number, cloud-borne  ``nc_<class>``             [kg^-1]
 
 Number tracers use ``nondimensionalize=False`` (they are #/kg, not a
 mixing ratio), matching the 2M scheme's ``qnc``/``qni`` convention.

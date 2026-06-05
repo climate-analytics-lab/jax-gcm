@@ -1,11 +1,14 @@
 """Microphysics-neutral aerosol population description.
 
 These are pure-Python frozen dataclasses that describe the *shape* of an
-aerosol population — how many modes, which species each carries, and the
-per-mode/per-species physical metadata a process harness needs. They are
-the swap point between the microphysics-agnostic harness (emissions, dry/
-wet deposition, sedimentation, ARG activation) and an interchangeable
-microphysics core (placeholder today; MAM4-JAX later).
+aerosol population — how many aerosol classes, which species each carries,
+and the per-class/per-species physical metadata a process harness needs.
+``ModalAerosolSpec`` is the modal realisation (each class is a log-normal
+mode); a sectional realisation (each class a size bin) would be a sibling
+spec with the same role (#491). They are the swap point between the
+microphysics-agnostic harness (emissions, dry/wet deposition, sedimentation,
+ARG activation) and an interchangeable microphysics core (placeholder today;
+MAM4-JAX later).
 
 Design notes
 ------------
@@ -36,8 +39,9 @@ class AerosolSpecies:
             used by gas–aerosol exchange in the real core).
         density: particle-material density [kg/m³].
         hygroscopicity: κ (kappa-Köhler hygroscopicity parameter) [-].
-        long_name: descriptive name (e.g. ``"sulfate"``); also the bridge
-            to MAM4's ``SPECNAME_AMODE`` tokens.
+        long_name: descriptive name (e.g. ``"sulfate"``), for readability /
+            output labelling (the short ``name`` is what tracer keys and the
+            microphysics-core adapters key off).
         refractive_index: complex refractive index, or ``None`` (optics
             are out of scope here — see #495).
 

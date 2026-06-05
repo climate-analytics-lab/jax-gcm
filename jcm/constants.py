@@ -58,6 +58,15 @@ class PhysicalConstants(NamedTuple):
     ak: float = 1.3806504e-23     # Boltzmann constant (J/K)
     p0s1_bg: float = 101325.0     # Sea level reference pressure (Pa)
 
+    # Molar / aerosol-microphysics constants
+    r_universal: float = 8.314462          # Universal gas constant (J/mol/K)
+    m_air: float = 8.314462 / 287.0        # Molar mass of dry air (kg/mol) = R*/Rd
+    m_water: float = 0.622 * 8.314462 / 287.0  # Molar mass of water (kg/mol) = eps·M_air
+    surface_tension_water: float = 0.0728  # Surface tension of water (N/m, ~20°C)
+    vapor_diffusivity: float = 2.11e-5     # Water-vapour diffusivity in air (m²/s)
+    air_thermal_conductivity: float = 0.024  # Thermal conductivity of air (W/m/K)
+    tiny: float = 1e-30           # Very small floor (distinct from epsilon=1e-12)
+
     @classmethod
     def default(cls) -> 'PhysicalConstants':
         """Return default physical constants."""
@@ -102,6 +111,15 @@ rhoi = physical_constants.rhoi
 
 # Numerical
 epsilon = physical_constants.epsilon
+tiny = physical_constants.tiny
+
+# Molar / aerosol-microphysics
+r_universal = physical_constants.r_universal
+m_air = physical_constants.m_air
+m_water = physical_constants.m_water
+surface_tension_water = physical_constants.surface_tension_water
+vapor_diffusivity = physical_constants.vapor_diffusivity
+air_thermal_conductivity = physical_constants.air_thermal_conductivity
 
 # ECHAM-6.3 additions
 rgrav = physical_constants.rgrav

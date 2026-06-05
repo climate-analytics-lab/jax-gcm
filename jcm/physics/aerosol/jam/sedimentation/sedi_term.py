@@ -17,15 +17,14 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
+from jcm.constants import grav as _G
+from jcm.constants import m_air as _MA
+from jcm.constants import r_universal as _RGAS
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
-
-_G = 9.80665
-_MA = 0.028965     # molar mass of dry air [kg/mol]
-_RGAS = 8.314462
 
 
 @tree_math.struct

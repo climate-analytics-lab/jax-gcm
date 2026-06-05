@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-_KB = 1.380649e-23   # Boltzmann constant [J/K]
-_G = 9.80665
+from jcm.constants import ak as _KB  # Boltzmann constant [J/K]
+from jcm.constants import grav as _G
+from jcm.constants import m_air as _MA
+from jcm.constants import r_universal as _RGAS
 
 
 def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -31,7 +33,6 @@ def cunningham_slip(
     r: jnp.ndarray, temperature: jnp.ndarray, pressure: jnp.ndarray
 ) -> jnp.ndarray:
     """Cunningham slip-correction factor [-]."""
-    from jcm.physics.aerosol.jam.sedimentation.sedi_term import _MA, _RGAS
     mu = air_viscosity(temperature)
     mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
     kn = mfp / jnp.maximum(r, 1.0e-10)

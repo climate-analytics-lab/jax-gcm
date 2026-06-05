@@ -21,26 +21,35 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
-# Physical constants (SI).
-_MW = 0.018015      # molar mass of water [kg/mol]
-_MA = 0.028965      # molar mass of dry air [kg/mol]
-_RGAS = 8.314462    # universal gas constant [J/mol/K]
-_RHOW = 1000.0      # water density [kg/m³]
-_LV = 2.501e6       # latent heat of vaporization [J/kg]
-_CP = 1004.0        # specific heat of air [J/kg/K]
-_G = 9.80665        # gravity [m/s²]
-_DV = 2.11e-5       # water-vapour diffusivity [m²/s]
-_KA = 0.024         # thermal conductivity of air [J/m/s/K]
-_SIGMA_W = 0.072    # surface tension of water [J/m²]
+# All physical constants are sourced from jcm.constants.PhysicalConstants
+# (short local aliases keep the formulae readable). _RGAS is the *universal*
+# gas constant (J/mol/K), distinct from the per-mass dry-air constant.
+from jcm.constants import air_thermal_conductivity as _KA
+from jcm.constants import alhc as _LV
+from jcm.constants import cp as _CP
+from jcm.constants import grav as _G
+from jcm.constants import m_air as _MA
+from jcm.constants import m_water as _MW
+from jcm.constants import r_universal as _RGAS
+from jcm.constants import rhow as _RHOW
+from jcm.constants import surface_tension_water as _SIGMA_W
+from jcm.constants import tiny as _TINY
+from jcm.constants import vapor_diffusivity as _DV
 
-_TINY = 1.0e-30
 # Ghosh et al. (2025) σ_acc validity range.
 _SIGMA_ACC_LO = 1.4
 _SIGMA_ACC_HI = 2.1
 
 
 def _saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Tetens saturation vapour pressure over liquid water [Pa]."""
+    """Saturation vapour pressure over liquid water [Pa].
+
+    Magnus-Tetens form with the empirical WMO/Alduchov & Eskridge (1996)
+    coefficients: ``es = 611.2·exp(17.62·t_c / (t_c + 243.12))`` with
+    ``t_c`` in °C (here ``t_c + 243.12 = T − 30.03`` for ``T`` in K). The
+    three numbers are the standard empirical Magnus fit, not derivable from
+    fundamental constants.
+    """
     t_c = temperature - 273.15
     return 611.2 * jnp.exp(17.62 * t_c / (temperature - 30.03))
 
@@ -58,6 +67,11 @@ def _shape_coefficients(
     functions of the accumulation-mode width ``sigma_acc`` (applied to all
     modes, per the paper), and ``p`` switches in the kinetically limited
     ``ζ/η > 1`` regime.
+
+    The ``variant`` branch is a *compile-time static* dispatch — ``variant``
+    is a plain Python string fixed at compose time, so this remains fully
+    jittable (the branch is resolved during tracing, not at run time). Only
+    the ``jnp.where`` on ``ζ/η`` is a traced, data-dependent switch.
     """
     if variant == "arg2000":
         f = 0.5 * jnp.exp(2.5 * ln_sigma ** 2)
