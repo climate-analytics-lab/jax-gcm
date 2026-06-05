@@ -69,8 +69,8 @@ def echam_physics(
     radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
-    ham_microphysics: str = "placeholder",
-    ham_arg_variant: str = "arg2000",
+    jam_microphysics: str = "placeholder",
+    jam_arg_variant: str = "arg2000",
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -103,17 +103,17 @@ def echam_physics(
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
-            ``"ham"`` (online HAM harness — emissions, microphysics core,
-            ARG activation, deposition, sedimentation; #461). The HAM path
+            ``"jam"`` (online JAM harness — emissions, microphysics core,
+            ARG activation, deposition, sedimentation; #461). The JAM path
             *augments* MACv2-SP rather than replacing it: MACv2-SP is kept for
             the aerosol radiative optics and Twomey factor that radiation and
-            the cloud schemes require, while HAM adds the prognostic aerosol
+            the cloud schemes require, while JAM adds the prognostic aerosol
             tracers and an ``activated_cdnc`` that the 2M scheme prefers over
             the SPA floor. The online aerosol *direct radiative* effect that
-            would let HAM fully replace MACv2-SP optics is tracked in #495.
-        ham_microphysics: HAM core when ``aerosol_module="ham"`` —
+            would let JAM fully replace MACv2-SP optics is tracked in #495.
+        jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
-        ham_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
 
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
@@ -166,33 +166,35 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
-    # MACv2-SP always provides the ``aerosol`` optics/Twomey diagnostic that
-    # radiation and the cloud schemes require. The HAM harness, when enabled,
-    # is appended after it to add prognostic aerosol + ARG activation.
+    # For now MACv2-SP is kept alongside JAM to provide the ``aerosol``
+    # optics/Twomey diagnostic that radiation and the cloud schemes read — a
+    # temporary fudge in lieu of proper JAM aerosol↔radiation and
+    # aerosol↔microphysics coupling (#495). Once JAM supplies those, MACv2-SP
+    # need not be included in the JAM path.
     #
     # Wet deposition is split out and placed *after* the cloud microphysics
     # term so it scavenges against the current step's precip/condensate (the
-    # rest of the HAM chain runs in the pre-cloud aerosol block — activation
+    # rest of the JAM chain runs in the pre-cloud aerosol block — activation
     # must precede the cloud term that consumes ``activated_cdnc``).
-    ham_post_cloud_terms: list[PhysicsTerm] = []
+    jam_post_cloud_terms: list[PhysicsTerm] = []
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
-    elif aerosol_module == "ham":
-        from jcm.physics.aerosol.ham.ham_terms import ham_aerosol_physics
-        ham_terms = ham_aerosol_physics(
-            microphysics=ham_microphysics, arg_variant=ham_arg_variant,
+    elif aerosol_module == "jam":
+        from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
+        jam_terms = jam_aerosol_physics(
+            microphysics=jam_microphysics, arg_variant=jam_arg_variant,
         )
-        ham_post_cloud_terms = [
-            t for t in ham_terms if t.category == "aerosol_wetdep"
+        jam_post_cloud_terms = [
+            t for t in jam_terms if t.category == "aerosol_wetdep"
         ]
-        ham_pre_cloud_terms = [
-            t for t in ham_terms if t.category != "aerosol_wetdep"
+        jam_pre_cloud_terms = [
+            t for t in jam_terms if t.category != "aerosol_wetdep"
         ]
-        aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *ham_pre_cloud_terms]
+        aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *jam_pre_cloud_terms]
     else:
         raise ValueError(
             f"Unknown aerosol_module={aerosol_module!r}. Choose 'macv2sp' "
-            "or 'ham'."
+            "or 'jam'."
         )
 
     return ComposablePhysics(
@@ -205,7 +207,7 @@ def echam_physics(
             rad_term,
             TiedtkeConvection(params=convection_p),
             micro_term,
-            *ham_post_cloud_terms,
+            *jam_post_cloud_terms,
             TteTkeVerticalDiffusion(params=vertical_diffusion_p),
             EchamSurface(params=surface_p),
             HinesGwd(params=hines_p),

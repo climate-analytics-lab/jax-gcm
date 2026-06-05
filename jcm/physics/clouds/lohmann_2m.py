@@ -26,10 +26,10 @@ Represented processes include:
 - Temperature-dependent partitioning between liquid and ice phases
 
 Planned features:
-- Consistent coupling to aerosol microphysics via HAM #TODO
+- Consistent coupling to aerosol microphysics via JAM #TODO
 
 Based on the ECHAM6/ICON microphysics as described in:
-- Lohmann et al. (2007): Cloud microphysics and aerosol indirect effects in the global climate model ECHAM5-HAM
+- Lohmann et al. (2007): Cloud microphysics and aerosol indirect effects in the global climate model ECHAM5-JAM
 - Lohmann & Hoose (2009): Sensitivity studies of different aerosol indirect effects in mixed-phase clouds
 - Lohmann & Neubauer (2018): The importance of mixed-phase and ice clouds for climate sensitivity in the global 
   aerosolclimate model ECHAM6-HAM2
@@ -3257,7 +3257,7 @@ def cloud_microphysics_2m(
     # Heterogeneous mixed-phase freezing via DeMott (2010) INP
     #
     # Replaces the ECHAM6 het_mxphase_freezing call (which needs 9 modal
-    # aerosol inputs from HAM, see #436) with a simpler INP-based
+    # aerosol inputs from JAM, see #436) with a simpler INP-based
     # parameterization that only needs temperature + prescribed total
     # aerosol number > 0.5 μm.
     # ------------------------------------------------------------------
@@ -3692,10 +3692,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
         # Activated CDNC source. The inline SPA floor (from the MACv2-SP Nccn)
         # is always computed as a baseline. An upstream activation term (e.g.
-        # HAM's ARG, #461) may write an explicit ``activated_cdnc``; when it
+        # JAM's ARG, #461) may write an explicit ``activated_cdnc``; when it
         # does we use it, but fall back to the SPA floor wherever that online
-        # source is empty (≈0) — e.g. before the prognostic HAM aerosol tracers
-        # spin up — so the default HAM+2M run still activates droplets. Both
+        # source is empty (≈0) — e.g. before the prognostic JAM aerosol tracers
+        # spin up — so the default JAM+2M run still activates droplets. Both
         # paths are differentiable and produce the same (nlev, ncols) field.
         Nccn = diagnostics["aerosol"].Nccn
         spa_floor = spa_activated_cdnc(
