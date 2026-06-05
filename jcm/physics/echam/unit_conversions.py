@@ -22,8 +22,7 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
-from ..speedy.physical_constants import p0
-from jcm.constants import grav, rd
+import jcm.constants as c
 
 
 def convert_surface_pressure(surface_pressure_normalized: jnp.ndarray) -> jnp.ndarray:
@@ -36,7 +35,7 @@ def convert_surface_pressure(surface_pressure_normalized: jnp.ndarray) -> jnp.nd
         Surface pressure in Pascal
 
     """
-    return surface_pressure_normalized * p0
+    return surface_pressure_normalized * c.p0
 
 
 def calculate_pressure_levels(
@@ -76,7 +75,7 @@ def geopotential_to_height(geopotential: jnp.ndarray) -> jnp.ndarray:
         Geometric height in meters
 
     """
-    return geopotential / grav
+    return geopotential / c.grav
 
 
 def calculate_air_density(
@@ -93,7 +92,7 @@ def calculate_air_density(
         Air density in kg/m³
 
     """
-    return pressure / (rd * temperature)
+    return pressure / (c.rd * temperature)
 
 
 def calculate_layer_thickness(
@@ -120,7 +119,7 @@ def calculate_layer_thickness(
     # For levels 1 to nlev-1
     dp = jnp.diff(pressure_levels, axis=0)
     rho_mid = 0.5 * (air_density[1:] + air_density[:-1])
-    dz = dz.at[1:].set(dp / (rho_mid * grav))
+    dz = dz.at[1:].set(dp / (rho_mid * c.grav))
     
     # For the top layer, use the same thickness as the layer below
     dz = dz.at[0].set(dz[1])

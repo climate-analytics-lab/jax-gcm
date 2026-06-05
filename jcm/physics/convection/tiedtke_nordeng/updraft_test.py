@@ -69,7 +69,7 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
         """Condensation must warm the parcel; the latent heat released
         should match the energy budget cp*dT = L*d_condensed.
         """
-        from jcm.constants import cp, alhc
+        from jcm.constants import cpd, alhc
         T, p = 290.0, 90000.0
         qsat_T = float(saturation_mixing_ratio(
             jnp.asarray(p), jnp.asarray(T)
@@ -77,7 +77,7 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
         total_q = 2.0 * qsat_T  # Heavily supersaturated
         T_adj, vapor, liquid = self._run(T, total_q, p)
         dT = float(T_adj) - T
-        expected_dT = alhc * float(liquid) / cp
+        expected_dT = alhc * float(liquid) / cpd
         # Allow 2% tolerance for the Newton iteration's residual
         self.assertAlmostEqual(dT / expected_dT, 1.0, delta=0.02)
         self.assertGreater(dT, 0.0, "Condensation must warm the parcel")

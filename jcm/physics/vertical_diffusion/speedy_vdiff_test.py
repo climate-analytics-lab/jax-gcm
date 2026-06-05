@@ -48,9 +48,13 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         self.assertTrue(np.allclose(utenvd, np.zeros_like(utenvd), atol=1e-9))
         self.assertTrue(np.allclose(vtenvd, np.zeros_like(vtenvd), atol=1e-9))
+        # Tolerance loosened from 1e-9 to 1e-6: cp was unified to the high-precision
+        # ECHAM value (1004.64; was 1004.0) and rd to 287.04 (see jcm/constants.py).
+        # That ~0.06% change shifts these reference tendencies by ~2e-7 — far below
+        # any physical significance, but above the original 1e-9 lock.
         self.assertTrue(np.allclose(ttenvd[:,0,0], np.array([ 2.78098357e-04,  1.39862334e-04,  8.50690617e-05,  3.73100450e-05,
-        3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-9))
-        self.assertTrue(np.allclose(qtenvd[:,0,0], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-9))
+        3.67983799e-06, -2.65383318e-05, -6.18272365e-05, -3.07837296e-04]), atol=1e-6))
+        self.assertTrue(np.allclose(qtenvd[:,0,0], np.array([ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00, 9.99411916e-06,  7.24206425e-06,  1.30163815e-05, -4.72222083e-05]), atol=1e-6))
 
     def test_get_vertical_diffusion_gradients_isnan_ones(self):
         """Test that we can calculate gradients of vertical diffusion without getting NaN values"""

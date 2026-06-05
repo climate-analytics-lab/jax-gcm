@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
 )
@@ -22,9 +22,6 @@ from .tke_budget import (
     compute_tke_diagnostics,
     echam_tke_source_update,
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -42,7 +39,7 @@ def compute_dry_static_energy(
         Dry static energy [J/kg]
 
     """
-    return PHYS_CONST.cp * temperature + geopotential
+    return c.cpd * temperature + geopotential
 
 
 @jax.jit
@@ -125,7 +122,7 @@ def prepare_vertical_diffusion_state(
     # Compute air masses
     # dp should be positive (higher pressure - lower pressure)
     dp = jnp.diff(pressure_half, axis=1)  # This gives p[k+1] - p[k], which is positive
-    air_mass = dp / PHYS_CONST.grav
+    air_mass = dp / c.grav
 
     # Approximate dry air mass (could be more sophisticated)
     dry_air_mass = air_mass * (1.0 - qv)
@@ -308,8 +305,8 @@ def _column_buoyancy_freq_squared(temperature: jnp.ndarray,
     dz = jnp.diff(height_full, axis=1)
     dT_dz = jnp.diff(temperature, axis=1) / dz
     dT_dz_full = jnp.concatenate([dT_dz[:, :1], dT_dz], axis=1)
-    lapse = PHYS_CONST.grav / PHYS_CONST.cp
-    return (PHYS_CONST.grav / temperature) * (dT_dz_full + lapse)
+    lapse = c.grav / c.cpd
+    return (c.grav / temperature) * (dT_dz_full + lapse)
 
 
 @jax.jit

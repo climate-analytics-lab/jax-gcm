@@ -8,11 +8,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .vertical_diffusion_types import VDiffParameters, VDiffState, VDiffDiagnostics
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -22,7 +19,7 @@ def compute_richardson_number(
     temperature: jnp.ndarray,
     height_full: jnp.ndarray,
     height_half: jnp.ndarray,
-    gravity: float = PHYS_CONST.grav
+    gravity: float = c.grav
 ) -> jnp.ndarray:
     """Compute bulk Richardson number for atmospheric stability.
     
@@ -51,7 +48,7 @@ def compute_richardson_number(
     
     # Brunt-Väisälä frequency squared (buoyancy frequency)
     # N² = (g/T) * (dT/dz + g/cp)
-    lapse_rate = gravity / PHYS_CONST.cp
+    lapse_rate = gravity / c.cpd
     buoyancy_freq_squared = (gravity / temp_avg) * (dt_dz + lapse_rate)
     
     # Richardson number: Ri = N² / (du/dz)²
@@ -269,7 +266,7 @@ def compute_surface_exchange_coefficients(
         theta_air = temperature_air
         
         # Bulk Richardson number for surface layer
-        ri_surface = (PHYS_CONST.grav * z_ref * 
+        ri_surface = (c.grav * z_ref *
                      (theta_air - theta_surface) / 
                      (0.5 * (theta_air + theta_surface) * 
                       jnp.maximum(wind_speed_surface**2, 0.01)))
@@ -446,8 +443,6 @@ def compute_surface_fluxes(
         Tuple of (momentum_flux_u, momentum_flux_v, heat_flux, moisture_flux)
 
     """
-    from jcm.constants import grav, cp, karman_const
-    
     # Surface wind speed
     wind_u = state.u[:, -1]
     wind_v = state.v[:, -1]
@@ -477,8 +472,8 @@ def compute_surface_fluxes(
     q_air = state.qv[:, -1]
     
     # Initial estimates for iterative solution
-    ustar = karman_const * wind_speed / jnp.log(z_ref / z0_momentum)
-    
+    ustar = c.karman_const * wind_speed / jnp.log(z_ref / z0_momentum)
+
     # Iterative solution for Monin-Obukhov length
     L_obukhov = jnp.full_like(ustar, 1000.0)  # Initial guess
     
@@ -493,20 +488,20 @@ def compute_surface_fluxes(
         psi_h = stability_function_heat(zeta)
         
         # Update friction velocity
-        ustar = karman_const * wind_speed / (jnp.log(z_ref / z0_momentum) - psi_m)
+        ustar = c.karman_const * wind_speed / (jnp.log(z_ref / z0_momentum) - psi_m)
         ustar = jnp.maximum(ustar, 0.01)  # Minimum friction velocity
-        
+
         # Heat transfer coefficient
-        ch = karman_const**2 / ((jnp.log(z_ref / z0_momentum) - psi_m) * 
+        ch = c.karman_const**2 / ((jnp.log(z_ref / z0_momentum) - psi_m) *
                                 (jnp.log(z_ref / z0_heat) - psi_h))
-        
+
         # Surface heat flux
-        heat_flux = -air_density * cp * ch * wind_speed * (theta_air - theta_surface)
-        
+        heat_flux = -air_density * c.cpd * ch * wind_speed * (theta_air - theta_surface)
+
         # Update Monin-Obukhov length
         L_obukhov = jnp.where(
             jnp.abs(heat_flux) > 1e-10,
-            -air_density * cp * theta_air * ustar**3 / (karman_const * grav * heat_flux),
+            -air_density * c.cpd * theta_air * ustar**3 / (c.karman_const * c.grav * heat_flux),
             1000.0  # Neutral conditions
         )
         L_obukhov = jnp.clip(L_obukhov, -1000.0, 1000.0)  # Reasonable limits
@@ -517,8 +512,8 @@ def compute_surface_fluxes(
     tau_v = -air_density * ustar**2 * wind_v / wind_speed
     
     # Heat flux (already computed above)
-    heat_flux = -air_density * cp * ch * wind_speed * (theta_air - theta_surface)
-    
+    heat_flux = -air_density * c.cpd * ch * wind_speed * (theta_air - theta_surface)
+
     # Moisture flux (similar to heat flux)
     moisture_flux = -air_density * ch * wind_speed * (q_air - q_surface)
     
@@ -582,7 +577,7 @@ def compute_turbulence_diagnostics(
     
     # Air density at surface
     air_density = (state.pressure_full[:, -1] / 
-                  (PHYS_CONST.rd * state.temperature[:, -1]))
+                  (c.rd * state.temperature[:, -1]))
     
     # Compute surface fluxes using Monin-Obukhov similarity theory
     (surface_momentum_flux_u, surface_momentum_flux_v, 

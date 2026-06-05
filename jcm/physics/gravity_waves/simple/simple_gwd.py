@@ -22,7 +22,7 @@ from typing import NamedTuple, Tuple, Optional
 # from functools import partial  # No longer needed
 import tree_math
 
-from jcm.constants import grav, rd, cp, p0
+import jcm.constants as c
 
 
 @tree_math.struct
@@ -112,7 +112,7 @@ def brunt_vaisala_frequency(
         N²: Brunt-Väisälä frequency squared (s⁻²) [nlev]
 
     """
-    theta = temperature * (p0 / pressure) ** (rd / cp)
+    theta = temperature * (c.p0 / pressure) ** (c.rd / c.cpd)
     
     # Calculate vertical gradient of potential temperature
     # Use one-sided differences at boundaries
@@ -132,7 +132,7 @@ def brunt_vaisala_frequency(
     )
     
     # Brunt-Väisälä frequency squared
-    n2 = grav / theta * dtheta_dz
+    n2 = c.grav / theta * dtheta_dz
     
     # Apply minimum threshold for stability
     n2 = jnp.maximum(n2, 1e-8)
@@ -379,7 +379,7 @@ def simple_gwd(
     
     # Temperature tendency from dissipation (mechanical heating)
     # KE dissipation: dT/dt = -(u*du/dt + v*dv/dt) / cp
-    dtedt = -(u_wind * dudt + v_wind * dvdt) / cp
+    dtedt = -(u_wind * dudt + v_wind * dvdt) / c.cpd
     
     # Only apply GWD above minimum height
     height_mask = height > config.zmin

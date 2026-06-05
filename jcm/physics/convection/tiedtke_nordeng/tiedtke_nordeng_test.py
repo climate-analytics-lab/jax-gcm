@@ -368,10 +368,10 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from jcm.constants import cp, alhc
-            
+            from jcm.constants import cpd, alhc
+
             # Sensible heat change
-            dH_sensible = jnp.sum(tendencies.dtedt * cp)
+            dH_sensible = jnp.sum(tendencies.dtedt * cpd)
             
             # Latent heat change (condensation releases heat)
             dH_latent = -jnp.sum(tendencies.dqdt * alhc)
@@ -1216,9 +1216,9 @@ class TestConvectionNumericalStability:
             p_curr, p_next = p_pair
             dp = p_next - p_curr
             qs_val = saturation_mixing_ratio(p_curr, parcel_t)
-            from jcm.constants import alhc, cp
+            from jcm.constants import alhc, cpd
             dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs_val) / (
-                cp + alhc**2 * qs_val / (rv * parcel_t**2)
+                cpd + alhc**2 * qs_val / (rv * parcel_t**2)
             )
             return parcel_t + dTdp * dp, parcel_t + dTdp * dp
 

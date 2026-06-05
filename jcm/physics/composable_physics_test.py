@@ -835,7 +835,6 @@ class TestTracerSpec(unittest.TestCase):
     def test_nondimensionalize_flag_round_trip(self):
         """Tracers with nondimensionalize=False must round-trip unchanged through the converters."""
         from dinosaur import primitive_equations
-        from dinosaur.scales import SI_SCALE
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
         from jcm.dycore.dinosaur.state_bridge import (
             dynamics_state_to_physics_state,
@@ -843,7 +842,9 @@ class TestTracerSpec(unittest.TestCase):
         )
 
         coords = get_speedy_coords()
-        specs = primitive_equations.PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+        # Constants-derived specs so coords.radius (sourced from PhysicalConstants
+        # via get_coords) matches physics_specs.radius.
+        from jcm.dycore.dinosaur.dycore import PHYSICS_SPECS as specs
         primitive = primitive_equations.PrimitiveEquations(
             reference_temperature=jnp.ones(coords.nodal_shape[0]) * 288.0,
             orography=jnp.zeros(coords.modal_shape[1:]),

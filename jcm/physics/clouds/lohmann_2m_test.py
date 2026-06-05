@@ -48,7 +48,13 @@ from .lohmann_2m_params import (
     eps,
     clc_min,
 )
-from jcm.constants import rhoh2o, alhs, alhc, t0, rv
+from jcm.constants import rhow, alhs, alhc, rv
+
+# The constants refactor renamed ``t0`` -> ``tmelt`` and ``rhoh2o`` -> ``rhow``
+# in jcm.constants. ``tmelt`` (273.15 K) is already imported above from
+# lohmann_2m_params with the identical value, so the former ``t0`` uses below
+# reference that import rather than re-importing ``tmelt`` from jcm.constants
+# (which would shadow the params import).
 
 
 def _zeros(n: int) -> jnp.ndarray:
@@ -135,7 +141,7 @@ class TestCloudUtils:
         got = minimum_CDNC(pxwat)
 
         if ldyn_cdnc_min:
-            expected = rcd_vol_max ** (-3.0) * (3.0 / (4.0 * pi * rhoh2o)) * pxwat
+            expected = rcd_vol_max ** (-3.0) * (3.0 / (4.0 * pi * rhow)) * pxwat
             expected = jnp.clip(expected, cdnc_min_lower, cdnc_min_upper)
         else:
             expected = jnp.full_like(pxwat, cdnc_min_fixed * 1.0e6)  # cm^-3 -> m^-3
@@ -721,8 +727,8 @@ class TestMixedPhaseDepositionAndCorrections2M:
         p = jnp.full((n,), 40000.0, dtype=jnp.float32)
         rho = jnp.full((n,), 0.45, dtype=jnp.float32)
         T_val = 240.0
-        ztmp_ice = (alhs / rv) * (1.0 / t0 - 1.0 / T_val)
-        ztmp_water = (alhc / rv) * (1.0 / t0 - 1.0 / T_val)
+        ztmp_ice = (alhs / rv) * (1.0 / tmelt - 1.0 / T_val)
+        ztmp_water = (alhc / rv) * (1.0 / tmelt - 1.0 / T_val)
         esi_correct = 611 * jnp.exp(ztmp_ice)
         esw_correct = 611 * jnp.exp(ztmp_water)
         esi = jnp.full((n,), esi_correct, dtype=jnp.float32)

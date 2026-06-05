@@ -17,9 +17,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 from functools import partial
 
-from jcm.constants import (
-    cp, alhc, grav,
-)
+import jcm.constants as c
 from .tiedtke_nordeng import (
     ConvectionParameters, saturation_mixing_ratio
 )
@@ -62,7 +60,7 @@ def wetbulb_temperature(
     def calculate_wetbulb():
         # Simplified: assume wet-bulb is slightly cooler
         # Full version would iterate to find equilibrium
-        cooling = (qs - humidity) * alhc / cp
+        cooling = (qs - humidity) * c.alhc / c.cpd
         twb = temperature - 0.3 * cooling  # Damping factor
         qwb = saturation_mixing_ratio(pressure, twb)
         return twb, qwb
@@ -211,7 +209,7 @@ def downdraft_step(
         # update implicitly through the (pgeoh(k-1)-pgeoh(k))/cp term;
         # we apply it explicitly so the temperature mixing step is just
         # a linear interpolation toward the environment.
-        adiabatic_warming = grav * dz / cp
+        adiabatic_warming = c.grav * dz / c.cpd
         td_desc = prev_td + adiabatic_warming
         qd_desc = prev_qd
 
@@ -260,7 +258,7 @@ def downdraft_step(
             cevapcu * evap_potential * safe_abs_mfd,
             precip,
         )
-        td_new = td_mix - alhc * evap_rate / (cp * safe_abs_mfd)
+        td_new = td_mix - c.alhc * evap_rate / (c.cpd * safe_abs_mfd)
         qd_new = qd_mix + evap_rate / safe_abs_mfd
 
         td_new = jnp.clip(td_new, 100.0, 400.0)

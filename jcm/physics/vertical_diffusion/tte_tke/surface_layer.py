@@ -38,6 +38,7 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
+import jcm.constants as c
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
@@ -69,23 +70,18 @@ def compute_surface_exchange_coefficients_echam_louis(
     Returns CH·|U| and CM·|U| (= sCH, sCM) in m/s, per tile. Caller
     multiplies by ρ to get the flux factor.
     """
-    # Use the ``physical_constants`` instance already exposed on
-    # ``jcm.physics.echam``. Importing via ``jcm.physics.echam`` (whose
-    # ``__init__`` has already loaded the constants subpackage) avoids
-    # the partial-init problem that hits a bare
-    # ``from jcm.physics.echam.constants.physical_constants import …``
-    # under Python 3.11 + pytest-cov when this function is reached via
-    # the echam → parameters → tte_tke chain.
-    from jcm.physics.echam import physical_constants as PHYS_CONST
-
-    Rd = PHYS_CONST.rd
-    cp = PHYS_CONST.cp
-    grav = PHYS_CONST.grav
-    Lv = PHYS_CONST.alhc
-    p0 = PHYS_CONST.p0     # 1.0e5 Pa — same as ECHAM's p0ref
-    rv_over_rd = PHYS_CONST.rv / Rd
-    rd_over_rv = Rd / PHYS_CONST.rv
-    karman = PHYS_CONST.karman_const
+    # Read shared physical constants by attribute access on the
+    # ``jcm.constants`` module so any ``set_constants`` override is
+    # honoured. The local names below (``cp``, ``grav``, …) are purely
+    # local aliases for readability in the formulas that follow.
+    Rd = c.rd
+    cp = c.cpd
+    grav = c.grav
+    Lv = c.alhc
+    p0 = c.p0     # 1.0e5 Pa — same as ECHAM's p0ref
+    rv_over_rd = c.rv / Rd
+    rd_over_rv = Rd / c.rv
+    karman = c.karman_const
     vtmpc1 = rv_over_rd - 1.0   # ≈ 0.608 (q-buoyancy coefficient)
 
     fsl = params.surface_layer_fsl

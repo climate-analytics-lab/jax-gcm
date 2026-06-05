@@ -106,14 +106,14 @@ class TestCuadjtq:
         condensed. ``cp·ΔT + L·Δq`` must be conserved up to the
         linearisation residual (sub-1 % at 50 % supersat).
         """
-        from jcm.constants import cp, alhc
+        from jcm.constants import cpd, alhc
         T = jnp.array(290.0)
         p = jnp.array(80000.0)
         qs, _ = _qsat_and_dqsat_dt(T, p)
         q = 1.5 * qs
         T_adj, q_adj, _cond = cuadjtq(T, q, p, kcall=1)
-        h_before = cp * T + alhc * q
-        h_after = cp * T_adj + alhc * q_adj
+        h_before = cpd * T + alhc * q
+        h_after = cpd * T_adj + alhc * q_adj
         rel_imbalance = float(jnp.abs(h_after - h_before) / h_before)
         assert rel_imbalance < 1e-3, (
             f"moist static energy drift = {rel_imbalance*100:.4f} %"

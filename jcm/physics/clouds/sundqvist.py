@@ -14,9 +14,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
-from jcm.constants import (
-    tmelt, alhc, alhs, cp, eps, rd, grav
-)
+import jcm.constants as c
 
 
 @tree_math.struct
@@ -140,7 +138,7 @@ def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
         Saturation vapor pressure (Pa)
 
     """
-    t_celsius = temperature - tmelt
+    t_celsius = temperature - c.tmelt
     return 610.78 * jnp.exp(17.27 * t_celsius / (t_celsius + 237.3))
 
 
@@ -154,7 +152,7 @@ def saturation_vapor_pressure_ice(temperature: jnp.ndarray) -> jnp.ndarray:
         Saturation vapor pressure (Pa)
 
     """
-    t_celsius = temperature - tmelt
+    t_celsius = temperature - c.tmelt
     return 610.78 * jnp.exp(21.87 * t_celsius / (t_celsius + 265.5))
 
 
@@ -178,13 +176,13 @@ def saturation_specific_humidity(
     
     # Blend between ice and water saturation in mixed phase region
     # Linear interpolation between t_ice and tmelt
-    weight = jnp.clip((temperature - 238.15) / (tmelt - 238.15), 0.0, 1.0)
+    weight = jnp.clip((temperature - 238.15) / (c.tmelt - 238.15), 0.0, 1.0)
     es = weight * es_water + (1.0 - weight) * es_ice
-    
+
     # Convert to saturation specific humidity
     # Cap es < pressure so denominator stays positive under extreme T
     es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - eps), 1.0)
+    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
     return jnp.clip(qs, 0.0, 0.5)
 
 
@@ -228,7 +226,7 @@ def _stratocumulus_zsat(
     # Shape (nlev-1,). Layer thickness assigned to the upper level k.
     log_ratio = jnp.log(p_safe[1:] / p_safe[:-1])  # +ve when going up
     T_avg = 0.5 * (temperature[:-1] + temperature[1:])
-    dz_layer = rd * T_avg / grav * log_ratio       # (nlev-1,), m
+    dz_layer = c.rd * T_avg / c.grav * log_ratio       # (nlev-1,), m
     # height above surface at each full level: 0 at surface, accumulating up
     z_full = jnp.concatenate([
         jnp.cumsum(dz_layer[::-1])[::-1],   # height of each upper-level w.r.t. surface
@@ -256,7 +254,7 @@ def _stratocumulus_zsat(
     # (otherwise the layer is too unstable to sustain stratocumulus).
     # Use the SAME ``-cinv*g/cp`` initial value ECHAM seeds ``zdtmin``
     # with, so any ``dTdz_clipped > -cinv*g/cp`` qualifies.
-    dtdz_threshold = -config.cinv * grav / cp
+    dtdz_threshold = -config.cinv * c.grav / c.cpd
     in_bl = (z_full >= config.inversion_z_min) & (z_full <= config.inversion_z_max)
     valid = in_bl & (dTdz_clipped > dtdz_threshold)
     # Set invalid levels to a strongly-negative sentinel so argmax skips them.
@@ -269,7 +267,7 @@ def _stratocumulus_zsat(
     # → zsat = csatsc (full enhancement). At a "stable but not inverted"
     # layer (zdtdz slightly negative), zgam > 0 → zsat = csatsc + zgam,
     # weakening the enhancement until ``zsat = 1`` and it has no effect.
-    zgam_at_knvb = jnp.maximum(-dTdz_clipped[knvb] * cp / grav, 0.0)
+    zgam_at_knvb = jnp.maximum(-dTdz_clipped[knvb] * c.cpd / c.grav, 0.0)
     zsat_value = jnp.where(
         has_inversion,
         jnp.minimum(1.0, config.csatsc + zgam_at_knvb),
@@ -401,19 +399,19 @@ def _qs_and_dqs_dt(
     """
     es_water = saturation_vapor_pressure_water(temperature)
     es_ice = saturation_vapor_pressure_ice(temperature)
-    weight = jnp.clip((temperature - 238.15) / (tmelt - 238.15), 0.0, 1.0)
+    weight = jnp.clip((temperature - 238.15) / (c.tmelt - 238.15), 0.0, 1.0)
     es = weight * es_water + (1.0 - weight) * es_ice
 
     p_safe = jnp.maximum(pressure, 1.0)
     es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - eps), 1.0)
-    qs = eps * es_safe / denom
+    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
+    qs = c.eps * es_safe / denom
 
     # Tetens d(es)/dT — same coefficients used in
     # ``saturation_vapor_pressure_water`` / ``..._ice``.
     a_water, c_water = 17.27, 237.3
     a_ice, c_ice = 21.875, 265.5
-    tc = temperature - tmelt
+    tc = temperature - c.tmelt
     des_dt_water = es_water * a_water * c_water / jnp.maximum(
         (tc + c_water) ** 2, 1e-3,
     )
@@ -421,7 +419,7 @@ def _qs_and_dqs_dt(
         (tc + c_ice) ** 2, 1e-3,
     )
     des_dt = weight * des_dt_water + (1.0 - weight) * des_dt_ice
-    dqs_dt = eps * p_safe * des_dt / denom ** 2
+    dqs_dt = c.eps * p_safe * des_dt / denom ** 2
     return qs, dqs_dt
 
 
@@ -486,8 +484,8 @@ def condensation_evaporation(
         / (config.t_mix_max - config.t_mix_min),
         0.0, 1.0,
     )
-    L_eff = weight_liquid * alhc + (1.0 - weight_liquid) * alhs
-    L_cp = L_eff / cp
+    L_eff = weight_liquid * c.alhc + (1.0 - weight_liquid) * c.alhs
+    L_cp = L_eff / c.cpd
 
     # ---- Pass 1: linearised Newton step ---------------------------------
     # ECHAM's ``cuadjtq`` and ``mo_cloud`` lines 776-779 (``zqcon``).
@@ -532,7 +530,7 @@ def condensation_evaporation(
     qi_frac = jnp.where(total_cloud > 0, cloud_ice / safe_total, 0.0)
     L_evap = jnp.where(
         total_cloud > 0,
-        (cloud_water * alhc + cloud_ice * alhs) / safe_total,
+        (cloud_water * c.alhc + cloud_ice * c.alhs) / safe_total,
         L_eff,                                    # fallback (unused)
     )
 
@@ -550,7 +548,7 @@ def condensation_evaporation(
     # Temperature tendency. Latent heat uses the same mixed-phase L the
     # Newton step used so the moist static energy budget is consistent.
     L_for_dT = jnp.where(cond_total > 0, L_eff, L_evap)
-    dtedt = L_for_dT * cond_total / (cp * dt)
+    dtedt = L_for_dT * cond_total / (c.cpd * dt)
 
     return dtedt, dqdt, dqcdt, dqidt
 

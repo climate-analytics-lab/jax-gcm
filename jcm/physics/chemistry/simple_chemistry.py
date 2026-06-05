@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple
 import tree_math
 
-from jcm.constants import grav, rd
+import jcm.constants as c
 
 
 @tree_math.struct
@@ -156,7 +156,7 @@ def compute_height_from_pressure(
     temp_mean = jnp.mean(temperature, axis=0, keepdims=True)
     
     # Scale height H = R*T/g
-    scale_height = rd * temp_mean / grav
+    scale_height = c.rd * temp_mean / c.grav
     
     # Height from hydrostatic equation: h = H * ln(p_sfc/p)
     height = scale_height * jnp.log(surface_pressure[None, :] / pressure)

@@ -11,6 +11,8 @@ import numpy as np
 from math import pi
 import tree_math
 
+from jcm import constants as c
+
 @tree_math.struct
 class CloudParams2M: #(NamedTuple):
     """Cloud parameters for ECHAM6/ICON 2-m microphysical scheme"""
@@ -155,9 +157,9 @@ class CloudParams2M: #(NamedTuple):
     @classmethod
     def default(
         cls,
-        tmelt: float = 273.15,
-        grav: float = 9.81,
-        cthomi: float = 273.15 - 35.0,
+        tmelt: float = c.tmelt,
+        grav: float = c.grav,
+        cthomi: float = c.tmelt - 35.0,
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,

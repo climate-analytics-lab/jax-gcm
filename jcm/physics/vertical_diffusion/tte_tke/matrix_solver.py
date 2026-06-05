@@ -7,13 +7,10 @@ vertical diffusion scheme, following the downward sweep/upward sweep approach.
 import jax
 import jax.numpy as jnp
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -86,7 +83,7 @@ def setup_matrix_system(
     # We use pressure and virtual temperature at half levels (average of adjacent full levels)
     p_half = 0.5 * (state.pressure_full[:, :-1] + state.pressure_full[:, 1:])  # (ncol, nlev-1)
     t_half = 0.5 * (state.temperature[:, :-1] + state.temperature[:, 1:])  # Use T as proxy for Tv
-    prefactor_half = p_half / (PHYS_CONST.rd * t_half * dz_half)  # (ncol, nlev-1)
+    prefactor_half = p_half / (c.rd * t_half * dz_half)  # (ncol, nlev-1)
 
     # Time step factor
     dt_factor = dt * params.tpfac1
@@ -549,7 +546,7 @@ def compute_tendencies_from_solution(
     thv_var_tend = (thv_var_new - state.thv_variance) / dt
 
     # Convert temperature tendency to heating rate
-    heating_rate = t_tend * state.air_mass * PHYS_CONST.cp
+    heating_rate = t_tend * state.air_mass * c.cpd
 
     return VDiffTendencies(
         u_tendency=u_tend,

@@ -8,7 +8,10 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import p0, cp, alhc, grav
+import jcm.constants as c
+# alhc is SPEEDY's latent heat in J/g (q is in g/kg). cpd, p0, grav are shared
+# and read as module attributes from jcm.constants.
+from jcm.physics.speedy.physical_constants import alhc
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -45,8 +48,8 @@ def get_large_scale_condensation_tendencies(
     qsmax = 10.0
 
     rtlsc = 1.0 / (parameters.condensation.trlsc * 3600.0)
-    tfact = alhc / cp
-    prg = p0 / grav
+    tfact = alhc / c.cpd
+    prg = c.p0 / c.grav
 
     psa2 = state.normalized_surface_pressure ** 2.0
 

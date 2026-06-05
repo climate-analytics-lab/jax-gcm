@@ -23,7 +23,8 @@ from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import State
 from dinosaur.scales import SI_SCALE, units
 
-from jcm.constants import p0
+import jcm.constants as jcm_constants
+from jcm.constants import PhysicalConstants
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.state_bridge import (
@@ -35,7 +36,35 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
 
-PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+def physics_specs_from_constants(
+    constants: PhysicalConstants,
+) -> primitive_equations.PrimitiveEquationsSpecs:
+    """Build dinosaur's nondimensionalisation/equation constants from ``constants``.
+
+    This is the single bridge that makes the dynamical core honour the same
+    :class:`~jcm.constants.PhysicalConstants` as the physics, instead of
+    dinosaur's own defaults. ``Cp`` is derived inside dinosaur as ``R/kappa``,
+    so passing ``rd`` (= ``akap·cpd``) and ``akap`` reproduces ``cpd`` exactly.
+    """
+    return primitive_equations.PrimitiveEquationsSpecs.from_si(
+        radius_si=constants.rearth * units.meter,
+        angular_velocity_si=constants.omega / units.second,
+        gravity_acceleration_si=constants.grav * units.meter / units.second**2,
+        ideal_gas_constant_si=constants.rd * units.joule / units.kilogram / units.kelvin,
+        water_vapor_gas_constant_si=constants.rv * units.joule / units.kilogram / units.kelvin,
+        water_vapor_isobaric_heat_capacity_si=(
+            constants.cpv * units.joule / units.kilogram / units.kelvin
+        ),
+        kappa_si=constants.akap * units.dimensionless,
+        scale=SI_SCALE,
+    )
+
+
+# Default specs, built from the default (shared) PhysicalConstants so the
+# dynamical core and physics agree on values out of the box. Consumers that
+# need a fixed module-level handle (e.g. Held-Suarez) reference this; the
+# dycore itself rebuilds per-instance from its injected ``constants``.
+PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 
 class DinosaurDycore(DynamicalCore):
@@ -62,6 +91,7 @@ class DinosaurDycore(DynamicalCore):
         terrain: TerrainData,
         dt_seconds: float,
         *,
+        constants: PhysicalConstants | None = None,
         tracer_specs: Mapping[str, Any] | None = None,
         diffusion: DiffusionFilter | None = None,
     ):
@@ -72,8 +102,14 @@ class DinosaurDycore(DynamicalCore):
         self.diffusion = diffusion or DiffusionFilter.default()
         self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
 
+        # Physical constants drive both nondimensionalisation and the primitive
+        # equations. Default to the *live* module singleton (read here at
+        # construction time) so a prior jcm.constants.set_constants(...) is
+        # honoured; an explicit ``constants`` argument overrides that.
+        self.constants = constants if constants is not None else jcm_constants.physical_constants
+
         # Nondimensional timestep used throughout the dinosaur path.
-        self._physics_specs = PHYSICS_SPECS
+        self._physics_specs = physics_specs_from_constants(self.constants)
         self._dt_si = (self.dt_seconds * units.second).to(units.second)
         self._dt = self._physics_specs.nondimensionalize(self._dt_si)
 
@@ -84,8 +120,8 @@ class DinosaurDycore(DynamicalCore):
         self._default_state_fn, aux_features = primitive_equations_states.isothermal_rest_atmosphere(
             coords=self.coords,
             physics_specs=self._physics_specs,
-            p0=p0 * units.pascal,
-            p1=0.01 * p0 * units.pascal,
+            p0=self.constants.p0 * units.pascal,
+            p1=0.01 * self.constants.p0 * units.pascal,
         )
 
         # Orography is truncated against the spectral basis here — the SE
@@ -269,7 +305,7 @@ class DinosaurDycore(DynamicalCore):
             if not isinstance(self.coords.vertical, HybridCoordinates):
                 state.log_surface_pressure = self.coords.horizontal.to_modal(
                     self.coords.horizontal.to_nodal(state.log_surface_pressure)
-                    - jnp.log(self._physics_specs.nondimensionalize(p0 * units.pascal))
+                    - jnp.log(self._physics_specs.nondimensionalize(self.constants.p0 * units.pascal))
                 )
             state.tracers = {
                 'specific_humidity': 0.0 * primitive_equations_states.gaussian_scalar(

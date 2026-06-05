@@ -9,9 +9,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
 from .surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
+    SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics
 )
 from .turbulent_fluxes import (
@@ -21,9 +20,6 @@ from .turbulent_fluxes import (
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 def initialize_surface_state(
@@ -577,7 +573,7 @@ class EchamSurface(PhysicsTerm):
 
         temp_tend_sfc = (
             imp_heat * sensible_heat
-            / (rho_sfc * _physical_constants.cp * dz_sfc)
+            / (rho_sfc * _physical_constants.cpd * dz_sfc)
         )
         qv_tend_sfc = imp_moist * evaporation / (rho_sfc * dz_sfc)
         u_tend_sfc = imp_mom * (-tau_u) / (rho_sfc * dz_sfc)

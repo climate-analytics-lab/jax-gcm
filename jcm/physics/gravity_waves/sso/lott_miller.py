@@ -85,7 +85,7 @@ import jax.numpy as jnp
 from jax import lax
 import tree_math
 
-from jcm.constants import grav, rd, cpd
+import jcm.constants as c
 
 # Tunable thresholds taken straight from the ECHAM ``mo_echam_sso_config``
 # PARAMETER block. They protect the algorithm from degenerate inputs
@@ -306,10 +306,10 @@ def _orosetup(
     # loop — they are handled separately (initialised to 0 / 9999, etc.).
     h_idx = jnp.arange(1, nlev)
     zdp_half = papm1[h_idx] - papm1[h_idx - 1]         # (nlev-1,)
-    rho_half = (2.0 * paphm1[h_idx] / rd
+    rho_half = (2.0 * paphm1[h_idx] / c.rd
                 / (ptm1[h_idx] + ptm1[h_idx - 1]))
-    stab_half = (2.0 * grav ** 2 / cpd / (ptm1[h_idx] + ptm1[h_idx - 1])
-                 * (1.0 - cpd * rho_half * (ptm1[h_idx] - ptm1[h_idx - 1])
+    stab_half = (2.0 * c.grav ** 2 / c.cpd / (ptm1[h_idx] + ptm1[h_idx - 1])
+                 * (1.0 - c.cpd * rho_half * (ptm1[h_idx] - ptm1[h_idx - 1])
                     / zdp_half))
     stab_half = jnp.maximum(stab_half, _MIN_BV_FREQ)
     # Pad to length nlev+1 with the surface and top initial values.
@@ -400,7 +400,7 @@ def _orosetup(
 
     # ----- Richardson number at half levels (lines 866-879) -----------------
     zdwind = jnp.maximum(jnp.abs(zvpf[h] - zvpf[h - 1]), _MIN_LOW_LEVEL_WIND)
-    pri_int = pstab[1:nlev] * (zdp[1:nlev] / (grav * prho[1:nlev] * zdwind)) ** 2
+    pri_int = pstab[1:nlev] * (zdp[1:nlev] / (c.grav * prho[1:nlev] * zdwind)) ** 2
     pri_int = jnp.maximum(pri_int, _CRITICAL_RICHARDSON)
     pri = jnp.concatenate([jnp.zeros(1), pri_int, jnp.array([9999.0])])
 

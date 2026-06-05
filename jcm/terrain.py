@@ -5,7 +5,9 @@ Date: 2026-01-26
 import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
-from jcm.constants import grav
+# Attribute access (not ``from ... import grav``) so a jcm.constants.set_constants
+# override is honoured at call time rather than captured at import.
+import jcm.constants as _constants
 from jcm.utils import VALID_NODAL_SHAPES, VALID_TRUNCATIONS, validate_ds, spectral_truncation
 
 
@@ -365,7 +367,7 @@ class TerrainData:
         elif lfluxland is None:
             lfluxland = False
 
-        phi0 = grav * orog
+        phi0 = _constants.grav * orog
         phis0 = spectral_truncation(coords.horizontal, phi0)
 
         # Resolve SSO descriptors. Order of precedence:
@@ -444,7 +446,7 @@ class TerrainData:
                 f"Terrain shape {orography.shape} does not match coords "
                 f"horizontal shape {target_shape}"
             )
-        phi0 = grav * orography
+        phi0 = _constants.grav * orography
         if orog_envelope_wavenumber is not None:
             # Envelope orography: low-pass filter the orographic geopotential
             # to a lower spectral wavenumber than the model truncation, to
@@ -523,7 +525,7 @@ class TerrainData:
 
         """
         if phis0 is None:
-            phis0 = grav * orog
+            phis0 = _constants.grav * orog
 
         orog_arr = jnp.array([[orog]])
         sso_derived = get_simplified_sso_descriptors(orog_arr)

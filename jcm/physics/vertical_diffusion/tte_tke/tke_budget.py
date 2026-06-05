@@ -18,11 +18,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .vertical_diffusion_types import VDiffState, VDiffParameters
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -76,7 +73,7 @@ def compute_buoyancy_production(
     temperature: jnp.ndarray,
     dz: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    gravity: float = PHYS_CONST.grav
+    gravity: float = c.grav
 ) -> jnp.ndarray:
     """Compute buoyancy production term in TKE budget.
     
@@ -106,7 +103,7 @@ def compute_buoyancy_production(
     
     # Buoyancy production: P_b = -K_h * (g/T) * (dT/dz + g/cp)
     # Note: The dry adiabatic lapse rate g/cp is included for stability
-    lapse_rate = gravity / PHYS_CONST.cp
+    lapse_rate = gravity / c.cpd
     buoyancy_freq = (gravity / temp_avg) * (dt_dz_extended + lapse_rate)
     
     # Buoyancy production (negative for stable stratification)

@@ -442,6 +442,49 @@ The model output is a :py:class:`Predictions` object containing the model state 
        ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
    ).mean(dim=['lon', 'lat'])
 
+Overriding physical constants
+-----------------------------
+
+All shared physical constants live in a single source of truth,
+:class:`jcm.constants.PhysicalConstants`, exposed as a process-global singleton.
+Each quantity has exactly one canonical name (e.g. dry-air specific heat is
+``cpd``, the dry-air gas constant ``rd``, the melting point ``tmelt``).
+*Derived* quantities (``rd = akap·cpd``, ``cvd``, ``rgrav``, the ``vtmpc*``
+coefficients) are computed on access, so they always stay consistent with the
+base values.
+
+To run with non-default constants — say for a different planet or a sensitivity
+study — call :func:`jcm.constants.set_constants` **before constructing the
+model**. Only *base* fields are set; derived constants follow automatically, and
+both the dynamical core and the physics pick up the override:
+
+.. code-block:: python
+
+   import jcm.constants as c
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+   # Override base constants (derived values recompute automatically)
+   c.set_constants(grav=9.80665, rearth=6.371229e6, cpd=1005.0)
+   assert c.rd == c.akap * c.cpd     # derived value follows
+
+   coords = get_speedy_coords(layers=8, spectral_truncation=31)
+   model = Model(coords=coords)       # honours the override
+
+From the CLI, use the ``constants`` config group (applied before the model is
+built):
+
+.. code-block:: bash
+
+   python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
+
+.. note::
+
+   The override is **process-global** and must be set *before* the model is
+   constructed. Read constants by attribute access (``import jcm.constants as
+   c; c.grav``) — a ``from jcm.constants import grav`` captures the value at
+   import time and will not track later overrides.
+
 Next Steps
 ----------
 

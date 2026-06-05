@@ -616,6 +616,17 @@ def run(cfg: DictConfig, model: Model | None = None):
       ``cfg.run.column.{lat_deg,lon_deg}``, and run :class:`SingleColumnModel`
       for tracer evolution at that column.
     """
+    # Apply any physical-constant overrides BEFORE the model is built, so the
+    # dynamical core (which reads the live jcm.constants singleton at
+    # construction) and the attribute-access physics both pick them up. Only base
+    # fields may be set; derived constants (rd, cvd, rgrav, vtmpc*) follow.
+    constants_overrides = cfg.get("constants", None)
+    if constants_overrides:
+        import jcm.constants as _jcm_constants
+        _jcm_constants.set_constants(
+            **{k: float(v) for k, v in dict(constants_overrides).items()}
+        )
+
     mode = cfg.run.get("mode", "full")
     if mode == "full":
         return _run_full(cfg, model)

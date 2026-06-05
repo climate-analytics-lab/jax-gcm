@@ -13,14 +13,11 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -156,12 +153,12 @@ def sea_ice_physics_step(
 
     # Air density
     air_density = (atmospheric_state.pressure /
-                  (PHYS_CONST.rd * atmospheric_state.temperature))
+                  (c.rd * atmospheric_state.temperature))
 
     # Surface saturation humidity
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - PHYS_CONST.t0) /
-                           (surface_temp - PHYS_CONST.t0 + 237.3))
-    q_sat_surface = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
+    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - c.tmelt) /
+                           (surface_temp - c.tmelt + 237.3))
+    q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
 
     # Temperature and humidity differences. Positive convention: flux UP
     # from surface into the atmosphere when the surface is warmer / wetter
@@ -170,8 +167,8 @@ def sea_ice_physics_step(
     delta_humidity = q_sat_surface - atmospheric_state.humidity
 
     # Turbulent fluxes (latent uses ``alhs`` for sublimation over ice)
-    sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
-    latent_heat = air_density * PHYS_CONST.alhs * exchange_coeff_moisture * delta_humidity
+    sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp
+    latent_heat = air_density * c.alhs * exchange_coeff_moisture * delta_humidity
 
     # Momentum fluxes
     momentum_u = air_density * exchange_coeff_momentum * atmospheric_state.u_wind

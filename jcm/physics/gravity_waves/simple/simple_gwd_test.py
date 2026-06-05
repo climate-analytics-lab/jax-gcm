@@ -9,7 +9,7 @@ from .simple_gwd import (
     SimpleGwdParameters, brunt_vaisala_frequency, orographic_source, wave_breaking_criterion,
     simple_gwd
 )
-from jcm.constants import grav, cp, rd
+from jcm.constants import grav, cpd, rd
 
 
 def test_simple_gwd_smoke():
@@ -64,7 +64,7 @@ class TestBruntVaisalaFrequency:
         n2 = brunt_vaisala_frequency(temperature, pressure, height)
         
         # Isothermal atmosphere has N² = g²/cp/T
-        expected = grav**2 / (cp * 273.0)
+        expected = grav**2 / (cpd * 273.0)
         
         # Should be approximately constant
         assert jnp.std(n2[1:-1]) / jnp.mean(n2[1:-1]) < 0.1
@@ -328,7 +328,7 @@ class TestGravityWaveDrag:
         
         # Temperature tendency from dissipation
         # dT/dt = -dKE/dt / cp
-        expected_heating = -ke_loss / cp
+        expected_heating = -ke_loss / cpd
         
         # Should match where there are tendencies
         mask = jnp.abs(ke_loss) > 1e-10

@@ -3,7 +3,10 @@ from jax import jit
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physical_constants import cp, alhc
+import jcm.constants as c
+# alhc is SPEEDY's latent heat in J/g (q is in g/kg) — a SPEEDY-specific value.
+# cpd is shared and read as a module attribute from jcm.constants.
+from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -47,10 +50,10 @@ def get_vertical_diffusion_tend(
     cvdi = (physics_data.speedy_coords.hsg[nl1] - physics_data.speedy_coords.hsg[1]) / ((nl1 - 1) * 3600.0)
     
     fshcq = cshc / parameters.vertical_diffusion.trshc
-    fshcse = cshc / (parameters.vertical_diffusion.trshc * cp)
+    fshcse = cshc / (parameters.vertical_diffusion.trshc * c.cpd)
     
     fvdiq = cvdi / parameters.vertical_diffusion.trvdi
-    fvdise = cvdi / (parameters.vertical_diffusion.trvds * cp)
+    fvdise = cvdi / (parameters.vertical_diffusion.trvds * c.cpd)
 
     rsig = 1.0 / physics_data.speedy_coords.dhs
     rsig1 = jnp.zeros((kx,)).at[:-1].set(1.0 / (1.0 - physics_data.speedy_coords.hsg[1:-1]))

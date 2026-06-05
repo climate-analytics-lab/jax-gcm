@@ -41,7 +41,7 @@ from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice,
 )
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 
 import rrtmgp
 from rrtmgp.config import radiative_transfer
@@ -251,8 +251,7 @@ def prepare_rrtmgp_data(
     to3d_nan = lambda a: _to_3d_with_nan_halo(a, nlev, halo)  # noqa: E731
     to3d_fill = lambda a: _to_3d_with_filled_halo(a, nlev, halo)  # noqa: E731
 
-    phys = PhysicalConstants()
-    rho = icon_data.pressure / (phys.rgas * icon_data.temperature)
+    rho = icon_data.pressure / (c.rd * icon_data.temperature)
 
     # Vertical ordering: ICON is TOA->surface, RRTMGP expects surface->TOA
     needs_reversal = _reverse_if_needed(icon_data.pressure)
@@ -279,7 +278,7 @@ def prepare_rrtmgp_data(
     total_condensate = cloud_water_mixing + cloud_ice_mixing
 
     # Water vapour VMR -> mass mixing ratio: q = VMR * eps
-    h2o_mass_mixing = icon_data.h2o_vmr * phys.eps
+    h2o_mass_mixing = icon_data.h2o_vmr * c.eps
     h2o_mass_mixing = lax.cond(needs_reversal, flip, identity, h2o_mass_mixing)
     total_water = h2o_mass_mixing + total_condensate
 
