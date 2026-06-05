@@ -85,6 +85,10 @@ class SlinnDryDeposition(PhysicsTerm):
         rho_sfc = air_density[-1]
         dz_sfc = dz[-1]
 
+        # ``state.tracers`` is empty during ``Model.get_empty_data``'s
+        # structural probe; fall back to zeros there (real runs have every
+        # declared tracer seeded).
+        zeros = jnp.zeros_like(state.temperature)
         tracer_tends: dict[str, jnp.ndarray] = {}
         for i, mode in enumerate(self._spec.modes):
             r_sfc = aer.r_wet[i, -1]
@@ -99,7 +103,7 @@ class SlinnDryDeposition(PhysicsTerm):
                 mass_name(sp, mode.short) for sp in mode.species
             ]
             for nm in names:
-                q = state.tracers[nm]
+                q = state.tracers.get(nm, zeros)
                 tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(
                     -loss_rate * q[-1]
                 )

@@ -115,7 +115,10 @@ class StokesSedimentation(PhysicsTerm):
         # Gather every interstitial tracer to settle and the (per-mode)
         # settling velocity that transports it, then run the donor-cell
         # transport once over the whole stack so XLA batches it (rather than
-        # emitting an unrolled op per tracer).
+        # emitting an unrolled op per tracer). ``state.tracers`` is empty
+        # during ``Model.get_empty_data``'s structural probe, so fall back to
+        # zeros there (real runs have every declared tracer seeded).
+        zeros = jnp.zeros_like(state.temperature)
         names: list[str] = []
         q_list: list[jnp.ndarray] = []
         v_list: list[jnp.ndarray] = []
@@ -129,7 +132,7 @@ class StokesSedimentation(PhysicsTerm):
                 mass_name(sp, mode.short) for sp in mode.species
             ]:
                 names.append(nm)
-                q_list.append(state.tracers[nm])
+                q_list.append(state.tracers.get(nm, zeros))
                 v_list.append(v)
 
         q_stack = jnp.stack(q_list)            # (K, nlev, ncols)

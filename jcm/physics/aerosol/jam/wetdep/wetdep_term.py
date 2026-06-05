@@ -138,7 +138,10 @@ class WetScavenging(PhysicsTerm):
 
         # Build a per-tracer scavenging rate and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
-        # than an unrolled tendency per mode×species).
+        # than an unrolled tendency per mode×species). ``state.tracers`` is
+        # empty during ``Model.get_empty_data``'s structural probe, so fall
+        # back to zeros there (real runs have every declared tracer seeded).
+        zeros = jnp.zeros_like(state.temperature)
         names: list[str] = []
         q_list: list[jnp.ndarray] = []
         rate_list: list[jnp.ndarray] = []
@@ -152,7 +155,7 @@ class WetScavenging(PhysicsTerm):
                 mass_name(sp, mode.short) for sp in mode.species
             ]:
                 names.append(nm)
-                q_list.append(state.tracers[nm])
+                q_list.append(state.tracers.get(nm, zeros))
                 rate_list.append(rate)
 
         dq_stack = -jnp.stack(rate_list) * jnp.stack(q_list)
