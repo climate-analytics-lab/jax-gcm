@@ -9,10 +9,19 @@ class JamFactoryTest(unittest.TestCase):
 
         terms = jam_aerosol_physics()
         cats = [t.category for t in terms]
+        names = [t.name for t in terms]
+        # Three natural-emission scheme terms, then the core + processes.
         self.assertEqual(
-            cats,
+            names[:3],
             [
-                "aerosol_emissions",
+                "jam_seasalt_emissions",
+                "jam_dms_emissions",
+                "jam_dust_emissions",
+            ],
+        )
+        self.assertEqual(
+            cats[3:],
+            [
                 "aerosol_microphysics",
                 "aerosol_activation",
                 "aerosol_sedimentation",
@@ -20,6 +29,7 @@ class JamFactoryTest(unittest.TestCase):
                 "aerosol_wetdep",
             ],
         )
+        self.assertTrue(all(c == "aerosol_emissions" for c in cats[:3]))
 
     def test_activation_precedes_deposition(self):
         # wetdep requires activated_fraction, so ARG must come first.

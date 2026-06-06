@@ -19,9 +19,11 @@ from jcm.physics.aerosol.jam.drydep.drydep_term import (
     DryDepParameters,
     SlinnDryDeposition,
 )
-from jcm.physics.aerosol.jam.emissions.emissions_term import (
-    EmissionParameters,
-    JamEmissions,
+from jcm.physics.aerosol.jam.emissions.dms import DmsEmissions, DmsParameters
+from jcm.physics.aerosol.jam.emissions.dust import DustEmissions, DustParameters
+from jcm.physics.aerosol.jam.emissions.seasalt import (
+    SeaSaltEmissions,
+    SeaSaltParameters,
 )
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
@@ -61,7 +63,9 @@ def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
     arg_variant: str = "arg2000",
-    emissions: EmissionParameters | None = None,
+    seasalt: SeaSaltParameters | None = None,
+    dms: DmsParameters | None = None,
+    dust: DustParameters | None = None,
     activation: ArgParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
@@ -73,18 +77,23 @@ def jam_aerosol_physics(
         microphysics: the swappable core — ``"placeholder"`` or a
             ``ModalMicrophysicsTerm`` instance.
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
-        emissions/activation/sedimentation/drydep/wetdep: optional per-process
+        seasalt/dms/dust: optional ``Parameters`` overrides for the natural
+            emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
+        activation/sedimentation/drydep/wetdep: optional per-process
             ``Parameters`` overrides (each ``None`` resolves to its default).
 
     Returns:
-        ``[JamEmissions, <core>, ArgActivation, StokesSedimentation,
-        SlinnDryDeposition, WetScavenging]``.
+        ``[SeaSaltEmissions, DmsEmissions, DustEmissions, <core>,
+        ArgActivation, StokesSedimentation, SlinnDryDeposition,
+        WetScavenging]``.
 
     """
     core = _resolve_microphysics(microphysics)
     spec = core.spec
     return [
-        JamEmissions(params=emissions, spec=spec),
+        SeaSaltEmissions(params=seasalt, spec=spec),
+        DmsEmissions(params=dms, spec=spec),
+        DustEmissions(params=dust, spec=spec),
         core,
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
         StokesSedimentation(params=sedimentation, spec=spec),

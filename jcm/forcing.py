@@ -230,6 +230,13 @@ class ForcingData:
     # the physics path. Default ``None`` for runs without nudging.
     nudging_target: Any = None
 
+    # Prescribed natural-aerosol emission surface fields (or TimeSeries
+    # thereof), read from the forcing file when present and ``None`` otherwise
+    # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
+    # dust emission is simply inert until the field is supplied.
+    dms_seawater: Any = None   # seawater DMS concentration (DmsEmissions)
+    dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -429,7 +436,9 @@ class ForcingData:
              solar=None,
              ozone_climatology=None,
              ch4_vmr=None,
-             nudging_target=_UNSET):
+             nudging_target=_UNSET,
+             dms_seawater=None,
+             dust_source=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -454,6 +463,8 @@ class ForcingData:
                 nudging_target if nudging_target is not _UNSET
                 else self.nudging_target
             ),
+            dms_seawater=dms_seawater if dms_seawater is not None else self.dms_seawater,
+            dust_source=dust_source if dust_source is not None else self.dust_source,
         )
 
     def isnan(self):
