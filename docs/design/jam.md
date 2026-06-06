@@ -48,11 +48,15 @@ ARG variant) is a compose-time Python decision with no traced branching.
 
 `jam_aerosol_physics()` returns the ordered list:
 
-1. `JamEmissions` — sea salt / dust / DMS / volcanic / biogenic sources →
-   lowest-layer tracer tendencies. Emission is computed in gridpoint (nodal)
-   space; the split of a source's mass into aerosol classes belongs to the
-   microphysics core's population, so the harness works with any dycore (no
-   modal representation is assumed on the dynamics side).
+1. Natural-emission scheme terms — `SeaSaltEmissions` (Gong 2003),
+   `DmsEmissions` (Nightingale 2000), `DustEmissions` (Tegen et al. 2002) —
+   each a faithful port with calibratable `Parameters`, producing lowest-layer
+   tracer tendencies. Emission is computed in gridpoint (nodal) space; the
+   split of a source's mass into aerosol classes belongs to the microphysics
+   core's population, so the harness works with any dycore (no modal
+   representation is assumed on the dynamics side). DMS reads a prescribed
+   seawater field and dust a prescribed source field from `ForcingData`
+   (zero fallback). Prescribed anthropogenic (CEDS) emissions are #498.
 2. microphysics core (`PlaceholderMicrophysics`) — writes `_jam_state`.
 3. `ArgActivation` — Abdul-Razzak & Ghan (2000); writes `activated_cdnc`
    (the same key the 2M SPA floor produces, so ARG and SPA are
