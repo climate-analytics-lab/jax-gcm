@@ -790,9 +790,19 @@ orchestrator:
    # Remove non-orographic Hines gravity-wave drag
    physics = echam_physics().remove("hines")
 
-   # Replace a single term
-   from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
-   physics = echam_physics().replace("radiation", RRTMGPRadiation())
+   # Replace a single term with a separately configured instance
+   from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+       ConvectionParameters,
+       TiedtkeConvection,
+   )
+   convection = TiedtkeConvection(
+       params=ConvectionParameters.default(tau=10800.0),
+   )
+   physics = echam_physics().replace("convection", convection)
+
+When replacing a wavelength-dependent radiation backend, the enclosing
+``ComposablePhysics.band_config`` must also be configured for that backend.
+The RRTMGP Hydra configurations perform this setup automatically.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,

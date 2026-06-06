@@ -176,15 +176,16 @@ category into the single replacement, inserted at the position of the
 first one — so you can swap an entire process category in one call:
 
 ```python
-# ECHAM with RRTMGP radiation
-physics = echam_physics().replace("radiation", RRTMGPRadiation())
-
 # ECHAM with a custom convection scheme
 physics = echam_physics().replace("convection", MyConvection())
 
 # Strip clouds entirely, then add Rayleigh damping
 physics = echam_physics().remove("clouds") + RayleighDamping()
 ```
+
+Replacing a wavelength-dependent radiation backend also requires updating the
+enclosing composition's `band_config` to match that backend. The RRTMGP Hydra
+configurations perform this setup automatically.
 
 When users compose from scratch (`term_a + term_b + term_c`), they
 accept responsibility for ordering correctness — `_validate_ordering`

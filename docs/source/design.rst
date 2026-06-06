@@ -78,8 +78,9 @@ automatically. Expert callers can construct and pass a backend explicitly:
 
 The v2.0 Hydra CLI currently constructs the Dinosaur backend explicitly;
 selecting a different registered backend is a Python-API workflow. When
-constructing a backend explicitly, its ``dt_seconds`` must match the
-``Model(time_step=...)`` value.
+constructing a backend explicitly, its ``dt_seconds`` and
+``Model(time_step=...)`` (minutes) must represent the same duration after unit
+conversion.
 
 The Physics Interface
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -182,7 +183,10 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
 
    from jcm.physics.speedy.speedy_terms import speedy_physics
    from jcm.physics.echam.echam_terms import echam_physics
-   from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+   from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+       ConvectionParameters,
+       TiedtkeConvection,
+   )
 
    # Use pre-built SPEEDY defaults
    physics = speedy_physics()
@@ -190,8 +194,11 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
    # Use ECHAM with the NN radiation emulator
    physics = echam_physics(radiation_scheme="emulated")
 
-   # Replace ECHAM radiation with the RRTMGP backend
-   physics = echam_physics().replace("radiation", RRTMGPRadiation())
+   # Replace one term with a separately configured instance
+   convection = TiedtkeConvection(
+       params=ConvectionParameters.default(tau=10800.0),
+   )
+   physics = echam_physics().replace("convection", convection)
 
    # Remove a term
    physics = echam_physics().remove("hines")

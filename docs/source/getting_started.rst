@@ -182,7 +182,8 @@ You can customize various aspects of the model:
 configuration. ``Model(coords=...)`` remains the shorthand for constructing
 the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
 uses Dinosaur; explicit backend selection is currently a Python-API workflow.
-Keep the backend's ``dt_seconds`` equal to ``Model(time_step=...)``.
+The backend's ``dt_seconds`` and ``Model(time_step=...)`` (minutes) must
+represent the same duration after unit conversion.
 
 .. code-block:: python
 
