@@ -14,7 +14,8 @@ from dinosaur import coordinate_systems
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
-from jcm.dycore.dinosaur.dycore import PHYSICS_SPECS
+import jcm.constants as jcm_constants
+from jcm.dycore.dinosaur.dycore import physics_specs_from_constants
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.composable_physics import ComposablePhysics
 
@@ -24,8 +25,10 @@ Quantity = units.Quantity
 class HeldSuarez(PhysicsTerm):
     """Held-Suarez (1994) Newtonian relaxation + Rayleigh friction.
 
-    All parameters use SI Quantity inputs and are non-dimensionalized
-    against `PHYSICS_SPECS` at construction.
+    All parameters use SI Quantity inputs and are non-dimensionalized at
+    construction against specs built from the live
+    :data:`jcm.constants.physical_constants`, so a prior ``set_constants``
+    override is honoured (consistent with the dynamical core).
     """
 
     name: ClassVar[str] = "held_suarez"
@@ -43,14 +46,19 @@ class HeldSuarez(PhysicsTerm):
         dThz: Quantity = 10 * units.degK,
     ) -> None:
         """Initialize Held-Suarez forcing parameters."""
+        # Build specs from the live constants singleton (read here at
+        # construction) so an override set before the model is built is used
+        # for nondimensionalisation and kappa.
+        specs = physics_specs_from_constants(jcm_constants.physical_constants)
         self.sigma_b = nnx.Variable(jnp.asarray(sigma_b))
-        self.kf = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(kf)))
-        self.ka = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(ka)))
-        self.ks = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(ks)))
-        self.minT = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(minT)))
-        self.maxT = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(maxT)))
-        self.dTy = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(dTy)))
-        self.dThz = nnx.Variable(jnp.asarray(PHYSICS_SPECS.nondimensionalize(dThz)))
+        self.kf = nnx.Variable(jnp.asarray(specs.nondimensionalize(kf)))
+        self.ka = nnx.Variable(jnp.asarray(specs.nondimensionalize(ka)))
+        self.ks = nnx.Variable(jnp.asarray(specs.nondimensionalize(ks)))
+        self.minT = nnx.Variable(jnp.asarray(specs.nondimensionalize(minT)))
+        self.maxT = nnx.Variable(jnp.asarray(specs.nondimensionalize(maxT)))
+        self.dTy = nnx.Variable(jnp.asarray(specs.nondimensionalize(dTy)))
+        self.dThz = nnx.Variable(jnp.asarray(specs.nondimensionalize(dThz)))
+        self._kappa = float(specs.kappa)
         self._coords_cached = False
 
     def cache_coords(self, coords: coordinate_systems.CoordinateSystem) -> None:
@@ -68,7 +76,7 @@ class HeldSuarez(PhysicsTerm):
         sigma = self._sigma.get_value()
         lat = self._lat.get_value()
         p_over_p0 = sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure
-        temperature = p_over_p0 ** PHYSICS_SPECS.kappa * (
+        temperature = p_over_p0 ** self._kappa * (
             self.maxT.get_value()
             - self.dTy.get_value() * jnp.sin(lat) ** 2
             - self.dThz.get_value() * jnp.log(p_over_p0) * jnp.cos(lat) ** 2

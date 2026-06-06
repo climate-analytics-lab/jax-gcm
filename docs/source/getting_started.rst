@@ -485,6 +485,23 @@ built):
    c; c.grav``) — a ``from jcm.constants import grav`` captures the value at
    import time and will not track later overrides.
 
+.. warning::
+
+   Set constants **once, at the start of the process, before building any
+   model** — think of them as fixed for the run (hence *constants*), in contrast
+   to calibratable scheme parameters which are threaded through the model as
+   explicit, differentiable arguments.
+
+   Constants are baked into a model at construction/trace time: the dynamical
+   core reads the singleton when it is built, and physics functions read the
+   current values when JAX first traces them. Because JAX caches compiled
+   functions, calling :func:`~jcm.constants.set_constants` *after* a model has
+   been built — or building a **second** model with different constants in the
+   same process — is **not** guaranteed to take effect; already-traced/compiled
+   code keeps the values it was first traced with. To compare several constant
+   sets, run each in a **separate process** (e.g. a fresh interpreter or a
+   separate CLI invocation).
+
 Next Steps
 ----------
 
