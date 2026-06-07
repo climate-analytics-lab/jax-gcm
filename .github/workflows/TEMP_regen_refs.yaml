@@ -1,0 +1,40 @@
+name: TEMP regenerate regression references
+
+# One-off helper: regenerate the composable-physics regression references on
+# CI hardware (ubuntu-latest, matching the rest of CI) after the physical-
+# constants value-unification changed the dynamics trajectory. Uploads the
+# new .npz files as an artifact to download and commit. DELETE this workflow
+# once the references are committed.
+
+on:
+  push:
+    branches:
+      - refactor/physical-constants-single-source
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -e .
+      - name: Regenerate references
+        run: |
+          REGENERATE=1 JAX_PLATFORMS=cpu pytest -v -s -o addopts="" \
+            jcm/physics/composable_physics_regression_test.py
+      - name: Upload regenerated references
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-references
+          path: jcm/data/test/composable_physics_regression/*.npz
+          if-no-files-found: error
