@@ -114,10 +114,8 @@ combined with the composable physics API:
 
 ```python
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
 physics = echam_physics(radiation_scheme="rrtmgp")
-physics = echam_physics().replace("radiation", RRTMGPRadiation())
 physics = echam_physics().remove("hines")
 ```
 

@@ -903,7 +903,8 @@ Assumptions and Limitations
 **Time Steps**:
 
 - Recommended time step: 30 minutes for T31 resolution
-- All physics sub-schemes share the model timestep (set via ``Parameters.with_timestep()``)
+- Physics terms read the model timestep from the enclosing
+  ``ComposablePhysics`` at runtime.
 - Shorter time steps needed for higher resolutions
 
 **Forcing Data**:

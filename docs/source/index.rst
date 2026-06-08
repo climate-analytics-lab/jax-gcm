@@ -27,6 +27,8 @@ Contents
    getting_started
    speedy_physics
    echam_physics
+   release_notes
+   v1_to_v2
    speedy_translation
    api
    design

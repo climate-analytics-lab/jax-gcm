@@ -43,8 +43,9 @@ from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_types import SurfaceParameters
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
@@ -135,6 +136,14 @@ def echam_physics(
             "Choose 'grey', 'rrtmgp', 'emulated', or pass a radiation "
             "PhysicsTerm."
         )
+    # Aerosol and cloud optics need the same band metadata as the selected
+    # radiation term, so Python-created RRTMGP compositions must carry the
+    # multi-band config just like the Hydra runner path.
+    band_config = (
+        RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
+        if isinstance(rad_term, RRTMGPRadiation)
+        else RadiationBandConfig.broadband()
+    )
 
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(params=microphysics_p)
@@ -168,4 +177,5 @@ def echam_physics(
         ],
         checkpoint_terms=checkpoint_terms,
         vectorize_columns=True,
+        band_config=band_config,
     )

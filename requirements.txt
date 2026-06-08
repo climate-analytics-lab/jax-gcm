@@ -6,6 +6,7 @@ hydra-core
 
 # I/O requirements
 xarray[io, parallel]
+gcsfs  # WeatherBench / ERA5 example notebook reads public gs:// zarr data
 
 # Testing requirements
 pytest-cov
@@ -19,4 +20,3 @@ myst-parser  # Markdown source for design/* docs
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
 jax-rrtmgp @ git+https://github.com/climate-analytics-lab/jax-rrtmgp@main
-
