@@ -152,7 +152,19 @@ def physics_state_to_dynamics_state(
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
 
-    log_surface_pressure = jnp.log(physics_state.normalized_surface_pressure)
+    # ``normalized_surface_pressure`` is P_s / p0 regardless of coord family
+    # (see :func:`dynamics_state_to_physics_state`). dinosaur stores
+    # ``log(P_s / p0)`` for sigma but ``log(P_s)`` (in nondim Pa) for hybrid, so
+    # the hybrid branch must multiply by ``p0_nondim`` before the log — the exact
+    # inverse of the division done on the forward path. Without this, an injected
+    # hybrid PhysicsState collapses surface pressure by a factor of ~p0.
+    if isinstance(dynamics.coords.vertical, HybridCoordinates):
+        from jcm.constants import p0 as P0_PA
+        p0_nondim = dynamics.physics_specs.nondimensionalize(P0_PA * units.pascal)
+        sp_nondim = physics_state.normalized_surface_pressure * p0_nondim
+    else:
+        sp_nondim = physics_state.normalized_surface_pressure
+    log_surface_pressure = jnp.log(sp_nondim)
     modal_log_sp = dynamics.coords.horizontal.to_modal(log_surface_pressure)
 
     tracers_modal = {'specific_humidity': q_modal}

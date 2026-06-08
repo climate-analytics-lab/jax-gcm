@@ -65,5 +65,49 @@ class TestStateBridgeRoundTripSlow(unittest.TestCase):
         ))
 
 
+@pytest.mark.slow
+class TestHybridSurfacePressureRoundTrip(unittest.TestCase):
+    """Hybrid-coordinate surface pressure must survive a PhysicsState round-trip.
+
+    Regression for the asymmetry where ``dynamics_state_to_physics_state``
+    divides hybrid ``sp`` by ``p0`` (exposing ``P_s/p0``) but the inverse logged
+    that normalized value directly. For hybrid coords dinosaur stores
+    ``log(P_s)`` (nondim Pa), so the inverse must multiply by ``p0`` first;
+    without it surface pressure collapses by a factor of ~p0.
+    """
+
+    def test_hybrid_round_trip_preserves_surface_pressure(self):
+        from jcm.model import Model
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords,
+            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            time_step=180.0,
+        )
+        primitive = model.dycore.primitive
+        tracer_specs = {spec.name: spec for spec in model.physics.required_tracers()}
+
+        state = model.dycore.to_physics_state(model._prepare_initial_dycore_state())
+        # A clearly non-trivial normalized surface pressure (P_s/p0 ≈ 0.97).
+        seeded = state.copy(
+            normalized_surface_pressure=state.normalized_surface_pressure * 0.97,
+        )
+
+        modal = physics_state_to_dynamics_state(seeded, primitive, tracer_specs=tracer_specs)
+        recovered = dynamics_state_to_physics_state(modal, primitive, tracer_specs=tracer_specs)
+
+        # The load-bearing assertion: surface pressure survives the round-trip.
+        # Pre-fix, ``recovered`` is smaller than ``seeded`` by ~p0 (~1e5).
+        self.assertTrue(jnp.allclose(
+            recovered.normalized_surface_pressure,
+            seeded.normalized_surface_pressure,
+            rtol=1e-4,
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

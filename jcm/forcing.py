@@ -361,11 +361,16 @@ class ForcingData:
         elif ds["stl"].shape[:2] == coords.horizontal.nodal_shape:
             # Source already at target resolution — skip the lat/lon interp
             # pipeline (which can introduce NaN through pole padding when
-            # lat values match exactly). Only the time-axis interpolation
-            # is needed for monthly → daily.
-            ds = interpolate_to_daily(ds)
+            # lat values match exactly). Only do the monthly -> daily time
+            # interpolation for a 12-month climatology; native daily or
+            # multi-year axes are passed through to the TimeSeries/BY_DATE
+            # alignment unchanged (interpolate_to_daily requires exactly 12
+            # monthly timestamps and would otherwise raise).
+            if _is_monthly_climatology(ds):
+                ds = interpolate_to_daily(ds)
         else:
-            ds = upsample_forcings_ds(interpolate_to_daily(ds), grid=coords.horizontal)
+            base = interpolate_to_daily(ds) if _is_monthly_climatology(ds) else ds
+            ds = upsample_forcings_ds(base, grid=coords.horizontal)
 
         # Build the shared time axis (seconds since MODEL_EPOCH) for every
         # time-varying variable in this file, plus the alignment mode.
@@ -476,6 +481,19 @@ class ForcingData:
 # ---------------------------------------------------------------------------
 # Time selection helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_monthly_climatology(ds) -> bool:
+    """Return ``True`` if ``ds`` has a 12-step (monthly-climatology) time axis.
+
+    ``interpolate_to_daily`` only accepts exactly 12 monthly timestamps (it pads
+    with adjacent-year Dec/Jan and raises otherwise). Native daily or multi-year
+    boundary files therefore must skip it and flow straight to the
+    ``TimeSeries``/``BY_DATE`` alignment. This mirrors ``interpolate_to_daily``'s
+    own contract (a length check), so a same-grid file is only treated as a
+    monthly climatology when it actually has 12 timesteps.
+    """
+    return "time" in ds.dims and ds.sizes.get("time") == 12
 
 
 def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
