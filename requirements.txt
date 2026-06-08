@@ -6,7 +6,6 @@ hydra-core
 
 # I/O requirements
 xarray[io, parallel]
-gcsfs  # WeatherBench / ERA5 example notebook reads public gs:// zarr data
 
 # Testing requirements
 pytest-cov
