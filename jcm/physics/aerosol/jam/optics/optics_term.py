@@ -21,6 +21,7 @@ import dataclasses
 import math
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -75,11 +76,26 @@ class JamOpticsTerm(PhysicsTerm):
         self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw)
 
     def _band_optics(self, state, aer, num_per_area, centers_nm, ri):
-        """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``."""
+        """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``.
+
+        The bands are independent and share the whole modal geometry
+        (volumes, wet radii, number), so the band axis is mapped with a
+        single ``jax.vmap`` rather than a Python loop: only the wavelength
+        and the per-species refractive index ``(n, k)`` vary across bands.
+        The inner loops over modes/species stay explicit — they are ragged
+        (each mode carries a different species set) and small.
+        """
+        n_band = centers_nm.shape[0]
+        if n_band == 0:
+            empty = jnp.zeros((0,) + state.temperature.shape)
+            return empty, empty, empty
+
         zeros = jnp.zeros_like(state.temperature)
-        aod_bands, ssa_bands, asy_bands = [], [], []
-        for b in range(centers_nm.shape[0]):
-            lam_m = float(centers_nm[b]) * 1.0e-9
+        lam_all = jnp.asarray(centers_nm, state.temperature.dtype) * 1.0e-9
+        # ri: species -> (n[n_band], k[n_band]); vmap maps the band axis.
+        ri_j = {sp: (jnp.asarray(n), jnp.asarray(k)) for sp, (n, k) in ri.items()}
+
+        def one_band(lam_m, ri_band):
             aod = jnp.zeros_like(state.temperature)
             scat = jnp.zeros_like(state.temperature)
             gscat = jnp.zeros_like(state.temperature)
@@ -91,16 +107,16 @@ class JamOpticsTerm(PhysicsTerm):
                 for sp in mode.species:
                     mass = state.tracers.get(mass_name(sp, mode.short), zeros)
                     v = mass / self._spec.species_props(sp).density
-                    n_sp, k_sp = ri[sp]
-                    vol_n = vol_n + v * float(n_sp[b])
-                    vol_k = vol_k + v * float(k_sp[b])
+                    n_sp, k_sp = ri_band[sp]
+                    vol_n = vol_n + v * n_sp
+                    vol_k = vol_k + v * k_sp
                     vol_tot = vol_tot + v
                 v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
                     r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
                 )
-                n_w, k_w = ri["h2o"]
-                vol_n = vol_n + v_water * float(n_w[b])
-                vol_k = vol_k + v_water * float(k_w[b])
+                n_w, k_w = ri_band["h2o"]
+                vol_n = vol_n + v_water * n_w
+                vol_k = vol_k + v_water * k_w
                 vol_tot = vol_tot + v_water
 
                 safe = jnp.maximum(vol_tot, _TINY)
@@ -112,13 +128,13 @@ class JamOpticsTerm(PhysicsTerm):
                 aod = aod + aod_i
                 scat = scat + ssa * aod_i
                 gscat = gscat + g * ssa * aod_i
-            aod_bands.append(aod)
-            ssa_bands.append(scat / jnp.maximum(aod, _TINY))
-            asy_bands.append(gscat / jnp.maximum(scat, _TINY))
-        if not aod_bands:
-            empty = jnp.zeros((0,) + state.temperature.shape)
-            return empty, empty, empty
-        return (jnp.stack(aod_bands), jnp.stack(ssa_bands), jnp.stack(asy_bands))
+            return (
+                aod,
+                scat / jnp.maximum(aod, _TINY),
+                gscat / jnp.maximum(scat, _TINY),
+            )
+
+        return jax.vmap(one_band)(lam_all, ri_j)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         aer = diagnostics["_jam_state"]
