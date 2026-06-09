@@ -76,6 +76,9 @@ def create_default_aerosol_data(nlev=10, parameters=None, ncols=1):
         aod_sw_per_band=aod_per_band,
         ssa_sw_per_band=ssa_per_band,
         asy_sw_per_band=asy_per_band,
+        aod_lw_per_band=jnp.zeros_like(aod_per_band),
+        ssa_lw_per_band=jnp.zeros_like(ssa_per_band),
+        asy_lw_per_band=jnp.zeros_like(asy_per_band),
     )
 
 
