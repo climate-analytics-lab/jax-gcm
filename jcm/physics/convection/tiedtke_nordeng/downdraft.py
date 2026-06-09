@@ -63,11 +63,14 @@ def wetbulb_temperature(
         cooling = (qs - humidity) * c.alhc / c.cpd
         twb = temperature - 0.3 * cooling  # Damping factor
         qwb = saturation_mixing_ratio(pressure, twb)
-        return twb, qwb
-    
+        return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
+
     def already_saturated():
-        return jnp.float32(temperature), jnp.float32(humidity)
-    
+        return temperature, humidity
+
+    # Both branches must return identical dtypes for ``lax.cond``. Tie them to
+    # the inputs (not a hardcoded float32) so the convection scheme is correct
+    # whether the model runs in float32 or float64.
     return lax.cond(is_saturated, already_saturated, calculate_wetbulb)
 
 

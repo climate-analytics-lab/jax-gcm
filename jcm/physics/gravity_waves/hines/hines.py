@@ -477,8 +477,10 @@ def _hines_extro_column(
         2.0 * sqamp_launch / (m_alpha_launch ** 2 - m_min_sq))
     m_alpha_min_running_launch = m_alpha_launch                    # (8,)
 
-    # Initialise full column buffers, indexed top..bottom.
-    m_alpha = jnp.full((nlev, num_azimuths), m_min)
+    # Initialise full column buffers, indexed top..bottom. The fill dtype
+    # follows the computed launch values (not ``m_min``'s) so the buffer is
+    # float-structure agnostic and the scatter below doesn't down/up-cast.
+    m_alpha = jnp.full((nlev, num_azimuths), m_min, dtype=m_alpha_launch.dtype)
     m_alpha = m_alpha.at[launch_idx].set(m_alpha_launch)
     sigma_alpha = jnp.zeros((nlev, num_azimuths))
     sigma_alpha = sigma_alpha.at[launch_idx].set(sigma_a_launch)
