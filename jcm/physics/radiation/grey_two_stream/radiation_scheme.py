@@ -729,6 +729,17 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             asy_sw_per_band=jnp.transpose(
                 aerosol_in.asy_sw_per_band, (2, 0, 1)
             ),
+            # LW per-band fields (zero-width for grey) need the same
+            # column-leading layout so every vmapped leaf shares axis 0 = ncols.
+            aod_lw_per_band=jnp.transpose(
+                aerosol_in.aod_lw_per_band, (2, 0, 1)
+            ),
+            ssa_lw_per_band=jnp.transpose(
+                aerosol_in.ssa_lw_per_band, (2, 0, 1)
+            ),
+            asy_lw_per_band=jnp.transpose(
+                aerosol_in.asy_lw_per_band, (2, 0, 1)
+            ),
         )
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
