@@ -51,11 +51,14 @@ class BettsMillerConvection(PhysicsTerm):
         """Return Betts-Miller (temperature, humidity) tendencies + precip diagnostic."""
         dt = diagnostics["_dt_seconds"]
 
-        ps = state.normalized_surface_pressure * c.p0          # (ix, il) [Pa]
-        a_half = self._a_half.get_value()[:, None, None]
-        b_half = self._b_half.get_value()[:, None, None]
-        phalf = a_half + b_half * ps[None, :, :]               # (kx+1, ix, il)
-        pfull = 0.5 * (phalf[:-1] + phalf[1:])                 # (kx, ix, il)
+        # Surface pressure [Pa]; horiz rank is 2 ((ix, il)) for the standard path
+        # and 1 ((ncols,)) when ComposablePhysics vectorizes columns.
+        ps = state.normalized_surface_pressure * c.p0          # shape = horiz
+        lev_shape = (-1,) + (1,) * ps.ndim
+        a_half = self._a_half.get_value().reshape(lev_shape)   # (kx+1, 1[,1])
+        b_half = self._b_half.get_value().reshape(lev_shape)
+        phalf = a_half + b_half * ps[None]                     # (kx+1, *horiz)
+        pfull = 0.5 * (phalf[:-1] + phalf[1:])                 # (kx, *horiz)
 
         # PhysicsState carries specific humidity in g/kg; the scheme works in
         # SI kg/kg internally.

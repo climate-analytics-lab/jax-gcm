@@ -159,6 +159,25 @@ class TestBettsMillerTermAndGradients(unittest.TestCase):
                                     np.asarray(tdel), atol=1e-6))
         self.assertTrue(np.allclose(np.asarray(precip), float(p_col) / DT))
 
+    def test_vectorized_columns_shape(self):
+        # ComposablePhysics(vectorize_columns=True) passes (kx, ncols) state;
+        # the driver must accept it and match the (kx, ix, il) result per column.
+        T, q, pfull, phalf = _moist_unstable_column()
+        kx = T.shape[0]
+        P = BettsMillerParameters(do_envsat=True)
+        ncols = 5
+        T2 = jnp.broadcast_to(T[:, None], (kx, ncols))
+        q2 = jnp.broadcast_to(q[:, None], (kx, ncols))
+        pf2 = jnp.broadcast_to(pfull[:, None], (kx, ncols))
+        ph2 = jnp.broadcast_to(phalf[:, None], (kx + 1, ncols))
+        dTdt, dqdt, precip = betts_miller_tendencies(T2, q2, pf2, ph2, DT, P)
+        self.assertEqual(dTdt.shape, (kx, ncols))
+        self.assertEqual(precip.shape, (ncols,))
+        tdel, qdel, p_col = betts_miller_column(T, q, pfull, phalf, DT, P)
+        self.assertTrue(np.allclose(np.asarray(dTdt[:, 0]) * DT,
+                                    np.asarray(tdel), atol=1e-6))
+        self.assertAlmostEqual(float(precip[0]), float(p_col) / DT, places=9)
+
     def test_gradients_are_finite(self):
         T, q, pfull, phalf = _moist_unstable_column()
         P = BettsMillerParameters(do_envsat=True)

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 import jcm.constants as c
@@ -294,19 +295,24 @@ def _do_shallower(tdel, qdel, cloud, dp, grav):
     # Suffix sums towards the surface: cumsurf[k] = sum_{j>=k} lp[j].
     cumsurf = jnp.cumsum(lp[::-1])[::-1]
 
-    # ktop = highest cloud level whose surface-ward suffix integrates to >= 0.
+    # j = highest cloud level whose surface-ward suffix integrates to >= 0.
+    # The fully-kept region is [j .. surface]; the *partially*-retained boundary
+    # layer is the moistening layer just ABOVE it (j-1) — Isca scales the
+    # last-removed layer back in to bring the kept precip to exactly zero. (The
+    # shallow branch only runs when the full-column precip < 0, so j > klzb and
+    # the boundary layer j-1 is always within the cloud.)
     qualifies = cloud & (cumsurf >= 0.0)
-    ktop = jnp.where(qualifies, levels, kx).min()
-    feasible = ktop < kx
+    j = jnp.where(qualifies, levels, kx).min()
+    feasible = j < kx
+    boundary = j - 1
 
-    at_ktop = levels == ktop
-    below_ktop = (levels > ktop) & cloud
-    lp_ktop = jnp.sum(jnp.where(at_ktop, lp, 0.0))
-    below = jnp.sum(jnp.where(below_ktop, lp, 0.0))           # precip of kept lower layers
-    # Trim the boundary layer so kept precip (below + frac*lp_ktop) == 0 exactly.
-    # frac is Isca's (unclipped) ptopfrac; guard only a vanishing boundary layer.
-    frac = jnp.where(jnp.abs(lp_ktop) > 1e-12, -below / lp_ktop, 0.0)
-    scale = jnp.where(below_ktop, 1.0, jnp.where(at_ktop, frac, 0.0))
+    keep_full = (levels >= j) & cloud
+    at_boundary = levels == boundary
+    below = jnp.sum(jnp.where(keep_full, lp, 0.0))           # = cumsurf[j], >= 0
+    lp_b = jnp.sum(jnp.where(at_boundary, lp, 0.0))          # boundary (moistening) layer
+    # kept precip = below + frac*lp_b == 0  ->  frac = -below/lp_b  (in [0, 1]).
+    frac = jnp.where(jnp.abs(lp_b) > 1e-12, -below / lp_b, 0.0)
+    scale = jnp.where(keep_full, 1.0, jnp.where(at_boundary, frac, 0.0))
 
     new_tdel = tdel * scale
     new_qdel = qdel * scale
@@ -322,36 +328,42 @@ def _do_shallower(tdel, qdel, cloud, dp, grav):
 
 def betts_miller_tendencies(temperature, specific_humidity, pfull, phalf, dt,
                             params: BettsMillerParameters):
-    """Vectorized Betts-Miller tendencies over a (kx, ix, il) grid.
+    """Vectorized Betts-Miller tendencies over a column field.
+
+    The leading axis is the vertical level; any trailing axes are the horizontal
+    grid and are flattened, so this supports both the full ``(kx, ix, il)`` state
+    and the column-vectorized ``(kx, ncols)`` state that ``ComposablePhysics``
+    produces under ``vectorize_columns=True``.
 
     Args:
-        temperature: [K], (kx, ix, il).
-        specific_humidity: [kg/kg], (kx, ix, il).
-        pfull: full-level pressure [Pa], (kx, ix, il).
-        phalf: half-level pressure [Pa], (kx+1, ix, il).
+        temperature: [K], (kx, *horiz).
+        specific_humidity: [kg/kg], (kx, *horiz).
+        pfull: full-level pressure [Pa], (kx, *horiz).
+        phalf: half-level pressure [Pa], (kx+1, *horiz).
         dt: timestep [s].
         params: static :class:`BettsMillerParameters`.
 
     Returns:
         (dtemp_dt, dq_dt, precip): tendencies [K/s], [kg/kg/s] of shape
-        (kx, ix, il) and precipitation [kg/m^2/s] of shape (ix, il).
+        ``(kx, *horiz)`` and precipitation [kg/m^2/s] of shape ``horiz``.
 
     """
-    kx, ix, il = temperature.shape
-    n = ix * il
+    kx = temperature.shape[0]
+    horiz = temperature.shape[1:]
+    n = int(np.prod(horiz)) if horiz else 1
 
-    def reshape_lev(a):
-        return a.reshape(a.shape[0], n).T            # (n, levels)
+    def to_cols(a):
+        return a.reshape(a.shape[0], n).T            # (ncols, levels)
 
-    t2 = reshape_lev(temperature)
-    q2 = reshape_lev(specific_humidity)
-    pf2 = reshape_lev(pfull)
-    ph2 = reshape_lev(phalf)
+    t2 = to_cols(temperature)
+    q2 = to_cols(specific_humidity)
+    pf2 = to_cols(pfull)
+    ph2 = to_cols(phalf)
 
     column = lambda t, q, pf, ph: betts_miller_column(t, q, pf, ph, dt, params)
     tdel, qdel, precip = jax.vmap(column)(t2, q2, pf2, ph2)
 
-    dtemp_dt = (tdel.T).reshape(kx, ix, il) / dt
-    dq_dt = (qdel.T).reshape(kx, ix, il) / dt
-    precip_flux = precip.reshape(ix, il) / dt
+    dtemp_dt = tdel.T.reshape((kx,) + horiz) / dt
+    dq_dt = qdel.T.reshape((kx,) + horiz) / dt
+    precip_flux = precip.reshape(horiz) / dt
     return dtemp_dt, dq_dt, precip_flux
