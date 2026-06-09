@@ -72,6 +72,17 @@ def build_mie_lut(
     )
 
 
+_DEFAULT_LUT: MieLUT | None = None
+
+
+def default_mie_lut() -> MieLUT:
+    """Process-wide memoised default LUT (built once; ~4 s)."""
+    global _DEFAULT_LUT
+    if _DEFAULT_LUT is None:
+        _DEFAULT_LUT = build_mie_lut()
+    return _DEFAULT_LUT
+
+
 def interp_mie(lut: MieLUT, x, mr, mi):
     """Differentiable trilinear interpolation → ``(q_ext, ssa, g)``.
 

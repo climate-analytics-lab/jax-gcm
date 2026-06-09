@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
-from jcm.physics.aerosol.jam.optics.mie_lut import build_mie_lut, interp_mie
+from jcm.physics.aerosol.jam.optics.mie_lut import default_mie_lut, interp_mie
 from jcm.physics.aerosol.jam.optics.refractive_index import refractive_index_at
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name
@@ -58,7 +58,7 @@ class JamOpticsTerm(PhysicsTerm):
     def __init__(self, *, spec: ModalAerosolSpec | None = None):
         """Build the Mie lookup table and hold the population."""
         self._spec = spec or MAM4_SPEC
-        self._lut = build_mie_lut()
+        self._lut = default_mie_lut()
         self._cache = None   # set by cache_band_config
 
     def cache_band_config(self, band_config) -> None:

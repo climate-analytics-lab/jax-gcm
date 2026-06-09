@@ -23,6 +23,7 @@ class JamFactoryTest(unittest.TestCase):
             cats[3:],
             [
                 "aerosol_microphysics",
+                "aerosol_optics",
                 "aerosol_activation",
                 "aerosol_sedimentation",
                 "aerosol_drydep",
