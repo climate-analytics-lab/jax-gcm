@@ -21,16 +21,20 @@ class BettsMillerConvection(PhysicsTerm):
     ``params.shallow`` (see :class:`BettsMillerParameters`). Works on sigma or
     hybrid vertical grids and at any number of levels.
 
-    The configuration is a static :class:`BettsMillerParameters` (the flavor and
-    modifiers select code paths), supplied at construction.
+    The configuration is a :class:`BettsMillerParameters`, supplied at
+    construction. It is held in an ``nnx.Param`` so its numeric tunables
+    (``tau_bm``, ``rhbm``, ...) are differentiable leaves — gradients flow to
+    them like any other physics parameter — while the ``shallow`` flavor and the
+    ``do_envsat`` / ``do_taucape`` modifiers ride along as static aux data that
+    select code paths at trace time.
     """
 
     name: ClassVar[str] = "betts_miller_convection"
     category: ClassVar[str] = "convection"
 
     def __init__(self, params: BettsMillerParameters | None = None) -> None:
-        """Initialize with a static :class:`BettsMillerParameters` configuration."""
-        self.params = params or BettsMillerParameters.default()
+        """Initialize with a :class:`BettsMillerParameters` configuration."""
+        self.params = nnx.Param(params or BettsMillerParameters.default())
         self._coords_cached = False
 
     def cache_coords(self, coords) -> None:
@@ -65,7 +69,7 @@ class BettsMillerConvection(PhysicsTerm):
         q_kgkg = state.specific_humidity / 1000.0
 
         dtemp_dt, dq_dt_kgkg, precip = betts_miller_tendencies(
-            state.temperature, q_kgkg, pfull, phalf, dt, self.params,
+            state.temperature, q_kgkg, pfull, phalf, dt, self.params.get_value(),
         )
 
         tendency = PhysicsTendency(

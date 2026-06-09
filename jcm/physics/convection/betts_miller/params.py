@@ -1,10 +1,12 @@
 """Configuration for the Betts-Miller convective-adjustment scheme.
 
-These are *static* configuration values: the ``shallow`` flavor and the
-``do_envsat`` / ``do_taucape`` modifiers select genuinely different code paths
-(notably ``do_shallower``'s data-dependent depth reduction), so they are chosen
-at construction/trace time via Python branching rather than traced. The numeric
-tunables (``tau_bm``, ``rhbm``, ...) are likewise construction-time constants.
+:class:`BettsMillerParameters` is a JAX pytree (``flax.struct.dataclass``) so the
+numeric tunables are differentiable leaves — gradients can be taken with respect
+to them, exactly like the other physics parameter containers. The ``shallow``
+flavor and the ``do_envsat`` / ``do_taucape`` modifiers are *static* fields
+(``pytree_node=False``): they select genuinely different code paths (notably
+``do_shallower``'s data-dependent depth reduction), so they are resolved by
+Python branching at trace time rather than traced.
 
 Defaults reproduce Isca's ``betts_miller_nml`` defaults: the Frierson (2007)
 "Simplified Betts-Miller" scheme (``do_simp`` with ``rhbm=0.8``,
@@ -15,7 +17,9 @@ off), and a fixed relaxation timescale (``do_taucape`` off).
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+
+import jax.numpy as jnp
+from flax import struct
 
 
 class ShallowScheme(enum.Enum):
@@ -40,31 +44,40 @@ class ShallowScheme(enum.Enum):
     NONE = "none"
 
 
-@dataclass(frozen=True)
+@struct.dataclass
 class BettsMillerParameters:
-    """Static configuration for :class:`BettsMillerConvection`.
+    """Configuration for :class:`BettsMillerConvection`.
+
+    The numeric fields are differentiable pytree leaves; ``shallow`` /
+    ``do_envsat`` / ``do_taucape`` are static (``pytree_node=False``).
 
     Attributes:
         tau_bm: Relaxation timescale toward the reference profile (s).
         rhbm: Target relative humidity of the reference profile (fraction).
+        capetaubm: CAPE (J/kg) at which the scaled timescale equals ``tau_bm``.
+        tau_min: Floor on the CAPE-scaled timescale (s).
+        buoyancy_kick: Temperature perturbation (K) added to the surface parcel.
+        t_floor: Parcel temperature (K) below which the ascent is presumed
+            CAPE-free (Isca's 173.16 K lookup-table floor).
         shallow: :class:`ShallowScheme` for the negative-precip / shallow case.
         do_envsat: If True, set reference humidity to ``rhbm`` × saturation wrt
             the *environment* temperature; if False (default), wrt the *parcel*.
         do_taucape: If True, scale ``tau_bm`` ∝ CAPE^(-1/2) (Isca ``do_taucape``).
-        capetaubm: CAPE (J/kg) at which the scaled timescale equals ``tau_bm``.
-        tau_min: Floor on the CAPE-scaled timescale (s).
-        buoyancy_kick: Temperature perturbation (K) added to the surface parcel.
 
     """
 
-    tau_bm: float = 7200.0
-    rhbm: float = 0.8
-    shallow: ShallowScheme = ShallowScheme.SIMP
-    do_envsat: bool = False
-    do_taucape: bool = False
-    capetaubm: float = 900.0
-    tau_min: float = 2400.0
-    buoyancy_kick: float = 0.0
+    # --- Differentiable tunables (pytree leaves) ----------------------------
+    tau_bm: jnp.ndarray = 7200.0
+    rhbm: jnp.ndarray = 0.8
+    capetaubm: jnp.ndarray = 900.0
+    tau_min: jnp.ndarray = 2400.0
+    buoyancy_kick: jnp.ndarray = 0.0
+    t_floor: jnp.ndarray = 173.16
+
+    # --- Static configuration (selects code paths; not differentiated) ------
+    shallow: ShallowScheme = struct.field(pytree_node=False, default=ShallowScheme.SIMP)
+    do_envsat: bool = struct.field(pytree_node=False, default=False)
+    do_taucape: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
     def default(cls) -> "BettsMillerParameters":

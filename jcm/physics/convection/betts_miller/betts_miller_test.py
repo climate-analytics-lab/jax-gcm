@@ -190,6 +190,33 @@ class TestBettsMillerTermAndGradients(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(gT))))
         self.assertTrue(bool(jnp.all(jnp.isfinite(gq))))
 
+    def test_params_is_a_differentiable_pytree(self):
+        # The numeric tunables are pytree leaves; the flavor/modifier flags are
+        # static aux data — so gradients flow to tau_bm/rhbm but the flags are
+        # untouched and remain usable in Python branching.
+        P = BettsMillerParameters(do_envsat=True)
+        leaves = jax.tree_util.tree_leaves(P)
+        # Six numeric leaves; the enum + two bools are aux, not leaves.
+        self.assertEqual(len(leaves), 6)
+        self.assertTrue(all(jnp.ndim(jnp.asarray(x)) == 0 for x in leaves))
+
+        T, q, pfull, phalf = _moist_unstable_column()
+
+        def loss(params):
+            tdel, qdel, precip = betts_miller_column(
+                T, q, pfull, phalf, DT, params)
+            return jnp.sum(tdel ** 2) + jnp.sum(qdel ** 2) + precip ** 2
+
+        grads = jax.grad(loss)(P)
+        # Deep precipitating convection depends on both tau_bm and rhbm.
+        self.assertTrue(jnp.isfinite(grads.tau_bm))
+        self.assertTrue(jnp.isfinite(grads.rhbm))
+        self.assertNotEqual(float(grads.tau_bm), 0.0)
+        self.assertNotEqual(float(grads.rhbm), 0.0)
+        # Static fields survive the transform unchanged (still Python values).
+        self.assertEqual(grads.shallow, P.shallow)
+        self.assertEqual(grads.do_envsat, P.do_envsat)
+
     def test_term_end_to_end(self):
         from jcm.utils import get_coords
         from jcm.physics_interface import PhysicsState

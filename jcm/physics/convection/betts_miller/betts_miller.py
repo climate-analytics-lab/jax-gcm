@@ -38,9 +38,6 @@ from jcm.physics.convection.betts_miller.params import (
     ShallowScheme,
 )
 
-_T_FLOOR = 173.16  # K — below this the parcel ascent is presumed CAPE-free (Isca).
-
-
 def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     """Saturation vapour pressure over liquid water (Pa).
 
@@ -57,10 +54,10 @@ def saturation_specific_humidity(temperature: jnp.ndarray,
         temperature, pressure, phase="water")
 
 
-def _moist_dtdlnp(temperature, q, kappa, hlv, cp, rv):
+def _moist_dtdlnp(temperature, q):
     """Moist pseudo-adiabatic ``dT/dln(p)`` (Isca's first-order form, q for r)."""
-    a = kappa * temperature + hlv / cp * q
-    b = hlv * hlv * q / (cp * rv * temperature * temperature)
+    a = c.akap * temperature + c.alhc / c.cpd * q
+    b = c.alhc * c.alhc * q / (c.cpd * c.rv * temperature * temperature)
     return a / (1.0 + b)
 
 
@@ -69,13 +66,18 @@ def _level_index(kx, ndim):
     return jnp.arange(kx, dtype=jnp.int32).reshape((kx,) + (1,) * (ndim - 1))
 
 
-def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick):
+def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick, t_floor):
     """Lift a surface parcel and return its profile plus CAPE / cloud mask.
 
     Inputs are column fields with the vertical level on axis 0 (ordered top
     (0) -> surface) and any trailing horizontal axes. Everything broadcasts, so
     the routine is identical for a bare ``(kx,)`` column, a ``(kx, ncols)`` block
     or a ``(kx, ix, il)`` grid.
+
+    Args:
+        t_floor: parcel temperature [K] below which the moist ascent is clamped
+            (Isca's 173.16 K lookup-table floor); a tunable from
+            :class:`BettsMillerParameters`.
 
     Returns:
         tp: parcel temperature [K], ``(kx, *horiz)``.
@@ -85,8 +87,6 @@ def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick):
         has_cape: bool, ``(*horiz)``.
 
     """
-    kappa, hlv, cp, rv, rd = c.akap, c.alhc, c.cpd, c.rv, c.rd
-    pstar = c.p0
     kx = tin.shape[0]
     horiz = tin.shape[1:]
 
@@ -100,22 +100,22 @@ def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick):
 
     t0 = t_env[0] + buoyancy_kick               # surface parcel, (*horiz)
     q_parcel = qin[::-1][0]                      # conserved below saturation
-    theta0 = t0 * (pstar / p[0]) ** kappa
+    theta0 = t0 * (c.p0 / p[0]) ** c.akap
 
     def step(carry, x):
         t_prev, q_prev, p_prev, saturated, has_cape, stopped, klzb, cape = carry
         p_k, t_env_k, phl_k, phu_k, idx_k = x
 
         # Dry-adiabatic candidate (potential temperature conserved).
-        t_dry = theta0 * (p_k / pstar) ** kappa
+        t_dry = theta0 * (p_k / c.p0) ** c.akap
         qsat_dry = saturation_specific_humidity(t_dry, p_k)
         newly_sat = q_parcel >= qsat_dry
         is_sat = saturated | newly_sat
 
         # Moist-adiabatic candidate (single ln-p step from the level below).
-        dtdlnp = _moist_dtdlnp(t_prev, q_prev, kappa, hlv, cp, rv)
+        dtdlnp = _moist_dtdlnp(t_prev, q_prev)
         t_moist = jnp.maximum(
-            t_prev + dtdlnp * jnp.log(jnp.maximum(p_k, 1.0) / p_prev), _T_FLOOR)
+            t_prev + dtdlnp * jnp.log(jnp.maximum(p_k, 1.0) / p_prev), t_floor)
         qsat_moist = saturation_specific_humidity(t_moist, p_k)
 
         t_k = jnp.where(is_sat, t_moist, t_dry)
@@ -125,7 +125,7 @@ def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick):
         buoyant = t_k > t_env_k
         # Buoyancy contribution to CAPE (energy per unit mass), guard log at top.
         dlnp = jnp.log(jnp.maximum(phl_k, 1.0) / jnp.maximum(phu_k, 1.0))
-        contrib = rd * (t_k - t_env_k) * dlnp
+        contrib = c.rd * (t_k - t_env_k) * dlnp
 
         # Track the contiguous buoyant plume above the level of free convection.
         active = is_sat & buoyant & (~stopped)
@@ -164,7 +164,7 @@ def _reference_profiles(tin, qin, tp, pfull, cloud, rhbm, do_envsat):
     return t_ref, q_ref
 
 
-def betts_miller_column(temperature, specific_humidity, pfull, phalf, dt,
+def betts_miller_column(tin, qin, pfull, phalf, dt,
                         params: BettsMillerParameters):
     """Betts-Miller temperature/humidity increments for a column field.
 
@@ -175,8 +175,8 @@ def betts_miller_column(temperature, specific_humidity, pfull, phalf, dt,
     runs SPEEDY-style whole-grid or ECHAM-style column-vectorized physics.
 
     Args:
-        temperature: temperature [K], ``(kx, *horiz)`` ordered top->surface.
-        specific_humidity: specific humidity [kg/kg], ``(kx, *horiz)``.
+        tin: temperature [K], ``(kx, *horiz)`` ordered top->surface.
+        qin: specific humidity [kg/kg], ``(kx, *horiz)``.
         pfull: full-level pressure [Pa], ``(kx, *horiz)``.
         phalf: half-level pressure [Pa], ``(kx+1, *horiz)``.
         dt: timestep [s].
@@ -187,12 +187,10 @@ def betts_miller_column(temperature, specific_humidity, pfull, phalf, dt,
         (``(kx, *horiz)`` each) and column precipitation [kg/m^2] (``(*horiz)``).
 
     """
-    hlv, cp, grav = c.alhc, c.cpd, c.grav
-    tin, qin = temperature, specific_humidity
     dp = phalf[1:] - phalf[:-1]                       # layer thickness [Pa] (>0)
 
     tp, cloud, cape, has_cape = _parcel_ascent(
-        tin, qin, pfull, phalf, params.buoyancy_kick)
+        tin, qin, pfull, phalf, params.buoyancy_kick, params.t_floor)
 
     t_ref, q_ref = _reference_profiles(
         tin, qin, tp, pfull, cloud, params.rhbm, params.do_envsat)
@@ -208,8 +206,8 @@ def betts_miller_column(temperature, specific_humidity, pfull, phalf, dt,
     # Deep relaxation increments and column precip integrals (sum over levels).
     tdel = jnp.where(cloud, -(tin - t_ref) / tau * dt, 0.0)
     qdel = jnp.where(cloud, -(qin - q_ref) / tau * dt, 0.0)
-    precip = -jnp.sum(qdel * dp, axis=0) / grav          # from moistening deficit
-    precip_t = jnp.sum(cp / hlv * tdel * dp, axis=0) / grav  # from latent heating
+    precip = -jnp.sum(qdel * dp, axis=0) / c.grav          # from moistening deficit
+    precip_t = jnp.sum(c.cpd / c.alhc * tdel * dp, axis=0) / c.grav  # from latent heating
 
     tdel, qdel, precip = _energy_correction(
         tdel, qdel, precip, precip_t, t_ref, q_ref, tin, qin,
@@ -258,7 +256,6 @@ def _energy_correction(tdel, qdel, precip, precip_t, t_ref, q_ref, tin, qin,
 def _shallow_branch(tdel, qdel, t_ref, q_ref, tin, qin, cloud, dp, tau, dt,
                     params):
     """Apply the negative-precip flavor (static Python branch on params.shallow)."""
-    grav = c.grav
     zeros = jnp.zeros_like(tdel)
     precip_zero = jnp.zeros(tdel.shape[1:], dtype=tdel.dtype)
 
@@ -279,7 +276,7 @@ def _shallow_branch(tdel, qdel, t_ref, q_ref, tin, qin, cloud, dp, tau, dt,
         return new_tdel, new_qdel, precip_zero
 
     if params.shallow == ShallowScheme.SHALLOWER:
-        return _do_shallower(tdel, qdel, cloud, dp, grav)
+        return _do_shallower(tdel, qdel, cloud, dp)
 
     if params.shallow == ShallowScheme.SIMP:
         # do_simp in the negative-precip regime simply suppresses convection
@@ -290,7 +287,7 @@ def _shallow_branch(tdel, qdel, t_ref, q_ref, tin, qin, cloud, dp, tau, dt,
     return zeros, zeros, precip_zero
 
 
-def _do_shallower(tdel, qdel, cloud, dp, grav):
+def _do_shallower(tdel, qdel, cloud, dp):
     """Raise the cloud top until the column-integrated precip is non-negative.
 
     Faithful (broadcasting) port of Isca's ``do_shallower`` loop: the topmost
@@ -303,7 +300,7 @@ def _do_shallower(tdel, qdel, cloud, dp, grav):
     kx = tdel.shape[0]
     levels = _level_index(kx, tdel.ndim)
     # Per-layer precip contribution [kg/m^2]; >0 dries (rains), <0 moistens.
-    lp = jnp.where(cloud, -qdel * dp / grav, 0.0)
+    lp = jnp.where(cloud, -qdel * dp / c.grav, 0.0)
     # Suffix sums towards the surface: cumsurf[k] = sum_{j>=k} lp[j].
     cumsurf = jnp.cumsum(lp[::-1], axis=0)[::-1]
 

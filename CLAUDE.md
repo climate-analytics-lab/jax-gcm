@@ -62,6 +62,8 @@ jcm/                          # Main package
 │   │   └── speedy_shortwave.py, speedy_longwave.py
 │   ├── convection/
 │   │   ├── tiedtke_nordeng/     # Tiedtke-Nordeng mass flux scheme
+│   │   ├── betts_miller/        # Betts-Miller convective adjustment (Isca/Frierson)
+│   │   ├── saturation.py        # Shared Tetens saturation thermodynamics
 │   │   └── speedy_convection.py
 │   ├── clouds/
 │   │   ├── sundqvist.py         # Sundqvist diagnostic cloud fraction
@@ -151,7 +153,35 @@ Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks 
 - Array shapes must be **statically known** where possible
 - See `JAX_gotchas.md` for common pitfalls
 
+### Column physics: broadcasting-native, vertical on axis 0
+New column-physics schemes (e.g. `convection/betts_miller/`) must be written
+**broadcasting-native**: put the vertical level on **axis 0** and let any trailing
+axes be horizontal and broadcast numpy-style. The *identical* code then runs
+unchanged on a single `(kx,)` column, a `(kx, ncols)` vectorized block, or a whole
+`(kx, ix, il)` grid — with **no `vmap`, no `reshape`, and no awareness of how the
+host lays out the horizontal dimension.**
+
+```python
+# Vertical reductions/scans are over axis 0; per-column scalars are (*horiz).
+dp     = phalf[1:] - phalf[:-1]            # (kx, *horiz)
+precip = jnp.sum(qdel * dp, axis=0) / c.grav   # (*horiz)
+# Reshape a level index to broadcast against a (kx, *horiz) field:
+levels = jnp.arange(kx).reshape((kx,) + (1,) * (field.ndim - 1))
+```
+
+- A term **must not** branch on the horizontal rank (`if temperature.ndim == 3`)
+  or unpack horizontal shape (`kx, ix, il = temperature.shape`). Index axis 0 for
+  the vertical and reduce with `axis=0`; everything else broadcasts.
+- The `PhysicsTerm` wrapper builds `(kx+1, *horiz)` pressures with
+  `phalf = a_half.reshape((-1,) + (1,)*ps.ndim) + b_half[...] * ps[None]`, so it too
+  is agnostic to whole-grid vs column-vectorized hosts.
+- This is what lets `ComposablePhysics(vectorize_columns=...)` run a scheme either
+  way without the scheme knowing. Cover both shapes in tests (a `(kx,)` column and
+  a `(kx, ncols)` / `(kx, ix, il)` broadcast must agree per column).
+
 ### Data structures
+State and tendencies use `@tree_math.struct` (vector-math semantics for the
+time-stepper):
 ```python
 @tree_math.struct
 class PhysicsState:
@@ -160,6 +190,23 @@ class PhysicsState:
     temperature: jnp.ndarray
     ...
 ```
+
+**Differentiable physics parameters** use `flax.struct.dataclass` so the numeric
+tunables are pytree leaves you can take gradients with respect to, while genuinely
+*static* configuration (enums/flags that select code paths at trace time) is marked
+`pytree_node=False` and stays as Python aux data usable in ordinary `if` branches:
+```python
+@struct.dataclass
+class BettsMillerParameters:
+    tau_bm: jnp.ndarray = 7200.0                                    # differentiable leaf
+    rhbm:   jnp.ndarray = 0.8                                       # differentiable leaf
+    shallow: ShallowScheme = struct.field(pytree_node=False,
+                                           default=ShallowScheme.SIMP)  # static aux
+```
+Inside a `PhysicsTerm`, hold such a parameter object in an `nnx.Param(...)` and read
+it back with `.get_value()` so the leaves are visible to `jax.grad` / optimizers.
+Do **not** make a numeric tunable static — that hides it from gradients (this was a
+review requirement: physics parameters must be differentiable like all the others).
 
 ### Import conventions
 ```python
@@ -215,6 +262,31 @@ Auto-generated physics variable translation docs come from `jcm/physics/speedy/u
 - Configuration is managed via **Hydra** (see `jcm/config/`)
 - Supports multiple resolutions: T21 to T425 spectral truncations
 - SPMD sharding support for multi-device execution
+
+### Physical constants (`jcm.constants`)
+
+`jcm/constants.py` is the **single source of truth** for general physical
+constants shared across all physics packages. The v2 API:
+
+- **One canonical name per independent quantity** — no aliases. Dry-air specific
+  heat is `cpd`, the dry-air gas constant `rd`, the melting point `tmelt`, etc.
+- **Derived quantities are `@property`** on `PhysicalConstants` (a `NamedTuple`):
+  `rd = akap·cpd`, `cvd = cpd - rd`, `rgrav = 1/grav`, the `vtmpc*` moisture
+  coefficients. They recompute on access, so they can never drift out of sync
+  with the bases — even after an override.
+- **Process-global override** via `set_constants(...)`:
+  ```python
+  import jcm.constants as c
+  c.set_constants(grav=9.80665)            # tweak one base value (kwargs)
+  c.set_constants(PhysicalConstants(...))  # or replace the whole set
+  ```
+  Call it *before* constructing the model (the dynamical core reads the live
+  singleton at construction). Only *base* fields may be overridden by keyword;
+  derived quantities recompute automatically.
+- **Read constants by attribute access**, not `from`-import. `import jcm.constants
+  as c; ... c.grav` (a module-level `__getattr__` forwards to the live singleton)
+  honours overrides. `from jcm.constants import grav` binds the value at import
+  time and will **not** track `set_constants`. New code must use `c.<name>`.
 
 ### Coordinate and terrain system
 
