@@ -33,9 +33,7 @@ import jax
 from jax import lax
 from typing import Tuple
 
-from jcm.constants import (
-    cp, alhc, alhs, tmelt, eps
-)
+import jcm.constants as c
 from .tiedtke_nordeng import (
     saturation_mixing_ratio, saturation_vapor_pressure
 )
@@ -64,18 +62,18 @@ def _qsat_and_dqsat_dt(
     es = saturation_vapor_pressure(temperature)
     p_safe = jnp.maximum(pressure, 1.0)
     es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - eps), 1.0)
-    qs = eps * es_safe / denom
+    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
+    qs = c.eps * es_safe / denom
 
-    tc = temperature - tmelt
+    tc = temperature - c.tmelt
     des_dT_water = es * _TETENS_A_WATER * _TETENS_C_WATER / jnp.maximum(
         (tc + _TETENS_C_WATER) ** 2, 1e-3,
     )
     des_dT_ice = es * _TETENS_A_ICE * _TETENS_C_ICE / jnp.maximum(
         (tc + _TETENS_C_ICE) ** 2, 1e-3,
     )
-    des_dT = jnp.where(temperature > tmelt, des_dT_water, des_dT_ice)
-    dqs_dT = eps * p_safe * des_dT / denom ** 2
+    des_dT = jnp.where(temperature > c.tmelt, des_dT_water, des_dT_ice)
+    dqs_dT = c.eps * p_safe * des_dT / denom ** 2
     return qs, dqs_dT
 
 
@@ -110,7 +108,7 @@ def cuadjtq(
         with ``condensate = q - q_adj`` reflecting the moist exchange.
 
     """
-    L_cp = alhc / cp
+    L_cp = c.alhc / c.cpd
 
     def _newton(T, q):
         qs, dqs_dT = _qsat_and_dqsat_dt(T, pressure)
@@ -175,8 +173,8 @@ def saturation_adjustment(
     )
 
     # Liquid / ice split — mirrors what ECHAM cuasc does outside cuadjtq.
-    t_freeze = tmelt
-    t_ice = tmelt - 23.0
+    t_freeze = c.tmelt
+    t_ice = c.tmelt - 23.0
     frac_liquid = jnp.clip((t_adj - t_ice) / (t_freeze - t_ice), 0, 1)
     frac_ice = 1.0 - frac_liquid
 
@@ -186,7 +184,7 @@ def saturation_adjustment(
     # full sublimation latent heat.
     qc_adj = cloud_water + condensate * frac_liquid
     qi_adj = cloud_ice + condensate * frac_ice
-    t_adj = t_adj + condensate * frac_ice * (alhs - alhc) / cp
+    t_adj = t_adj + condensate * frac_ice * (c.alhs - c.alhc) / c.cpd
 
     # Belt-and-braces clip to non-negative (cuadjtq guarantees this for
     # ``kcall=1`` but downstream consumers expect it from the wrapper).
@@ -223,7 +221,7 @@ def energy_conservation_check(
     """
     # Sensible heat change
     dT = temperature_new - temperature_old
-    sensible = cp * dT / dt
+    sensible = c.cpd * dT / dt
     
     # Latent heat changes
     dq = specific_humidity_new - specific_humidity_old
@@ -232,15 +230,15 @@ def energy_conservation_check(
     
     # Latent heat (vapor uses L at current temperature)
     t_avg = 0.5 * (temperature_old + temperature_new)
-    lv = alhc + (alhs - alhc) * jnp.clip((tmelt - t_avg) / 23.0, 0, 1)
+    lv = c.alhc + (c.alhs - c.alhc) * jnp.clip((c.tmelt - t_avg) / 23.0, 0, 1)
     
     latent_vapor = lv * dq / dt
-    latent_liquid = alhc * dqc / dt
-    latent_ice = alhs * dqi / dt
+    latent_liquid = c.alhc * dqc / dt
+    latent_ice = c.alhs * dqi / dt
     
     # Precipitation removes energy
     # Assume precipitation temperature is cloud temperature
-    precip_energy = precipitation * cp * (t_avg - tmelt)
+    precip_energy = precipitation * c.cpd * (t_avg - c.tmelt)
     
     # Total energy change
     total_energy = sensible + latent_vapor + latent_liquid + latent_ice + precip_energy

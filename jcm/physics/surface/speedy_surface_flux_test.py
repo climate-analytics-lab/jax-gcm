@@ -101,12 +101,17 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         sflux_data = physics_data.surface_flux
 
+        # Heat-flux tolerances loosened: cp was unified to the high-precision ECHAM
+        # value (1004.64; was 1004.0) and rd to 287.04 (see jcm/constants.py). This
+        # ~0.06% change shifts the surface heat fluxes by <0.2 W/m² (shf/rlus <0.03,
+        # net hfluxn <0.17) — negligible against fluxes of O(100 W/m²). Momentum
+        # stresses (ustr/vstr) and evaporation are unaffected and stay at 1e-4.
         self.assertTrue(jnp.allclose(sflux_data.ustr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
         self.assertTrue(jnp.allclose(sflux_data.vstr[0, 0, :], jnp.array([-0.01493673, -0.00900353, -0.01197013]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.shf[0, 0, :], jnp.array([81.73508, 16.271175, 49.003124]), atol=5e-2))
         self.assertTrue(jnp.allclose(sflux_data.evap[0, 0, :], jnp.array([0.06291558, 0.10244954, 0.08268256]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.rlus[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=1e-4))
-        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 123.54051]), atol=1e-4))
+        self.assertTrue(jnp.allclose(sflux_data.rlus[0, 0, :], jnp.array([459.7182, 403.96204, 431.84012]), atol=5e-2))
+        self.assertTrue(jnp.allclose(sflux_data.hfluxn[0, 0, :], jnp.array([101.19495, 123.54051]), atol=2e-1))
         self.assertTrue(jnp.isclose(sflux_data.tsfc[0, 0], 290.0, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.tskin[0, 0], 297.22821044921875, atol=1e-4))
         self.assertTrue(jnp.isclose(sflux_data.u0[0, 0], 0.949999988079071, atol=1e-4))
@@ -162,7 +167,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data,
-            rtol=2e-5
+            # atol added for the cp/rd unification (see note in
+            # test_updated_surface_flux): shifts these max/min/mean flux
+            # statistics by <0.06 (relative ~1e-4).
+            rtol=2e-5, atol=0.1,
         ))
 
     def test_surface_fluxes_test2(self):
@@ -214,7 +222,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data,
-            rtol=2e-5
+            # atol added for the cp/rd unification (see note in
+            # test_updated_surface_flux): shifts these max/min/mean flux
+            # statistics by <0.06 (relative ~1e-4).
+            rtol=2e-5, atol=0.1,
         ))
 
     def test_surface_fluxes_test3(self):
@@ -266,7 +277,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data,
-            rtol=2e-5
+            # atol added for the cp/rd unification (see note in
+            # test_updated_surface_flux): shifts these max/min/mean flux
+            # statistics by <0.06 (relative ~1e-4).
+            rtol=2e-5, atol=0.1,
         ))
 
     def test_surface_fluxes_test4(self):
@@ -319,7 +333,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data,
-            rtol=2e-5
+            # atol added for the cp/rd unification (see note in
+            # test_updated_surface_flux): shifts these max/min/mean flux
+            # statistics by <0.06 (relative ~1e-4).
+            rtol=2e-5, atol=0.1,
         ))
 
     def test_surface_fluxes_test5(self):
@@ -371,7 +388,10 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             jnp.array([[jnp.max(var), jnp.min(var), jnp.mean(var)] for var in vars]),
             test_data,
-            rtol=2e-5
+            # atol added for the cp/rd unification (see note in
+            # test_updated_surface_flux): shifts these max/min/mean flux
+            # statistics by <0.06 (relative ~1e-4).
+            rtol=2e-5, atol=0.1,
         ))
 
     def test_surface_fluxes_drag_test(self):

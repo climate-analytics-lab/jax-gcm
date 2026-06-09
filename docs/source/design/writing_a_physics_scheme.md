@@ -234,8 +234,8 @@ from my_package.rayleigh_damping import RayleighDamping
 # Append: add the term at the end of the default ECHAM stack.
 physics = echam_physics() + RayleighDamping()
 
-# Replace: swap out the existing gravity_waves terms.
-physics = echam_physics().replace("gravity_waves", RayleighDamping())
+# Replace: swap out the existing non-orographic Hines drag term.
+physics = echam_physics().replace("hines", RayleighDamping())
 
 # Remove: drop a category, then build whatever you want on top.
 physics = echam_physics().remove("clouds") + RayleighDamping()

@@ -18,7 +18,7 @@ from jcm.forcing import default_forcing, ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import grav
+from jcm.constants import grav
 from jcm.physics.speedy.speedy_coords import get_speedy_coords, SpeedyCoords
 
 

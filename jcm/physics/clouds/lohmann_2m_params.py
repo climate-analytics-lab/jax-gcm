@@ -11,6 +11,8 @@ import numpy as np
 from math import pi
 import tree_math
 
+from jcm import constants as c
+
 @tree_math.struct
 class CloudParams2M: #(NamedTuple):
     """Cloud parameters for ECHAM6/ICON 2-m microphysical scheme"""
@@ -155,9 +157,9 @@ class CloudParams2M: #(NamedTuple):
     @classmethod
     def default(
         cls,
-        tmelt: float = 273.15,
-        grav: float = 9.81,
-        cthomi: float = 273.15 - 35.0,
+        tmelt: float | None = None,
+        grav: float | None = None,
+        cthomi: float | None = None,
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
@@ -247,6 +249,16 @@ class CloudParams2M: #(NamedTuple):
         cap_val = 2.0 / pi
         cons4_val = 1.0 / (pi * crhosno * cn0s) ** 0.8125
         cons5_val = 1.0 / (pi * crhosno * cn0s) ** 0.875
+
+        # Resolve constant-derived defaults here (not in the signature) so they
+        # read the live jcm.constants singleton when default() is *called*,
+        # honouring a set_constants override applied before model construction.
+        if tmelt is None:
+            tmelt = c.tmelt
+        if grav is None:
+            grav = c.grav
+        if cthomi is None:
+            cthomi = c.tmelt - 35.0
 
         return cls(
             tmelt=jnp.array(tmelt),

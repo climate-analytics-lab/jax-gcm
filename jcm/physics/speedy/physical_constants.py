@@ -1,25 +1,32 @@
-"""Date: 1/25/2024
-For storing and initializing physical constants.
+"""SPEEDY physics constants.
+
+This module holds ONLY the constants that are genuinely SPEEDY-specific — those
+that differ in value/units from the shared set, plus scheme tunables with no
+shared counterpart. General physical constants (radius, gravity, gas/heat
+constants, Stefan-Boltzmann, ...) are NOT re-exported here: read them directly
+from :mod:`jcm.constants` (``import jcm.constants as c; c.grav``) so there is a
+single source of truth and runtime ``set_constants`` overrides are honoured.
+
+Original module date: 1/25/2024.
 """
 import jax.numpy as jnp
-import jcm.constants as c
 
-# Physical constants for dynamics
-rearth = 6.371e+6 # Radius of Earth (m)
-omega = 7.292e-05 # Rotation rate of Earth (rad/s)
-grav = c.grav # Gravitational acceleration (m/s/s)
+# --- SPEEDY-specific constants that intentionally DIFFER from jcm.constants ---
+# These are not duplicates to be unified — the differing value/units are part of
+# SPEEDY's formulation:
+#   * Latent heats are in J/g (not J/kg) because SPEEDY carries specific humidity
+#     in g/kg; the shared c.alhc / c.alhs are the SI J/kg values.
+#   * solc is the area-averaged insolation (S0/4) used directly by SPEEDY's
+#     shortwave scheme, not the TOA solar constant c.solc (≈1361 W/m²).
+#   * epsilon is SPEEDY's gradient-safety floor (1e-9), looser than the shared
+#     numerical epsilon (1e-12).
+alhc = 2501.0       # Latent heat of condensation (J/g)
+alhs = 2801.0       # Latent heat of sublimation (J/g)
+solc = 342.0        # Area-averaged solar input (W/m²)
+epssw = 0.020       # Fraction of incoming solar radiation absorbed by ozone
+epsilon = 1e-9      # Gradient-safety floor for SPEEDY physics
 
-# Physical constants for thermodynamics
-p0 = c.p0 # Reference pressure (Pa)
-cp = c.cp # Specific heat at constant pressure (J/K/kg)
-akap = 2.0/7.0 # 1 - 1/gamma where gamma is the heat capacity ratio of a perfect diatomic gas (7/5)
-rgas = akap * cp # Gas constant per unit mass for dry air (J/K/kg)
-alhc = 2501.0 # Latent heat of condensation, in J/g for consistency with specific humidity in g/Kg
-alhs = 2801.0 # Latent heat of sublimation
-sbc = 5.67e-8 # Stefan-Boltzmann constant
-solc = 342.0 # Solar constant (area averaged) in W/m^2
-epssw = 0.020 # Fraction of incoming solar radiation absorbed by ozone
-
+# --- SPEEDY scheme tunables (no shared counterpart) --------------------------
 gamma  = 6.0       # Reference temperature lapse rate (-dT/dz in deg/km)
 hscale = 7.5       # Reference scale height for pressure (in km)
 hshum  = 2.5       # Reference scale height for specific humidity (in km)
@@ -37,9 +44,6 @@ tdrs   = 24.0*30.0 # Damping time (in hours) for drag on zonal-mean wind
 sd2sc = 60.0 # Snow depth (mm water) corresponding to snow cover = 1
 swcap = 0.30 # Soil wetness at field capacity (volume fraction)
 swwil = 0.17 # Soil wetness at wilting point  (volume fraction)
-
-# to prevent blowup of gradients
-epsilon = 1e-9
 
 nstrad = 3 # number of timesteps between shortwave evaluations
 

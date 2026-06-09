@@ -18,6 +18,12 @@ schemes (solar zenith, MACv2-SP, SST forcing) cache against the dycore-supplied
 ``coords.horizontal.latitudes`` / ``longitudes`` arrays, which are shaped to match
 ``horizontal_shape``.
 
+The protocol permits any ``horizontal_shape``. The current
+``ComposablePhysics(vectorize_columns=True)`` implementation still expects
+exactly two horizontal dimensions, so a backend with an element-plus-GLL
+layout must flatten or adapt that layout before using the shipped
+column-vectorized physics packages.
+
 This protocol is the only sanctioned bridge between the dycore's internal state and
 the rest of jax-gcm. ``Model`` never reaches past it; physics packages never see
 spectral coefficients (or whatever the dycore's native representation happens to be).

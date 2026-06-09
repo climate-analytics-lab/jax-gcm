@@ -10,13 +10,13 @@
 <img src="logo.png" alt="JAX-GCM logo" width="180">
 
 JAX-GCM is a differentiable atmospheric general circulation model written
-in JAX. It couples the
-[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral dynamical core
-to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages, with
-support for gradient-based calibration, ML-physics experiments, and
+in JAX. Its pluggable dynamical-core interface currently ships with the
+[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral backend and
+couples it to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages,
+with support for gradient-based calibration, ML-physics experiments, and
 accelerated CPU/GPU/TPU runs.
 
-The current beta focus is the ECHAM T63L47 hybrid-coordinate stack with
+The v2.0 release focus is the ECHAM T63L47 hybrid-coordinate stack with
 RRTMGP radiation:
 
 ```bash
@@ -26,7 +26,8 @@ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
 ## Highlights
 
 - Fully differentiable JAX implementation compatible with `jit`, `grad`, and `vmap`
-- Operator-split physics coupled to a spectral primitive-equation dycore
+- Pluggable dynamical-core protocol with a shipped Dinosaur spectral backend
+- Dycore-agnostic, operator-split gridpoint physics coupling
 - SPEEDY, Held-Suarez, and composable ECHAM physics configurations
 - ECHAM T63L47 hybrid-coordinate target setup with grey, RRTMGP, or neural-emulated radiation
 - xarray/netCDF output, chunked long-run health checks, and resumable checkpoints
@@ -61,8 +62,14 @@ Run a short SPEEDY aquaplanet integration from Python:
 from jcm.model import Model
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
+# Build coords (pass spmd_mesh=(x, y, z) here to enable multi-device sharding)
 coords = get_speedy_coords(layers=8, spectral_truncation=31)
-model = Model(coords=coords, time_step=30.0)
+
+# Create a model with default configuration
+model = Model(
+    coords=coords,
+    time_step=30.0,  # minutes
+)
 
 predictions = model.run(save_interval=10.0, total_time=120.0)
 ds = predictions.to_xarray()
@@ -100,7 +107,7 @@ testing, and optimization examples: simplified convection, large-scale
 condensation, radiation, surface fluxes, vertical diffusion, and
 orographic drag.
 
-**ECHAM** is the beta release target for climate-quality integrations. It
+**ECHAM** is the v2.0 release target for climate-quality integrations. It
 includes Tiedtke-Nordeng convection, Sundqvist cloud cover, 1M/2M cloud
 microphysics, TTE-TKE vertical diffusion, multi-tile surface physics,
 gravity-wave drag, MACv2-SP aerosols, simple chemistry, and selectable
@@ -113,10 +120,8 @@ combined with the composable physics API:
 
 ```python
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
 physics = echam_physics(radiation_scheme="rrtmgp")
-physics = echam_physics().replace("radiation", RRTMGPRadiation())
 physics = echam_physics().remove("hines")
 ```
 

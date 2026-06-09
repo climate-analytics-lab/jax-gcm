@@ -37,7 +37,7 @@ def compute_geopotential_height(pressure: jnp.ndarray,
     """
     # Constants
     g = physical_constants.grav
-    R = physical_constants.rgas
+    R = physical_constants.rd
     
     # Ensure surface_pressure has compatible shape for concatenation
     batch_shape = pressure.shape[:-1]

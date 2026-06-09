@@ -456,7 +456,7 @@ class TestUtilityFunctions:
         
         dse = compute_dry_static_energy(temperature, geopotential)
         
-        expected = PHYS_CONST.cp * temperature + geopotential
+        expected = PHYS_CONST.cpd * temperature + geopotential
         assert jnp.allclose(dse, expected)
     
     def test_virtual_temperature(self):
@@ -611,7 +611,7 @@ class TestTKEStability:
 
         # Neutral T: dry-adiabatic profile so buoyancy production is ~0
         surface_T = 288.0
-        gamma = 9.81 / PHYS_CONST.cp  # K/m
+        gamma = 9.81 / PHYS_CONST.cpd  # K/m
         temperature = surface_T - gamma * height_full
         qv = jnp.zeros((ncol, nlev))
         qc = jnp.zeros((ncol, nlev))

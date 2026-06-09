@@ -15,9 +15,7 @@ import jax.numpy as jnp
 from jax import lax
 from typing import Tuple
 
-from jcm.constants import (
-    grav, cp, alhc, tmelt
-)
+import jcm.constants as c
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
@@ -79,8 +77,8 @@ def calculate_cloud_water_ice(
 
     """
     # Temperature thresholds for ice formation
-    t_ice = tmelt - 40.0  # All ice below this
-    t_water = tmelt       # All water above this
+    t_ice = c.tmelt - 40.0  # All ice below this
+    t_water = c.tmelt       # All water above this
     
     # Linear transition between water and ice
     ice_frac = jnp.clip((t_water - temperature) / (t_water - t_ice), 0.0, 1.0)
@@ -150,7 +148,7 @@ def calculate_tendencies(
     # Starting from surface (highest index), integrate upward
     # geopotential[k] = sum of layer_thickness[k:] * g
     heights_from_surface = jnp.cumsum(layer_thickness[::-1])[::-1]  # Reverse, cumsum, reverse back
-    geopotential = grav * heights_from_surface
+    geopotential = c.grav * heights_from_surface
 
     # Dry static energy = cp*T + geopotential
     # The latent heat is handled separately through lh_source.
@@ -162,9 +160,9 @@ def calculate_tendencies(
     # subsides and warms adiabatically. Without the s̄ subtraction,
     # the absolute s_par (~3·10⁵ J/kg) dominates and any small dmfu/dz
     # from entrainment produces unphysical heating of ~10³–10⁴ K/day.
-    dse_env = cp * temperature + geopotential
-    dse_up = cp * updraft_state.tu + geopotential
-    dse_down = cp * downdraft_state.td + geopotential
+    dse_env = c.cpd * temperature + geopotential
+    dse_up = c.cpd * updraft_state.tu + geopotential
+    dse_down = c.cpd * downdraft_state.td + geopotential
 
     # Deviation fluxes of dry static energy (W/m²)
     dse_flux_up = (dse_up - dse_env) * updraft_state.mfu
@@ -192,14 +190,14 @@ def calculate_tendencies(
     )
     # Latent-heat source from condensation flux divergence. The same
     # signed-dp / signed-diff convention applies.
-    lh_source = alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
+    lh_source = c.alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
 
     # Signed layer mass per unit area (sign matches ``dp_signed``); the
     # division below cancels the sign so the tendency comes out positive
     # for heating regardless of ordering.
-    layer_mass_per_area = dp_signed / grav  # kg/m² (signed), shape (nlev-1)
+    layer_mass_per_area = dp_signed / c.grav  # kg/m² (signed), shape (nlev-1)
 
-    dtedt_k_levels = (dse_flux_div + lh_source) / (cp * layer_mass_per_area)
+    dtedt_k_levels = (dse_flux_div + lh_source) / (c.cpd * layer_mass_per_area)
     dqdt_k_levels = q_flux_div / layer_mass_per_area
 
     # Mass flux divergences needed for momentum transport
@@ -341,7 +339,7 @@ def mass_flux_closure(
         
         # Mass flux to remove CAPE over timescale
         # Simplified - full version would iterate
-        mf_cape = cape / (grav * tau)
+        mf_cape = cape / (c.grav * tau)
         
         # Apply limits
         return jnp.clip(mf_cape, config.cmfcmin, config.cmfcmax)
@@ -351,7 +349,7 @@ def mass_flux_closure(
         # Balance low-level moisture convergence
         # For shallow convection, also use CAPE but with different scaling
         # If no moisture convergence, use CAPE-based trigger for shallow convection
-        cape_flux = cape / (grav * config.tau * 10.0)  # Weaker than deep convection
+        cape_flux = cape / (c.grav * config.tau * 10.0)  # Weaker than deep convection
         moisture_flux = moisture_conv * 0.1  # Efficiency factor
         
         # Use the larger of the two triggers

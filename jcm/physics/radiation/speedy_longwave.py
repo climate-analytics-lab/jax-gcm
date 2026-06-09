@@ -4,7 +4,9 @@ import jax.numpy as jnp
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physical_constants import sbc
+import jcm.constants as c
+# sbc (Stefan-Boltzmann) is a shared constant, read as a module attribute
+# from jcm.constants.
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -59,11 +61,11 @@ def get_downward_longwave_rad_fluxes(
     st4a = st4a.at[kx-1,:,:,1].set(anis * jnp.maximum(ta[kx-1] - st4a[nl1-1,:,:,0], 0.0))
     
     # Blackbody emission in the stratosphere
-    st4a = st4a.at[:2,:,:,0].set(sbc * st4a[:2, :, :, 1]**4.0)
+    st4a = st4a.at[:2,:,:,0].set(c.sbc * st4a[:2, :, :, 1]**4.0)
     st4a = st4a.at[:2,:,:,1].set(0.0)
 
     # Blackbody emission in the troposphere
-    st3a = sbc * ta[2:kx]**3.0
+    st3a = c.sbc * ta[2:kx]**3.0
     st4a = st4a.at[2:kx,:,:,0].set(st3a * ta[2:kx])
     st4a =  st4a.at[2:kx,:,:,1].set(4.0 * st3a * st4a[2:kx,:,:,1])
 

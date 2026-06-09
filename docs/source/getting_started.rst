@@ -26,7 +26,7 @@ Requirements
 
 - Python ≥ 3.11
 - JAX
-- Dinosaur (dynamical core)
+- Dinosaur (the dynamical-core backend shipped with v2.0)
 - XArray (for I/O and data handling)
 
 See ``requirements.txt`` for the complete list of dependencies.
@@ -178,6 +178,30 @@ You can customize various aspects of the model:
       physics=physics
    )
 
+**Dynamical core**: Pass a backend explicitly when you need backend-specific
+configuration. ``Model(coords=...)`` remains the shorthand for constructing
+the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
+uses Dinosaur; explicit backend selection is currently a Python-API workflow.
+The backend's ``dt_seconds`` and ``Model(time_step=...)`` (minutes) must
+represent the same duration after unit conversion.
+
+.. code-block:: python
+
+   from jcm.diffusion import DiffusionFilter
+   from jcm.dycore.dinosaur import DinosaurDycore
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.terrain import TerrainData
+
+   coords = get_speedy_coords()
+   dycore = DinosaurDycore(
+       coords=coords,
+       terrain=TerrainData.aquaplanet(coords),
+       dt_seconds=1800.0,
+       diffusion=DiffusionFilter.default(),
+   )
+   model = Model(dycore=dycore, time_step=30.0)
+
 **Initial Conditions**: Start from a specific state
 
 .. code-block:: python
@@ -309,15 +333,15 @@ to suppress internal variability that's unrelated to the question you're
 asking — useful for comparing model fields to specific dates of
 observations, or for reducing noise in calibration runs.
 
-Nudging is implemented as a Newtonian relaxation in spectral space:
+Nudging is implemented as a gridpoint-space ``PhysicsTerm``:
 
 .. math::
 
    \frac{\mathrm{d}X}{\mathrm{d}t}\bigg|_\mathrm{nudge}
    = \frac{X_\mathrm{ref} - X}{\tau}
 
-where ``X`` is one of the dycore state variables (vorticity, divergence,
-temperature, log surface pressure) and ``τ`` is the relaxation timescale.
+where ``X`` is a gridpoint wind or temperature field and ``τ`` is the
+relaxation timescale.
 The most common pattern is to nudge winds above the boundary layer and
 let everything else evolve freely, so the model gets the right
 synoptic-scale circulation while its physics still has the freedom to
@@ -441,6 +465,66 @@ The model output is a :py:class:`Predictions` object containing the model state 
    global_mean_temp = ds['temperature'].weighted(
        ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
    ).mean(dim=['lon', 'lat'])
+
+Overriding physical constants
+-----------------------------
+
+All shared physical constants live in a single source of truth,
+:class:`jcm.constants.PhysicalConstants`, exposed as a process-global singleton.
+Each quantity has exactly one canonical name (e.g. dry-air specific heat is
+``cpd``, the dry-air gas constant ``rd``, the melting point ``tmelt``).
+*Derived* quantities (``rd = akap·cpd``, ``cvd``, ``rgrav``, the ``vtmpc*``
+coefficients) are computed on access, so they always stay consistent with the
+base values.
+
+To run with non-default constants — say for a different planet or a sensitivity
+study — call :func:`jcm.constants.set_constants` **before constructing the
+model**. Only *base* fields are set; derived constants follow automatically, and
+both the dynamical core and the physics pick up the override:
+
+.. code-block:: python
+
+   import jcm.constants as c
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+   # Override base constants (derived values recompute automatically)
+   c.set_constants(grav=9.80665, rearth=6.371229e6, cpd=1005.0)
+   assert c.rd == c.akap * c.cpd     # derived value follows
+
+   coords = get_speedy_coords(layers=8, spectral_truncation=31)
+   model = Model(coords=coords)       # honours the override
+
+From the CLI, use the ``constants`` config group (applied before the model is
+built):
+
+.. code-block:: bash
+
+   python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
+
+.. note::
+
+   The override is **process-global** and must be set *before* the model is
+   constructed. Read constants by attribute access (``import jcm.constants as
+   c; c.grav``) — a ``from jcm.constants import grav`` captures the value at
+   import time and will not track later overrides.
+
+.. warning::
+
+   Set constants **once, at the start of the process, before building any
+   model** — think of them as fixed for the run (hence *constants*), in contrast
+   to calibratable scheme parameters which are threaded through the model as
+   explicit, differentiable arguments.
+
+   Constants are baked into a model at construction/trace time: the dynamical
+   core reads the singleton when it is built, and physics functions read the
+   current values when JAX first traces them. Because JAX caches compiled
+   functions, calling :func:`~jcm.constants.set_constants` *after* a model has
+   been built — or building a **second** model with different constants in the
+   same process — is **not** guaranteed to take effect; already-traced/compiled
+   code keeps the values it was first traced with. To compare several constant
+   sets, run each in a **separate process** (e.g. a fresh interpreter or a
+   separate CLI invocation).
 
 Next Steps
 ----------

@@ -758,5 +758,63 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         self.assertEqual(sst_now.shape, nodal_shape)
 
 
+class TestForcingNonMonthlyTimeAxis(unittest.TestCase):
+    """from_dataset must accept native daily / multi-year same-grid files.
+
+    Regression for the branch that unconditionally ran interpolate_to_daily
+    (which requires exactly 12 monthly timestamps) on same-grid files, so a
+    native daily or multi-year boundary file raised before reaching the
+    TimeSeries/BY_DATE alignment.
+    """
+
+    def _same_grid_dataset(self, n_times):
+        import pandas as pd
+        import xarray as xr
+        from jcm.utils import get_coords
+
+        coords = get_coords(np.linspace(0.0, 1.0, 9), spectral_truncation=21)
+        nlon, nlat = coords.horizontal.nodal_shape  # (64, 32)
+        time = pd.date_range("2000-01-01", periods=n_times, freq="D")
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((nlon, nlat, n_times), value, dtype="float32"))
+
+        ds = xr.Dataset(
+            {
+                "stl": f3(280.0),
+                "icec": f3(0.0),
+                "sst": f3(290.0),
+                "soilw_am": f3(0.5),
+                "snowc": f3(0.0),
+                "alb": (("lon", "lat"), np.full((nlon, nlat), 0.1, dtype="float32")),
+            },
+            coords={"time": time},
+        )
+        return ds, coords, (nlon, nlat)
+
+    def test_is_monthly_climatology_helper(self):
+        from jcm.forcing import _is_monthly_climatology
+        ds12, _, _ = self._same_grid_dataset(12)
+        ds5, _, _ = self._same_grid_dataset(5)
+        ds24, _, _ = self._same_grid_dataset(24)
+        self.assertTrue(_is_monthly_climatology(ds12))
+        self.assertFalse(_is_monthly_climatology(ds5))   # native daily
+        self.assertFalse(_is_monthly_climatology(ds24))  # multi-year monthly
+
+    def test_same_grid_daily_axis_loads(self):
+        # 5 daily steps at the target grid: previously raised in
+        # interpolate_to_daily ("expected 12 monthly timestamps").
+        ds, coords, (nlon, nlat) = self._same_grid_dataset(5)
+        forcing = ForcingData.from_dataset(ds, coords=coords, validate=False)
+        self.assertEqual(forcing.alb0.shape, (nlon, nlat))
+
+    def test_same_grid_multiyear_axis_loads(self):
+        ds, coords, (nlon, nlat) = self._same_grid_dataset(24)
+        forcing = ForcingData.from_dataset(ds, coords=coords, align_mode="by_date",
+                                           validate=False)
+        self.assertEqual(forcing.alb0.shape, (nlon, nlat))
+
+
 if __name__ == '__main__':
     unittest.main()

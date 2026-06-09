@@ -191,6 +191,9 @@ startup.sh
 # Local doc files
 docs/build
 docs/source/generated
+# Generated at Sphinx build time from jcm/physics/speedy/units_table.csv
+# (docs/source/conf.py); never committed — see issue #394.
+docs/source/speedy_translation.rst
 
 # Local claude files
 .claude/

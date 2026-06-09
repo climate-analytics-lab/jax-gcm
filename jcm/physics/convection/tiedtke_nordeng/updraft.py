@@ -15,9 +15,7 @@ import jax.numpy as jnp
 from jax import lax
 from typing import NamedTuple, Tuple
 
-from jcm.constants import (
-    grav, cp, alhc, tmelt, eps, rd
-)
+import jcm.constants as c
 from .tiedtke_nordeng import (
     ConvectionParameters, saturation_mixing_ratio, saturation_vapor_pressure
 )
@@ -49,19 +47,19 @@ def _saturation_mixing_ratio_and_derivative(
     # `es_safe` matches the clipping inside `saturation_mixing_ratio`
     p_safe = jnp.maximum(pressure, 1.0)
     es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - eps), 1.0)
-    qs = eps * es_safe / denom
+    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
+    qs = c.eps * es_safe / denom
 
     # des/dT from Tetens: des/dT = es * a*C / (tc + C)**2
     # Use water coefficients above freezing, ice coefficients below
-    tc = temperature - tmelt
+    tc = temperature - c.tmelt
     a_water, c_water = _TETENS_A_WATER, _TETENS_C_WATER
     a_ice, c_ice = _TETENS_A_ICE, _TETENS_C_ICE
     des_dT_water = es * a_water * c_water / jnp.maximum((tc + c_water) ** 2, 1e-3)
     des_dT_ice = es * a_ice * c_ice / jnp.maximum((tc + c_ice) ** 2, 1e-3)
-    des_dT = jnp.where(temperature > tmelt, des_dT_water, des_dT_ice)
+    des_dT = jnp.where(temperature > c.tmelt, des_dT_water, des_dT_ice)
     # dqs/dT: differentiate qs = eps*es / (p - (1-eps)*es)
-    dqs_dT = eps * p_safe * des_dT / denom ** 2
+    dqs_dT = c.eps * p_safe * des_dT / denom ** 2
     return qs, dqs_dT
 
 
@@ -115,7 +113,7 @@ def saturation_adjustment(
         and ``vapour ≈ qs(T_adj)`` to within a fraction of a percent.
 
     """
-    L_cp = alhc / cp
+    L_cp = c.alhc / c.cpd
 
     def _first_pass(T, q_vap, liq):
         """Condensation-only Newton step (kcall=1)."""
@@ -212,10 +210,10 @@ def calculate_updraft(
     surf_humid = humidity[surf_idx]
     surf_press = pressure[surf_idx]
 
-    parcel_T_dry_at_cb = surf_temp * (pressure[kbase] / surf_press) ** (rd / cp)
+    parcel_T_dry_at_cb = surf_temp * (pressure[kbase] / surf_press) ** (c.rd / c.cpd)
     qsat_at_cb = saturation_mixing_ratio(pressure[kbase], parcel_T_dry_at_cb)
     excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
-    tu_cb = parcel_T_dry_at_cb + (alhc / cp) * excess
+    tu_cb = parcel_T_dry_at_cb + (c.alhc / c.cpd) * excess
     # The parcel is exactly saturated at the (warmer) cb temperature;
     # use that as the cloud-base mixing ratio rather than the raw env q.
     qu_cb = saturation_mixing_ratio(pressure[kbase], tu_cb)
@@ -352,7 +350,7 @@ def calculate_updraft(
                     carry.mfu[next_level] + dmf_entr, 1e-10
                 )
                 # Adiabatic cooling of the updraft air as it rises by dz
-                adiabatic_cooling = grav * dz / cp
+                adiabatic_cooling = c.grav * dz / c.cpd
                 tu_lifted = carry.tu[next_level] - adiabatic_cooling
 
                 total_water = (
@@ -396,7 +394,7 @@ def calculate_updraft(
             # ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``
             # blended by ``land_fraction``.
             in_precip_zone = (p_at_base - pressure) >= zdnoprc
-            geoh_diff = grav * dz  # ≈ pgeoh(jk) - pgeoh(jk+1) in ECHAM
+            geoh_diff = c.grav * dz  # ≈ pgeoh(jk) - pgeoh(jk+1) in ECHAM
             cprcon_eff = jnp.where(
                 jnp.logical_and(mfu_new > mfu_threshold, in_precip_zone),
                 cprcon, 0.0,
@@ -410,7 +408,7 @@ def calculate_updraft(
             # Calculate buoyancy
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
-            buoy_new = grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
+            buoy_new = c.grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
 
             # Dynamic cloud-top termination: once above cloud base the parcel
             # becomes negatively buoyant (or the mass flux has already dropped

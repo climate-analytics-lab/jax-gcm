@@ -1,4 +1,4 @@
-dinosaur @ git+https://github.com/neuralgcm/dinosaur@main
+dinosaur
 flax>=0.12.0
 jax-datetime
 tree-math
@@ -18,5 +18,4 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp @ git+https://github.com/climate-analytics-lab/jax-rrtmgp@main
-
+jax-rrtmgp

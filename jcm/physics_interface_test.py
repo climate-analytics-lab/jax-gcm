@@ -10,12 +10,12 @@ from jcm.dycore.dinosaur.state_bridge import (
 
 class TestPhysicsInterfaceUnit(unittest.TestCase):
     def test_initial_state_conversion(self):
-        from dinosaur.scales import SI_SCALE
         from dinosaur import primitive_equations
         from dinosaur import xarray_utils
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
-
-        PHYSICS_SPECS = primitive_equations.PrimitiveEquationsSpecs.from_si(scale = SI_SCALE)
+        # Use the constants-derived specs so coords.radius (from get_coords,
+        # sourced from PhysicalConstants) matches physics_specs.radius.
+        from jcm.dycore.dinosaur.dycore import PHYSICS_SPECS
         kx, ix, il = 8, 96, 48
         temp = 288 * jnp.ones((kx, ix, il))
         u = jnp.ones((kx, ix, il)) * 0.5

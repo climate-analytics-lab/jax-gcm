@@ -8,14 +8,11 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing, 
+    SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceResistances, SurfaceDiagnostics
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -49,7 +46,7 @@ def compute_bulk_richardson_number(
     theta_v_mean = 0.5 * (theta_v_air[:, None] + theta_v_surface)
     
     # Buoyancy term
-    buoyancy = (PHYS_CONST.grav * reference_height * 
+    buoyancy = (c.grav * reference_height *
                (theta_v_air[:, None] - theta_v_surface) / theta_v_mean)
     
     # Wind shear term (prevent division by zero)
@@ -177,8 +174,8 @@ def compute_surface_humidity(
     # Saturation vapor pressure (simplified Clausius-Clapeyron)
     # e_sat = e0 * exp(L/Rv * (1/T0 - 1/T))
     e0 = 611.0  # Pa
-    L_over_Rv = PHYS_CONST.alhc / PHYS_CONST.rv  # K
-    T0 = PHYS_CONST.t0  # K
+    L_over_Rv = c.alhc / c.rv  # K
+    T0 = c.tmelt  # K
     
     # Wide math-safety clip only — prevents divide-by-zero and exp overflow,
     # NOT a physical-range bound
@@ -187,7 +184,7 @@ def compute_surface_humidity(
     e_sat = e0 * jnp.exp(exponent)
 
     # Saturation mixing ratio — cap e_sat < 0.99 * pressure
-    epsilon = PHYS_CONST.eps
+    epsilon = c.eps
     p_safe = jnp.maximum(pressure[:, None], 1.0)
     e_sat = jnp.minimum(e_sat, 0.99 * p_safe)
     q_sat = epsilon * e_sat / jnp.maximum(p_safe - (1.0 - epsilon) * e_sat, 1.0)
@@ -225,9 +222,9 @@ def compute_turbulent_fluxes(
     nsfc_type = surface_state.temperature.shape[1]
     
     # Air density
-    air_density = (atmospheric_state.pressure / 
-                  (PHYS_CONST.rd * atmospheric_state.temperature))
-    
+    air_density = (atmospheric_state.pressure /
+                  (c.rd * atmospheric_state.temperature))
+
     # Surface saturation humidity
     q_surface = compute_surface_humidity(
         surface_state.temperature, atmospheric_state.pressure
@@ -243,15 +240,15 @@ def compute_turbulent_fluxes(
     delta_humidity = (atmospheric_state.humidity[:, None] - q_surface)
     
     # Sensible heat flux [W/m²]
-    sensible_heat = (air_density[:, None] * PHYS_CONST.cp * 
+    sensible_heat = (air_density[:, None] * c.cpd *
                     exchange_coeffs_heat * delta_temp)
     
     # Latent heat flux [W/m²]
     # Use appropriate latent heat (condensation vs sublimation)
     latent_heat_coeff = jnp.where(
-        surface_state.temperature > PHYS_CONST.tmelt,
-        PHYS_CONST.alhc,  # Condensation
-        PHYS_CONST.alhs   # Sublimation
+        surface_state.temperature > c.tmelt,
+        c.alhc,  # Condensation
+        c.alhs   # Sublimation
     )
     latent_heat = (air_density[:, None] * latent_heat_coeff * 
                   exchange_coeffs_moisture * delta_humidity)
@@ -423,7 +420,7 @@ def compute_surface_diagnostics(
     momentum_flux_magnitude = jnp.sqrt(
         surface_fluxes.momentum_u_mean**2 + surface_fluxes.momentum_v_mean**2
     )
-    air_density = atmospheric_state.pressure / (PHYS_CONST.rd * atmospheric_state.temperature)
+    air_density = atmospheric_state.pressure / (c.rd * atmospheric_state.temperature)
     friction_velocity = jnp.sqrt(momentum_flux_magnitude / air_density)
     
     # Richardson number (grid-box mean)

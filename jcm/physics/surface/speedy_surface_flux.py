@@ -8,7 +8,8 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import p0, rgas, cp, alhc, sbc, grav
+import jcm.constants as c
+from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.clouds.speedy_humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.utils import pass_fn
 
@@ -64,14 +65,14 @@ def get_surface_fluxes(
     rlds = physics_data.surface_flux.rlds
 
     rh = physics_data.humidity.rh
-    phi0 = terrain.orog * grav # surface geopotential
+    phi0 = terrain.orog * c.grav # surface geopotential
 
     snowc = physics_data.mod_radcon.snowc
     alb_l = physics_data.mod_radcon.alb_l
     alb_s = physics_data.mod_radcon.alb_s
 
     # Initialize variables
-    esbc  = parameters.mod_radcon.emisfc*sbc
+    esbc  = parameters.mod_radcon.emisfc*c.sbc
     ghum0 = 1.0 - parameters.surface_flux.fhum0
 
     ustr = jnp.zeros((ix, il, 3))
@@ -106,7 +107,7 @@ def get_surface_fluxes(
     astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
 
     # 1.1 Wind components
-    rcp = 1.0/cp
+    rcp = 1.0/c.cpd
     nl1 = kx-1
     gtemp0 = 1.0 - parameters.surface_flux.ftemp0
 
@@ -118,7 +119,7 @@ def get_surface_fluxes(
     # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
     # line 115 - 116
     t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(rgas*288.0*physics_data.speedy_coords.sigl[kx-1]))
+    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(c.rd*288.0*physics_data.speedy_coords.sigl[kx-1]))
 
     # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
     # line 119 - 120
@@ -133,7 +134,7 @@ def get_surface_fluxes(
     t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
 
     # 1.3 Density * wind speed (including gustiness factor)
-    denvvs = denvvs.at[:, :, 0].set((p0*psa/(rgas*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
+    denvvs = denvvs.at[:, :, 0].set((c.p0*psa/(c.rd*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
 
 
     ##########################################################
@@ -166,7 +167,7 @@ def get_surface_fluxes(
         vstr = vstr.at[:, :, 0].set(-cdldv * va[kx-1])
 
         # 2.4 Computing Sensible Heat Flux
-        chlcp = parameters.surface_flux.chl * cp
+        chlcp = parameters.surface_flux.chl * c.cpd
         shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
         
         # 2.5 Computing Evaporation
@@ -206,7 +207,7 @@ def get_surface_fluxes(
                 )
 
             # Redefine skin temperature to balance the heat budget
-            dtskin = hfluxn[:, :, 0] / (clamb + drls + (parameters.surface_flux.chl * denvvs[:, :, 1] * (cp + (alhc * qsat0[:, :, 1]))))
+            dtskin = hfluxn[:, :, 0] / (clamb + drls + (parameters.surface_flux.chl * denvvs[:, :, 1] * (c.cpd + (alhc * qsat0[:, :, 1]))))
             tskin = tskin + dtskin
 
             # Add linear corrections to heat fluxes
@@ -249,7 +250,7 @@ def get_surface_fluxes(
     vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
 
     # 4.3 Sensible heat flux
-    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * cp * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
+    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * c.cpd * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
 
     # 4.4 Evaporation
     qsat0 = qsat0.at[:, :, 1].set(get_qsat(forcing.sea_surface_temperature, psa, 1.0))
@@ -294,7 +295,7 @@ def get_orog_land_sfc_drag(phis0, hdrag):
     phi0 : Array
         - Array used for calculating the forog
     """
-    rhdrag = 1/(grav*hdrag)
+    rhdrag = 1/(c.grav*hdrag)
 
     forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))
 

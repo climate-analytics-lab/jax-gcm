@@ -8,14 +8,11 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .surface_types import (
-    SurfaceParameters, AtmosphericForcing, 
+    SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -240,7 +237,7 @@ def compute_transpiration(
     # where Delta = slope of saturation vapor pressure curve, gamma = psychrometric constant
     
     # Simplified: transpiration proportional to net radiation and water availability
-    potential_transpiration = jnp.maximum(net_radiation * 0.5, 0.0) / PHYS_CONST.alhc
+    potential_transpiration = jnp.maximum(net_radiation * 0.5, 0.0) / c.alhc
     
     # Apply water stress and vegetation fraction
     transpiration = (potential_transpiration * water_stress * vegetation_fraction *
@@ -365,17 +362,17 @@ def land_surface_physics_step(
     surface_temp = soil_temp[:, 0]
     
     # Air density
-    air_density = (atmospheric_state.pressure / 
-                  (PHYS_CONST.rd * atmospheric_state.temperature))
+    air_density = (atmospheric_state.pressure /
+                  (c.rd * atmospheric_state.temperature))
     
     # Surface humidity (soil + vegetation)
     # Soil evaporation depends on soil moisture
     soil_beta = jnp.minimum(soil_moisture[:, 0] / 0.75, 1.0)  # Evaporation efficiency
     
     # Simplified surface humidity
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - PHYS_CONST.t0) / 
-                           (surface_temp - PHYS_CONST.t0 + 237.3))
-    q_sat_surface = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
+    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - c.tmelt) /
+                           (surface_temp - c.tmelt + 237.3))
+    q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
     q_surface = soil_beta * q_sat_surface  # Reduced by soil dryness
     
     # Temperature and humidity differences. Positive convention: flux UP
@@ -388,7 +385,7 @@ def land_surface_physics_step(
     delta_humidity = q_surface - atmospheric_state.humidity
 
     # Turbulent fluxes
-    sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
+    sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp
 
     # Evaporation from soil. ``maximum(.., 0)`` enforces "no condensation
     # onto land" (a standard simplification; dew is not modelled here).
@@ -404,7 +401,7 @@ def land_surface_physics_step(
     )
     
     # Total latent heat flux
-    latent_heat = PHYS_CONST.alhc * (evaporation + transpiration)
+    latent_heat = c.alhc * (evaporation + transpiration)
     
     # Momentum fluxes
     momentum_u = air_density * exchange_coeff_momentum * atmospheric_state.u_wind

@@ -1,31 +1,35 @@
-name: Update Documentation
+name: Validate documentation generation
+
+# The SPEEDY variable-translation page is generated at Sphinx build time from
+# jcm/physics/speedy/units_table.csv (see docs/source/conf.py); it is no longer
+# committed back to the repo by CI (which bypassed the PR rule — issue #394).
+# This job only *validates* that generation succeeds for changes that affect it,
+# without write permission and without committing anything.
+
 on:
-  push:
+  pull_request:
     paths:
-      - 'jcm/physics/speedy/units_table.csv'  
+      - 'jcm/physics/speedy/units_table.csv'
+      - 'docs/generate_docs.py'
+      - 'docs/source/conf.py'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  update-docs:
+  validate-docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
-          
-      - name: Update Sphinx documentation
+          python-version: '3.11'
+
+      - name: Generate translation docs (no commit)
         run: python docs/generate_docs.py
-          
-      - name: Commit changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add docs/source/speedy_translation.rst
-          git diff --staged --quiet || git commit -m "Auto-update variable translation documentation"
-          git push
+
+      - name: Fail if generation produced no output
+        run: test -s docs/source/speedy_translation.rst

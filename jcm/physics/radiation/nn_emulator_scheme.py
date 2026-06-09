@@ -30,7 +30,7 @@ from jcm.physics.radiation.nn_emulator import (
     reconstruct_lw_fluxes,
     flux_to_heating_rate,
 )
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 
 
 def radiation_scheme_emulated(
@@ -74,7 +74,6 @@ def radiation_scheme_emulated(
     from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
 
     nlev = temperature.shape[0]
-    phys = PhysicalConstants()
 
     # --- Solar geometry ---
     # `solar` is a `jcm.forcing.SolarGeometry` precomputed by the Model;
@@ -91,7 +90,7 @@ def radiation_scheme_emulated(
 
     # --- Prepare inputs common to SW and LW ---
     # Water vapour mixing ratio
-    eps = phys.eps  # Mv/Md ≈ 0.622
+    eps = c.eps  # Mv/Md ≈ 0.622
     h2o_vmr = specific_humidity / (eps * (1.0 - specific_humidity) + specific_humidity)
 
     # Ozone

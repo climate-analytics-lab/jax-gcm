@@ -9,7 +9,11 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.physical_constants import p0, alhc, grav, cp
+import jcm.constants as c
+# alhc is the SPEEDY latent heat in J/g (consistent with q in g/kg); it is a
+# SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
+# grav) are read as module attributes from jcm.constants.
+from jcm.physics.speedy.physical_constants import alhc
 
 @jit
 def diagnose_convection(
@@ -120,7 +124,7 @@ def get_convection_tendencies(
     dfqa: Net flux of specific humidity into each atmospheric layer
 
     """
-    se = cp * state.temperature + state.geopotential
+    se = c.cpd * state.temperature + state.geopotential
     qa = state.specific_humidity
     qsat = physics_data.humidity.qsat
     kx, ix, il = se.shape
@@ -137,7 +141,7 @@ def get_convection_tendencies(
     entr *= parameters.convection.entmax / sentr
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
-    fm0 = p0*physics_data.speedy_coords.dhs[-1]/(grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
+    fm0 = c.p0*physics_data.speedy_coords.dhs[-1]/(c.grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
     rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection

@@ -108,21 +108,39 @@ def update_sphinx_doc(csv_file, output_file):
     except Exception:
         return False
 
+# Repo-relative default paths computed from this file's location, so the
+# generator behaves identically whether it is run by hand, by the Sphinx build
+# (docs/source/conf.py) on Read the Docs, or in CI — regardless of the current
+# working directory.
+_DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_DOCS_DIR)
+DEFAULT_CSV_PATH = os.path.join(
+    _REPO_ROOT, 'jcm', 'physics', 'speedy', 'units_table.csv')
+DEFAULT_OUTPUT_FILE = os.path.join(_DOCS_DIR, 'source', 'speedy_translation.rst')
+
+
+def generate(csv_path=None, output_file=None):
+    """Generate the SPEEDY variable-translation page from the units CSV.
+
+    Writes ``output_file`` and returns the number of variables documented.
+    This is the single entry point used both by the CLI (:func:`main`) and by
+    the Sphinx build (``docs/source/conf.py``), so the page is produced at
+    build time and never committed to the repository (see issue #394).
+    """
+    csv_path = csv_path or DEFAULT_CSV_PATH
+    output_file = output_file or DEFAULT_OUTPUT_FILE
+    if not update_sphinx_doc(csv_path, output_file):
+        raise RuntimeError(f"Failed to generate {output_file} from {csv_path}")
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        return sum(1 for row in reader if row.get('Variable', '').strip())
+
+
 def main():
-    """Execute workflow to update Sphinx documentation from CSV"""
-    output_file = 'docs/source/speedy_translation.rst'
-    
-    csv_path = 'jcm/physics/speedy/units_table.csv'
-    
-    success = update_sphinx_doc(csv_path, output_file)
-    
-    if success:
-        with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            total_vars = sum(1 for row in reader if row.get('Variable', '').strip())
-            print(f"Updated documentation for {total_vars} variables.")
-    else:
-        sys.exit(1)
+    """Execute workflow to update Sphinx documentation from CSV."""
+    total_vars = generate()
+    print(f"Updated documentation for {total_vars} variables.")
+
 
 if __name__ == "__main__":
     main()

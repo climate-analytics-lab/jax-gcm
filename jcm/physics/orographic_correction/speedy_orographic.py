@@ -10,7 +10,8 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physical_constants import rgas, grav, gamma, hscale, hshum, refrh1
+import jcm.constants as c
+from jcm.physics.speedy.physical_constants import gamma, hscale, hshum, refrh1
 from jcm.physics.speedy.physics_data import PhysicsData
 
 
@@ -32,7 +33,7 @@ def compute_temperature_correction_vertical_profile(terrain: TerrainData, physic
 
     """
     # SPEEDY constants from physical_constants.py
-    rgam = rgas * gamma / (1000.0 * grav)
+    rgam = c.rd * gamma / (1000.0 * c.grav)
     
     # Get sigma levels (fsg in SPEEDY) - use layer midpoints
     sigma_levels = physics_data.speedy_coords.fsg  # These are the full sigma levels
@@ -106,7 +107,7 @@ def compute_temperature_correction_horizontal(terrain: TerrainData, physics_data
         Horizontal correction array of shape (lon, lat)
 
     """
-    gamlat = gamma / (1000.0 * grav)  # Reference lapse rate (constant in SPEEDY)
+    gamlat = gamma / (1000.0 * c.grav)  # Reference lapse rate (constant in SPEEDY)
     
     # Apply correction: gamlat * phis0 (spectrally-filtered surface geopotential)
     corh = gamlat * terrain.phis0
@@ -151,7 +152,7 @@ def compute_humidity_correction_horizontal(
     # 3. Calculate pressure adjustment due to temperature difference
     # In SPEEDY: pexp = 1./(rgas * gamlat(j)), but gamlat is constant = gamma/(1000*grav)
     # So pexp = 1000*grav/(rgas*gamma)
-    pexp = 1000.0 * grav / (rgas * gamma)
+    pexp = 1000.0 * c.grav / (c.rd * gamma)
     
     # psfc = (tsfc/tref)^pexp
     psfc = (tsfc / tref) ** pexp

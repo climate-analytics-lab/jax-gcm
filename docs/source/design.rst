@@ -17,50 +17,91 @@ Core Architecture
 Model Structure
 ^^^^^^^^^^^^^^^
 
-The :py:class:`jcm.model.Model` class serves as the central orchestrator, linking the Dinosaur dynamical core with physics implementations through a clean interface. See :doc:`design/operator_split_physics` for the per-step coupling between the dynamics integrator and physics.
+The :py:class:`jcm.model.Model` class is the central orchestrator. It links a
+pluggable dynamical-core backend to a physics package without reaching into the
+backend's native state representation. See :doc:`design/operator_split_physics`
+for the per-step coupling between the dycore and physics.
 
 .. code-block:: text
 
-   ┌──────────────────────────────────────────────┐
-   │             Model                            │
-   │  ┌────────────────────────────────────────┐  │
-   │  │   Dinosaur Dynamical Core              │  │
-   │  │   (Spectral, Primitive Equations)      │  │
-   │  └────────────────────────────────────────┘  │
-   │                  ↕                           │
-   │  ┌────────────────────────────────────────┐  │
-   │  │   Physics Interface                    │  │
-   │  │   (PhysicsState ↔ PhysicsTendency)     │  │
-   │  └────────────────────────────────────────┘  │
-   │                  ↕                           │
-   │  ┌────────────────────────────────────────┐  │
-   │  │   ComposablePhysics                    │  │
-   │  │   (ordered list of PhysicsTerm)        │  │
-   │  │   built by speedy_physics(),           │  │
-   │  │   echam_physics(), held_suarez_physics()│  │
-   │  └────────────────────────────────────────┘  │
-   └──────────────────────────────────────────────┘
+   ┌───────────────────────────────────────────────┐
+   │ Model                                         │
+   │                                               │
+   │   DynamicalCore                               │
+   │   native state ↔ gridpoint PhysicsState       │
+   │          │                                    │
+   │          ▼                                    │
+   │   physics_interface                           │
+   │   verify state → tendencies → verify tendency │
+   │          │                                    │
+   │          ▼                                    │
+   │   ComposablePhysics                           │
+   │   ordered PhysicsTerm modules                 │
+   └───────────────────────────────────────────────┘
+
+Pluggable Dynamical Cores
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The :py:class:`jcm.dycore.base.DynamicalCore` protocol owns every operation
+that depends on a dycore's native representation: initial-state construction,
+one-step integration, terrain preparation, conversion to gridpoint
+:py:class:`~jcm.physics_interface.PhysicsState`, simulation-time accounting,
+and xarray output. The shipped
+:py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
+spectral primitive-equation state, IMEX-RK step, and spectral filters.
+
+The physics-dynamics boundary is gridpoint space on the dycore's native
+horizontal layout, so physics never sees spectral coefficients. The protocol
+permits non-lat/lon layouts, although the current column-vectorized
+``ComposablePhysics`` path still expects exactly two horizontal dimensions;
+a backend with an element-plus-GLL layout must flatten or adapt that layout
+before using the shipped column physics packages. Backends perform any output
+regridding in ``to_xarray()``, outside the per-step physics path.
+
+For convenience, ``Model(coords=...)`` constructs ``DinosaurDycore``
+automatically. Expert callers can construct and pass a backend explicitly:
+
+.. code-block:: python
+
+   from jcm.dycore.dinosaur import DinosaurDycore
+   from jcm.model import Model
+   from jcm.physics.speedy.speedy_coords import get_speedy_coords
+   from jcm.terrain import TerrainData
+
+   coords = get_speedy_coords()
+   dycore = DinosaurDycore(
+       coords=coords,
+       terrain=TerrainData.aquaplanet(coords),
+       dt_seconds=1800.0,
+   )
+   model = Model(dycore=dycore, time_step=30.0)
+
+The v2.0 Hydra CLI currently constructs the Dinosaur backend explicitly;
+selecting a different registered backend is a Python-API workflow. When
+constructing a backend explicitly, its ``dt_seconds`` and
+``Model(time_step=...)`` (minutes) must represent the same duration after unit
+conversion.
 
 The Physics Interface
 ^^^^^^^^^^^^^^^^^^^^^^
 
-The :py:class:`jcm.physics_interface.Physics` abstract base class defines a clean contract between the dynamical core and physics packages:
+The :py:class:`jcm.physics_interface.Physics` base class defines the contract
+between the gridpoint state supplied by the dycore and a physics package:
 
 .. code-block:: python
 
    class Physics:
-       def __call__(
+       def compute_tendencies(
            self,
            state: PhysicsState,
-           physics_data: PhysicsData,
            forcing: ForcingData,
            terrain: TerrainData,
-       ) -> tuple[PhysicsTendency, PhysicsData]:
+           prev_physics_data=None,
+       ) -> tuple[PhysicsTendency, PhysicsCarryState]:
            """Compute physics tendencies for the current state.
 
            Args:
                state: Current atmospheric state (temperature, winds, etc.)
-               physics_data: Diagnostic data from previous timesteps
                forcing: Boundary conditions for the *current step*. The
                    Model collapses every `TimeSeries` leaf and populates
                    `forcing.solar` via ``forcing.select(date, calendar)``
@@ -68,12 +109,14 @@ The :py:class:`jcm.physics_interface.Physics` abstract base class defines a clea
                    spatial fields and a precomputed `SolarGeometry` —
                    no time axis, no `DateData`.
                terrain: Orography / land-sea mask information
+               prev_physics_data: Cross-step physics carry from the
+                   preceding timestep.
 
            Returns:
                tendencies: Changes to apply to the state
-               updated_data: Updated diagnostic information
+               updated_data: Updated diagnostics and cross-step carry
            """
-           pass
+           raise NotImplementedError
 
 This interface enables:
 
@@ -140,7 +183,10 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
 
    from jcm.physics.speedy.speedy_terms import speedy_physics
    from jcm.physics.echam.echam_terms import echam_physics
-   from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+   from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+       ConvectionParameters,
+       TiedtkeConvection,
+   )
 
    # Use pre-built SPEEDY defaults
    physics = speedy_physics()
@@ -148,8 +194,11 @@ The model is composable at multiple levels through the ``ComposablePhysics`` fra
    # Use ECHAM with the NN radiation emulator
    physics = echam_physics(radiation_scheme="emulated")
 
-   # Replace SPEEDY radiation with the RRTMGP backend
-   physics = speedy_physics().replace("radiation", RRTMGPRadiation())
+   # Replace one term with a separately configured instance
+   convection = TiedtkeConvection(
+       params=ConvectionParameters.default(tau=10800.0),
+   )
+   physics = echam_physics().replace("convection", convection)
 
    # Remove a term
    physics = echam_physics().remove("hines")
@@ -279,6 +328,7 @@ For Experts
 Every component can be customized or extended:
 
 - **Custom Physics**: Add a new ``PhysicsTerm`` — see :doc:`design/writing_a_physics_scheme` for the one-file plugin contract.
+- **Custom Dynamical Core**: Implement the :py:class:`jcm.dycore.base.DynamicalCore` protocol and pass the backend to ``Model(dycore=...)``.
 - **Custom Forcing**: Create specialized boundary condition handlers
 - **Custom Diagnostics**: Add new output variables and computations
 - **Integration**: Couple with other models or ML components

@@ -75,7 +75,7 @@ import jax.numpy as jnp
 from jax import lax
 import tree_math
 
-from jcm.constants import grav, rd, cpd
+import jcm.constants as c
 
 # 8-azimuth case uses cos(45°) projections; precompute as a Python float
 # so it folds into XLA constants.
@@ -372,7 +372,7 @@ def _brunt_vaisala(temperature: jnp.ndarray, pressure_full: jnp.ndarray,
     ``T / Pi^kappa``, then converts to N. Index 0 = top. Followed by a
     single forward log-pressure smoother to suppress noise.
     """
-    rgocp = rd / cpd
+    rgocp = c.rd / c.cpd
     sigma = pressure_full / surface_pressure
     pi_kappa = sigma ** rgocp
 
@@ -382,9 +382,9 @@ def _brunt_vaisala(temperature: jnp.ndarray, pressure_full: jnp.ndarray,
                  / (sigma[1:] - sigma[:-1]))
     dT_dsigma = jnp.minimum(dT_dsigma, -5.0 / sigma[1:])
     dT_dsigma = dT_dsigma * pi_kappa[1:]
-    bvf2 = -dT_dsigma * sigma[1:] / rd
+    bvf2 = -dT_dsigma * sigma[1:] / c.rd
     bvf2 = jnp.maximum(bvf2, 0.0)
-    bvfreq_inner = jnp.sqrt(bvf2) * grav / temperature[1:]
+    bvfreq_inner = jnp.sqrt(bvf2) * c.grav / temperature[1:]
 
     # Pad index 0 with index 1 (Fortran line: ``bvfreq(:,1) = bvfreq(:,2)``).
     bvfreq = jnp.concatenate([bvfreq_inner[:1], bvfreq_inner])

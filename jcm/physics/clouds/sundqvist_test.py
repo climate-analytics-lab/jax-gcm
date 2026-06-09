@@ -11,7 +11,7 @@ from .sundqvist import (
     partition_cloud_phase, condensation_evaporation,
     shallow_cloud_scheme, critical_relative_humidity, _qs_and_dqs_dt,
 )
-from jcm.constants import tmelt, eps, alhc, cp
+from jcm.constants import tmelt, eps, alhc, cpd
 
 
 class TestCondensationLinearisation:
@@ -50,9 +50,9 @@ class TestCondensationLinearisation:
         dT_per_step = float(dT) * 1800.0
 
         # Naive (pre-fix) ΔT = L/cp · q_excess
-        naive_dT = float(alhc / cp * (q - qs))
+        naive_dT = float(alhc / cpd * (q - qs))
         # Expected damping factor at this T
-        damping = float(1.0 + alhc / cp * dqs_dt)
+        damping = float(1.0 + alhc / cpd * dqs_dt)
 
         # Post-fix ΔT must be no larger than naive/damping × 1.2 (allow
         # 20 % slack for the cloud-fraction weighting + two-pass cleanup).
@@ -143,8 +143,8 @@ class TestCondensationLinearisation:
         )
         delta_T = float(dT) * 1800.0
         delta_q = float(dq) * 1800.0
-        h_change = cp * delta_T + alhc * delta_q
-        h_baseline = cp * float(T) + alhc * float(q)
+        h_change = cpd * delta_T + alhc * delta_q
+        h_baseline = cpd * float(T) + alhc * float(q)
         rel = abs(h_change) / h_baseline
         assert rel < 1e-2, f"moist static energy drift {rel*100:.3f} %"
 

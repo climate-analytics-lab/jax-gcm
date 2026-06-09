@@ -12,14 +12,11 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-from jcm.constants import PhysicalConstants
+import jcm.constants as c
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
 )
-
-# Create constants instance
-PHYS_CONST = PhysicalConstants()
 
 
 @jax.jit
@@ -80,7 +77,7 @@ def compute_ocean_roughness(
     # where u* = sqrt(tau / rho_air)
     # Simplified: z0 = alpha * U^2 / g with alpha ≈ 0.018
     charnock_alpha = 0.018
-    gravity = PHYS_CONST.grav
+    gravity = c.grav
 
     z0_ocean = charnock_alpha * wind_rel_speed**2 / gravity
 
@@ -125,13 +122,13 @@ def compute_ocean_surface_fluxes(
 
     # Air density
     air_density = (atmospheric_state.pressure /
-                  (PHYS_CONST.rd * atmospheric_state.temperature))
+                  (c.rd * atmospheric_state.temperature))
 
     # Ocean surface saturation humidity
     # Saturation vapor pressure over ocean
-    T_celsius = ocean_temp - PHYS_CONST.t0
+    T_celsius = ocean_temp - c.tmelt
     e_sat = 611.0 * jnp.exp(17.27 * T_celsius / (T_celsius + 237.3))  # Pa
-    q_sat_ocean = PHYS_CONST.eps * e_sat / atmospheric_state.pressure
+    q_sat_ocean = c.eps * e_sat / atmospheric_state.pressure
 
     # Temperature and humidity differences
     delta_temp = ocean_temp - atmospheric_state.temperature
@@ -143,7 +140,7 @@ def compute_ocean_surface_fluxes(
     wind_rel_speed = jnp.sqrt(wind_rel_u**2 + wind_rel_v**2)
 
     # Sensible heat flux [W/m²]
-    sensible_heat = air_density * PHYS_CONST.cp * exchange_coeff_heat * delta_temp
+    sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp
 
     # Momentum fluxes [N/m²]
     momentum_u = air_density * exchange_coeff_momentum * wind_rel_u
@@ -153,7 +150,7 @@ def compute_ocean_surface_fluxes(
     evaporation = air_density * exchange_coeff_moisture * delta_humidity
 
     # Latent heat flux [W/m²]
-    latent_heat = PHYS_CONST.alhc * evaporation
+    latent_heat = c.alhc * evaporation
 
     # Ocean albedo
     albedo_vis_dir, albedo_vis_dif, albedo_nir_dir, albedo_nir_dif = compute_ocean_albedo(

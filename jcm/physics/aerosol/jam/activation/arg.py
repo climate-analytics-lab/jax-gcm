@@ -26,7 +26,7 @@ from jax.scipy.special import erf
 # gas constant (J/mol/K), distinct from the per-mass dry-air constant.
 from jcm.constants import air_thermal_conductivity as _KA
 from jcm.constants import alhc as _LV
-from jcm.constants import cp as _CP
+from jcm.constants import cpd as _CP
 from jcm.constants import grav as _G
 from jcm.constants import m_air as _MA
 from jcm.constants import m_water as _MW

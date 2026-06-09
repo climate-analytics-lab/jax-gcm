@@ -8,9 +8,7 @@ import jax
 from jax import jit
 from math import pi
 
-from jcm.constants import (
-    rgrav, rhoh2o
-)
+import jcm.constants as c
 from .lohmann_2m_params import (
     epsec, eps, fact_PK, pow_PK, ldyn_cdnc_min, cdnc_min_fixed,
     cdnc_min_lower, cdnc_min_upper, rcd_vol_max, cqtmin, conv_effr2mvr
@@ -47,16 +45,16 @@ def get_util_var(nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1):
         paphm1[:, ntdia+1:nlevp1] - paphm1[:, ntdia:nlev]
     )
     pdpg = pdpg.at[:, ntdia:nlev].set(                     # pressure gradient force term
-        rgrav * pdp[:, ntdia:nlev]
+        c.rgrav * pdp[:, ntdia:nlev]
     )
 
     # Height differences
     pdz = pdz.at[:, ntdia:nlevp1].set(
-        rgrav * (pgeoh[:, ntdia:nlev] - pgeoh[:, ntdia+1:nlevp1])
+        c.rgrav * (pgeoh[:, ntdia:nlev] - pgeoh[:, ntdia+1:nlevp1])
     )
     # Might change it to this to keep it consistent with pressure differ
     # pdz = pdz.at[:, ntdia:nlevp1].set(
-    #     rgrav * (pgeoh[:, ntdia+1:nlevp1] - pgeoh[:, ntdia:nlev])
+    #     c.rgrav * (pgeoh[:, ntdia+1:nlevp1] - pgeoh[:, ntdia:nlev])
     # )
 
     # Air density correction
@@ -229,7 +227,7 @@ def minimum_CDNC(pxwat, ldyn_cdnc_min=ldyn_cdnc_min, cdnc_min_fixed=cdnc_min_fix
     """
     if ldyn_cdnc_min:
         # Dynamic value for minimum CDNC
-        pcdnc_min = rcd_vol_max**(-3.0) * (3.0 / (4.0 * pi * rhoh2o)) * pxwat
+        pcdnc_min = rcd_vol_max**(-3.0) * (3.0 / (4.0 * pi * c.rhow)) * pxwat
         pcdnc_min = jnp.clip(pcdnc_min, cdnc_min_lower, cdnc_min_upper)
     else:
         # Static minimum CDNC

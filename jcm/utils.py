@@ -8,8 +8,6 @@ import dinosaur
 import functools
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 from dinosaur.hybrid_coordinates import HybridCoordinates
-from dinosaur.primitive_equations import PrimitiveEquationsSpecs
-from dinosaur.scales import SI_SCALE
 from dinosaur.sigma_coordinates import SigmaCoordinates
 from dinosaur import typing
 from typing import Any, Mapping, MutableMapping, Union
@@ -40,6 +38,7 @@ def get_coords(
     spectral_truncation=31,
     nodal_shape=None,
     spmd_mesh=None,
+    constants=None,
 ) -> CoordinateSystem:
     """Return a CoordinateSystem object for the given vertical and horizontal resolution.
 
@@ -89,7 +88,13 @@ def get_coords(
         horizontal_grid = getattr(
             dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
 
-    physics_specs = PrimitiveEquationsSpecs.from_si(scale=SI_SCALE)
+    # The horizontal grid's radius is part of the physical-constants set and
+    # must match the dycore's physics_specs.radius (dinosaur enforces this).
+    # Source it from the live PhysicalConstants singleton so coords and dynamics
+    # agree and a prior set_constants(...) is honoured.
+    import jcm.constants as _jcm_constants
+    constants = constants if constants is not None else _jcm_constants.physical_constants
+    grid_radius = constants.rearth
 
     if spmd_mesh is not None:
         spmd_mesh = jax.make_mesh(spmd_mesh, ('x', 'y', 'z'))
@@ -103,7 +108,7 @@ def get_coords(
         vertical = SigmaCoordinates(vertical_coords)
 
     return CoordinateSystem(
-        horizontal=horizontal_grid(radius=physics_specs.radius,
+        horizontal=horizontal_grid(radius=grid_radius,
                                    spherical_harmonics_impl=spherical_harmonics_impl),
         vertical=vertical,
         spmd_mesh=spmd_mesh

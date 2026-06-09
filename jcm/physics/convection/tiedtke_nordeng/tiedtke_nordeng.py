@@ -27,9 +27,7 @@ from jax import lax
 from typing import NamedTuple, Tuple
 import tree_math
 
-from jcm.constants import (
-    grav, rd, rv, cp, eps, tmelt, alhc
-)
+import jcm.constants as c
 
 # Import updraft, downdraft and flux modules after they're defined
 # This avoids circular imports
@@ -211,7 +209,7 @@ def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     # zero at T≈36K and T≈8K. Use a loose bound that only catches truly
     # pathological values and doesn't mask upstream physics bugs.
     temperature = jnp.clip(temperature, 50.0, 500.0)
-    t_celsius = temperature - tmelt
+    t_celsius = temperature - c.tmelt
 
     # Over water (T > 0°C) — denominator always > 150+237.3-273.15 > 114 when T clipped
     es_water = 610.78 * jnp.exp(a * t_celsius / (t_celsius + 237.3))
@@ -220,7 +218,7 @@ def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     es_ice = 610.78 * jnp.exp(b * t_celsius / (t_celsius + 265.5))
 
     # Use water or ice formula depending on temperature
-    es = jnp.where(temperature > tmelt, es_water, es_ice)
+    es = jnp.where(temperature > c.tmelt, es_water, es_ice)
 
     return es
 
@@ -240,7 +238,7 @@ def saturation_mixing_ratio(pressure: jnp.ndarray,
     es = saturation_vapor_pressure(temperature)
     # Cap es < 0.99*pressure so denominator can't approach zero at low P / high T
     es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - eps), 1.0)
+    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
     return jnp.clip(qs, 0.0, 0.5)
 
 
@@ -258,7 +256,7 @@ def moist_static_energy(temperature: jnp.ndarray,
         Moist static energy (J/kg)
 
     """
-    return cp * temperature + grav * height + alhc * mixing_ratio
+    return c.cpd * temperature + c.grav * height + c.alhc * mixing_ratio
 
 
 def initialize_convection(temperature: jnp.ndarray,
@@ -342,7 +340,7 @@ def find_cloud_base(temperature: jnp.ndarray,
     surf_press = pressure[surf_idx]
     
     # Calculate parcel temperature at all levels (dry adiabatic)
-    exner_ratios = (pressure / surf_press) ** (rd / cp)
+    exner_ratios = (pressure / surf_press) ** (c.rd / c.cpd)
     parcel_temps = surf_temp * exner_ratios
     
     # Calculate saturation mixing ratio at parcel temperatures
@@ -427,7 +425,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
 
     # Below cloud base — dry-adiabatic ascent. q is conserved, so the
     # parcel mixing ratio stays at the surface value.
-    parcel_temp_dry = surf_temp * (p_sf / surf_press) ** (rd / cp)
+    parcel_temp_dry = surf_temp * (p_sf / surf_press) ** (c.rd / c.cpd)
 
     # Above cloud base — moist (pseudoadiabatic) ascent. We scan
     # surface→TOA (increasing index in surface-first) and only step the
@@ -445,14 +443,14 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     p_cb = p_sf[cb_sf]
     qsat_at_cb = saturation_mixing_ratio(p_cb, parcel_temp_at_cb_dry)
     excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
-    cloud_base_temp = parcel_temp_at_cb_dry + (alhc / cp) * excess
+    cloud_base_temp = parcel_temp_at_cb_dry + (c.alhc / c.cpd) * excess
 
     def _step(parcel_t, args):
         p_curr, p_next, k = args
         dp = p_next - p_curr  # negative going up
         qs = saturation_mixing_ratio(p_curr, parcel_t)
-        dTdp = (1.0 / p_curr) * (rd * parcel_t + alhc * qs) / (
-            cp + alhc ** 2 * qs / (rv * parcel_t ** 2)
+        dTdp = (1.0 / p_curr) * (c.rd * parcel_t + c.alhc * qs) / (
+            c.cpd + c.alhc ** 2 * qs / (c.rv * parcel_t ** 2)
         )
         new_t = parcel_t + dTdp * dp
         # If we haven't reached cloud base yet, hold the parcel at the
@@ -477,7 +475,7 @@ def calculate_cape_cin(temperature: jnp.ndarray,
 
     env_tv_sf = T_sf * (1.0 + 0.61 * q_sf)
     parcel_tv_sf = parcel_temp_sf * (1.0 + 0.61 * parcel_q_sf)
-    buoyancy_sf = grav * (parcel_tv_sf - env_tv_sf) / env_tv_sf
+    buoyancy_sf = c.grav * (parcel_tv_sf - env_tv_sf) / env_tv_sf
 
     # LFC: lowest-altitude (smallest surface-first index) at-or-above cb
     #      where buoyancy first becomes positive.
@@ -804,7 +802,7 @@ def tiedtke_nordeng_convection(
         # Enhanced cloud water/ice production from condensation
         qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu * 0.1, 0.0)
         qi_conv = jnp.where(
-            (updraft_state.mfu > 0) & (temperature < tmelt),
+            (updraft_state.mfu > 0) & (temperature < c.tmelt),
             updraft_state.lu * 0.05, 0.0
         )
         

@@ -22,9 +22,7 @@ import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
 import tree_math
 
-from jcm.constants import (
-    tmelt, alhf, alhc, alhs, cp, rhow, rv, eps
-)
+import jcm.constants as c
 
 
 @tree_math.struct
@@ -214,7 +212,7 @@ def cloud_droplet_radius(
     droplet_density = droplet_number * air_density  # 1/m³
     
     # Volume of single droplet
-    volume_per_droplet = cloud_water_density / (droplet_density + config.epsilon) / rhow  # m³
+    volume_per_droplet = cloud_water_density / (droplet_density + config.epsilon) / c.rhow  # m³
     
     # Volume mean radius
     radius = (3.0 * volume_per_droplet / (4.0 * jnp.pi)) ** (1.0 / 3.0)
@@ -430,7 +428,7 @@ def ice_autoconversion(
     """
     # Temperature-dependent aggregation efficiency
     # Maximum near -15°C (258K)
-    t_celsius = temperature - tmelt
+    t_celsius = temperature - c.tmelt
     agg_efficiency = jnp.exp(-0.05 * jnp.abs(t_celsius + 15.0))
     
     # Critical ice content for autoconversion (fixed)
@@ -487,7 +485,7 @@ def snow_accretion(
     
     # Temperature factor for aggregation (ice only)
     if not is_liquid:
-        t_celsius = temperature - tmelt
+        t_celsius = temperature - c.tmelt
         temp_factor = jnp.exp(-0.03 * jnp.abs(t_celsius + 15.0))
         efficiency = efficiency * temp_factor
     
@@ -522,12 +520,12 @@ def melting_freezing(
 
     """
     # Temperature departure from freezing
-    dt_freeze = tmelt - temperature
-    
+    dt_freeze = c.tmelt - temperature
+
     # Melting rate (T > 0°C)
     melt_rate = jnp.where(
-        temperature > tmelt,
-        snow * (temperature - tmelt) / (config.tau_melt * 10.0),  # Scaled by temp
+        temperature > c.tmelt,
+        snow * (temperature - c.tmelt) / (config.tau_melt * 10.0),  # Scaled by temp
         0.0
     )
     melt_rate = jnp.minimum(melt_rate, snow / dt)
@@ -771,11 +769,11 @@ def cloud_microphysics(
     # evaporation/sublimation, melt/freeze, and liquid riming by snow change
     # phase enthalpy here.
     dtedt = (
-        - alhc / cp * rain_evap
-        - alhs / cp * snow_sublim
-        - alhf / cp * snow_melt
-        + alhf / cp * rain_freeze
-        + alhf / cp * qc_rime
+        - c.alhc / c.cpd * rain_evap
+        - c.alhs / c.cpd * snow_sublim
+        - c.alhf / c.cpd * snow_melt
+        + c.alhf / c.cpd * rain_freeze
+        + c.alhf / c.cpd * qc_rime
     )
     
     # 6. Sedimentation (using simple approach for now)
@@ -912,8 +910,8 @@ def _saturation_adjustment_layer(
         / jnp.maximum(config.t_mix_max - config.t_mix_min, 1e-3),
         0.0, 1.0,
     )
-    L_eff = weight_liquid * alhc + (1.0 - weight_liquid) * alhs
-    L_cp = L_eff / cp
+    L_eff = weight_liquid * c.alhc + (1.0 - weight_liquid) * c.alhs
+    L_cp = L_eff / c.cpd
 
     # ---- Pass 1: linearised Newton step (matches sundqvist) ----
     qs, dqs_dt = _qs_and_dqs_dt(p, T)
@@ -941,7 +939,7 @@ def _saturation_adjustment_layer(
     qi_frac = jnp.where(total_cloud > 0, qi / safe_total, 0.0)
     L_evap = jnp.where(
         total_cloud > 0,
-        (qc * alhc + qi * alhs) / safe_total,
+        (qc * c.alhc + qi * c.alhs) / safe_total,
         L_eff,
     )
 
@@ -957,7 +955,7 @@ def _saturation_adjustment_layer(
         cond_total * qi_frac,
     )
     L_for_dT = jnp.where(cond_total > 0, L_eff, L_evap)
-    dT = L_for_dT * cond_total / cp
+    dT = L_for_dT * cond_total / c.cpd
     return dT, dq, dqc, dqi
 
 
@@ -971,10 +969,10 @@ def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
     ``zqsw = uaw/(p - vtmpc1·uaw)`` after expanding ``uaw = ε·es``).
     Returns ``(qsw, esw_pa)``.
     """
-    t_c = temperature - tmelt
+    t_c = temperature - c.tmelt
     es = 610.78 * jnp.exp(17.27 * t_c / (t_c + 237.3))
     es_safe = jnp.minimum(es, 0.5 * pressure)
-    qsw = eps * es_safe / jnp.maximum(pressure - (1.0 - eps) * es_safe, 1.0)
+    qsw = c.eps * es_safe / jnp.maximum(pressure - (1.0 - c.eps) * es_safe, 1.0)
     return qsw, es_safe
 
 
@@ -1061,8 +1059,8 @@ def cloud_microphysics_column_sweep(
     pmref = air_density * layer_thickness     # kg/m² per layer
 
     # Phase weights for the latent-heat update from snow melting / riming.
-    zlsdcp = alhs / cp
-    zlvdcp = alhc / cp
+    zlsdcp = c.alhs / c.cpd
+    zlvdcp = c.alhc / c.cpd
     zlfdcp = zlsdcp - zlvdcp        # alhf / cp
 
     def step(carry, level_inputs):
@@ -1074,7 +1072,7 @@ def cloud_microphysics_column_sweep(
         # since snow falling INTO this layer melts based on whether the
         # ambient air is above freezing — condensation hasn't run yet.
         zcons = (mref / dt) / jnp.maximum(zlfdcp, 1e-6)
-        ztdif = jnp.maximum(0.0, T0 - tmelt)
+        ztdif = jnp.maximum(0.0, T0 - c.tmelt)
         zsnmlt = jnp.minimum(0.99 * zsfl, zcons * ztdif)
         zrfl = zrfl + zsnmlt
         zsfl = zsfl - zsnmlt
@@ -1169,7 +1167,7 @@ def cloud_microphysics_column_sweep(
         # (3c) Snow riming of cloud water (zsacl-style). Only fires when
         # T1 < tmelt — above freezing the collected liquid stays liquid.
         zsacl = jnp.where(
-            T1 < tmelt,
+            T1 < c.tmelt,
             zxlb * _impl_depletion(config.ccracl * zxsp1 * dt),
             0.0,
         )
@@ -1219,7 +1217,7 @@ def cloud_microphysics_column_sweep(
         zsusatw = jnp.minimum(q1 / jnp.maximum(qsw, config.epsilon) - 1.0, 0.0)
         zdv = 2.21 / jnp.maximum(p, config.epsilon)
         zast = (
-            alhc * (alhc / (rv * jnp.maximum(T1, 1.0)) - 1.0)
+            c.alhc * (c.alhc / (c.rv * jnp.maximum(T1, 1.0)) - 1.0)
             / jnp.maximum(T1, 1.0) / 0.024
         )
         zbst = T1 / jnp.maximum(zdv * esw, config.epsilon)

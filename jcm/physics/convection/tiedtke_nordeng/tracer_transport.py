@@ -11,7 +11,7 @@ from typing import NamedTuple, Tuple, Optional
 
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
-from jcm.constants import tmelt
+import jcm.constants as c
 
 
 class TracerIndices(NamedTuple):
@@ -57,8 +57,8 @@ def partition_cloud_detrainment(
 
     """
     # Temperature thresholds
-    t_ice = tmelt - 35.0   # All ice below this
-    t_water = tmelt        # All water above this
+    t_ice = c.tmelt - 35.0   # All ice below this
+    t_water = c.tmelt        # All water above this
     
     # Linear transition between water and ice
     ice_frac = jnp.clip((t_water - temperature) / (t_water - t_ice), 0.0, 1.0)
