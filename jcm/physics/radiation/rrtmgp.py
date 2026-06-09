@@ -965,6 +965,9 @@ class RRTMGPRadiation(PhysicsTerm):
                 aod_sw_per_band=split_col(aerosol_for_vmap.aod_sw_per_band),
                 ssa_sw_per_band=split_col(aerosol_for_vmap.ssa_sw_per_band),
                 asy_sw_per_band=split_col(aerosol_for_vmap.asy_sw_per_band),
+                aod_lw_per_band=split_col(aerosol_for_vmap.aod_lw_per_band),
+                ssa_lw_per_band=split_col(aerosol_for_vmap.ssa_lw_per_band),
+                asy_lw_per_band=split_col(aerosol_for_vmap.asy_lw_per_band),
             ),
         )
 
