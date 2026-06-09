@@ -26,10 +26,10 @@ Represented processes include:
 - Temperature-dependent partitioning between liquid and ice phases
 
 Planned features:
-- Consistent coupling to aerosol microphysics via HAM #TODO
+- Consistent coupling to aerosol microphysics via JAM #TODO
 
 Based on the ECHAM6/ICON microphysics as described in:
-- Lohmann et al. (2007): Cloud microphysics and aerosol indirect effects in the global climate model ECHAM5-HAM
+- Lohmann et al. (2007): Cloud microphysics and aerosol indirect effects in the global climate model ECHAM5-JAM
 - Lohmann & Hoose (2009): Sensitivity studies of different aerosol indirect effects in mixed-phase clouds
 - Lohmann & Neubauer (2018): The importance of mixed-phase and ice clouds for climate sensitivity in the global 
   aerosolclimate model ECHAM6-HAM2
@@ -3254,7 +3254,7 @@ def cloud_microphysics_2m(
     # Heterogeneous mixed-phase freezing via DeMott (2010) INP
     #
     # Replaces the ECHAM6 het_mxphase_freezing call (which needs 9 modal
-    # aerosol inputs from HAM, see #436) with a simpler INP-based
+    # aerosol inputs from JAM, see #436) with a simpler INP-based
     # parameterization that only needs temperature + prescribed total
     # aerosol number > 0.5 μm.
     # ------------------------------------------------------------------
@@ -3686,14 +3686,25 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             tke = jnp.zeros_like(state.temperature)
 
-        # SPA-style activated-CDNC floor from the column-mean Nccn (cm^-3).
+        # Activated CDNC source. The inline SPA floor (from the MACv2-SP Nccn)
+        # is always computed as a baseline. An upstream activation term (e.g.
+        # JAM's ARG, #461) may write an explicit ``activated_cdnc``; when it
+        # does we use it, but fall back to the SPA floor wherever that online
+        # source is empty (≈0) — e.g. before the prognostic JAM aerosol tracers
+        # spin up — so the default JAM+2M run still activates droplets. Both
+        # paths are differentiable and produce the same (nlev, ncols) field.
         Nccn = diagnostics["aerosol"].Nccn
-        activated_cdnc = spa_activated_cdnc(
+        spa_floor = spa_activated_cdnc(
             Nccn=Nccn[jnp.newaxis, :],
             cloud_fraction=cloud_fraction,
             prefactor=self._spa_prefactor.get_value(),
             exponent=self._spa_exponent.get_value(),
         )
+        arg_cdnc = diagnostics.get("activated_cdnc")
+        if arg_cdnc is None:
+            activated_cdnc = spa_floor
+        else:
+            activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, spa_floor)
 
         tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
             cloud_microphysics_2m,

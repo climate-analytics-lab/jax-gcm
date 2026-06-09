@@ -82,6 +82,13 @@ class PhysicalConstants(NamedTuple):
 
     # --- Numerical ----------------------------------------------------------
     epsilon: float = 1e-12             # Small number to prevent division by zero
+    tiny: float = 1e-30                # Very small floor (distinct from epsilon)
+
+    # --- Molar / aerosol-microphysics (independent constants) ---------------
+    r_universal: float = 8.314462           # Universal gas constant (J/mol/K)
+    surface_tension_water: float = 0.0728   # Surface tension of water (N/m, ~20 °C)
+    vapor_diffusivity: float = 2.11e-5      # Water-vapour diffusivity in air (m²/s)
+    air_thermal_conductivity: float = 0.024  # Thermal conductivity of air (W/m/K)
 
     # --- Derived quantities (recompute from the fields above) ---------------
     @property
@@ -116,6 +123,16 @@ class PhysicalConstants(NamedTuple):
     def vtmpc2(self) -> float:
         """Moist heat-capacity coefficient (cpv/cpd - 1)."""
         return self.cpv / self.cpd - 1.0
+
+    @property
+    def m_air(self) -> float:
+        """Molar mass of dry air (kg/mol) = R*/Rd."""
+        return self.r_universal / self.rd
+
+    @property
+    def m_water(self) -> float:
+        """Molar mass of water (kg/mol) = eps·M_air."""
+        return self.eps * self.m_air
 
     @classmethod
     def default(cls) -> 'PhysicalConstants':
