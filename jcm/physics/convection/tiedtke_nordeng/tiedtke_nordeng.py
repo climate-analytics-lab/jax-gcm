@@ -28,6 +28,12 @@ from typing import NamedTuple, Tuple
 import tree_math
 
 import jcm.constants as c
+# Shared Tetens saturation thermodynamics (water+ice "auto" phase, as used
+# throughout the ECHAM/Tiedtke path). Re-exported for backward compatibility.
+from jcm.physics.convection.saturation import (  # noqa: F401
+    saturation_mixing_ratio,
+    saturation_vapor_pressure,
+)
 
 # Import updraft, downdraft and flux modules after they're defined
 # This avoids circular imports
@@ -189,57 +195,6 @@ class ConvectionData:
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
         )
-
-
-def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation vapor pressure using Tetens formula
-    
-    Args:
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation vapor pressure (Pa)
-
-    """
-    # Tetens formula coefficients
-    a = 17.27
-    b = 35.86
-
-    # Wide math-safety clip — Tetens denominators t+237.3 and t+265.5 hit
-    # zero at T≈36K and T≈8K. Use a loose bound that only catches truly
-    # pathological values and doesn't mask upstream physics bugs.
-    temperature = jnp.clip(temperature, 50.0, 500.0)
-    t_celsius = temperature - c.tmelt
-
-    # Over water (T > 0°C) — denominator always > 150+237.3-273.15 > 114 when T clipped
-    es_water = 610.78 * jnp.exp(a * t_celsius / (t_celsius + 237.3))
-
-    # Over ice (T <= 0°C)
-    es_ice = 610.78 * jnp.exp(b * t_celsius / (t_celsius + 265.5))
-
-    # Use water or ice formula depending on temperature
-    es = jnp.where(temperature > c.tmelt, es_water, es_ice)
-
-    return es
-
-
-def saturation_mixing_ratio(pressure: jnp.ndarray, 
-                          temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation mixing ratio
-    
-    Args:
-        pressure: Pressure (Pa)
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation mixing ratio (kg/kg)
-
-    """
-    es = saturation_vapor_pressure(temperature)
-    # Cap es < 0.99*pressure so denominator can't approach zero at low P / high T
-    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
-    return jnp.clip(qs, 0.0, 0.5)
 
 
 def moist_static_energy(temperature: jnp.ndarray,

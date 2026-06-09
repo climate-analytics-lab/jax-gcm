@@ -31,32 +31,29 @@ import numpy as np
 from jax import lax
 
 import jcm.constants as c
+from jcm.physics.convection import saturation as _saturation
 from jcm.physics.convection.betts_miller.params import (
     BettsMillerParameters,
     ShallowScheme,
 )
 
-# Tetens saturation vapour pressure reference (over liquid water).
-_ES0 = 610.78  # Pa at 273.16 K
-_ES_A = 17.269
-_ES_T0 = 273.16
-_ES_TB = 35.86
-
 _T_FLOOR = 173.16  # K — below this the parcel ascent is presumed CAPE-free (Isca).
 
 
 def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Saturation vapour pressure over liquid water (Pa), Tetens formula."""
-    return _ES0 * jnp.exp(_ES_A * (temperature - _ES_T0) / (temperature - _ES_TB))
+    """Saturation vapour pressure over liquid water (Pa).
+
+    Betts-Miller follows Isca and saturates over water everywhere; the shared
+    Tetens implementation lives in :mod:`jcm.physics.convection.saturation`.
+    """
+    return _saturation.saturation_vapor_pressure(temperature, phase="water")
 
 
 def saturation_specific_humidity(temperature: jnp.ndarray,
                                  pressure: jnp.ndarray) -> jnp.ndarray:
-    """Saturation specific humidity [kg/kg] at ``temperature`` [K], ``pressure`` [Pa]."""
-    es = saturation_vapor_pressure(temperature)
-    # Cap es below the pressure so the denominator stays positive at low p.
-    es = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    return c.eps * es / jnp.maximum(pressure - (1.0 - c.eps) * es, 1.0)
+    """Saturation specific humidity [kg/kg] over liquid water."""
+    return _saturation.saturation_specific_humidity(
+        temperature, pressure, phase="water")
 
 
 def _moist_dtdlnp(temperature, q, kappa, hlv, cp, rv):

@@ -16,51 +16,12 @@ from jax import lax
 from typing import NamedTuple, Tuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import (
-    ConvectionParameters, saturation_mixing_ratio, saturation_vapor_pressure
+from .tiedtke_nordeng import ConvectionParameters, saturation_mixing_ratio
+# Analytic (qs, dqs/dT) for the ECHAM cuadjtq-style Newton updraft step; shared
+# with the adjustment module via jcm.physics.convection.saturation.
+from jcm.physics.convection.saturation import (
+    saturation_specific_humidity_and_derivative as _saturation_mixing_ratio_and_derivative,
 )
-
-
-# Tetens coefficients matching `saturation_vapor_pressure` in
-# tiedtke_nordeng.py: es = 610.78 * exp(a*tc/(tc+C)). The ice-phase `b` here
-# matches the existing implementation (35.86) even though canonical Tetens
-# ice uses 21.87 — consistency with the qs formula is what matters for the
-# Newton step to converge against the same target.
-_TETENS_A_WATER = 17.27
-_TETENS_C_WATER = 237.3
-_TETENS_A_ICE = 35.86
-_TETENS_C_ICE = 265.5
-
-
-def _saturation_mixing_ratio_and_derivative(
-    temperature: jnp.ndarray,
-    pressure: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Return (qs, dqs/dT) for the Tetens formulation used in this package.
-
-    This is the `dqsat_dT` that the ECHAM `cuadjtq` Newton step requires.
-    Computed analytically so the Newton iteration is bit-reproducible under
-    JIT without relying on autodiff through a saturation lookup table.
-    """
-    # Re-use the bound-safe saturation vapor pressure
-    es = saturation_vapor_pressure(temperature)
-    # `es_safe` matches the clipping inside `saturation_mixing_ratio`
-    p_safe = jnp.maximum(pressure, 1.0)
-    es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
-    qs = c.eps * es_safe / denom
-
-    # des/dT from Tetens: des/dT = es * a*C / (tc + C)**2
-    # Use water coefficients above freezing, ice coefficients below
-    tc = temperature - c.tmelt
-    a_water, c_water = _TETENS_A_WATER, _TETENS_C_WATER
-    a_ice, c_ice = _TETENS_A_ICE, _TETENS_C_ICE
-    des_dT_water = es * a_water * c_water / jnp.maximum((tc + c_water) ** 2, 1e-3)
-    des_dT_ice = es * a_ice * c_ice / jnp.maximum((tc + c_ice) ** 2, 1e-3)
-    des_dT = jnp.where(temperature > c.tmelt, des_dT_water, des_dT_ice)
-    # dqs/dT: differentiate qs = eps*es / (p - (1-eps)*es)
-    dqs_dT = c.eps * p_safe * des_dT / denom ** 2
-    return qs, dqs_dT
 
 
 class UpdatedraftState(NamedTuple):
