@@ -29,6 +29,7 @@ from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
+from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
 from jcm.physics.aerosol.jam.sedimentation.sedi_term import (
     StokesSedimentation,
     SedParameters,
@@ -63,6 +64,7 @@ def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
     arg_variant: str = "arg2000",
+    optics: bool = True,
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
@@ -90,7 +92,7 @@ def jam_aerosol_physics(
     """
     core = _resolve_microphysics(microphysics)
     spec = core.spec
-    return [
+    terms = [
         SeaSaltEmissions(params=seasalt, spec=spec),
         DmsEmissions(params=dms, spec=spec),
         DustEmissions(params=dust, spec=spec),
@@ -100,3 +102,10 @@ def jam_aerosol_physics(
         SlinnDryDeposition(params=drydep, spec=spec),
         WetScavenging(params=wetdep, spec=spec),
     ]
+    if optics:
+        # Online aerosol direct radiative effect (#495): overwrites the
+        # MACv2-SP optics in the ``aerosol`` diagnostic. Placed after the core
+        # (needs ``_jam_state``); reads the MACv2-SP ``aerosol`` struct that
+        # ``echam_physics`` provides upstream.
+        terms.insert(4, JamOpticsTerm(spec=spec))
+    return terms

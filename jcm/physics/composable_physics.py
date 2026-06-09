@@ -349,6 +349,9 @@ class ComposablePhysics(nnx.Module, Physics):
         "aerosol.aod_sw_per_band",
         "aerosol.ssa_sw_per_band",
         "aerosol.asy_sw_per_band",
+        "aerosol.aod_lw_per_band",
+        "aerosol.ssa_lw_per_band",
+        "aerosol.asy_lw_per_band",
     })
 
     def data_struct_to_dict(
