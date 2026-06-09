@@ -38,8 +38,10 @@ Deliberately not coupled yet (follow-ups)
   harness does not prognose them yet. The core's internal hardcoded H₂SO₄
   production (``1e-16`` mol/mol/s) still drives weak nucleation, so this adds
   a tiny non-conservative sulfate source; negligible per step.
-* **PBL-enhanced nucleation** is off (``pblh=0``) pending a wired PBL-height
-  diagnostic; the free-tropospheric binary H₂SO₄–H₂O path runs everywhere.
+* **PBL-enhanced nucleation** reads the PBL height from the ``vertical_diffusion``
+  diagnostic (TTE-TKE, previous-step carry) when available, else falls back to
+  ``pblh=0`` (e.g. the first step) so the free-tropospheric binary H₂SO₄–H₂O
+  path runs everywhere.
 * **Cloud-borne activation** stays the harness's job (the core runs clear-sky,
   ``cldn=0``); ``amicphys``'s cloudy sub-area path is not ported upstream.
 """
@@ -226,6 +228,18 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             state.temperature, state.specific_humidity,
             diagnostics["pressure_full"],
         )
+
+        # PBL height [m] for boundary-layer-enhanced nucleation. TTE-TKE
+        # publishes it in the ``vertical_diffusion`` diagnostic, which (like
+        # ARG's updraft) is read from the previous step's carry — it runs after
+        # the aerosol block. Absent on the first step → 0, so only the
+        # free-tropospheric binary nucleation path fires there.
+        vdiff = diagnostics.get("vertical_diffusion")
+        pblh = (
+            jnp.asarray(jnp.broadcast_to(vdiff.pbl_height, shape), jnp.float64)
+            if vdiff is not None else zeros64
+        )
+
         core_state = {
             "q": q,
             "qqcw": qqcw,
@@ -236,7 +250,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             "pmid": jnp.asarray(diagnostics["pressure_full"], jnp.float64),
             "cldn": zeros64,
             "zmid": jnp.asarray(diagnostics["height_full"], jnp.float64),
-            "pblh": zeros64,
+            "pblh": pblh,
             "relhum": jnp.asarray(rh, jnp.float64),
             "deltat": dt,
         }
