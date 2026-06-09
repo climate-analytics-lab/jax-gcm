@@ -15,6 +15,12 @@ Scheme-specific choices are parameters rather than separate copies:
 
 Physical constants (``eps``, ``tmelt``) are read by attribute access from
 :mod:`jcm.constants`, so a runtime ``set_constants`` override is honoured.
+
+These functions are intentionally *not* ``@jit``-ed: they are always called
+inside the model's outer jit (the ``_run_from_state`` step), so they are inlined
+and fused into that compiled graph. ``phase`` is a static Python string resolved
+at trace time — each phase bakes a constant into its caller's trace, so distinct
+phases never share a compiled artifact.
 """
 
 import jax.numpy as jnp
