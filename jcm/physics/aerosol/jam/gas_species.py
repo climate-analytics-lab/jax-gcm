@@ -33,8 +33,11 @@ GAS_SPECIES: dict[str, GasSpecies] = {
                       long_name="sulfur-dioxide"),
     "h2so4": GasSpecies("h2so4", molar_mass=0.0980784,
                         long_name="sulfuric-acid-vapour"),
+    # SOAG = the lumped semi-volatile organic *gas* that condenses to form
+    # secondary organic aerosol (SOA); it is the gas-phase SOA precursor, hence
+    # not itself an aerosol despite the MAM4 "SOAG" name.
     "soag": GasSpecies("soag", molar_mass=0.150,
-                       long_name="soa-gas"),
+                       long_name="secondary-organic-aerosol precursor gas"),
 }
 
 #: All prognostic gas tracers carried by the sulfur cycle, in chain order.

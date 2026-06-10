@@ -161,10 +161,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 sp_list.append((midx, props.density, props.hygroscopicity))
             mode_species.append(sp_list)
 
-        # Gas tracers fed to the core: g_h2so4/g_soag -> their pcnst slots.
-        self._gas_pack = tuple(
-            (gas_name(g), int(data.LMAP_GAS[_GAS_IGAS[g]])) for g in MAM4_GAS
-        )
+        # Gas tracers (H2SO4/SOAG) resolve their pcnst slot from a *different*
+        # MAM4 index table (LMAP_GAS) than the aerosol tracers, but once mapped
+        # they are packed into ``q`` and read back as tendencies exactly like
+        # any other tracer — so they just join ``q_pack``.
+        for g in MAM4_GAS:
+            q_pack.append((gas_name(g), int(data.LMAP_GAS[_GAS_IGAS[g]])))
 
         self._q_pack = tuple(q_pack)
         self._qqcw_pack = tuple(qqcw_pack)
@@ -217,10 +219,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         q = jnp.zeros(shape + (self._pcnst,), jnp.float64)
         q = q.at[..., 0].set(jnp.asarray(state.specific_humidity, jnp.float64))
         for name, idx in self._q_pack:
-            q = q.at[..., idx].set(fetch(name))
-        # Gas-phase H₂SO₄/SOAG from the sulfur chemistry → MAM4 gas slots; the
-        # core condenses/nucleates them (other gas slots stay zero).
-        for name, idx in self._gas_pack:
             q = q.at[..., idx].set(fetch(name))
         qqcw = jnp.zeros(shape + (self._pcnst,), jnp.float64)
         for name, idx in self._qqcw_pack:
@@ -300,12 +298,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         for name, idx in self._qqcw_pack:
             tracer_tends[name] = (
                 (qqcw_new[..., idx] - qqcw[..., idx]) / dt
-            ).astype(out_dtype)
-        # Gas consumed by condensation/nucleation → sink on the gas tracers
-        # (the matching aerosol gain flows through the aerosol-slot readback).
-        for name, idx in self._gas_pack:
-            tracer_tends[name] = (
-                (q_new[..., idx] - q[..., idx]) / dt
             ).astype(out_dtype)
 
         jam_state = self._jam_state(

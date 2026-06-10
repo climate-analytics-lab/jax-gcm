@@ -50,34 +50,56 @@ _CONV_SO2_H2SO4 = _M_H2SO4 / _M_SO2
 _TINY = 1.0e-30
 _P_REF = 1.0e5   # Pa — BL weighting for the interim SOAG source
 
+# --- Gas-phase oxidation rate-constant coefficients -----------------------
+# These are *empirical* Arrhenius / Troe parameters from the laboratory
+# kinetics literature (JPL/DeMore & IUPAC/Atkinson evaluations), reproduced
+# verbatim from ECHAM-HAM (``mo_ham_chemistry.f90``). They are measured
+# reaction coefficients — **not** physical constants — so they cannot be
+# derived from :mod:`jcm.constants`; they are the fixed published values.
+# Arrhenius form k = A·exp(−Ea/RT), written here as A·exp(±C/T) with C = Ea/R.
 
-# log of the addition-channel prefactor (1.7e-42 underflows float32, so it is
-# folded into the exponent below to keep the intermediate in range).
-_LN_K2_PREFAC = math.log(1.7e-42)
+# DMS + OH (Atkinson). Two channels:
+#   H-abstraction:  k1 = 9.6e-12·exp(−234/T)
+#   OH-addition:    k2 = 1.7e-42·exp(7810/T)·[O₂] / (1 + 5.5e-31·exp(7460/T)·[O₂])
+_DMS_OH_ABS_A, _DMS_OH_ABS_C = 9.6e-12, 234.0
+_DMS_OH_ADD_A, _DMS_OH_ADD_C = 1.7e-42, 7810.0
+_DMS_OH_ADD_DEN_A, _DMS_OH_ADD_DEN_C = 5.5e-31, 7460.0
+# 1.7e-42 underflows float32, so its log is folded into the exponent below.
+_LN_DMS_OH_ADD_A = math.log(_DMS_OH_ADD_A)
+_O2_FRAC = 0.21   # molar fraction of O₂ in air
+
+# SO₂ + OH + M → HSO₃ (→ H₂SO₄), Troe termolecular (JPL):
+#   k0 = k0_300·(T/300)^−n (low-P limit), k_inf (high-P limit), Fc broadening.
+_SO2_OH_K0_300, _SO2_OH_K0_N = 4.0e-31, 3.3
+_SO2_OH_KINF = 2.0e-12
+_SO2_OH_FC = 0.45   # Troe broadening factor (measured, not a tuning knob)
+
+# DMS + NO₃ → HNO₃ + products (night), Atkinson:  k3 = 1.9e-13·exp(520/T)
+_DMS_NO3_A, _DMS_NO3_C = 1.9e-13, 520.0
 
 
 def _k_dms_oh(t: jnp.ndarray, n_air: jnp.ndarray):
     """DMS+OH abstraction (k1) and addition (k2) rates [cm³ molec⁻¹ s⁻¹]."""
-    o2 = 0.21 * n_air
-    k1 = 9.6e-12 * jnp.exp(-234.0 / t)
-    numerator = jnp.exp(7810.0 / t + _LN_K2_PREFAC) * o2
-    k2 = numerator / (1.0 + 5.5e-31 * jnp.exp(7460.0 / t) * o2)
+    o2 = _O2_FRAC * n_air
+    k1 = _DMS_OH_ABS_A * jnp.exp(-_DMS_OH_ABS_C / t)
+    numerator = jnp.exp(_DMS_OH_ADD_C / t + _LN_DMS_OH_ADD_A) * o2
+    k2 = numerator / (
+        1.0 + _DMS_OH_ADD_DEN_A * jnp.exp(_DMS_OH_ADD_DEN_C / t) * o2
+    )
     return k1, k2
 
 
 def _k_so2_oh(t: jnp.ndarray, n_air: jnp.ndarray) -> jnp.ndarray:
     """SO₂+OH+M termolecular (Troe) rate [cm³ molec⁻¹ s⁻¹]."""
-    k0 = 4.0e-31 * (t / 300.0) ** (-3.3)
-    k_inf = 2.0e-12
-    fc = 0.45
-    hil = jnp.maximum(k0 * n_air / k_inf, _TINY)
+    k0 = _SO2_OH_K0_300 * (t / 300.0) ** (-_SO2_OH_K0_N)
+    hil = jnp.maximum(k0 * n_air / _SO2_OH_KINF, _TINY)
     expo = 1.0 / (1.0 + jnp.log10(hil) ** 2)
-    return k0 * n_air / (1.0 + hil) * fc ** expo
+    return k0 * n_air / (1.0 + hil) * _SO2_OH_FC ** expo
 
 
 def _k_dms_no3(t: jnp.ndarray) -> jnp.ndarray:
     """DMS+NO₃ rate [cm³ molec⁻¹ s⁻¹]."""
-    return 1.9e-13 * jnp.exp(520.0 / t)
+    return _DMS_NO3_A * jnp.exp(_DMS_NO3_C / t)
 
 
 @tree_math.struct
