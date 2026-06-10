@@ -22,11 +22,14 @@ class JamFactoryTest(unittest.TestCase):
         self.assertEqual(
             cats[3:],
             [
+                "aerosol_oxidants",
+                "aerosol_gas_chemistry",
                 "aerosol_microphysics",
                 "aerosol_optics",
                 "aerosol_activation",
                 "aerosol_sedimentation",
                 "aerosol_drydep",
+                "aerosol_aqueous_chemistry",
                 "aerosol_wetdep",
             ],
         )

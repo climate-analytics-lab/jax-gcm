@@ -193,11 +193,15 @@ def echam_physics(
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, arg_variant=jam_arg_variant,
         )
+        # Aqueous chemistry + wet deposition need the current step's clouds, so
+        # they run after the cloud microphysics term; the rest of the JAM chain
+        # is the pre-cloud aerosol block.
+        _post_cloud = ("aerosol_wetdep", "aerosol_aqueous_chemistry")
         jam_post_cloud_terms = [
-            t for t in jam_terms if t.category == "aerosol_wetdep"
+            t for t in jam_terms if t.category in _post_cloud
         ]
         jam_pre_cloud_terms = [
-            t for t in jam_terms if t.category != "aerosol_wetdep"
+            t for t in jam_terms if t.category not in _post_cloud
         ]
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *jam_pre_cloud_terms]
     else:

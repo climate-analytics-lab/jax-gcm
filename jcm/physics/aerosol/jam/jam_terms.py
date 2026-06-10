@@ -15,6 +15,18 @@ from jcm.physics.aerosol.jam.activation.arg_term import (
     ArgActivation,
     ArgParameters,
 )
+from jcm.physics.aerosol.jam.chemistry.aqueous import (
+    AqueousSulfur,
+    AqueousSulfurParameters,
+)
+from jcm.physics.aerosol.jam.chemistry.oxidants import (
+    OxidantParameters,
+    PrescribedOxidants,
+)
+from jcm.physics.aerosol.jam.chemistry.sulfur_gas import (
+    SulfurGasChemistry,
+    SulfurGasParameters,
+)
 from jcm.physics.aerosol.jam.drydep.drydep_term import (
     DryDepParameters,
     SlinnDryDeposition,
@@ -80,6 +92,9 @@ def jam_aerosol_physics(
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
+    oxidants: OxidantParameters | None = None,
+    sulfur_gas: SulfurGasParameters | None = None,
+    aqueous: AqueousSulfurParameters | None = None,
     activation: ArgParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
@@ -93,31 +108,40 @@ def jam_aerosol_physics(
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
+        oxidants/sulfur_gas/aqueous: optional ``Parameters`` for the
+            prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         activation/sedimentation/drydep/wetdep: optional per-process
             ``Parameters`` overrides (each ``None`` resolves to its default).
 
     Returns:
-        ``[SeaSaltEmissions, DmsEmissions, DustEmissions, <core>,
-        ArgActivation, StokesSedimentation, SlinnDryDeposition,
-        WetScavenging]``.
+        The ordered term list: natural emissions, prescribed oxidants and
+        gas-phase sulfur chemistry, the microphysics core (optionally followed
+        by online optics), activation, sedimentation, dry deposition, in-cloud
+        aqueous sulfur chemistry, and wet deposition.
 
     """
     core = _resolve_microphysics(microphysics)
     spec = core.spec
-    terms = [
+    pre_core = [
         SeaSaltEmissions(params=seasalt, spec=spec),
         DmsEmissions(params=dms, spec=spec),
         DustEmissions(params=dust, spec=spec),
-        core,
+        # Sulfur chemistry: oxidants → gas-phase DMS/SO2 oxidation, producing
+        # the H2SO4/SOAG gas the core condenses + nucleates this same step.
+        PrescribedOxidants(params=oxidants),
+        SulfurGasChemistry(params=sulfur_gas),
+    ]
+    # Online aerosol direct radiative effect (#495): placed right after the core
+    # (needs ``_jam_state``); overwrites the MACv2-SP ``aerosol`` optics.
+    optics_terms = [JamOpticsTerm(spec=spec)] if optics else []
+    post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
         StokesSedimentation(params=sedimentation, spec=spec),
         SlinnDryDeposition(params=drydep, spec=spec),
+        # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
+        # post-cloud block (needs current clouds), just before wet scavenging.
+        AqueousSulfur(params=aqueous, spec=spec),
         WetScavenging(params=wetdep, spec=spec),
     ]
-    if optics:
-        # Online aerosol direct radiative effect (#495): overwrites the
-        # MACv2-SP optics in the ``aerosol`` diagnostic. Placed after the core
-        # (needs ``_jam_state``); reads the MACv2-SP ``aerosol`` struct that
-        # ``echam_physics`` provides upstream.
-        terms.insert(4, JamOpticsTerm(spec=spec))
+    terms = [*pre_core, core, *optics_terms, *post_core]
     return terms
