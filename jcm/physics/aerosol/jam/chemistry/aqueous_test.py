@@ -143,5 +143,63 @@ class AqueousTermTest(unittest.TestCase):
         self.assertTrue(np.isfinite(float(g)))
 
 
+class SimpleAqueousSchemeTest(unittest.TestCase):
+    def _setup(self, h2o2=1.0e10, so2=1.0e-10, nlev=3, ncols=2):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+
+        shape = (nlev, ncols)
+        tracers = {"g_so2": jnp.full(shape, so2)}
+        for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
+            tracers[mass_name("so4", m)] = jnp.full(shape, 1.0e-11)
+            tracers[mass_name("so4", m, cloud_borne=True)] = jnp.full(shape, 1.0e-12)
+            tracers[number_name(m, cloud_borne=True)] = jnp.full(shape, 1.0e7)
+        state = PhysicsState.zeros(shape).copy(
+            temperature=jnp.full(shape, 275.0), tracers=tracers,
+        )
+        ox = OxidantField(
+            oh=jnp.zeros(shape), no3=jnp.zeros(shape),
+            o3=jnp.full(shape, 1.0e12), h2o2=jnp.full(shape, h2o2),
+        )
+        diagnostics = {
+            "oxidants": ox,
+            "clouds": types.SimpleNamespace(
+                cloud_fraction=jnp.full(shape, 0.6), qc=jnp.full(shape, 2.0e-4),
+            ),
+            "air_density": jnp.full(shape, 1.0),
+            "_dt_seconds": 1800.0,
+        }
+        return state, diagnostics
+
+    def test_invalid_scheme_raises(self):
+        with self.assertRaises(ValueError):
+            AqueousSulfur(scheme="bogus")
+
+    def test_simple_produces_sulfate_and_conserves_sulfur(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
+
+        state, diagnostics = self._setup()
+        tend, _ = AqueousSulfur(scheme="simple")(state, diagnostics, None, None)
+        self.assertGreater(
+            float(tend.tracers[mass_name("so4", "acc", cloud_borne=True)][0, 0]),
+            0.0,
+        )
+        s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
+        for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
+            s_rate = s_rate + np.asarray(
+                tend.tracers[mass_name("so4", m, cloud_borne=True)]
+            ) / _MW_SO4
+        self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
+
+    def test_simple_is_h2o2_limited(self):
+        # Scarce H2O2 caps the sulfate produced below the abundant-H2O2 case.
+        lo, _ = AqueousSulfur(scheme="simple")(*self._setup(h2o2=1.0e7)[:2], None, None)
+        hi, _ = AqueousSulfur(scheme="simple")(*self._setup(h2o2=1.0e11)[:2], None, None)
+        key = mass_name("so4", "acc", cloud_borne=True)
+        self.assertLess(
+            float(lo.tracers[key][0, 0]), float(hi.tracers[key][0, 0])
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

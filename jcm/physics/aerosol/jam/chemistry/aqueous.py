@@ -30,6 +30,12 @@ Adaptations for jcm/MAM4:
 
 Runs in the **post-cloud** block (needs the current step's cloud water /
 fraction), alongside wet deposition.
+
+A lightweight alternative is available via ``scheme="simple"``
+(:func:`_simple_aqueous_so4`): H₂O₂-limited stoichiometric oxidation with no
+Henry's law, pH or O₃ path. CAM's ``mo_setsox`` is *not* simpler than the full
+port here (it solves a 20-iteration electroneutrality pH including NH₃/HNO₃/CO₂),
+so this reduced scheme — not a CAM port — is the simple option.
 """
 
 from __future__ import annotations
@@ -66,6 +72,7 @@ _H_SO2_0, _H_SO2_ACT = 1.23, 3020.0
 # Molar masses in g/mol (HAM works in grams).
 _MW_SO2 = GAS_SPECIES["so2"].molar_mass * 1000.0          # 64.0648
 _MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0 (jcm so4)
+_MW_AIR = c.m_air * 1000.0                               # ~28.96
 _CONV_SO2_SO4_MASS = _MW_SO4 / _MW_SO2
 
 _TINY = 1.0e-30
@@ -151,6 +158,24 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
     return dso2tot * _CONV_SO2_SO4_MASS
 
 
+def _simple_aqueous_so4(so2, h2o2, rho):
+    """H₂O₂-limited fast in-cloud oxidation — the simple scheme.
+
+    Assumes ``SO₂(aq) + H₂O₂(aq) → S(VI)`` goes to completion within the step,
+    limited by whichever of SO₂/H₂O₂ is scarcer (1:1 stoichiometry) — no
+    Henry's-law partitioning, no pH, no O₃ path. ``so2`` is a mass mixing ratio
+    [kg/kg], ``h2o2`` a number density [molec cm⁻³], ``rho`` air density
+    [kg m⁻³]. Returns the in-cloud SO₄ mass produced [kg/kg]; the term applies
+    the cloud-fraction weighting and the S-conserving SO₂ sink.
+    """
+    n_air = rho * _AVO_XTOC / _MW_AIR                       # molec/cm³
+    h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
+    # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).
+    h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _MW_AIR)
+    so2_oxidised = jnp.minimum(jnp.maximum(so2, 0.0), h2o2_as_so2)
+    return so2_oxidised * _CONV_SO2_SO4_MASS
+
+
 @tree_math.struct
 class AqueousSulfurParameters:
     """Tunable knob for the aqueous oxidation (differentiable)."""
@@ -163,7 +188,14 @@ class AqueousSulfurParameters:
 
 
 class AqueousSulfur(PhysicsTerm):
-    """In-cloud SO₂ + H₂O₂/O₃ oxidation → cloud-borne sulfate."""
+    """In-cloud SO₂ + H₂O₂/O₃ oxidation → cloud-borne sulfate.
+
+    ``scheme="full"`` (default) runs the complete HAM ``ham_wet_chemistry``
+    port (Henry's law + per-sub-step pH + H₂O₂ and O₃ paths). ``scheme="simple"``
+    runs the lightweight H₂O₂-limited approximation (:func:`_simple_aqueous_so4`):
+    stoichiometric SO₂+H₂O₂ with no Henry/pH/O₃ — cheaper and easier to reason
+    about, capturing the dominant in-cloud pathway.
+    """
 
     name: ClassVar[str] = "jam_aqueous_sulfur"
     category: ClassVar[str] = "aerosol_aqueous_chemistry"
@@ -177,10 +209,16 @@ class AqueousSulfur(PhysicsTerm):
         params: AqueousSulfurParameters | None = None,
         *,
         spec: ModalAerosolSpec | None = None,
+        scheme: str = "full",
     ):
-        """Hold params and the population."""
+        """Hold params, the population, and the aqueous scheme."""
         self.params = nnx.Param(params or AqueousSulfurParameters.default())
         self._spec = spec or MAM4_SPEC
+        if scheme not in ("full", "simple"):
+            raise ValueError(
+                f"Unknown aqueous scheme {scheme!r}; choose 'full' or 'simple'."
+            )
+        self._scheme = scheme
         # Modes carrying sulfate that can host cloud-borne SO4 (accum, coarse).
         self._so4_modes = tuple(
             m.short for m in self._spec.modes if "so4" in m.species
@@ -213,16 +251,21 @@ class AqueousSulfur(PhysicsTerm):
             for m in self._so4_modes
         )
 
-        dso4 = params.rate_scale * _aqueous_so4(
-            so2=jnp.maximum(so2, 0.0),
-            so4=jnp.maximum(so4_total, 0.0),
-            h2o2=jnp.maximum(ox.h2o2, 0.0),
-            o3=jnp.maximum(ox.o3, 0.0),
-            lwc=lwc_incloud,
-            rho=rho,
-            temperature=state.temperature,
-            dt=dt,
-        )
+        if self._scheme == "simple":
+            dso4 = params.rate_scale * _simple_aqueous_so4(
+                so2=so2, h2o2=jnp.maximum(ox.h2o2, 0.0), rho=rho,
+            )
+        else:
+            dso4 = params.rate_scale * _aqueous_so4(
+                so2=jnp.maximum(so2, 0.0),
+                so4=jnp.maximum(so4_total, 0.0),
+                h2o2=jnp.maximum(ox.h2o2, 0.0),
+                o3=jnp.maximum(ox.o3, 0.0),
+                lwc=lwc_incloud,
+                rho=rho,
+                temperature=state.temperature,
+                dt=dt,
+            )
         dso4 = jnp.where(active, dso4, 0.0)
 
         # Grid-mean rates: produced sulfate is in-cloud, so weight by the

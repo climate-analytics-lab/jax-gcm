@@ -95,6 +95,7 @@ def jam_aerosol_physics(
     oxidants: OxidantParameters | None = None,
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
+    aqueous_scheme: str = "full",
     activation: ArgParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
@@ -110,6 +111,8 @@ def jam_aerosol_physics(
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
         oxidants/sulfur_gas/aqueous: optional ``Parameters`` for the
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
+        aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
+            ``"simple"`` (H2O2-limited stoichiometric oxidation).
         activation/sedimentation/drydep/wetdep: optional per-process
             ``Parameters`` overrides (each ``None`` resolves to its default).
 
@@ -140,7 +143,7 @@ def jam_aerosol_physics(
         SlinnDryDeposition(params=drydep, spec=spec),
         # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
         # post-cloud block (needs current clouds), just before wet scavenging.
-        AqueousSulfur(params=aqueous, spec=spec),
+        AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
         WetScavenging(params=wetdep, spec=spec),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
