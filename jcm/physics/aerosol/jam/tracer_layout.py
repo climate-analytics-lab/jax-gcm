@@ -26,6 +26,20 @@ from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.physics_term import TracerSpec
 
 
+def gas_name(species: str) -> str:
+    """Tracer key for a gas-phase precursor mixing ratio (e.g. ``g_so2``)."""
+    return f"g_{species}"
+
+
+def gas_tracer_specs(species: tuple[str, ...]) -> tuple[TracerSpec, ...]:
+    """TracerSpecs for the given gas-phase precursor tokens.
+
+    Gas precursors are ordinary mass mixing ratios [kg/kg] (transported and
+    nondimensionalised like aerosol mass), one per token.
+    """
+    return tuple(TracerSpec(gas_name(s), units="kg/kg") for s in species)
+
+
 def mass_name(species: str, mode_short: str, *, cloud_borne: bool = False) -> str:
     """Tracer key for a (species, mode) mass mixing ratio."""
     prefix = "mc" if cloud_borne else "m"
