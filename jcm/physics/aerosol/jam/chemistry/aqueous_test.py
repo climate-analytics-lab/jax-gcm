@@ -48,7 +48,7 @@ class AqueousKernelTest(unittest.TestCase):
 
 
 class AqueousTermTest(unittest.TestCase):
-    def _setup(self, cloud_fraction=0.6, nlev=3, ncols=2):
+    def _setup(self, cloud_fraction=0.6, nc=1.0e7, nlev=3, ncols=2):
         from jcm.physics.aerosol.jam import MAM4_SPEC
 
         shape = (nlev, ncols)
@@ -56,7 +56,7 @@ class AqueousTermTest(unittest.TestCase):
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             tracers[mass_name("so4", m)] = jnp.full(shape, 1.0e-11)
             tracers[mass_name("so4", m, cloud_borne=True)] = jnp.full(shape, 1.0e-12)
-            tracers[number_name(m, cloud_borne=True)] = jnp.full(shape, 1.0e7)
+            tracers[number_name(m, cloud_borne=True)] = jnp.full(shape, nc)
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
@@ -91,6 +91,26 @@ class AqueousTermTest(unittest.TestCase):
 
         state, diagnostics = self._setup()
         tend, _ = AqueousSulfur()(state, diagnostics, None, None)
+        s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
+        for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
+            key = mass_name("so4", m, cloud_borne=True)
+            s_rate = s_rate + np.asarray(tend.tracers[key]) / _MW_SO4
+        self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
+
+    def test_sulfur_conserved_without_cloud_borne_number(self):
+        # Spin-up case: no cloud-borne number anywhere. Sulfate must still be
+        # produced (in the coarse "droplet" mode) and match the SO2 sink — the
+        # SO2 sink must not vanish into nothing.
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
+
+        state, diagnostics = self._setup(nc=0.0)
+        tend, _ = AqueousSulfur()(state, diagnostics, None, None)
+        # All produced sulfate lands in the coarse mode.
+        self.assertGreater(
+            float(tend.tracers[mass_name("so4", "cor", cloud_borne=True)][0, 0]),
+            0.0,
+        )
         s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             key = mass_name("so4", m, cloud_borne=True)

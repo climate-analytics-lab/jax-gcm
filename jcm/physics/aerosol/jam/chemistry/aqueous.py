@@ -47,6 +47,7 @@ from jcm.physics.aerosol.jam.species import SPECIES
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
+import jcm.constants as c
 
 # --- HAM constants (mo_ham_chemistry.f90) ---------------------------------
 _NITER = 5
@@ -54,10 +55,11 @@ _ZHPBASE = 2.5e-6          # background H+ [mol/l]
 _ZE1K, _ZE1H = 1.1e-2, 2300.0   # O3 Henry
 _ZE3K, _ZE3H = 1.2e-2, 2010.0   # SO2 first dissociation
 _ZQ298 = 1.0 / 298.0
-_ZRGAS = 8.2e-2           # R [l·atm/mol/K]
+# Gas constant in l·atm/mol/K (HAM ``zrgas``), from R* (1 l·atm = 101.325 J).
+_ZRGAS = c.r_universal / 101.325
 _ZLWCMIN = 1.0e-7         # in-cloud LWC threshold [kg/kg]
-_AVO_XTOC = 6.022e20      # HAM's xtoc/ctox factor (avo with unit folding)
-_AVOGADRO = 6.022e23      # molec/mol
+_AVOGADRO = c.avogadro    # molec/mol
+_AVO_XTOC = _AVOGADRO * 1.0e-3   # HAM's xtoc/ctox factor (avo·1e-3 unit fold)
 # SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — HAMMOZ speclist(id_so2).
 _H_SO2_0, _H_SO2_ACT = 1.23, 3020.0
 
@@ -67,6 +69,7 @@ _MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0 (jcm so4)
 _CONV_SO2_SO4_MASS = _MW_SO4 / _MW_SO2
 
 _TINY = 1.0e-30
+_NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no droplets
 
 
 def _xtoc(rho: jnp.ndarray, mw: float) -> jnp.ndarray:
@@ -182,6 +185,13 @@ class AqueousSulfur(PhysicsTerm):
         self._so4_modes = tuple(
             m.short for m in self._spec.modes if "so4" in m.species
         )
+        # Fallback "droplet" mode for sulfate produced where no cloud-borne
+        # number exists yet — HAM assigns it to the coarse mode (Seinfeld &
+        # Pandis 1998); fall back to the last sulfate mode if there is none.
+        self._droplet_mode = next(
+            (m.short for m in self._spec.modes if m.name == "coarse"),
+            self._so4_modes[-1],
+        )
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -220,19 +230,27 @@ class AqueousSulfur(PhysicsTerm):
         so4_rate = cloud_fraction * dso4 / dt
         so2_rate = -so4_rate * (_MW_SO2 / _MW_SO4)   # S-conserving SO2 sink
 
-        # Distribute the cloud-borne sulfate over accum/coarse by their
-        # cloud-borne number fraction (HAM ms4as/ms4cs split).
+        # Distribute the cloud-borne sulfate over the sulfate modes by their
+        # cloud-borne number fraction (HAM ms4as/ms4cs split). Where a cell has
+        # no cloud-borne number yet (spin-up, or a column without cloud-borne
+        # aerosol) the fractions would all be zero and the sulfur consumed by
+        # the SO2 sink would vanish; HAM instead deposits that droplet sulfate
+        # in the coarse mode, so ``frac`` falls back to 1 there. The fractions
+        # always sum to 1, so the produced sulfate exactly matches the SO2 sink.
         nc = {
             m: jnp.maximum(
                 state.tracers.get(number_name(m, cloud_borne=True), zeros), 0.0
             )
             for m in self._so4_modes
         }
-        nc_tot = jnp.maximum(sum(nc.values()), _TINY)
+        nc_sum = sum(nc.values())
+        has_number = nc_sum > _NC_MIN
+        nc_safe = jnp.maximum(nc_sum, _TINY)
 
         tracer_tends: dict[str, jnp.ndarray] = {"g_so2": so2_rate}
         for m in self._so4_modes:
-            frac = nc[m] / nc_tot
+            fallback = 1.0 if m == self._droplet_mode else 0.0
+            frac = jnp.where(has_number, nc[m] / nc_safe, fallback)
             tracer_tends[mass_name("so4", m, cloud_borne=True)] = so4_rate * frac
 
         tendency = PhysicsTendency(
