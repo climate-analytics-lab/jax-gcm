@@ -50,13 +50,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
-from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.aerosol.jam.tracer_layout import (
+    gas_name,
+    mass_name,
+    number_name,
+)
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
+
+# amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
+# maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.
+_GAS_IGAS: dict[str, int] = {"soag": 0, "h2so4": 1}
 
 # jcm aerosol species token -> MAM4 ``SPECNAME_AMODE`` type index. This is the
 # physical correspondence between jcm's canonical tokens and MAM4's species
@@ -152,6 +161,11 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 sp_list.append((midx, props.density, props.hygroscopicity))
             mode_species.append(sp_list)
 
+        # Gas tracers fed to the core: g_h2so4/g_soag -> their pcnst slots.
+        self._gas_pack = tuple(
+            (gas_name(g), int(data.LMAP_GAS[_GAS_IGAS[g]])) for g in MAM4_GAS
+        )
+
         self._q_pack = tuple(q_pack)
         self._qqcw_pack = tuple(qqcw_pack)
         self._num_pcnst = tuple(num_pcnst)
@@ -203,6 +217,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         q = jnp.zeros(shape + (self._pcnst,), jnp.float64)
         q = q.at[..., 0].set(jnp.asarray(state.specific_humidity, jnp.float64))
         for name, idx in self._q_pack:
+            q = q.at[..., idx].set(fetch(name))
+        # Gas-phase H₂SO₄/SOAG from the sulfur chemistry → MAM4 gas slots; the
+        # core condenses/nucleates them (other gas slots stay zero).
+        for name, idx in self._gas_pack:
             q = q.at[..., idx].set(fetch(name))
         qqcw = jnp.zeros(shape + (self._pcnst,), jnp.float64)
         for name, idx in self._qqcw_pack:
@@ -282,6 +300,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         for name, idx in self._qqcw_pack:
             tracer_tends[name] = (
                 (qqcw_new[..., idx] - qqcw[..., idx]) / dt
+            ).astype(out_dtype)
+        # Gas consumed by condensation/nucleation → sink on the gas tracers
+        # (the matching aerosol gain flows through the aerosol-slot readback).
+        for name, idx in self._gas_pack:
+            tracer_tends[name] = (
+                (q_new[..., idx] - q[..., idx]) / dt
             ).astype(out_dtype)
 
         jam_state = self._jam_state(

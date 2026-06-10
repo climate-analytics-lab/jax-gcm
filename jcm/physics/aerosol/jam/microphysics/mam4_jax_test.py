@@ -39,6 +39,9 @@ def _column_state(nlev=4, ncols=2):
             tracers[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
                 (nlev, ncols), 1.0e-12
             )
+    # Gas-phase precursors fed to the core.
+    tracers["g_h2so4"] = jnp.full((nlev, ncols), 1.0e-12)
+    tracers["g_soag"] = jnp.full((nlev, ncols), 1.0e-12)
     state = PhysicsState.zeros((nlev, ncols)).copy(
         temperature=jnp.full((nlev, ncols), 280.0),
         specific_humidity=jnp.full((nlev, ncols), 5.0e-3),
@@ -65,6 +68,16 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         terms = jam_aerosol_physics(microphysics="mam4_jax")
         core = next(t for t in terms if t.category == "aerosol_microphysics")
         self.assertEqual(core.name, "jam_mam4_jax_microphysics")
+
+    def test_gas_pack_maps_h2so4_and_soag(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics()
+        gas = dict(term._gas_pack)
+        self.assertEqual(gas["g_h2so4"], 6)
+        self.assertEqual(gas["g_soag"], 9)
 
     def test_packing_covers_every_interstitial_tracer(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
