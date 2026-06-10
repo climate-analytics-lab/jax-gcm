@@ -38,10 +38,6 @@ Deliberately not coupled yet (follow-ups)
   harness does not prognose them yet. The core's internal hardcoded H₂SO₄
   production (``1e-16`` mol/mol/s) still drives weak nucleation, so this adds
   a tiny non-conservative sulfate source; negligible per step.
-* **PBL-enhanced nucleation** reads the PBL height from the ``vertical_diffusion``
-  diagnostic (TTE-TKE, previous-step carry) when available, else falls back to
-  ``pblh=0`` (e.g. the first step) so the free-tropospheric binary H₂SO₄–H₂O
-  path runs everywhere.
 * **Cloud-borne activation** stays the harness's job (the core runs clear-sky,
   ``cldn=0``); ``amicphys``'s cloudy sub-area path is not ported upstream.
 """
@@ -59,6 +55,7 @@ from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
 
 # jcm aerosol species token -> MAM4 ``SPECNAME_AMODE`` type index. This is the
@@ -83,48 +80,35 @@ _CORE = None
 
 
 def _core():
-    """Lazily import MAM4-JAX and enable float64.
+    """Lazily import MAM4-JAX and (re-)enable float64.
 
-    Importing ``mam4_jax`` flips ``jax_enable_x64`` on globally; we keep it
-    on because the core only converges in float64 (see module docstring).
-    jcm's own arrays stay float32 — x64 merely *permits* float64, it does
-    not force existing float32 code to promote.
+    Importing ``mam4_jax`` enables ``jax_enable_x64`` globally. The core only
+    converges in float64 (its implicit diffrax solver diverges otherwise), so
+    we keep it on; because jcm builds arrays with ``dtype=float``, the whole
+    model then runs in float64 while the core is active. The flag is re-asserted
+    on every call (not just the cached first import) because a caller may have
+    toggled it off in between — e.g. test teardown.
     """
     global _CORE
-    import jax
-
-    # Enable float64 on *every* call, not just the first. The import below is
-    # cached, but x64 must be (re-)asserted each time the core is used: a caller
-    # may have toggled it off in between (e.g. test teardown), and running the
-    # core without it silently downcasts to float32 where the diffrax solver
-    # diverges.
     jax.config.update("jax_enable_x64", True)
     if _CORE is None:
-        try:
-            import mam4_jax  # noqa: F401  — also enables jax_enable_x64 on import
-            from mam4_jax import data
-            from mam4_jax.processes.amicphys import amicphys
-            from mam4_jax.processes.calcsize import calcsize
-            from mam4_jax.processes.wateruptake import wateruptake
-        except ImportError as exc:
-            raise ImportError(
-                "The MAM4-JAX microphysics core requires the optional "
-                "'mam4-jax' dependency (GPL-3.0). Install it with "
-                "`pip install jcm[mam4]`."
-            ) from exc
+        import mam4_jax  # noqa: F401  — also enables jax_enable_x64 on import
+        from mam4_jax import data
+        from mam4_jax.processes.amicphys import amicphys
+        from mam4_jax.processes.calcsize import calcsize
+        from mam4_jax.processes.wateruptake import wateruptake
         _CORE = (calcsize, wateruptake, amicphys, data)
     return _CORE
 
 
 def relative_humidity(temperature, specific_humidity, pressure):
-    """Ambient relative humidity (0–1) from Tetens saturation vapour pressure.
+    """Ambient relative humidity (0–1) for ``amicphys``'s nucleation path.
 
-    Fed to ``amicphys``'s nucleation path (which re-clamps to [0.01, 0.99]).
+    ``RH = q / q_sat`` using the shared Tetens saturation thermodynamics; the
+    core re-clamps to [0.01, 0.99].
     """
-    t_c = temperature - 273.15
-    es = 611.2 * jnp.exp(17.62 * t_c / (temperature - 30.03))   # Pa
-    e = specific_humidity * pressure / (0.622 + 0.378 * specific_humidity)
-    return jnp.clip(e / jnp.maximum(es, 1.0e-3), 0.0, 1.0)
+    qs = saturation_specific_humidity(temperature, pressure)
+    return jnp.clip(specific_humidity / jnp.maximum(qs, 1.0e-30), 0.0, 1.0)
 
 
 class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
@@ -268,11 +252,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # ran one cell), collapsing T21 compile to ~1 GB while giving each cell
         # its own adaptive timestep — the physically correct box-model
         # semantics.
-        lead = shape
-        n_cells = int(np.prod(lead)) if lead else 1
+        n_cells = int(np.prod(shape)) if shape else 1
 
         def to_cells(a):
-            return a.reshape((n_cells,) + a.shape[len(lead):])
+            return a.reshape((n_cells,) + a.shape[len(shape):])
 
         flat_state = {
             k: (v if k == "deltat" else to_cells(v))
@@ -283,7 +266,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)
 
         def from_cells(a):
-            return a.reshape(lead + a.shape[1:])
+            return a.reshape(shape + a.shape[1:])
 
         out = {
             k: from_cells(flat_out[k])
