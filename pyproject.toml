@@ -34,6 +34,14 @@ jcm = [
     "physics/speedy/*.csv",
 ]
 
+[project.optional-dependencies]
+# MAM4-JAX modal aerosol microphysics core (issue #490). GPL-3.0 — kept as an
+# opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
+# tagged release. Install with `pip install jcm[mam4]`.
+mam4 = [
+    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@v0.2.0-beta.1",
+]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 

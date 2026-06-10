@@ -40,8 +40,20 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
 )
 from jcm.physics.physics_term import PhysicsTerm
 
+def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
+    """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
+    from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+        Mam4JaxMicrophysics,
+    )
+
+    return Mam4JaxMicrophysics
+
+
+# Core resolvers. ``placeholder`` is built-in; ``mam4_jax`` is loaded lazily so
+# the optional GPL-3.0 ``mam4-jax`` dependency is only imported when selected.
 _MICROPHYSICS = {
-    "placeholder": PlaceholderMicrophysics,
+    "placeholder": lambda: PlaceholderMicrophysics(),
+    "mam4_jax": lambda: _load_mam4_jax()(),
 }
 
 

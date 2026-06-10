@@ -236,22 +236,24 @@ def initialize_convection(temperature: jnp.ndarray,
     """
     nlev = temperature.shape[0]
     
-    # Initialize updraft properties with environmental values (ensure float32)
-    tu = jnp.array(temperature, dtype=jnp.float32)
-    qu = jnp.array(humidity, dtype=jnp.float32)
-    lu = jnp.zeros_like(temperature, dtype=jnp.float32)
-    uu = jnp.array(u_wind, dtype=jnp.float32)
-    vu = jnp.array(v_wind, dtype=jnp.float32)
-    
-    # Initialize downdraft properties (ensure float32)
-    td = jnp.array(temperature, dtype=jnp.float32)
-    qd = jnp.array(humidity, dtype=jnp.float32)
-    ud = jnp.array(u_wind, dtype=jnp.float32)
-    vd = jnp.array(v_wind, dtype=jnp.float32)
-    
-    # Initialize mass fluxes to zero with explicit dtype
-    mfu = jnp.zeros_like(temperature, dtype=jnp.float32)
-    mfd = jnp.zeros_like(temperature, dtype=jnp.float32)
+    # Initialize updraft properties with environmental values. Dtype follows
+    # the inputs (not a hardcoded float32) so the scheme is correct whether the
+    # model runs in float32 or float64 — both ``lax.cond`` branches must agree.
+    tu = jnp.asarray(temperature)
+    qu = jnp.asarray(humidity)
+    lu = jnp.zeros_like(temperature)
+    uu = jnp.asarray(u_wind)
+    vu = jnp.asarray(v_wind)
+
+    # Initialize downdraft properties.
+    td = jnp.asarray(temperature)
+    qd = jnp.asarray(humidity)
+    ud = jnp.asarray(u_wind)
+    vd = jnp.asarray(v_wind)
+
+    # Initialize mass fluxes to zero.
+    mfu = jnp.zeros_like(temperature)
+    mfd = jnp.zeros_like(temperature)
     
     # Initialize convection diagnostics
     ktype = jnp.array(0)  # No convection initially
@@ -645,14 +647,16 @@ def tiedtke_nordeng_convection(
         lambda: jnp.array(0),  # No convection
     )
     
-    # Initialize tendencies to zero with explicit float32 dtype
-    dtedt = jnp.zeros_like(temperature, dtype=jnp.float32)
-    dqdt = jnp.zeros_like(humidity, dtype=jnp.float32)
-    dudt = jnp.zeros_like(u_wind, dtype=jnp.float32)
-    dvdt = jnp.zeros_like(v_wind, dtype=jnp.float32)
-    qc_conv = jnp.zeros_like(temperature, dtype=jnp.float32)
-    qi_conv = jnp.zeros_like(temperature, dtype=jnp.float32)
-    precip_conv = jnp.array(0.0, dtype=jnp.float32)
+    # Initialize tendencies to zero. Dtype follows the inputs so the scheme is
+    # float-structure agnostic (float32 or float64) and both ``lax.cond``
+    # branches agree on output types.
+    dtedt = jnp.zeros_like(temperature)
+    dqdt = jnp.zeros_like(humidity)
+    dudt = jnp.zeros_like(u_wind)
+    dvdt = jnp.zeros_like(v_wind)
+    qc_conv = jnp.zeros_like(temperature)
+    qi_conv = jnp.zeros_like(temperature)
+    precip_conv = jnp.zeros((), dtype=temperature.dtype)
     
     # Import modules here to avoid circular imports
     from .updraft import calculate_updraft
