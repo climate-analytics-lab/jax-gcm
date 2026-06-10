@@ -21,8 +21,12 @@ Adaptations for jcm/MAM4:
   HAM's ``ms4as``/``ms4cs`` distribution. SO₂ (``g_so2``) is consumed.
 * Sulfate molar mass uses jcm's ``so4`` species value (MAM4-MOM ammonium
   bisulfate, 115 g/mol) consistently in both the pH and the produced mass.
-* H₂O₂ is a prescribed reservoir here, so its in-cloud depletion is **not**
-  written back (it would be once H₂O₂ is prognostic — flagged in #496).
+* H₂O₂ is a prescribed oxidant. It is depleted *within* the ``niter``
+  sub-stepping (so the within-step H₂O₂-limitation of SO₂ oxidation is
+  respected) and reset to the prescribed field each step — this matches
+  ECHAM-HAM's offline-oxidant behaviour: ``ham_wet_chemistry`` likewise
+  discards the depleted H₂O₂ after its loop, and only a coupled MOZ-style
+  prognostic H₂O₂ budget (out of scope) would persist it across steps.
 
 Runs in the **post-cloud** block (needs the current step's cloud water /
 fraction), alongside wet deposition.
