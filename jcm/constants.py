@@ -134,6 +134,11 @@ class PhysicalConstants(NamedTuple):
         """Molar mass of water (kg/mol) = eps·M_air."""
         return self.eps * self.m_air
 
+    @property
+    def avogadro(self) -> float:
+        """Avogadro constant (1/mol) = R*/k_B."""
+        return self.r_universal / self.ak
+
     @classmethod
     def default(cls) -> 'PhysicalConstants':
         """Return the default physical constants."""

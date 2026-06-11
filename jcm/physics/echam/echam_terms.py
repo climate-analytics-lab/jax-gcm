@@ -72,6 +72,7 @@ def echam_physics(
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
     jam_arg_variant: str = "arg2000",
+    jam_aqueous_scheme: str = "full",
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -115,6 +116,8 @@ def echam_physics(
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
+            (H2O2-limited) in-cloud aqueous sulfur chemistry.
 
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
@@ -192,12 +195,17 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, arg_variant=jam_arg_variant,
+            aqueous_scheme=jam_aqueous_scheme,
         )
+        # Aqueous chemistry + wet deposition need the current step's clouds, so
+        # they run after the cloud microphysics term; the rest of the JAM chain
+        # is the pre-cloud aerosol block.
+        _post_cloud = ("aerosol_wetdep", "aerosol_aqueous_chemistry")
         jam_post_cloud_terms = [
-            t for t in jam_terms if t.category == "aerosol_wetdep"
+            t for t in jam_terms if t.category in _post_cloud
         ]
         jam_pre_cloud_terms = [
-            t for t in jam_terms if t.category != "aerosol_wetdep"
+            t for t in jam_terms if t.category not in _post_cloud
         ]
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *jam_pre_cloud_terms]
     else:

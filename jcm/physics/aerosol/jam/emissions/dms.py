@@ -3,10 +3,10 @@
 Port of the Nightingale (2000) branch of HAMMOZ
 ``mo_hammoz_emi_ocean::dms_emissions``: a sea–air transfer (piston) velocity
 from the 10 m wind and the DMS Schmidt number (Andreae fit), times a
-prescribed seawater DMS concentration. The DMS gas oxidises to SO2 and then
-sulfate; since this configuration carries no gas-phase sulfur tracer, the
-emitted sulfur is added directly as primary sulfate to the Aitken/accumulation
-modes (an interim — full DMS→SO2→SO4 gas chemistry is #496).
+prescribed seawater DMS concentration. The DMS gas is emitted into the
+prognostic ``g_dms`` tracer (lowest layer) and oxidised to SO₂ → H₂SO₄ by the
+:mod:`..chemistry.sulfur_gas` term (#496), which then feeds the MAM4 core —
+replacing the earlier interim that added DMS straight to primary sulfate.
 
 The seawater DMS field is read from ``forcing.dms_seawater`` (a prescribed
 climatology, e.g. AeroCom ``conc_aerocom_DMS_sea.nc``); it falls back to zero
@@ -23,9 +23,9 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
-from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_flux
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
+from jcm.physics.aerosol.jam.tracer_layout import gas_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _CMH_TO_MS = 0.01 / 3600.0   # cm/h → m/s
@@ -51,12 +51,11 @@ def piston_velocity(u10: jnp.ndarray, schmidt: jnp.ndarray) -> jnp.ndarray:
 class DmsParameters:
     """Calibratable knobs for DMS sea–air emission."""
 
-    flux_scale: jnp.ndarray      # folds seawater-conc units → emitted SO4 mass
-    aitken_fraction: jnp.ndarray  # split of emitted sulfate into the Aitken mode
+    flux_scale: jnp.ndarray   # folds seawater-conc units → emitted DMS mass flux
 
     @classmethod
     def default(cls) -> "DmsParameters":
-        return cls(flux_scale=jnp.asarray(1.0), aitken_fraction=jnp.asarray(0.5))
+        return cls(flux_scale=jnp.asarray(1.0))
 
 
 class DmsEmissions(PhysicsTerm):
@@ -106,13 +105,12 @@ class DmsEmissions(PhysicsTerm):
         seafrac = jnp.where(land > 0.5, 0.0, 1.0 - land)
 
         vp = piston_velocity(u10, dms_schmidt_number(sst - 273.15))
-        flux_s = p.flux_scale * vp * dms_sea * seafrac        # kg-S/m²/s scale
+        flux_dms = p.flux_scale * vp * dms_sea * seafrac    # kg-DMS/m²/s
 
-        fluxes = [
-            ("so4", "ait", flux_s * p.aitken_fraction),
-            ("so4", "acc", flux_s * (1.0 - p.aitken_fraction)),
-        ]
-        tracer_tends = distribute_surface_flux(self._spec, fluxes, air_density, dz)
+        # Surface flux → lowest-layer mixing-ratio tendency [kg/kg/s].
+        dms_rate = flux_dms / (air_density[-1] * dz[-1])
+        g_dms = jnp.zeros_like(state.temperature).at[-1].set(dms_rate)
+        tracer_tends = {gas_name("dms"): g_dms}
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

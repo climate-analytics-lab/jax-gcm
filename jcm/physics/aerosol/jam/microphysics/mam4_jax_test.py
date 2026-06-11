@@ -39,6 +39,9 @@ def _column_state(nlev=4, ncols=2):
             tracers[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
                 (nlev, ncols), 1.0e-12
             )
+    # Gas-phase precursors fed to the core.
+    tracers["g_h2so4"] = jnp.full((nlev, ncols), 1.0e-12)
+    tracers["g_soag"] = jnp.full((nlev, ncols), 1.0e-12)
     state = PhysicsState.zeros((nlev, ncols)).copy(
         temperature=jnp.full((nlev, ncols), 280.0),
         specific_humidity=jnp.full((nlev, ncols), 5.0e-3),
@@ -66,6 +69,16 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         core = next(t for t in terms if t.category == "aerosol_microphysics")
         self.assertEqual(core.name, "jam_mam4_jax_microphysics")
 
+    def test_gas_tracers_map_to_their_pcnst_slots(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        # Gases share the single q_pack with the aerosol tracers.
+        packed = dict(Mam4JaxMicrophysics()._q_pack)
+        self.assertEqual(packed["g_h2so4"], 6)
+        self.assertEqual(packed["g_soag"], 9)
+
     def test_packing_covers_every_interstitial_tracer(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -74,16 +87,16 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 
         term = Mam4JaxMicrophysics()
         packed = {name for name, _ in term._q_pack}
-        expected = set()
+        expected = {"g_h2so4", "g_soag"}
         for mode in MAM4_SPEC.modes:
             expected.add(number_name(mode.short))
             for sp in mode.species:
                 expected.add(mass_name(sp, mode.short))
         self.assertEqual(packed, expected)
-        # pcnst indices are unique and inside the aerosol band [10, 34].
+        # pcnst indices are unique and inside the aerosol/gas band [6, 34].
         idxs = [idx for _, idx in term._q_pack]
         self.assertEqual(len(idxs), len(set(idxs)))
-        self.assertTrue(all(10 <= i <= 34 for i in idxs))
+        self.assertTrue(all(6 <= i <= 34 for i in idxs))
 
     def test_forward_finite_and_physical(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name

@@ -50,13 +50,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
-from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.aerosol.jam.tracer_layout import (
+    gas_name,
+    mass_name,
+    number_name,
+)
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
+
+# amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
+# maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.
+_GAS_IGAS: dict[str, int] = {"soag": 0, "h2so4": 1}
 
 # jcm aerosol species token -> MAM4 ``SPECNAME_AMODE`` type index. This is the
 # physical correspondence between jcm's canonical tokens and MAM4's species
@@ -151,6 +160,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 props = self.spec.species_props(sp)
                 sp_list.append((midx, props.density, props.hygroscopicity))
             mode_species.append(sp_list)
+
+        # Gas tracers (H2SO4/SOAG) resolve their pcnst slot from a *different*
+        # MAM4 index table (LMAP_GAS) than the aerosol tracers, but once mapped
+        # they are packed into ``q`` and read back as tendencies exactly like
+        # any other tracer — so they just join ``q_pack``.
+        for g in MAM4_GAS:
+            q_pack.append((gas_name(g), int(data.LMAP_GAS[_GAS_IGAS[g]])))
 
         self._q_pack = tuple(q_pack)
         self._qqcw_pack = tuple(qqcw_pack)

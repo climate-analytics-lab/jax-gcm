@@ -7,13 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jcm.physics.aerosol.jam import mass_name
 from jcm.physics.aerosol.jam.emissions.dms import (
     DmsEmissions,
     DmsParameters,
     dms_schmidt_number,
     piston_velocity,
 )
+from jcm.physics.aerosol.jam.tracer_layout import gas_name
 
 
 class DmsFunctionTest(unittest.TestCase):
@@ -52,29 +52,25 @@ def _inputs(nlev=3, ncols=2, wind=8.0, dms=1.0e-6):
 
 
 class DmsTermTest(unittest.TestCase):
-    def test_emits_sulfate_with_seawater_field(self):
+    def test_emits_gas_dms_with_seawater_field(self):
         term = DmsEmissions()
         tend, _ = term(*_inputs(dms=2.0e-6))
-        key = mass_name("so4", "acc")
-        self.assertGreater(float(tend.tracers[key][-1, 0]), 0.0)
+        # Emission enters the lowest layer of the gas-phase DMS tracer.
+        self.assertGreater(float(tend.tracers[gas_name("dms")][-1, 0]), 0.0)
+        self.assertAlmostEqual(float(tend.tracers[gas_name("dms")][0, 0]), 0.0)
 
     def test_zero_without_seawater_field(self):
         term = DmsEmissions()
         tend, _ = term(*_inputs(dms=0.0))
-        key = mass_name("so4", "acc")
-        self.assertAlmostEqual(float(tend.tracers[key][-1, 0]), 0.0)
+        self.assertAlmostEqual(float(tend.tracers[gas_name("dms")][-1, 0]), 0.0)
 
     def test_grad_through_flux_scale(self):
         state, diagnostics, forcing, terrain = _inputs()
 
         def loss(scale):
-            term = DmsEmissions(
-                params=DmsParameters(
-                    flux_scale=scale, aitken_fraction=jnp.asarray(0.5)
-                )
-            )
+            term = DmsEmissions(params=DmsParameters(flux_scale=scale))
             tend, _ = term(state, diagnostics, forcing, terrain)
-            return jnp.sum(tend.tracers[mass_name("so4", "acc")])
+            return jnp.sum(tend.tracers[gas_name("dms")])
 
         g = jax.grad(loss)(jnp.asarray(1.0))
         self.assertTrue(np.isfinite(float(g)))
