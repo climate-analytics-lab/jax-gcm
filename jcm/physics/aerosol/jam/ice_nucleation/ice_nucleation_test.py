@@ -167,5 +167,45 @@ class FactoryWiringTest(unittest.TestCase):
         self.assertEqual(term._scheme, "lohmann_diehl")
 
 
+class IceNucleationModelTest(unittest.TestCase):
+    """End-to-end: het ice nucleation drives the 2M scheme on a T21 run."""
+
+    def _run(self, scheme):
+        import numpy as onp
+
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(onp.linspace(0, 1, 21), spectral_truncation=21)
+        terrain = TerrainData.aquaplanet(coords)
+        model = Model(
+            coords=coords, time_step=30, terrain=terrain,
+            physics=echam_physics(
+                aerosol_module="jam", cloud_scheme="2m", jam_ice_scheme=scheme,
+            ),
+        )
+        return model.run(save_interval=0.0625, total_time=0.0625)
+
+    def _check(self, scheme):
+        dyn = self._run(scheme).dynamics
+        self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
+        for key in ("qi", "qni"):
+            self.assertFalse(bool(jnp.any(jnp.isnan(dyn.tracers[key]))))
+
+    def test_niemand_runs_finite(self):
+        self._check("niemand")
+
+    def test_lohmann_diehl_runs_finite(self):
+        self._check("lohmann_diehl")
+
+
+# Mark the model-level tests slow.
+import pytest  # noqa: E402
+
+IceNucleationModelTest = pytest.mark.slow(IceNucleationModelTest)
+
+
 if __name__ == "__main__":
     unittest.main()
