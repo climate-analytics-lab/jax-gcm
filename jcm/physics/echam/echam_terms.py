@@ -74,6 +74,7 @@ def echam_physics(
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
+    jam_anthropogenic: bool = False,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -121,6 +122,8 @@ def echam_physics(
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
+        jam_anthropogenic: include prescribed CEDS anthropogenic emissions
+            (#498); inert until CEDS forcing fluxes are supplied.
 
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
@@ -200,6 +203,7 @@ def echam_physics(
             microphysics=jam_microphysics, arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,
+            anthropogenic=jam_anthropogenic,
         )
         # Aqueous chemistry + wet deposition need the current step's clouds, so
         # they run after the cloud microphysics term; the rest of the JAM chain

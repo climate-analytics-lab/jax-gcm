@@ -31,6 +31,23 @@ def particle_mean_mass(mode: AerosolMode, species_density: float) -> float:
     )
 
 
+def emit_over_profile(
+    flux: jnp.ndarray,             # (ncols,) surface flux [X/m²/s]
+    weights: jnp.ndarray,          # (nlev, ncols) vertical weights summing to 1
+    air_density: jnp.ndarray,      # (nlev, ncols) [kg/m³]
+    layer_thickness: jnp.ndarray,  # (nlev, ncols) [m]
+) -> jnp.ndarray:
+    """Spread a surface mass/number flux over a vertical profile.
+
+    Returns a ``(nlev, ncols)`` mixing-ratio tendency [X/kg/s]. Because
+    ``weights`` sum to 1 over levels, the column-integrated emitted amount
+    equals the input flux (``Σ ρ_k Δz_k · dq_k = flux``), so it is
+    mass-conserving for any (differentiable) profile. Works for both mass
+    [kg/kg/s] and number [kg⁻¹/s] tendencies.
+    """
+    return weights * flux[jnp.newaxis, :] / (air_density * layer_thickness)
+
+
 def distribute_surface_flux(
     spec: ModalAerosolSpec,
     fluxes: list[tuple[str, str, jnp.ndarray]],
