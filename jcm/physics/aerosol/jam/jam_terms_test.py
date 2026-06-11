@@ -27,6 +27,7 @@ class JamFactoryTest(unittest.TestCase):
                 "aerosol_microphysics",
                 "aerosol_optics",
                 "aerosol_activation",
+                "aerosol_ice_nucleation",
                 "aerosol_sedimentation",
                 "aerosol_drydep",
                 "aerosol_aqueous_chemistry",

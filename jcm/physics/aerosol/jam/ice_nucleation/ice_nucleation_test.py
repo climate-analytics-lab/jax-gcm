@@ -146,5 +146,26 @@ class IceNucleationTermTest(unittest.TestCase):
         self.assertTrue(np.isfinite(float(g)) and float(g) != 0.0)
 
 
+class FactoryWiringTest(unittest.TestCase):
+    def test_ice_term_present_with_default_scheme(self):
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        term = next(
+            t for t in jam_aerosol_physics()
+            if t.category == "aerosol_ice_nucleation"
+        )
+        self.assertEqual(term.name, "jam_ice_nucleation")
+        self.assertEqual(term._scheme, "niemand")
+
+    def test_scheme_threads_through(self):
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        term = next(
+            t for t in jam_aerosol_physics(ice_scheme="lohmann_diehl")
+            if t.category == "aerosol_ice_nucleation"
+        )
+        self.assertEqual(term._scheme, "lohmann_diehl")
+
+
 if __name__ == "__main__":
     unittest.main()
