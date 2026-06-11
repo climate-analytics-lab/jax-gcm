@@ -39,7 +39,7 @@ def ns_imm_niemand(temperature: jnp.ndarray) -> jnp.ndarray:
 
 
 def niemand_inp(pops, temperature, s_ice, params: IceNucleationParameters):
-    """Heterogeneous INP number [m⁻³] (immersion + deposition)."""
+    """Immersion and deposition INP numbers [m⁻³] as ``(immersion, deposition)``."""
     t = temperature
     cold = t < _T_IMM_MAX
 
@@ -61,4 +61,4 @@ def niemand_inp(pops, temperature, s_ice, params: IceNucleationParameters):
     active_dep = (si_excess > 0.0) & (t < _T_DEP_MAX)
     inp_dep = jnp.where(active_dep, inp_dep_du + inp_dep_bc, 0.0)
 
-    return params.scale * (inp_imm + inp_dep)
+    return params.scale * inp_imm, params.scale * inp_dep

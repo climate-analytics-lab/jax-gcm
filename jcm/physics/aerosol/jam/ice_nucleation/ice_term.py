@@ -41,7 +41,7 @@ class IceNucleation(PhysicsTerm):
     name: ClassVar[str] = "jam_ice_nucleation"
     category: ClassVar[str] = "aerosol_ice_nucleation"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full", "air_density")
-    provides: ClassVar[tuple[str, ...]] = ("ice_nuclei",)
+    provides: ClassVar[tuple[str, ...]] = ("ice_nuclei", "ice_nuclei_deposition")
 
     def __init__(
         self,
@@ -80,11 +80,18 @@ class IceNucleation(PhysicsTerm):
         s_ice = state.specific_humidity / jnp.maximum(qsat_ice, 1.0e-30)
 
         if self._scheme == "niemand":
-            inp = niemand_inp(pops, t, s_ice, p)
+            inp_imm, inp_dep = niemand_inp(pops, t, s_ice, p)
         else:
             dt = jnp.asarray(diagnostics["_dt_seconds"], t.dtype)
             cooling = self._cooling_rate(diagnostics, t)
-            inp = lohmann_diehl_inp(pops, t, s_ice, cooling, dt, p)
+            inp_imm, inp_dep = lohmann_diehl_inp(pops, t, s_ice, cooling, dt, p)
 
+        # Immersion feeds the 2M mixed-phase het freezing; deposition feeds the
+        # cirrus nucleation hook (newly_formed_ice). Splitting them avoids
+        # double-counting where the regimes overlap.
         tendency = PhysicsTendency.zeros(t.shape)
-        return tendency, {**diagnostics, "ice_nuclei": jnp.maximum(inp, 0.0)}
+        return tendency, {
+            **diagnostics,
+            "ice_nuclei": jnp.maximum(inp_imm, 0.0),
+            "ice_nuclei_deposition": jnp.maximum(inp_dep, 0.0),
+        }

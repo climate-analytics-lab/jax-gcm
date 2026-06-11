@@ -14,10 +14,12 @@ log-normal geometry:
 * number-equiv:  ``n = (m/ρ) / v_p``,         ``v_p = (π/6)·dg³·exp(4.5 ln²σ)``
 * surface area:  ``A = (m/ρ) · 6/(dg·exp(2.5 ln²σ))``    [m²/m³ after ×ρ_air]
 
-Solubility (MAM4-MOM): BC in accum/coarse is treated as aged/coated → soluble,
-BC in primary_carbon → insoluble; dust (only in accum/coarse) is split by the
-differentiable ``frac_du_soluble`` (most aged dust is immersion-active, a small
-bare fraction is available for deposition).
+Solubility: **cloud-borne** dust/BC (``mc_*``) is already inside cloud droplets,
+so it is immersion-active (soluble) regardless of mode. For **interstitial**
+(``m_*``) aerosol: BC in accum/coarse is treated as aged/coated → soluble, BC in
+primary_carbon → insoluble; interstitial dust (only in accum/coarse) is split by
+the differentiable ``frac_du_soluble`` (most aged dust is immersion-active, a
+small bare fraction is available for deposition).
 """
 
 from __future__ import annotations
@@ -54,48 +56,51 @@ def in_populations(
     """
     zeros = jnp.zeros_like(air_density)
 
-    def species_number_area(species, mode_short):
-        mass = tracers.get(mass_name(species, mode_short), zeros)
+    def number_area(species, mode_short, *, cloud_borne):
+        mass = tracers.get(
+            mass_name(species, mode_short, cloud_borne=cloud_borne), zeros
+        )
         density = spec.species_props(species).density
         vol = jnp.maximum(mass, 0.0) / density        # m³/kg-air
         n_fac, a_fac = _geometry_factors(spec, mode_short)
-        number = vol * n_fac * air_density            # m⁻³
-        area = vol * a_fac * air_density              # m²/m³
-        return number, area
+        return vol * n_fac * air_density, vol * a_fac * air_density
 
-    # Dust lives only in the soluble (accum/coarse) modes; split by solubility.
-    du_n = zeros
-    du_a = zeros
-    for m in _SOLUBLE_MODES:
-        if "du" in spec.mode(m).species:
-            n, a = species_number_area("du", m)
-            du_n = du_n + n
-            du_a = du_a + a
+    def cloud_borne_pool(species):
+        """Cloud-borne (in-droplet) → immersion-active in any mode."""
+        n, a = zeros, zeros
+        for m in (*_SOLUBLE_MODES, *_INSOLUBLE_MODES):
+            if species in spec.mode(m).species:
+                dn, da = number_area(species, m, cloud_borne=True)
+                n, a = n + dn, a + da
+        return n, a
+
+    def interstitial(species, modes):
+        n, a = zeros, zeros
+        for m in modes:
+            if species in spec.mode(m).species:
+                dn, da = number_area(species, m, cloud_borne=False)
+                n, a = n + dn, a + da
+        return n, a
+
     fsol = jnp.clip(frac_du_soluble, 0.0, 1.0)
 
-    # BC solubility follows the mode (soluble modes vs primary carbon).
-    bc_n_sol = zeros
-    bc_a_sol = zeros
-    for m in _SOLUBLE_MODES:
-        if "bc" in spec.mode(m).species:
-            n, a = species_number_area("bc", m)
-            bc_n_sol = bc_n_sol + n
-            bc_a_sol = bc_a_sol + a
-    bc_n_insol = zeros
-    bc_a_insol = zeros
-    for m in _INSOLUBLE_MODES:
-        if "bc" in spec.mode(m).species:
-            n, a = species_number_area("bc", m)
-            bc_n_insol = bc_n_insol + n
-            bc_a_insol = bc_a_insol + a
+    # Dust: interstitial only in accum/coarse, split by frac; all cloud-borne
+    # dust is soluble (in droplets).
+    du_int_n, du_int_a = interstitial("du", _SOLUBLE_MODES)
+    du_cb_n, du_cb_a = cloud_borne_pool("du")
+    # BC: interstitial soluble (accum/coarse) vs insoluble (primary carbon);
+    # all cloud-borne BC is soluble.
+    bc_int_sol_n, bc_int_sol_a = interstitial("bc", _SOLUBLE_MODES)
+    bc_int_ins_n, bc_int_ins_a = interstitial("bc", _INSOLUBLE_MODES)
+    bc_cb_n, bc_cb_a = cloud_borne_pool("bc")
 
     return {
-        "du_number_sol": du_n * fsol,
-        "du_area_sol": du_a * fsol,
-        "du_number_insol": du_n * (1.0 - fsol),
-        "du_area_insol": du_a * (1.0 - fsol),
-        "bc_number_sol": bc_n_sol,
-        "bc_area_sol": bc_a_sol,
-        "bc_number_insol": bc_n_insol,
-        "bc_area_insol": bc_a_insol,
+        "du_number_sol": du_int_n * fsol + du_cb_n,
+        "du_area_sol": du_int_a * fsol + du_cb_a,
+        "du_number_insol": du_int_n * (1.0 - fsol),
+        "du_area_insol": du_int_a * (1.0 - fsol),
+        "bc_number_sol": bc_int_sol_n + bc_cb_n,
+        "bc_area_sol": bc_int_sol_a + bc_cb_a,
+        "bc_number_insol": bc_int_ins_n,
+        "bc_area_insol": bc_int_ins_a,
     }

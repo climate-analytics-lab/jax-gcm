@@ -39,22 +39,27 @@ _MEYERS_A = -0.639
 _MEYERS_B = 0.1296
 
 
-def _immersion_fraction(coeff, temperature, cooling, dt, scale):
-    """Frozen fraction of an immersion-IN population (L&D dependences)."""
+def _immersion_fraction(coeff, temperature, cooling, dt):
+    """Frozen fraction of an immersion-IN population (L&D dependences).
+
+    The overall ``scale`` is applied **once** by the caller (to the resulting
+    number), not here, so it stays a linear knob consistent with the deposition
+    path and the Niemand scheme.
+    """
     temp_factor = jnp.exp(jnp.clip(_TMELT - temperature, 0.0, 60.0))
-    rate = scale * _LD_CALIB * coeff * temp_factor * jnp.maximum(cooling, 0.0)
+    rate = _LD_CALIB * coeff * temp_factor * jnp.maximum(cooling, 0.0)
     return 1.0 - jnp.exp(-jnp.clip(rate * dt, 0.0, 50.0))
 
 
 def lohmann_diehl_inp(pops, temperature, s_ice, cooling, dt,
                       params: IceNucleationParameters):
-    """Heterogeneous INP number [m⁻³] (immersion + deposition)."""
+    """Immersion and deposition INP numbers [m⁻³] as ``(immersion, deposition)``."""
     t = temperature
     cold = t < _TMELT
 
     # --- Immersion: soluble dust + BC, L&D temperature/cooling dependence ---
-    f_du = _immersion_fraction(_A_IMM_DU, t, cooling, dt, params.scale)
-    f_bc = _immersion_fraction(_A_IMM_BC, t, cooling, dt, params.scale)
+    f_du = _immersion_fraction(_A_IMM_DU, t, cooling, dt)
+    f_bc = _immersion_fraction(_A_IMM_BC, t, cooling, dt)
     inp_imm = jnp.where(
         cold, pops["du_number_sol"] * f_du + pops["bc_number_sol"] * f_bc, 0.0
     )
@@ -67,4 +72,4 @@ def lohmann_diehl_inp(pops, temperature, s_ice, cooling, dt,
     insol_number = pops["du_number_insol"] + pops["bc_number_insol"]
     inp_dep = jnp.where(si_excess > 0.0, jnp.minimum(n_meyers, insol_number), 0.0)
 
-    return params.scale * (inp_imm + inp_dep)
+    return params.scale * inp_imm, params.scale * inp_dep
