@@ -76,6 +76,43 @@ ds = predictions.to_xarray()
 print(ds)
 ```
 
+The v2.0 ECHAM T63L47 hybrid + RRTMGP stack is the Python equivalent of
+`python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid`:
+
+```python
+from jcm.model import Model
+from jcm.utils import get_coords
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
+from jcm.physics.echam.echam_levels import get_echam_levels
+from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.dissipation import UpperSponge
+
+# T63L47 hybrid sigma-pressure coordinates. get_echam_levels(47) returns the
+# dinosaur HybridCoordinates table (a-boundaries in Pa); get_coords wraps it
+# on the T63 (192x96) Gaussian grid.
+coords = get_coords(get_echam_levels(47), spectral_truncation=63)
+
+# Boundary conditions: real orography + land-sea mask and SST/sea-ice forcing.
+# Swap in TerrainData.aquaplanet(coords) for an idealised run.
+terrain = TerrainData.from_file("jcm/data/bc/t63/terrain.nc", coords=coords)
+forcing = ForcingData.from_file("jcm/data/bc/t63/forcing.nc", coords=coords)
+
+# ECHAM physics with production RRTMGP radiation. The thin (~2 Pa) top hybrid
+# layer needs ECHAM lmidatm-style top damping, so pair it with an UpperSponge —
+# without it the top level runs away under any radiative imbalance.
+physics = echam_physics(radiation_scheme="rrtmgp") + UpperSponge(
+    n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
+)
+
+# time_step=12 min is the tuned ECHAM T63L47 step. Forcing is supplied to
+# run()/resume(), not the constructor.
+model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
+
+predictions = model.run(forcing=forcing, save_interval=1.0, total_time=10.0)
+ds = predictions.to_xarray()
+```
+
 Most production runs use the Hydra CLI:
 
 ```bash
