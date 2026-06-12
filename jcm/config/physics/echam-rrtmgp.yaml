@@ -13,7 +13,6 @@
 
 vectorize_columns: true
 checkpoint_terms: true
-radiation_chunk_size: null
 
 terms:
   moist_air_state:

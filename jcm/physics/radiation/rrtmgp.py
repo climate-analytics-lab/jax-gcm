@@ -48,74 +48,6 @@ from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
-# ---------------------------------------------------------------------------
-# Chunked-vmap configuration
-# ---------------------------------------------------------------------------
-#
-# RRTMGP is ``vmap``'d over horizontal columns. Each column allocates
-# ~150 intermediate arrays of shape (ngpt, nlev) inside ``compute_heating_rate``
-# (gas-optics interpolation tables, planck source functions, optical depth,
-# tridiagonal flux solver working memory). Vmapping all columns at once
-# blows up GPU memory at high horizontal resolution, so we split the vmap
-# into sequential chunks via ``lax.map``: ``n_chunks`` smaller batches that
-# share the same JIT'd kernel.
-#
-# Empirical sweet spot on a single 80 GiB A100 (T63L47, ngpt=128, nlev=47):
-#
-#   chunk=18432 (1 chunk, no chunking): OOM at 67 GiB peak
-#   chunk= 9216 (2 chunks)            : ~8.7 s/step
-#   chunk= 4608 (4 chunks)            : ~15.2 s/step
-#
-# Two chunks is ~74 % faster than four because XLA has enough headroom
-# to skip rematerialization. The per-cell cost (~3.6 MB) scales linearly
-# with ``nlev``.
-#
-# ``chunk_budget(nlev)`` auto-detects the largest chunk that fits in the
-# device's HBM (via ``jax.devices()[0].memory_stats()['bytes_limit']``) at
-# 55 % of the budget — leaves room for XLA working memory. Override with
-# :func:`set_chunk_size` (e.g. on shared GPUs with reduced free memory or
-# to fix a chunk count for reproducible kernel launches).
-
-_CHUNK_SIZE_OVERRIDE = None  # int | None
-
-
-def set_chunk_size(chunk_size) -> None:
-    """Override the RRTMGP chunked-vmap chunk size (cells per chunk).
-
-    Set to a positive integer to fix the chunk count; pass ``None`` to
-    revert to auto-detection from device HBM. Must be called BEFORE the
-    first radiation call so the JIT'd radiation function picks up the
-    new value (changing it after a JIT compile triggers a recompile on
-    the next call).
-    """
-    global _CHUNK_SIZE_OVERRIDE
-    _CHUNK_SIZE_OVERRIDE = chunk_size
-
-
-def get_chunk_size_override():
-    """Return the current chunk-size override (``None`` for auto)."""
-    return _CHUNK_SIZE_OVERRIDE
-
-
-def chunk_budget(nlev: int) -> int:
-    """Return the RRTMGP chunk-size budget (cells/chunk) for this device.
-
-    Uses :data:`_CHUNK_SIZE_OVERRIDE` if set, else queries the JAX
-    device HBM and picks the largest chunk that fits at 55 % of the
-    XLA bytes_limit. Falls back to 9216 if the device doesn't report
-    HBM (e.g. CPU run).
-    """
-    if _CHUNK_SIZE_OVERRIDE is not None and _CHUNK_SIZE_OVERRIDE > 0:
-        return int(_CHUNK_SIZE_OVERRIDE)
-    bytes_per_cell = 3.6e6 * (nlev / 47.0)
-    try:
-        bytes_limit = jax.devices()[0].memory_stats().get('bytes_limit', 0)
-    except Exception:
-        bytes_limit = 0
-    if bytes_limit > 0:
-        return max(1, int(0.55 * bytes_limit / bytes_per_cell))
-    return 9216
-
 
 # ---------------------------------------------------------------------------
 # Module-level RRTMGP instance (created once at import time)
@@ -722,14 +654,14 @@ def _column_vector_rrtmgp(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
     return jnp.reshape(value, (ncols,))
 
 
+
+
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
-    Uses ``jax.lax.map`` over chunks for memory-bounded vmap (RRTMGP
-    allocates many g-point intermediates per column; running all columns
-    of a T63L47 grid at once OOMs an 80 GiB A100). Chunk size is
-    auto-detected from device HBM via :func:`chunk_budget`; override via
-    ``RadiationParameters(rrtmgp_chunk_size=...)``.
+    A single ``jax.vmap`` over all columns (like the rest of the physics):
+    the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
+    set tiny (~1.5 GB at T63L47), so no chunking is needed.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
@@ -893,106 +825,71 @@ class RRTMGPRadiation(PhysicsTerm):
                 n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
         )
 
-        # Auto-pick chunk size from device HBM (see chunk_budget()).
-        budget = chunk_budget(nlev)
-        if ncols <= budget:
-            chunk_size = ncols
-        else:
-            n_chunks = -(-ncols // budget)  # ceil-div
-            while ncols % n_chunks != 0:
-                n_chunks += 1
-            chunk_size = ncols // n_chunks
-        n_chunks = ncols // chunk_size
-
-        def split_lev_first(a):
-            """Reshape (nz, ncols) → (n_chunks, chunk_size, nz)."""
-            nz = a.shape[0]
-            return a.reshape(nz, n_chunks, chunk_size).transpose(1, 2, 0)
-
-        def split_col(a):
-            """Reshape (ncols, ...) → (n_chunks, chunk_size, ...)."""
-            return a.reshape(n_chunks, chunk_size, *a.shape[1:])
-
-        chunked_inputs = dict(
-            temperature=split_lev_first(state.temperature),
-            specific_humidity=split_lev_first(state.specific_humidity),
-            pressure_full=split_lev_first(diagnostics["pressure_full"]),
-            pressure_half=split_lev_first(diagnostics["pressure_half"]),
-            layer_thickness=split_lev_first(diagnostics["layer_thickness"]),
-            air_density=split_lev_first(diagnostics["air_density"]),
-            cloud_water=split_lev_first(cloud_water),
-            cloud_ice=split_lev_first(cloud_ice),
-            cloud_fraction=split_lev_first(cloud_fraction),
-            surface_temperature=split_col(surface_temperature_col),
-            surface_albedo_vis=split_col(surface_albedo_vis_col),
-            surface_albedo_nir=split_col(surface_albedo_nir_col),
-            surface_emissivity=split_col(surface_emissivity_col),
-            latitudes=split_col(latitudes),
-            longitudes=split_col(longitudes),
-            column_indices=split_col(column_indices),
-            ozone_vmr=split_lev_first(ozone_vmr),
-            co2_vmr=split_lev_first(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
-            ch4_vmr=split_lev_first(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
-            aerosol=aerosol_for_vmap.copy(
-                aod_profile=split_col(aerosol_for_vmap.aod_profile),
-                ssa_profile=split_col(aerosol_for_vmap.ssa_profile),
-                asy_profile=split_col(aerosol_for_vmap.asy_profile),
-                cdnc_factor=split_col(aerosol_for_vmap.cdnc_factor),
-                aod_total=split_col(aerosol_for_vmap.aod_total),
-                aod_anthropogenic=split_col(aerosol_for_vmap.aod_anthropogenic),
-                aod_background=split_col(aerosol_for_vmap.aod_background),
-                Nccn=split_col(aerosol_in.Nccn.reshape(ncols)),
-                angstrom=split_col(aerosol_for_vmap.angstrom),
-                aod_sw_per_band=split_col(aerosol_for_vmap.aod_sw_per_band),
-                ssa_sw_per_band=split_col(aerosol_for_vmap.ssa_sw_per_band),
-                asy_sw_per_band=split_col(aerosol_for_vmap.asy_sw_per_band),
-            ),
-        )
-
         base_seed = self._base_seed
         compute_cre = self._compute_cre
 
-        def _vmap_one_chunk(chunk_inputs):
-            return jax.vmap(
-                radiation_scheme_rrtmgp,
-                in_axes=(
-                    0, 0, 0, 0, 0,
-                    0, 0, 0, 0,
-                    0, 0, 0, 0,
-                    None, 0, 0,
-                    None, 0,
-                    0, None, None, None,    # column_index, model_step, base_seed, compute_cre
-                    0, 0, 0,                # ozone_vmr, co2_vmr, ch4_vmr
-                ),
-                out_axes=(0, 0),
-                axis_size=chunk_size,
-            )(
-                chunk_inputs['temperature'], chunk_inputs['specific_humidity'],
-                chunk_inputs['pressure_full'], chunk_inputs['pressure_half'],
-                chunk_inputs['layer_thickness'], chunk_inputs['air_density'],
-                chunk_inputs['cloud_water'], chunk_inputs['cloud_ice'],
-                chunk_inputs['cloud_fraction'],
-                chunk_inputs['surface_temperature'],
-                chunk_inputs['surface_albedo_vis'],
-                chunk_inputs['surface_albedo_nir'],
-                chunk_inputs['surface_emissivity'],
-                solar, chunk_inputs['latitudes'], chunk_inputs['longitudes'],
-                params, chunk_inputs['aerosol'],
-                chunk_inputs['column_indices'],
-                model_step, base_seed, compute_cre,
-                chunk_inputs['ozone_vmr'],
-                chunk_inputs['co2_vmr'],
-                chunk_inputs['ch4_vmr'],
-            )
+        # Column-leading inputs for the vmap. The jax-rrtmgp #8 fix keeps the
+        # gas-optics tables shared operands under the column vmap, so the
+        # per-column working set is tiny (~1.5 GB at T63L47) and no chunking is
+        # needed — radiation now vmaps over columns like the rest of the
+        # physics. ``aerosol_for_vmap`` is already column-leading; add Nccn.
+        def lev_to_col(a):
+            """(nlev, ncols) → (ncols, nlev) for the leading column vmap."""
+            return a.T
 
-        chunked_results = jax.lax.map(_vmap_one_chunk, chunked_inputs)
-        tendencies_chunked, diagnostics_chunked = chunked_results
+        aerosol_col = aerosol_for_vmap.copy(Nccn=aerosol_in.Nccn.reshape(ncols))
+        cols = dict(
+            temperature=lev_to_col(state.temperature),
+            specific_humidity=lev_to_col(state.specific_humidity),
+            pressure_full=lev_to_col(diagnostics["pressure_full"]),
+            pressure_half=lev_to_col(diagnostics["pressure_half"]),
+            layer_thickness=lev_to_col(diagnostics["layer_thickness"]),
+            air_density=lev_to_col(diagnostics["air_density"]),
+            cloud_water=lev_to_col(cloud_water),
+            cloud_ice=lev_to_col(cloud_ice),
+            cloud_fraction=lev_to_col(cloud_fraction),
+            surface_temperature=surface_temperature_col,
+            surface_albedo_vis=surface_albedo_vis_col,
+            surface_albedo_nir=surface_albedo_nir_col,
+            surface_emissivity=surface_emissivity_col,
+            latitudes=latitudes,
+            longitudes=longitudes,
+            aerosol=aerosol_col,
+            column_indices=column_indices,
+            ozone_vmr=lev_to_col(ozone_vmr),
+            co2_vmr=lev_to_col(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
+            ch4_vmr=lev_to_col(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
+        )
 
-        def merge(a):
-            return a.reshape(ncols, *a.shape[2:])
-
-        tendencies_vmapped = jax.tree_util.tree_map(merge, tendencies_chunked)
-        diagnostics_vmapped = jax.tree_util.tree_map(merge, diagnostics_chunked)
+        # We tried a day/night split here (solve the dark ~half LW-only, skip
+        # its shortwave) — bit-identical but ~25 % slower at T63L47, because
+        # after the gas-optics gather fix the SW solve is no longer the
+        # bottleneck and the gather/scatter outweighs the skipped work. A plain
+        # single vmap over all columns is fastest.
+        tendencies_vmapped, diagnostics_vmapped = jax.vmap(
+            radiation_scheme_rrtmgp,
+            in_axes=(
+                0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                None, 0, 0,
+                None, 0,
+                0, None, None, None,  # col_index, model_step, base_seed, cre
+                0, 0, 0,              # ozone_vmr, co2_vmr, ch4_vmr
+            ),
+            out_axes=(0, 0),
+        )(
+            cols["temperature"], cols["specific_humidity"],
+            cols["pressure_full"], cols["pressure_half"],
+            cols["layer_thickness"], cols["air_density"],
+            cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
+            cols["surface_temperature"], cols["surface_albedo_vis"],
+            cols["surface_albedo_nir"], cols["surface_emissivity"],
+            solar, cols["latitudes"], cols["longitudes"],
+            params, cols["aerosol"], cols["column_indices"],
+            model_step, base_seed, compute_cre,
+            cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+        )
 
         # Per-gpoint flux profiles are summed over g-points inside the
         # vmapped per-column compute, so flux arrays are (ncols, nlev+1)

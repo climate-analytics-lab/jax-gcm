@@ -20,7 +20,6 @@ checkpoint_terms: true
 # from device HBM (recommended). Set to a positive int to fix the chunk
 # count — useful on shared GPUs with reduced free memory or for
 # reproducible kernel launches. Plumbs through to ``Model.__init__``.
-radiation_chunk_size: null
 
 terms:
   moist_air_state:
