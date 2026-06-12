@@ -15,6 +15,7 @@ from jcm.physics.aerosol.jam.emissions.sectors import (
     OM_OC_RATIO,
     SO2_TO_SO4_MASS,
     SO4_PRIMARY_FRACTION,
+    SUPER_SECTORS,
 )
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.species import SPECIES
@@ -37,8 +38,13 @@ def _setup(**fluxes):
             (_NLEV, _NCOLS),
         ),
     }
+    # The term reads per-channel fluxes from the ``anthropogenic_emissions``
+    # mapping on ``ForcingData`` (keyed ``emis_<sector>_<species>``); mirror
+    # that here so the test exercises the real forcing contract.
     forcing = types.SimpleNamespace(
-        **{k: jnp.full((_NCOLS,), v) for k, v in fluxes.items()}
+        anthropogenic_emissions={
+            k: jnp.full((_NCOLS,), v) for k, v in fluxes.items()
+        }
     )
     return state, diagnostics, forcing
 
@@ -121,6 +127,65 @@ class AnthropogenicEmissionsTest(unittest.TestCase):
             self.assertTrue(np.isfinite(float(gi)))
         # Injection height genuinely matters (non-zero gradient).
         self.assertGreater(abs(float(g[0])), 0.0)
+
+
+def _mass_weighted_height(tend, rho, dz, height, col=0):
+    """Column mass-weighted injection height [m] of a tracer tendency."""
+    w = np.asarray((tend * rho * dz)[:, col])
+    h = np.asarray(height[:, col])
+    return float(np.sum(w * h) / np.sum(w))
+
+
+class BiomassBurningTest(unittest.TestCase):
+    """Phase E: open biomass burning as a 4th super-sector with FIRE injection."""
+
+    def test_biomass_bc_to_primary_carbon_mass_conserving(self):
+        # Biomass BC/OC use the same speciation as anthropogenic carbon (MAM4
+        # routes both to the single primary-carbon mode), just a deeper profile.
+        state, diagnostics, forcing = _setup(
+            emis_biomass_burning_bc=_F_BC, emis_biomass_burning_oc=_F_OC)
+        tend, _ = AnthropogenicEmissions()(state, diagnostics, forcing, None)
+        rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
+        bc = _column_integral(tend.tracers[mass_name("bc", "pcm")], rho, dz)
+        poa = _column_integral(tend.tracers[mass_name("poa", "pcm")], rho, dz)
+        np.testing.assert_allclose(bc, _F_BC, rtol=1e-5)
+        np.testing.assert_allclose(poa, _F_OC * OM_OC_RATIO, rtol=1e-5)
+
+    def test_fire_profile_is_deeper_than_surface(self):
+        # The FIRE default injects much higher than surface combustion: the
+        # mass-weighted height of the emitted BC must be substantially larger.
+        state, diagnostics, _ = _setup()
+        rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
+        h = diagnostics["height_full"]
+
+        _, _, f_fire = _setup(emis_biomass_burning_bc=_F_BC)
+        _, _, f_surf = _setup(emis_surface_combustion_bc=_F_BC)
+        t_fire, _ = AnthropogenicEmissions()(state, diagnostics, f_fire, None)
+        t_surf, _ = AnthropogenicEmissions()(state, diagnostics, f_surf, None)
+        bc = mass_name("bc", "pcm")
+        z_fire = _mass_weighted_height(t_fire.tracers[bc], rho, dz, h)
+        z_surf = _mass_weighted_height(t_surf.tracers[bc], rho, dz, h)
+        self.assertGreater(z_fire, z_surf + 300.0)
+
+    def test_grad_through_biomass_injection_height_finite(self):
+        i = SUPER_SECTORS.index("biomass_burning")
+        state, diagnostics, forcing = _setup(emis_biomass_burning_bc=_F_BC)
+
+        def loss(height):
+            base = EmissionParameters.default()
+            p = EmissionParameters(
+                injection_height=base.injection_height.at[i].set(height),
+                injection_thickness=base.injection_thickness,
+                so4_primary_fraction=base.so4_primary_fraction,
+                scale=base.scale,
+            )
+            tend, _ = AnthropogenicEmissions(params=p)(
+                state, diagnostics, forcing, None)
+            return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
+
+        g = float(jax.grad(loss)(jnp.asarray(1000.0)))
+        self.assertTrue(np.isfinite(g))
+        self.assertGreater(abs(g), 0.0)
 
 
 class FactoryWiringTest(unittest.TestCase):

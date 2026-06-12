@@ -35,6 +35,7 @@ from jcm.physics.aerosol.jam.emissions.anthropogenic import (
     AnthropogenicEmissions,
     EmissionParameters,
 )
+from jcm.physics.aerosol.jam.emissions.prescribed import PreSpeciatedEmissions
 from jcm.physics.aerosol.jam.emissions.dms import DmsEmissions, DmsParameters
 from jcm.physics.aerosol.jam.emissions.dust import DustEmissions, DustParameters
 from jcm.physics.aerosol.jam.emissions.seasalt import (
@@ -102,6 +103,7 @@ def jam_aerosol_physics(
     dust: DustParameters | None = None,
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
+    prescribed_speciated: bool = False,
     oxidants: OxidantParameters | None = None,
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
@@ -121,8 +123,13 @@ def jam_aerosol_physics(
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
-        anthropogenic: include prescribed CEDS anthropogenic emissions (#498);
-            ``anthropogenic_params`` overrides the differentiable defaults.
+        anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
+            the *bulk* path (in-model differentiable speciation + smooth
+            injection); ``anthropogenic_params`` overrides the defaults.
+        prescribed_speciated: include the CAM6/MAM4-faithful *already-speciated*
+            emission path (#498) — per-tracer fields injected directly, no
+            in-model speciation. Independent of ``anthropogenic``; both, either,
+            or neither may be enabled.
         oxidants/sulfur_gas/aqueous: optional ``Parameters`` for the
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
@@ -153,6 +160,10 @@ def jam_aerosol_physics(
         emissions.append(
             AnthropogenicEmissions(params=anthropogenic_params, spec=spec)
         )
+    if prescribed_speciated:
+        # CAM6/MAM4-faithful already-speciated emissions (#498); inert until
+        # per-tracer forcing fields are supplied.
+        emissions.append(PreSpeciatedEmissions())
     pre_core = [
         *emissions,
         # Sulfur chemistry: oxidants → gas-phase DMS/SO2 oxidation, producing

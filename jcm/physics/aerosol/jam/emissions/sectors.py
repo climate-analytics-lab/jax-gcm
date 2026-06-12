@@ -25,11 +25,18 @@ from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.species import SPECIES
 
 #: Super-sectors in a fixed order — the ``EmissionParameters`` arrays index by
-#: this, and the forcing fields are keyed ``emis_<sector>_<species>``.
+#: this, and the forcing fields are keyed ``emis_<sector>_<species>``. The first
+#: three are CEDS anthropogenic activity super-sectors; ``biomass_burning`` is
+#: open (GFED/van Marle) burning, distinguished only by its deeper FIRE injection
+#: profile (HAMMOZ ``EM_FIRE``). All four go through the same speciation +
+#: smooth-injection machinery and are independently gated by which
+#: ``emis_<sector>_<species>`` forcing channels are supplied (absent ⇒ inert), so
+#: an anthropogenic-only run simply omits the biomass channels.
 SUPER_SECTORS: tuple[str, ...] = (
     "surface_combustion",   # CEDS TRA, RCO, AGR, WST, SLV — surface
     "elevated_industrial",  # CEDS ENE, IND — ~50 m
     "shipping",             # CEDS SHP — marine surface
+    "biomass_burning",      # open burning (GFED) — deep FIRE injection profile
 )
 
 #: Aerosol-relevant CEDS species carried here (gas precursors NH3/NOx/CO are
@@ -52,6 +59,16 @@ SECTOR_DEFAULTS: dict[str, SectorDefaults] = {
                                           injection_thickness=30.0),
     "shipping": SectorDefaults(injection_height=0.0,
                                injection_thickness=30.0),
+    # Open biomass burning (HAMMOZ ``EM_FIRE``): smoke is lofted through a deep
+    # layer rather than emitted at the surface. Defaults centre the smooth
+    # Gaussian ~1 km up with a ~1.5 km width — a clearly elevated, deep profile
+    # vs the near-surface sectors. Fire injection height is a large, poorly
+    # constrained uncertainty (most fires inject within the boundary layer;
+    # pyroconvection lofts the tail far higher), so these are deliberately just
+    # defaults — ``injection_height``/``injection_thickness`` are differentiable
+    # and meant to be calibrated.
+    "biomass_burning": SectorDefaults(injection_height=1000.0,
+                                      injection_thickness=1500.0),
 }
 
 # --- HAMMOZ species-handling constants (differentiable defaults on the term) --
@@ -65,3 +82,10 @@ SO2_TO_SO4_MASS = SPECIES["so4"].molar_mass / GAS_SPECIES["so2"].molar_mass
 #: MAM4 mode shorts that receive the primary emissions.
 SO4_MODES: tuple[str, str] = ("ait", "acc")   # primary sulfate
 CARBON_MODE = "pcm"                            # primary_carbon (BC + POA)
+
+# Note on emitted size: HAMMOZ/M7 distinguishes fossil-fuel (~0.03 µm) from
+# biomass (~0.075 µm) primary-carbon size. MAM4 carries a *single*
+# primary-carbon mode (``pcm``) for both fossil and biomass BC/POA, so that
+# distinction collapses here — biomass and anthropogenic carbon differ only in
+# their injection profile, not their emitted mode. A per-super-sector emitted
+# size (count-median radius) would be future work (see #498).

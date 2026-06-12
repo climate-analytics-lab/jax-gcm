@@ -237,6 +237,24 @@ class ForcingData:
     dms_seawater: Any = None   # seawater DMS concentration (DmsEmissions)
     dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
 
+    # Prescribed anthropogenic aerosol emissions (#498). A single mapping
+    # ``{emis_<sector>_<species>: array | TimeSeries}`` of **bulk** per-super-
+    # sector surface mass fluxes [kg/m²/s] on the model grid (so2 as SO₂ mass;
+    # bc/oc as carbon mass — see the emissions-file contract in
+    # ``.claude/aerosol_emissions_plan.md``). ``None`` ⇒ no anthropogenic
+    # emission. Kept as one dict-valued field rather than a field per
+    # (sector, species) so new channels need no struct change; ``select(date)``
+    # slices the per-channel ``TimeSeries`` leaves like any other forcing leaf.
+    anthropogenic_emissions: Any = None
+
+    # Prescribed *already-speciated* aerosol emissions (#498), the CAM6/MAM4-
+    # faithful counterpart to ``anthropogenic_emissions``. A mapping
+    # ``{tracer_name: array | TimeSeries}`` keyed by the tracer each field feeds
+    # (e.g. ``m_so4_acc``, ``m_bc_pcm``, ``n_pcm``, ``g_so2``); 2-D fields are
+    # surface fluxes, 3-D ``(lev, …)`` fields are per-model-level volume fluxes
+    # (see :class:`PreSpeciatedEmissions`). ``None`` ⇒ no prescribed emission.
+    prescribed_aerosol_emissions: Any = None
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -443,7 +461,9 @@ class ForcingData:
              ch4_vmr=None,
              nudging_target=_UNSET,
              dms_seawater=None,
-             dust_source=None):
+             dust_source=None,
+             anthropogenic_emissions=None,
+             prescribed_aerosol_emissions=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -470,6 +490,15 @@ class ForcingData:
             ),
             dms_seawater=dms_seawater if dms_seawater is not None else self.dms_seawater,
             dust_source=dust_source if dust_source is not None else self.dust_source,
+            anthropogenic_emissions=(
+                anthropogenic_emissions if anthropogenic_emissions is not None
+                else self.anthropogenic_emissions
+            ),
+            prescribed_aerosol_emissions=(
+                prescribed_aerosol_emissions
+                if prescribed_aerosol_emissions is not None
+                else self.prescribed_aerosol_emissions
+            ),
         )
 
     def isnan(self):
@@ -623,6 +652,78 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     lat = grid.latitudes
     sst_profile = jnp.where(jnp.abs(lat) < jnp.pi/3, 27*jnp.cos(3*lat/2)**2, 0) + 273.15
     return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
+
+def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
+    """Build the ``ForcingData.anthropogenic_emissions`` mapping from a dataset.
+
+    Reads every ``emis_<sector>_<species>`` variable (the emissions-file
+    contract — see ``.claude/aerosol_emissions_plan.md``) and wraps each as a
+    ``TimeSeries`` leaf (time-varying) or a bare array (static), keyed by the
+    variable name. Returns ``None`` when the dataset carries no such variable,
+    so the result can be passed straight to ``ForcingData.copy``::
+
+        ds = xr.open_dataset(emissions_file)
+        forcing = forcing.copy(anthropogenic_emissions=read_anthropogenic_emissions(ds))
+
+    The fields must already be on the model horizontal grid: this does **no**
+    regridding (use :mod:`jcm.data.emissions.prepare` to conservatively remap a
+    source-grid file first). Monthly data uses the same wrap-year/by-date time
+    alignment as the other forcing fields, so a 12-month climatology wraps and a
+    multi-year axis aligns by date.
+    """
+    emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
+    if not emis_names:
+        return None
+    has_time = any("time" in ds[n].dims for n in emis_names)
+    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
+    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    out: dict[str, Any] = {}
+    for name in emis_names:
+        da = ds[name]
+        if "time" in da.dims:
+            # Lead with time so `_select_time_series` can index axis 0; keep the
+            # remaining (horizontal) axes in their file order — the term ravels
+            # them to (ncols,).
+            others = [d for d in da.dims if d != "time"]
+            arr = jnp.asarray(da.transpose("time", *others).values)
+            out[name] = make_time_series(arr, time_seconds, align_mode=mode)
+        else:
+            out[name] = jnp.asarray(da.values)
+    return out
+
+
+def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
+    """Build ``ForcingData.prescribed_aerosol_emissions`` from a dataset.
+
+    Reads every ``aero_emis_<tracer>`` variable (the already-speciated emissions
+    contract — see ``.claude/aerosol_emissions_plan.md``), keyed by the bare
+    tracer name (``aero_emis_m_so4_acc`` → ``m_so4_acc``), and wraps each as a
+    ``TimeSeries`` leaf (time-varying) or a bare array (static). Returns ``None``
+    when no such variable is present. Fields may be 2-D (``lon, lat`` surface) or
+    3-D (``lev, lon, lat`` volume); the non-time axes are kept in file order
+    (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
+    reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
+    regridding here — use :mod:`jcm.data.emissions.prepare`).
+    """
+    prefix = "aero_emis_"
+    names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
+    if not names:
+        return None
+    has_time = any("time" in ds[n].dims for n in names)
+    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
+    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    out: dict[str, Any] = {}
+    for name in names:
+        da = ds[name]
+        key = name[len(prefix):]
+        if "time" in da.dims:
+            others = [d for d in da.dims if d != "time"]
+            arr = jnp.asarray(da.transpose("time", *others).values)
+            out[key] = make_time_series(arr, time_seconds, align_mode=mode)
+        else:
+            out[key] = jnp.asarray(da.values)
+    return out
+
 
 def default_forcing(
     grid: HorizontalGridTypes,

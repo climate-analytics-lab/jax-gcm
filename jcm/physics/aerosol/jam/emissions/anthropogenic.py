@@ -1,10 +1,14 @@
-"""``AnthropogenicEmissions`` — prescribed CEDS super-sector emissions (#498).
+"""``AnthropogenicEmissions`` — prescribed primary super-sector emissions (#498).
 
-Emits prescribed anthropogenic SO₂/BC/OC surface fluxes (per super-sector, read
-from ``ForcingData``) over a **smooth, differentiable vertical profile** rather
-than HAMMOZ's discrete injection levels, so injection height is calibratable by
-gradient (:mod:`injection`). Each super-sector's flux is split following HAMMOZ
-(:mod:`sectors`):
+Emits prescribed SO₂/BC/OC surface fluxes (per super-sector, read from
+``ForcingData``) over a **smooth, differentiable vertical profile** rather than
+HAMMOZ's discrete injection levels, so injection height is calibratable by
+gradient (:mod:`injection`). The super-sectors (:mod:`sectors`) cover both CEDS
+anthropogenic activity (surface / elevated-industrial / shipping) and open
+**biomass burning** (GFED), which differs only in its deeper FIRE injection
+profile — all four run through the identical speciation + injection path and are
+independently gated by which ``emis_<sector>_<species>`` forcing channels exist.
+Each super-sector's flux is split following HAMMOZ (:mod:`sectors`):
 
 * SO₂ → a primary-SO₄ fraction (default 2.5 %, differentiable) into Aitken+accum
   modal sulfate, the remainder into the ``g_so2`` gas tracer (oxidised by the
@@ -106,8 +110,19 @@ class AnthropogenicEmissions(PhysicsTerm):
 
     @staticmethod
     def _flux(forcing, name, ncols):
-        """Per-super-sector species surface flux [kg/m²/s]; 0 if not forced."""
-        v = getattr(forcing, name, None) if forcing is not None else None
+        """Per-super-sector species surface flux [kg/m²/s]; 0 if not forced.
+
+        Reads from the ``anthropogenic_emissions`` mapping on ``ForcingData``
+        (keyed ``emis_<sector>_<species>``; see the emissions-file contract in
+        ``.claude/aerosol_emissions_plan.md``). A single dict-valued field —
+        rather than one struct field per (sector, species) — keeps the forcing
+        general: new sectors/species need no ``ForcingData`` change, and
+        ``select(date)`` slices the per-channel ``TimeSeries`` leaves
+        automatically. Absent forcing, mapping, or channel ⇒ zero, so the term
+        is inert until the matching channel is supplied.
+        """
+        emis = getattr(forcing, "anthropogenic_emissions", None) if forcing is not None else None
+        v = emis.get(name) if emis is not None else None
         if v is not None and jnp.size(v) == ncols:
             return jnp.ravel(v)
         return jnp.zeros((ncols,))
