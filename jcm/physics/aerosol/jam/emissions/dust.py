@@ -107,9 +107,13 @@ class DustEmissions(PhysicsTerm):
         g_flux = horizontal_flux(u_star, p.u_threshold, air_density[-1], p.scale)
         flux = source * p.alpha * g_flux                       # kg/m²/s
 
+        # The population owns *which* classes receive primary dust (and their
+        # default split); the tunable ``accum_fraction`` overrides the fraction
+        # for this 2-class fine/coarse scheme. No literal mode names here.
+        (fine, _), (coarse, _) = self._spec.primary_split("du")
         fluxes = [
-            ("du", "acc", flux * p.accum_fraction),
-            ("du", "cor", flux * (1.0 - p.accum_fraction)),
+            ("du", fine.short, flux * p.accum_fraction),
+            ("du", coarse.short, flux * (1.0 - p.accum_fraction)),
         ]
         tracer_tends = distribute_surface_flux(self._spec, fluxes, air_density, dz)
 

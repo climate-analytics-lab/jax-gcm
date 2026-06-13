@@ -640,11 +640,15 @@ def _attach_ozone(forcing, forcing_cfg, coords):
 def _attach_emissions(forcing, forcing_cfg, coords):
     """Attach prescribed aerosol emissions from ``cfg.forcing.emissions_file``.
 
-    No-op when unset. A single file auto-routes by content: variables named
-    ``emis_<sector>_<species>`` drive the bulk / in-model-speciated path
-    (``anthropogenic_emissions``); ``aero_emis_<tracer>`` variables drive the
-    CAM6-faithful pre-speciated path (``prescribed_aerosol_emissions``). A file
-    may carry either or both. The fields must already be on the model horizontal
+    No-op when unset. ``emissions_file`` may be a single path or a **list** of
+    paths (e.g. one file for biomass burning and one for the rest) — multiple
+    files are merged by coordinates via ``xr.open_mfdataset``, so each can carry
+    a disjoint set of channels on the same grid. The fields auto-route by
+    content: variables named ``emis_<sector>_<species>`` drive the bulk /
+    in-model-speciated path (``anthropogenic_emissions``); ``aero_emis_<tracer>``
+    variables drive the CAM6-faithful pre-speciated path
+    (``prescribed_aerosol_emissions``). A file may carry either or both. The
+    fields must already be on the model horizontal
     grid — this does **not** regrid (use :mod:`jcm.data.emissions.prepare`
     first); a grid mismatch raises rather than silently zeroing (the emission
     terms fall back to zero on a size mismatch, which from the CLI would look
@@ -662,6 +666,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         return forcing
 
     import xarray as xr
+    from omegaconf import ListConfig
 
     from jcm.forcing import (
         default_forcing,
@@ -669,7 +674,14 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         read_prescribed_aerosol_emissions,
     )
 
-    ds = xr.open_dataset(path)
+    # One path → open_dataset; several → merge by coords (disjoint channels on a
+    # shared grid, e.g. biomass-burning + anthropogenic files).
+    if isinstance(path, (list, tuple, ListConfig)):
+        paths = [str(p) for p in path]
+        ds = xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1 \
+            else xr.open_dataset(paths[0])
+    else:
+        ds = xr.open_dataset(path)
     anthro = read_anthropogenic_emissions(ds)
     speciated = read_prescribed_aerosol_emissions(ds)
     if anthro is None and speciated is None:

@@ -232,8 +232,15 @@ class TestEmissionsConfig(unittest.TestCase):
         return str(path)
 
     def test_echam_jam_factory_includes_emission_terms(self):
+        # Exercise the factory-build path and emission-term wiring with
+        # lightweight overrides — the preset's real defaults (mam4_jax core,
+        # rrtmgp) need the optional ``jcm[mam4]`` extra / radiation data that the
+        # base CI image doesn't carry; the wiring under test is independent of
+        # both.
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
         names = [t.name for t in build_physics(cfg).terms]
         self.assertIn("jam_anthropogenic_emissions", names)
         self.assertIn("jam_prescribed_aerosol_emissions", names)
@@ -274,6 +281,33 @@ class TestEmissionsConfig(unittest.TestCase):
             f = build_forcing(cfg, coords)
         self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
         self.assertIsNone(f.anthropogenic_emissions)
+
+    def test_multiple_files_merge_disjoint_channels(self):
+        # A list of files (e.g. anthropogenic + biomass burning) is merged by
+        # coords; channels from both end up on the forcing.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "anthro.nc"
+            p2 = Path(tmp) / "bb.nc"
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 1e-11))},
+                       coords=base).to_netcdf(p1)
+            xr.Dataset({"emis_biomass_burning_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 2e-11))},
+                       coords=base).to_netcdf(p2)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            f = build_forcing(cfg, coords)
+        self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
+        self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
 
     def test_grid_mismatch_raises(self):
         import tempfile

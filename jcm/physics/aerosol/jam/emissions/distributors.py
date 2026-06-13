@@ -8,8 +8,6 @@ modal path is implemented here; a sectional distributor is future work (#491).
 
 from __future__ import annotations
 
-import math
-
 import jax.numpy as jnp
 
 from jcm.physics.aerosol.jam.population import AerosolMode, ModalAerosolSpec
@@ -17,18 +15,14 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
 
 def particle_mean_mass(mode: AerosolMode, species_density: float) -> float:
-    """Mean single-particle mass [kg] of a log-normal mode at its ref size.
+    """Mean single-particle mass [kg] of a class at its reference size.
 
-    ``m_p = ρ_p (π/6) Dg³ exp(9/2 ln²σ)`` (mass-equivalent of the number
-    distribution's third moment).
+    ``m_p = ρ_material / number_factor`` — the inverse of the family-agnostic
+    ``mode.number_factor`` (number per unit dry-aerosol volume), so the modal
+    log-normal third-moment formula lives in one place (``AerosolMode``) and a
+    sectional class returns its own mean particle mass through the same call.
     """
-    ln_sigma = math.log(mode.geom_std_dev)
-    return (
-        species_density
-        * (math.pi / 6.0)
-        * mode.dgnum ** 3
-        * math.exp(4.5 * ln_sigma ** 2)
-    )
+    return species_density / mode.number_factor
 
 
 def emit_over_profile(

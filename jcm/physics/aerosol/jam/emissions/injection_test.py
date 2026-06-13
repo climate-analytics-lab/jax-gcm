@@ -33,6 +33,22 @@ class InjectionProfileTest(unittest.TestCase):
         zbar_high = float(jnp.sum(high[:, 0] * _Z[:, 0]))
         self.assertGreater(zbar_high, zbar_low)
 
+    def test_underflow_above_top_loads_top_layer(self):
+        # An injection height far above the column (tiny width → Gaussian
+        # underflows everywhere) must fall back to the nearest layer = the top
+        # (level 0), not silently dump into the surface layer.
+        w = gaussian_injection_weights(_Z, _DZ, jnp.asarray(1.0e6),
+                                       jnp.asarray(1.0))
+        np.testing.assert_allclose(float(jnp.sum(w)), 1.0, rtol=1e-5)
+        self.assertEqual(int(jnp.argmax(w[:, 0])), 0)
+
+    def test_underflow_below_surface_loads_bottom_layer(self):
+        # Far below the surface → nearest layer = the bottom (level -1).
+        w = gaussian_injection_weights(_Z, _DZ, jnp.asarray(-1.0e6),
+                                       jnp.asarray(1.0))
+        np.testing.assert_allclose(float(jnp.sum(w)), 1.0, rtol=1e-5)
+        self.assertEqual(int(jnp.argmax(w[:, 0])), _Z.shape[0] - 1)
+
     def test_grad_wrt_height_and_thickness_finite_and_nonzero(self):
         def mean_height(h, t):
             w = gaussian_injection_weights(_Z, _DZ, h, t)

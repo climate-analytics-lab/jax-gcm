@@ -14,19 +14,20 @@
 #
 # Both emission terms are enabled but **inert until a matching file is given**,
 # so a plain ``physics=echam-jam`` run is the zero-emission JAM baseline.
+#
+# Defaults use the real MAM4-JAX core, which is an optional GPL extra:
+#     pip install jcm[mam4]
+# Without it, override the core: ``physics.jam_microphysics=placeholder``.
 
 builder: echam_physics
 
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
-radiation_scheme: grey      # set radiation_scheme=rrtmgp for RRTMGP
-jam_microphysics: placeholder
-jam_arg_variant: arg2000    # or ghosh2025
+radiation_scheme: rrtmgp    # set radiation_scheme=grey for the cheap grey scheme
+jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Köhler
+jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 
 # Prescribed-emission terms (driven by forcing.emissions_file):
 jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
 jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
-
-# Consumed by Model (not the factory); null = auto-detect from device HBM.
-radiation_chunk_size: null

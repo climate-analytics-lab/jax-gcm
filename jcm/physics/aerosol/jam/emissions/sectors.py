@@ -73,19 +73,22 @@ SECTOR_DEFAULTS: dict[str, SectorDefaults] = {
 
 # --- HAMMOZ species-handling constants (differentiable defaults on the term) --
 SO4_PRIMARY_FRACTION = 0.025     # fraction of SO2 sulfur → primary SO4 (zfacso2)
-SO4_AITKEN_FRACTION = 0.5        # primary-SO4 split into Aitken vs accum
 OM_OC_RATIO = 1.4                # OM:OC mass ratio for OC → POA
 
 #: SO₂ mass → SO₄ mass factor (one S atom each).
 SO2_TO_SO4_MASS = SPECIES["so4"].molar_mass / GAS_SPECIES["so2"].molar_mass
 
-#: MAM4 mode shorts that receive the primary emissions.
-SO4_MODES: tuple[str, str] = ("ait", "acc")   # primary sulfate
-CARBON_MODE = "pcm"                            # primary_carbon (BC + POA)
-
+# Which population classes receive primary SO4 / BC / POA — and in what
+# proportion — is **not** decided here: it is the population's policy, owned by
+# the aerosol spec's ``primary_emission`` table and queried via
+# ``spec.primary_split(species)``. This keeps the term representation-agnostic
+# (a sectional population supplies its own bin split) and centralises the
+# assumption with the population, HAMMOZ-style. For MAM4 the split is 50/50
+# Aitken/accumulation sulfate and primary-carbon-mode BC/POA (see
+# ``mam4_data._MAM4_PRIMARY_EMISSION``).
+#
 # Note on emitted size: HAMMOZ/M7 distinguishes fossil-fuel (~0.03 µm) from
 # biomass (~0.075 µm) primary-carbon size. MAM4 carries a *single*
-# primary-carbon mode (``pcm``) for both fossil and biomass BC/POA, so that
-# distinction collapses here — biomass and anthropogenic carbon differ only in
-# their injection profile, not their emitted mode. A per-super-sector emitted
-# size (count-median radius) would be future work (see #498).
+# primary-carbon mode for both, so that distinction collapses here — biomass and
+# anthropogenic carbon differ only in their injection profile. A per-super-sector
+# emitted size (count-median radius) would be future work (see #498).

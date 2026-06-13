@@ -133,6 +133,17 @@ class ModalAerosolSpec:
     modes: tuple[AerosolMode, ...]
     species: tuple[AerosolSpecies, ...]
     family: str = "modal"
+    #: Population policy for where freshly-emitted **primary** mass of a species
+    #: goes: ``{species: ((mode_short, mass_fraction), ...)}`` with fractions
+    #: summing to 1. This centralises the modal (or sectional) assumption with
+    #: the population — HAMMOZ keeps the same table in its aerosol module — so
+    #: emission terms ask :meth:`primary_split` instead of hardcoding modes. A
+    #: sectional spec supplies its own bin split here. ``ss``/``du`` size-mapped
+    #: source schemes (Gong/Tegen) instead use :meth:`classes_for` + the class
+    #: size ranges, so they need no entry.
+    primary_emission: dict[str, tuple[tuple[str, float], ...]] = (
+        dataclasses.field(default_factory=dict)
+    )
 
     def __post_init__(self) -> None:
         """Validate the family tag and species references."""
@@ -176,3 +187,31 @@ class ModalAerosolSpec:
             if s.name == name:
                 return s
         raise KeyError(f"No species named {name!r}.")
+
+    def classes_for(self, species: str) -> tuple[AerosolMode, ...]:
+        """Classes (modes/bins) that may carry ``species``, in spec order.
+
+        The family-agnostic way for an emission term to discover which classes a
+        species lives in without naming modes literally — a size-resolved source
+        scheme (Gong sea salt, Tegen dust) partitions its size-distributed flux
+        across these using each class's ``dgnum_lo``/``dgnum_hi`` range.
+        """
+        return tuple(m for m in self.modes if species in m.species)
+
+    def primary_split(
+        self, species: str
+    ) -> tuple[tuple[AerosolMode, float], ...]:
+        """Default ``((class, mass_fraction), ...)`` for primary ``species``.
+
+        Resolves the population's :attr:`primary_emission` policy table to the
+        actual classes. Terms with a *tunable* split (e.g. dust's accumulation
+        fraction) take the class set from here and substitute their own
+        fractions. Raises ``KeyError`` for a species with no primary policy.
+        """
+        table = self.primary_emission.get(species)
+        if table is None:
+            raise KeyError(
+                f"No primary-emission split defined for {species!r}; add it to "
+                "the spec's ``primary_emission`` table."
+            )
+        return tuple((self.mode(short), frac) for short, frac in table)

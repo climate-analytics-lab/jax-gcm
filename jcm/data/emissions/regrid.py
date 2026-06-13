@@ -24,6 +24,15 @@ Design (kept deliberately light — no ESMF/xesmf dependency):
 The source grid is described purely by per-cell ``(lon, lat, area)`` triples, so
 structured and unstructured sources go through the same path — only the adapter
 that produces those triples differs.
+
+Note — this is intentionally *not* the same remapper as
+``jcm.data.bc.interpolate`` (``upsample_forcings_ds``): that path **bilinearly
+interpolates** smooth structured lat/lon boundary fields (SST, soil moisture, …)
+to a higher spectral resolution and is *not* mass-conserving, whereas emissions
+are **flux** fields where conserving the column-integrated source is the property
+that matters, and their sources are often unstructured (``ncol``). Different
+problems (non-conservative bilinear upsampling vs conservative,
+unstructured-capable flux remap), hence kept separate.
 """
 
 from __future__ import annotations

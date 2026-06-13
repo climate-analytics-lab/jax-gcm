@@ -39,9 +39,18 @@ def gaussian_injection_weights(
     z = (height_full - injection_height) / sigma
     g = jnp.exp(-0.5 * z * z) * layer_thickness
     total = jnp.sum(g, axis=0, keepdims=True)
-    # Fall back to the lowest layer if the column has no overlap (numerically
-    # the Gaussian underflowed everywhere) so weights still sum to 1.
+    # Fallback when the Gaussian underflowed in *every* layer — i.e. the
+    # injection height sits far outside the column (above the model top or below
+    # the surface) or the width is so small no mid-layer height registers. Put
+    # all the mass in the single layer whose height is nearest the injection
+    # height, so an above-top height loads the top layer and a below-surface one
+    # the bottom layer. (Previously this always picked the lowest layer, which
+    # silently turned a calibrated high-altitude injection into a surface
+    # emission — corrupting gradient-based tuning that explores large heights.)
     safe = total > 0.0
     weights = jnp.where(safe, g / jnp.where(safe, total, 1.0), 0.0)
-    lowest = jnp.zeros_like(weights).at[-1].set(1.0)
-    return jnp.where(safe, weights, lowest)
+    nlev = height_full.shape[0]
+    nearest_idx = jnp.argmin(jnp.abs(height_full - injection_height), axis=0)
+    nearest = (jnp.arange(nlev)[:, None] == nearest_idx[None, :]).astype(
+        weights.dtype)
+    return jnp.where(safe, weights, nearest)

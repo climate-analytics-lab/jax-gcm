@@ -32,18 +32,14 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.emissions.distributors import (
     emit_over_profile,
-    particle_mean_mass,
 )
 from jcm.physics.aerosol.jam.emissions.injection import (
     gaussian_injection_weights,
 )
 from jcm.physics.aerosol.jam.emissions.sectors import (
-    CARBON_MODE,
     OM_OC_RATIO,
     SECTOR_DEFAULTS,
     SO2_TO_SO4_MASS,
-    SO4_AITKEN_FRACTION,
-    SO4_MODES,
     SO4_PRIMARY_FRACTION,
     SUPER_SECTORS,
 )
@@ -142,13 +138,14 @@ class AnthropogenicEmissions(PhysicsTerm):
                 flux2d, weights, rho, dz
             )
 
-        def add_aerosol(species, mode_short, flux2d, weights):
-            # Mass into (species, mode); implied number into the mode, both over
-            # the same vertical profile.
-            add_mass(mass_name(species, mode_short), flux2d, weights)
+        def add_aerosol(species, mode, flux2d, weights):
+            # Mass into (species, class); implied number from the class's
+            # ``number_factor`` (the family-agnostic mass→number conversion, so
+            # this is unchanged for a sectional bin), both over the same profile.
+            add_mass(mass_name(species, mode.short), flux2d, weights)
             density = self._spec.species_props(species).density
-            m_p = particle_mean_mass(self._spec.mode(mode_short), density)
-            add_mass(number_name(mode_short), flux2d / m_p, weights)
+            add_mass(number_name(mode.short),
+                     flux2d * mode.number_factor / density, weights)
 
         for i, sector in enumerate(SUPER_SECTORS):
             weights = gaussian_injection_weights(
@@ -159,18 +156,21 @@ class AnthropogenicEmissions(PhysicsTerm):
             bc = p.scale * self._flux(forcing, f"emis_{sector}_bc", ncols)
             oc = p.scale * self._flux(forcing, f"emis_{sector}_oc", ncols)
 
-            # SO2 → primary SO4 (Aitken/accum) + g_so2 gas (S-conserving).
+            # SO2 → primary SO4 + g_so2 gas remainder (S-conserving). The
+            # population owns which classes receive primary sulfate and in what
+            # proportion (``primary_split``) — no Aitken/accum assumption here.
             frac = p.so4_primary_fraction[i]
             so4_mass = frac * so2 * SO2_TO_SO4_MASS
-            ait, acc = SO4_MODES
-            add_aerosol("so4", ait, so4_mass * SO4_AITKEN_FRACTION, weights)
-            add_aerosol("so4", acc, so4_mass * (1.0 - SO4_AITKEN_FRACTION),
-                        weights)
+            for mode, mode_frac in self._spec.primary_split("so4"):
+                add_aerosol("so4", mode, so4_mass * mode_frac, weights)
             add_mass(gas_name("so2"), (1.0 - frac) * so2, weights)
 
-            # Primary carbonaceous mass → primary_carbon mode.
-            add_aerosol("bc", CARBON_MODE, bc, weights)
-            add_aerosol("poa", CARBON_MODE, oc * OM_OC_RATIO, weights)
+            # Primary carbonaceous mass → the population's primary-carbon
+            # class(es); OC scaled to POA by OM:OC.
+            for mode, mode_frac in self._spec.primary_split("bc"):
+                add_aerosol("bc", mode, bc * mode_frac, weights)
+            for mode, mode_frac in self._spec.primary_split("poa"):
+                add_aerosol("poa", mode, oc * OM_OC_RATIO * mode_frac, weights)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
