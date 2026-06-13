@@ -122,6 +122,58 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_wet) >= np.asarray(aer.r_dry)))
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
+    def test_input_sanitisation_keeps_finite(self):
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        # A non-finite / negative input tracer must be sanitised before the
+        # solve so it can never produce a NaN tendency.
+        state, diagnostics = _column_state()
+        bad = dict(state.tracers)
+        bad[mass_name("so4", "acc")] = bad[mass_name("so4", "acc")].at[0, 0].set(
+            jnp.nan
+        )
+        bad[mass_name("bc", "acc")] = bad[mass_name("bc", "acc")].at[1, 0].set(
+            -1.0
+        )
+        state = state.copy(tracers=bad)
+        tend, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        for v in tend.tracers.values():
+            self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+
+    def test_nonconvergence_gate_keeps_finite_and_logs(self):
+        from unittest import mock
+
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.microphysics import mam4_jax as _m
+
+        # Force the core to emit non-finite output (a diverged / non-converged
+        # solve). The gate must (a) keep the whole output finite (fall back to a
+        # zero tendency) and (b) log the count rather than silently hiding it.
+        state, diagnostics = _column_state()
+        calcsize, wateruptake, amicphys, data = _m._core()
+
+        def poisoned_amicphys(s):
+            out = dict(amicphys(s))
+            out["q"] = out["q"] * jnp.inf  # every cell non-finite
+            return out
+
+        term = _m.Mam4JaxMicrophysics()
+        key = mass_name("so4", "acc")
+        with mock.patch.object(
+            _m, "_core",
+            return_value=(calcsize, wateruptake, poisoned_amicphys, data),
+        ):
+            with self.assertLogs(_m.logger, level="WARNING") as cm:
+                tend, _ = term(state, diagnostics, None, None)
+                jax.block_until_ready(tend.tracers[key])
+
+        for v in tend.tracers.values():
+            self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+        self.assertTrue(any("did not converge" in m for m in cm.output))
+
     def test_grad_through_a_tracer_is_finite(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (

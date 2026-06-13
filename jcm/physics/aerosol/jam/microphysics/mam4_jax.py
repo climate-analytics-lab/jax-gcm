@@ -44,11 +44,23 @@ Deliberately not coupled yet (follow-ups)
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def _log_nonconverged(n_bad, n_total) -> None:
+    """Host-side log when the non-convergence gate fires (called only if >0)."""
+    logger.warning(
+        "jam/mam4 microphysics: %d of %d cells did not converge in the "
+        "per-cell aerosol solve; their tendency was gated to zero this step.",
+        int(n_bad), int(n_total),
+    )
 
 from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
@@ -127,11 +139,34 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
     requires: ClassVar[tuple[str, ...]] = ("pressure_full", "height_full")
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
 
-    def __init__(self, spec: ModalAerosolSpec | None = None):
-        """Import the core, enable float64, and precompute the index maps."""
+    def __init__(
+        self,
+        spec: ModalAerosolSpec | None = None,
+        *,
+        rtol: float = 1e-6,
+        atol: float = 1e-15,
+        max_steps: int = 4096,
+    ):
+        """Import the core, enable float64, configure the solver, precompute maps.
+
+        ``rtol`` / ``atol`` set the per-cell implicit-solver tolerances. The
+        upstream defaults (1e-9 / 1e-20) force float64 and many tiny adaptive
+        steps — the dominant cost of the step. Relaxing to 1e-6 / 1e-15 is
+        ~2.8x faster on the core for ~0.1% per-step error (see the JAM perf
+        study). The solver is also run with ``throw=False`` so a cell that hits
+        ``max_steps`` returns its best estimate instead of aborting the whole
+        vmapped batch; combined with the non-negativity clamp in ``__call__``,
+        this gates cold-start / outlier cells that would otherwise stall the
+        per-cell solve (the batch is paced by its worst cell).
+        """
         if spec is not None:
             self.spec = spec
         _, _, _, data = _core()
+        from mam4_jax import solvers as _solvers
+        _solvers.configure(
+            rtol=rtol, atol=atol, max_steps=max_steps, throw=False,
+        )
+        self._rtol, self._atol = float(rtol), float(atol)
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
@@ -224,6 +259,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         for name, idx in self._qqcw_pack:
             qqcw = qqcw.at[..., idx].set(fetch(name))
 
+        # Gate (inputs): sanitise to finite, non-negative mixing ratios before
+        # the per-cell solve. Dynamical overshoot / cold-start leaves small
+        # negative (and occasionally non-finite) tracer values that push the
+        # implicit solver into stiff, non-converging regimes — and because the
+        # solve is vmapped, the batch is paced by its worst cell. The same
+        # sanitised values are used for the tendency below, so a bad input can
+        # never produce a NaN tendency.
+        clean = lambda a: jnp.where(jnp.isfinite(a), jnp.maximum(a, 0.0), 0.0)
+        q = clean(q)
+        qqcw = clean(qqcw)
+
         rh = relative_humidity(
             state.temperature, state.specific_humidity,
             diagnostics["pressure_full"],
@@ -288,6 +334,36 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             k: from_cells(flat_out[k])
             for k in ("q", "qqcw", "dgncur_a", "dgncur_awet", "wetdens")
         }
+        # Gate (cont.): a non-converged cell (throw=False) can return non-finite
+        # state. Count those cells and log it — we gate the pathology but do not
+        # hide it. The host callback is wrapped in a cond so the common
+        # all-converged path pays no per-step host sync.
+        nonfinite_cell = ~(
+            jnp.isfinite(out["q"]).all(axis=-1)
+            & jnp.isfinite(out["qqcw"]).all(axis=-1)
+        )
+        n_bad = jnp.sum(nonfinite_cell.astype(jnp.int32))
+        n_total = int(np.prod(shape)) if shape else 1
+        jax.lax.cond(
+            n_bad > 0,
+            lambda nb: jax.debug.callback(_log_nonconverged, nb, n_total),
+            lambda nb: None,
+            n_bad,
+        )
+
+        # Fall back to the input for q/qqcw (→ zero tendency for that cell this
+        # step) and to the prescribed dry diameters / a unit wet density for the
+        # size fields, so one outlier cell never NaN-poisons the aerosol field
+        # or the downstream optics/activation.
+        dgn0 = jnp.broadcast_to(
+            jnp.asarray(self._dgnum, jnp.float64), shape + (self._ntot,)
+        )
+        finite = lambda new, fallback: jnp.where(jnp.isfinite(new), new, fallback)
+        out["q"] = finite(out["q"], q)
+        out["qqcw"] = finite(out["qqcw"], qqcw)
+        out["dgncur_a"] = finite(out["dgncur_a"], dgn0)
+        out["dgncur_awet"] = finite(out["dgncur_awet"], dgn0)
+        out["wetdens"] = finite(out["wetdens"], jnp.ones_like(out["wetdens"]))
         q_new, qqcw_new = out["q"], out["qqcw"]
 
         tracer_tends: dict[str, jnp.ndarray] = {}
