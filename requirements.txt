@@ -18,4 +18,4 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp
+jax-rrtmgp>=0.2.0  # 0.2.0+ has the gas-optics gather + shared-table fixes the single-vmap RRTMGP path needs
