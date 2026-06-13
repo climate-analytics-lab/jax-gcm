@@ -178,6 +178,36 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         finally:
             _amicphys.configure_condensation(backend="diffrax")
 
+    def test_enable_x64_control(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+        # setUp/tearDown restore the process-global x64 flag around this test.
+        try:
+            # Default (None) keeps float64 (current behaviour).
+            self.assertTrue(Mam4JaxMicrophysics()._enable_x64)
+            self.assertTrue(jax.config.read("jax_enable_x64"))
+            # Opt into float32 with a float32-safe backend.
+            term = Mam4JaxMicrophysics(
+                condensation_backend="substep", enable_x64=False,
+            )
+            self.assertFalse(term._enable_x64)
+            self.assertFalse(jax.config.read("jax_enable_x64"))
+            # diffrax needs float64 — enable_x64=False is overridden (warns).
+            with self.assertLogs(level="WARNING"):
+                dterm = Mam4JaxMicrophysics(
+                    condensation_backend="diffrax", enable_x64=False,
+                )
+            self.assertTrue(dterm._enable_x64)
+            self.assertTrue(jax.config.read("jax_enable_x64"))
+        finally:
+            _amicphys.configure_condensation(backend="diffrax")
+
     def test_input_sanitisation_keeps_finite(self):
         from jcm.physics.aerosol.jam import mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (

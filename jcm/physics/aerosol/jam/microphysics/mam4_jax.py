@@ -45,6 +45,7 @@ Deliberately not coupled yet (follow-ups)
 from __future__ import annotations
 
 import logging
+import os
 from typing import ClassVar
 
 import jax
@@ -101,19 +102,19 @@ _CORE = None
 
 
 def _core():
-    """Lazily import MAM4-JAX and (re-)enable float64.
+    """Lazily import the MAM4-JAX core functions.
 
-    Importing ``mam4_jax`` enables ``jax_enable_x64`` globally. The core only
-    converges in float64 (its implicit diffrax solver diverges otherwise), so
-    we keep it on; because jcm builds arrays with ``dtype=float``, the whole
-    model then runs in float64 while the core is active. The flag is re-asserted
-    on every call (not just the cached first import) because a caller may have
-    toggled it off in between — e.g. test teardown.
+    Precision is **not** forced here — it is decided per-instance in
+    ``Mam4JaxMicrophysics.__init__`` (see ``enable_x64`` there). The ``diffrax``
+    condensation backend needs float64; the ``substep`` / ``astem`` backends are
+    float32-safe (the coag ``qv12`` coefficient was reformulated upstream to
+    avoid a float32 underflow), so they can run the whole coupled model in
+    float32. Importing ``mam4_jax`` still enables float64 *by default* (unless
+    ``MAM4_JAX_ENABLE_X64=0``); the wrapper overrides it as needed.
     """
     global _CORE
-    jax.config.update("jax_enable_x64", True)
     if _CORE is None:
-        import mam4_jax  # noqa: F401  — also enables jax_enable_x64 on import
+        import mam4_jax  # noqa: F401  — enables jax_enable_x64 by default
         from mam4_jax import data
         from mam4_jax.processes.amicphys import amicphys
         from mam4_jax.processes.calcsize import calcsize
@@ -148,8 +149,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         max_steps: int = 4096,
         condensation_backend: str = "substep",
         n_substeps: int = 4,
+        enable_x64: bool | None = None,
     ):
-        """Import the core, enable float64, configure the solver, precompute maps.
+        """Import the core, set precision, configure the solver, precompute maps.
 
         ``rtol`` / ``atol`` set the per-cell implicit-solver tolerances of the
         ``"diffrax"`` condensation backend. The upstream defaults (1e-9 / 1e-20)
@@ -184,6 +186,16 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         ``configure_condensation`` (reflective-org/MAM4-JAX#59); if it is absent
         the wrapper falls back to ``"diffrax"`` with a warning so a stale install
         still runs.
+
+        ``enable_x64`` controls model precision. ``diffrax`` requires float64
+        (its ``atol=1e-20`` is below float32 eps). ``substep`` / ``astem`` are
+        float32-safe, so float32 runs the *whole* coupled model in float32 — the
+        dynamics + 60-tracer spectral transport are the dominant,
+        memory-bandwidth-bound cost, and float32 roughly halves that traffic.
+        ``None`` (default) reads the ``MAM4_JAX_ENABLE_X64`` env var (default
+        ``"1"`` → float64, preserving current behaviour); ``True`` / ``False``
+        override it. The flag is applied here, at construction, so the dycore
+        state built afterwards inherits it.
         """
         if spec is not None:
             self.spec = spec
@@ -209,6 +221,23 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             condensation_backend = "diffrax"
         self._condensation_backend = str(condensation_backend)
         self._n_substeps = int(n_substeps)
+
+        # Precision. diffrax needs float64; substep/astem are float32-safe.
+        # Applied during construction so the dycore state built afterwards (in
+        # bootstrap/run) inherits the precision — toggling it later would leave
+        # an f64 state meeting f32 tendencies (mixed-dtype lax.cond errors).
+        if enable_x64 is None:
+            want_x64 = os.environ.get("MAM4_JAX_ENABLE_X64", "1") != "0"
+        else:
+            want_x64 = bool(enable_x64)
+        if self._condensation_backend == "diffrax" and not want_x64:
+            logger.warning(
+                "diffrax condensation backend requires float64; "
+                "ignoring enable_x64=False."
+            )
+            want_x64 = True
+        jax.config.update("jax_enable_x64", want_x64)
+        self._enable_x64 = want_x64
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
