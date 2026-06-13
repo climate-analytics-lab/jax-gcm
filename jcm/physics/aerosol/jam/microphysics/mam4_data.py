@@ -65,9 +65,26 @@ MAM4_MODES: tuple[AerosolMode, ...] = (
 _USED = tuple(sorted({s for m in MAM4_MODES for s in m.species}))
 MAM4_SPECIES = tuple(SPECIES[t] for t in _USED) + (SPECIES["h2o"],)
 
+#: Where freshly-emitted *primary* mass of each species goes in MAM4 — the
+#: population's centralised emission policy (emission terms query it via
+#: ``primary_split`` instead of hardcoding modes; see #498). Primary sulfate is
+#: split 50/50 into the Aitken and accumulation modes (HAMMOZ ``cmr_sk``/
+#: ``cmr_sa``); primary carbonaceous mass (BC, POA) goes wholly to the
+#: primary-carbon mode (MAM4 carries no BC/POA in the Aitken mode). Dust's
+#: accum/coarse split default (Tegen) lives here too, though the dust term lets
+#: a tunable parameter override the fractions. Size-mapped source schemes (Gong
+#: sea salt) instead partition over ``classes_for`` and need no entry.
+_MAM4_PRIMARY_EMISSION = {
+    "so4": (("ait", 0.5), ("acc", 0.5)),
+    "bc": (("pcm", 1.0),),
+    "poa": (("pcm", 1.0),),
+    "du": (("acc", 0.1), ("cor", 0.9)),
+}
+
 #: The MAM4 4-mode population.
 MAM4_SPEC = ModalAerosolSpec(
     modes=MAM4_MODES,
     species=MAM4_SPECIES,
     family="modal",
+    primary_emission=_MAM4_PRIMARY_EMISSION,
 )

@@ -8,8 +8,6 @@ modal path is implemented here; a sectional distributor is future work (#491).
 
 from __future__ import annotations
 
-import math
-
 import jax.numpy as jnp
 
 from jcm.physics.aerosol.jam.population import AerosolMode, ModalAerosolSpec
@@ -17,18 +15,31 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
 
 def particle_mean_mass(mode: AerosolMode, species_density: float) -> float:
-    """Mean single-particle mass [kg] of a log-normal mode at its ref size.
+    """Mean single-particle mass [kg] of a class at its reference size.
 
-    ``m_p = ρ_p (π/6) Dg³ exp(9/2 ln²σ)`` (mass-equivalent of the number
-    distribution's third moment).
+    ``m_p = ρ_material / number_factor`` — the inverse of the family-agnostic
+    ``mode.number_factor`` (number per unit dry-aerosol volume), so the modal
+    log-normal third-moment formula lives in one place (``AerosolMode``) and a
+    sectional class returns its own mean particle mass through the same call.
     """
-    ln_sigma = math.log(mode.geom_std_dev)
-    return (
-        species_density
-        * (math.pi / 6.0)
-        * mode.dgnum ** 3
-        * math.exp(4.5 * ln_sigma ** 2)
-    )
+    return species_density / mode.number_factor
+
+
+def emit_over_profile(
+    flux: jnp.ndarray,             # (ncols,) surface flux [X/m²/s]
+    weights: jnp.ndarray,          # (nlev, ncols) vertical weights summing to 1
+    air_density: jnp.ndarray,      # (nlev, ncols) [kg/m³]
+    layer_thickness: jnp.ndarray,  # (nlev, ncols) [m]
+) -> jnp.ndarray:
+    """Spread a surface mass/number flux over a vertical profile.
+
+    Returns a ``(nlev, ncols)`` mixing-ratio tendency [X/kg/s]. Because
+    ``weights`` sum to 1 over levels, the column-integrated emitted amount
+    equals the input flux (``Σ ρ_k Δz_k · dq_k = flux``), so it is
+    mass-conserving for any (differentiable) profile. Works for both mass
+    [kg/kg/s] and number [kg⁻¹/s] tendencies.
+    """
+    return weights * flux[jnp.newaxis, :] / (air_density * layer_thickness)
 
 
 def distribute_surface_flux(

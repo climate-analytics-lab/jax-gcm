@@ -56,7 +56,9 @@ ARG variant) is a compose-time Python decision with no traced branching.
    core's population, so the harness works with any dycore (no modal
    representation is assumed on the dynamics side). DMS reads a prescribed
    seawater field and dust a prescribed source field from `ForcingData`
-   (zero fallback). Prescribed anthropogenic (CEDS) emissions are #498.
+   (zero fallback). Prescribed anthropogenic + biomass emissions
+   (`AnthropogenicEmissions`, #498) read bulk per-super-sector fluxes from
+   `ForcingData` — see "Prescribed anthropogenic & biomass emissions" below.
 2. microphysics core (`PlaceholderMicrophysics`) — writes `_jam_state`.
 3. `ArgActivation` — Abdul-Razzak & Ghan (2000); writes `activated_cdnc`
    (the same key the 2M SPA floor produces, so ARG and SPA are
@@ -101,11 +103,129 @@ to the MACv2-SP SPA floor wherever the online source is ≈0 (e.g. before the
 prognostic JAM tracers spin up from a zero-seeded initial state), so the
 default JAM+2M run always activates droplets.
 
+## Prescribed anthropogenic & biomass emissions (#498)
+
+Beyond the online natural sources, JAM can read **prescribed** SO₂/BC/OC
+emissions (`AnthropogenicEmissions`, opt-in via
+`echam_physics(aerosol_module="jam", jam_anthropogenic=True)`). These cover both
+CEDS anthropogenic activity and open biomass burning, organised into four
+**super-sectors** distinguished by *injection type and source size* (HAMMOZ's
+basis), not economic activity:
+
+| Super-sector | Injection (default) | Source |
+|---|---|---|
+| `surface_combustion` | surface (~0 m, σ 30 m) | CEDS TRA/RCO/AGR/WST/SLV |
+| `elevated_industrial` | ~50 m | CEDS ENE/IND |
+| `shipping` | marine surface | CEDS SHP |
+| `biomass_burning` | deep FIRE (~1 km, σ 1.5 km) | open burning (GFED/BB4CMIP7) |
+
+Each super-sector's bulk flux is speciated following HAMMOZ — SO₂ → a primary-SO₄
+fraction (default 2.5 %, into Aitken+accum sulfate) plus the `g_so2` gas
+remainder; BC/OC → the MAM4 primary-carbon mode (OC×1.4 = POA) — and distributed
+over a **smooth Gaussian vertical profile** (`injection.py`) so the injection
+height is differentiable (a hard level pick has no gradient). The injection
+height/thickness and primary-SO₄ fraction are per-super-sector differentiable
+`EmissionParameters`, defaulting to the HAMMOZ values, so they can be calibrated
+by gradient through the model.
+
+### Emissions-file contract
+
+The model is driven by a user-supplied file on (or already interpolated to) the
+model horizontal grid, carrying **bulk per-super-sector surface mass fluxes** —
+the model does the speciation and injection. Requirements:
+
+- **Variables:** `emis_<super_sector>_<species>` for the super-sectors above and
+  `species ∈ {so2, bc, oc}`. Any missing variable is treated as zero, so a file
+  need only carry the channels it has.
+- **Units:** kg m⁻² s⁻¹ surface flux. `so2` as SO₂ mass (not S); `bc`/`oc` as
+  carbon mass — **OC, not OM** (the OM:OC = 1.4 is applied in-model). The
+  primary-SO₄ fraction is *not* pre-applied — supply the full SO₂.
+- **Dims/time:** `(lon, lat, time)`; `time` may be a 12-month climatology
+  (wrap-year) or a multi-year monthly axis (by-date), matching the other forcing
+  fields.
+
+Load it onto `ForcingData` via:
+
+```python
+import xarray as xr
+from jcm.forcing import read_anthropogenic_emissions
+emis = read_anthropogenic_emissions(xr.open_dataset(emissions_file))
+forcing = forcing.copy(anthropogenic_emissions=emis)
+```
+
+### Preparing a file from a source product
+
+`jcm.data.emissions` regrids an arbitrary source onto the model grid and writes
+contract variables. The regridder (`regrid.py`) is light and **first-order
+conservative** (area-weighted nearest-cell binning), handling both regular
+lat/lon and unstructured `ncol` sources (e.g. CESM ne30). `prepare.py` maps
+source variables → contract variables via `Channel` records; shipped adapters
+`cesm_cmip_anthro(dir)` and `cesm_bb4cmip7(dir)` consume the CESM CMIP7 CEDS /
+biomass-burning files. `downloader.fetch` resolves a local path or arbitrary URL
+(host-agnostic — no ESGF coupling).
+
+```python
+from jcm.data.emissions import prepare_emissions, cesm_cmip_anthro
+ds = prepare_emissions(cesm_cmip_anthro(source_dir), coords, time_index=month)
+```
+
+### From the CLI
+
+The `echam-jam` physics preset enables JAM with both emission terms (inert until
+fed). Point `forcing.emissions_file` at a model-grid file — it auto-routes by
+content (`emis_*` bulk vs `aero_emis_*` pre-speciated), and a wrong-grid file
+raises rather than silently zeroing:
+
+```
+python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+    forcing.emissions_file=/path/to/emissions_on_model_grid.nc
+```
+
+`echam-jam` is *factory-built* (`physics.builder: echam_physics`) rather than a
+flat term list, because the JAM chain's ordering (split around the cloud term) is
+encoded by `echam_physics()` — `build_physics` delegates to it.
+
+See `.claude/aerosol_emissions_plan.md` for the full design, the data-source
+investigation (the raw 0.5° gridded CEDS is ESGF-only; a self-hosted compressed
+mirror is a tracked follow-up), and the CESM adapter's documented approximations.
+
+### Two emission paths: differentiable bulk vs CAM6-faithful pre-speciated
+
+The above is the **bulk / differentiable** path (`jam_anthropogenic=True`). There
+is a second, complementary path — `PreSpeciatedEmissions`
+(`jam_prescribed_speciated=True`) — that mirrors how **CAM6 actually applies
+emissions**: it reads **already-speciated per-tracer** fields and injects them
+directly, with no in-model speciation or injection parameters (CAM bakes the
+mode/sector split and vertical placement into the files offline;
+`mo_srf_emissions` for surface fields, `mo_extfrc` for altitude-resolved ones).
+
+| | bulk (`AnthropogenicEmissions`) | pre-speciated (`PreSpeciatedEmissions`) |
+|---|---|---|
+| Forcing | `emis_<sector>_<species>` bulk SO₂/BC/OC | `aero_emis_<tracer>` (`m_so4_acc`, `n_pcm`, `g_so2`, …) |
+| Speciation | **in-model**, differentiable (SO₄ frac, modes, OM:OC) | pre-baked in the file |
+| Injection | smooth Gaussian, differentiable height | surface (bottom layer) or 3-D volume per level |
+| Use | calibration of injection/speciation params | bit-faithful reproduction of CESM emissions |
+
+Both are independent flags (enable either, both, or neither) and both remain
+differentiable **w.r.t. the emission `ForcingData` fields themselves** — so even
+the pre-speciated path supports `∂(aerosol mmr)/∂(emission)` gradients, just not
+w.r.t. an injection-height knob it doesn't have.
+
+`prepare.cesm_mam4_speciated(dir)` + `prepare_speciated_emissions(...)` build the
+pre-speciated file from the CESM MAM4 files (a1→accum, a2→Aitken, a4→primary
+carbon; `SO2`→gas; `num_*`→number; the energy-sector `*_ene_vertical` 3-D
+`mo_extfrc` field column-integrated — ≤ ~400 m sits within the lowest model
+layer(s) at GCM resolution). This reproduces CESM's global budget, including the
+**2.5 % primary-sulfate split recovered to 3 decimals** — the validation
+counterpart to the differentiable path.
+
 ## Status and caveats
 
-- **Source magnitudes** (emissions) are order-of-magnitude defaults, not
-  inventory-calibrated. Prescribed CEDS emissions with HAMMOZ-grounded,
-  differentiable per-sector characteristics are tracked in #498.
+- **Natural source magnitudes** are order-of-magnitude defaults, not
+  inventory-calibrated. Prescribed CEDS/biomass emissions with HAMMOZ-grounded,
+  differentiable per-super-sector characteristics are now available (#498; see
+  above) and supersede the placeholders where a contract-conforming emissions
+  file is supplied.
 - **Wet scavenging** currently reconstructs the per-level precip-formation
   rate from column precip; exposing the true per-level formation/evaporation
   rates from the cloud schemes and adding re-evaporation re-injection is

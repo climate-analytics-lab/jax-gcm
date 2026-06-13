@@ -11,3 +11,10 @@ file: ???
 # Fortuin-Kelder surrogate. Must already be on the model's horizontal
 # grid; preprocess the file if not.
 ozone_file: null
+
+# Optional prescribed aerosol emissions netCDF, already on the model grid
+# (regrid with ``jcm.data.emissions.prepare`` first). Auto-routes by content:
+# ``emis_<sector>_<species>`` → bulk/differentiable path; ``aero_emis_<tracer>``
+# → CAM6-faithful pre-speciated path. Needs a JAM physics package with the
+# emission term(s) (e.g. ``physics=echam-jam``). Null → no prescribed emissions.
+emissions_file: null

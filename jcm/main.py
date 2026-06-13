@@ -18,6 +18,14 @@ Override individual options::
     python -m jcm.main run.total_time=30 run.save_interval=1 run.time_step=20
     python -m jcm.main physics=echam physics.radiation=rrtmgp init=jw
 
+JAM prognostic aerosol + prescribed emissions (the file must be on the model
+grid — ``jcm.data.emissions.prepare`` regrids a source product — and auto-routes
+by content: ``emis_<sector>_<species>`` bulk or ``aero_emis_<tracer>``
+pre-speciated)::
+
+    python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+        forcing.emissions_file=/path/to/emissions_on_model_grid.nc
+
 Multi-run sweep::
 
     python -m jcm.main -m run.time_step=10,20,30

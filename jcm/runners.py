@@ -201,11 +201,20 @@ def build_physics(cfg: DictConfig):
     from jcm.physics.composable_physics import ComposablePhysics
 
     physics_cfg = cfg.physics
+    # Two physics-config styles: an explicit ``terms`` list (the default), or a
+    # ``builder`` that delegates to a factory which already encodes the term
+    # ordering. The factory style is how multi-term, order-sensitive packages
+    # (notably the JAM aerosol chain, which is split around the cloud term) are
+    # configured without re-expressing that ordering as flat YAML.
+    if physics_cfg.get("builder", None) is not None:
+        return _build_physics_from_factory(physics_cfg)
+
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
         raise ValueError(
-            "cfg.physics.terms is required. Each entry must declare a "
-            "_target_ pointing at a PhysicsTerm subclass."
+            "cfg.physics.terms is required (unless physics.builder is set). "
+            "Each entry must declare a _target_ pointing at a PhysicsTerm "
+            "subclass."
         )
     terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
 
@@ -224,6 +233,41 @@ def build_physics(cfg: DictConfig):
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
         band_config=_band_config_for_terms(terms),
     )
+
+
+#: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``
+#: with its own validated term ordering (and band_config/vectorize handled
+#: internally). The factory already orders the JAM aerosol chain (incl. the
+#: pre/post-cloud split), so the preset YAML only carries scalar flags.
+def _physics_factories():
+    from jcm.physics.echam.echam_terms import echam_physics
+    return {"echam_physics": echam_physics}
+
+
+def _build_physics_from_factory(physics_cfg):
+    """Build physics by delegating to a factory named by ``physics.builder``.
+
+    Only the factory keyword args present in the YAML are forwarded (filtered
+    against the factory signature), so config-only keys consumed elsewhere
+    (``builder``, ``radiation_chunk_size``) are ignored here.
+    """
+    import inspect
+
+    from omegaconf import OmegaConf
+
+    factories = _physics_factories()
+    builder = physics_cfg.get("builder")
+    factory = factories.get(builder)
+    if factory is None:
+        raise ValueError(
+            f"Unknown physics.builder={builder!r}; expected one of "
+            f"{sorted(factories)}."
+        )
+    cfg_dict = OmegaConf.to_container(physics_cfg, resolve=True) or {}
+    accepted = set(inspect.signature(factory).parameters)
+    kwargs = {k: v for k, v in cfg_dict.items()
+              if k in accepted and v is not None}
+    return factory(**kwargs)
 
 
 def _band_config_for_terms(terms):
@@ -538,18 +582,21 @@ def build_forcing(cfg: DictConfig, coords):
     aquaplanet ``default_forcing(coords.horizontal)``. ``kind: from_file``
     loads a netCDF boundary file via ``ForcingData.from_file``.
 
-    Optionally attaches an ozone climatology if ``cfg.forcing.ozone_file``
-    is set; the file must be on the same horizontal grid as the model
-    (CMIP6-style ``(time, plev, lat, lon)`` mole/mole netCDF).
+    Optionally attaches an ozone climatology (``cfg.forcing.ozone_file``) and
+    prescribed aerosol emissions (``cfg.forcing.emissions_file``); both files
+    must already be on the model horizontal grid.
     """
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is None or forcing_cfg.kind == "default":
-        return _attach_ozone(None, forcing_cfg, coords)
-    if forcing_cfg.kind == "from_file":
+        forcing = None
+    elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
         forcing = ForcingData.from_file(forcing_cfg.file, coords=coords)
-        return _attach_ozone(forcing, forcing_cfg, coords)
-    raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
+    else:
+        raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
+    forcing = _attach_ozone(forcing, forcing_cfg, coords)
+    forcing = _attach_emissions(forcing, forcing_cfg, coords)
+    return forcing
 
 
 def _attach_ozone(forcing, forcing_cfg, coords):
@@ -588,6 +635,83 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     if forcing is None:
         forcing = default_forcing(coords.horizontal)
     return forcing.copy(ozone_climatology=climatology)
+
+
+def _attach_emissions(forcing, forcing_cfg, coords):
+    """Attach prescribed aerosol emissions from ``cfg.forcing.emissions_file``.
+
+    No-op when unset. ``emissions_file`` may be a single path or a **list** of
+    paths (e.g. one file for biomass burning and one for the rest) — multiple
+    files are merged by coordinates via ``xr.open_mfdataset``, so each can carry
+    a disjoint set of channels on the same grid. The fields auto-route by
+    content: variables named ``emis_<sector>_<species>`` drive the bulk /
+    in-model-speciated path (``anthropogenic_emissions``); ``aero_emis_<tracer>``
+    variables drive the CAM6-faithful pre-speciated path
+    (``prescribed_aerosol_emissions``). A file may carry either or both. The
+    fields must already be on the model horizontal
+    grid — this does **not** regrid (use :mod:`jcm.data.emissions.prepare`
+    first); a grid mismatch raises rather than silently zeroing (the emission
+    terms fall back to zero on a size mismatch, which from the CLI would look
+    like the file "did nothing"). Like ozone, when ``kind: default`` supplies no
+    parent struct one is built via ``default_forcing`` so the aquaplanet SST
+    climatology is preserved.
+
+    The matching emission term must also be in the physics package (e.g.
+    ``physics=echam-jam``) for the fields to be consumed.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = forcing_cfg.get("emissions_file", None)
+    if path in (None, "", "null"):
+        return forcing
+
+    import xarray as xr
+    from omegaconf import ListConfig
+
+    from jcm.forcing import (
+        default_forcing,
+        read_anthropogenic_emissions,
+        read_prescribed_aerosol_emissions,
+    )
+
+    # One path → open_dataset; several → merge by coords (disjoint channels on a
+    # shared grid, e.g. biomass-burning + anthropogenic files).
+    if isinstance(path, (list, tuple, ListConfig)):
+        paths = [str(p) for p in path]
+        ds = xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1 \
+            else xr.open_dataset(paths[0])
+    else:
+        ds = xr.open_dataset(path)
+    anthro = read_anthropogenic_emissions(ds)
+    speciated = read_prescribed_aerosol_emissions(ds)
+    if anthro is None and speciated is None:
+        raise ValueError(
+            f"forcing.emissions_file {path!r} has no emissions variables: "
+            "expected ``emis_<sector>_<species>`` (bulk) or "
+            "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
+            "contract in docs/design/jam.md."
+        )
+    _validate_emissions_grid({**(anthro or {}), **(speciated or {})},
+                             coords, path)
+    if forcing is None:
+        forcing = default_forcing(coords.horizontal)
+    return forcing.copy(anthropogenic_emissions=anthro,
+                        prescribed_aerosol_emissions=speciated)
+
+
+def _validate_emissions_grid(mapping, coords, path):
+    """Raise if any emission field's horizontal shape != the model grid."""
+    from jcm.forcing import TimeSeries
+    nodal = tuple(coords.horizontal.nodal_shape)
+    for name, leaf in mapping.items():
+        arr = leaf.values if isinstance(leaf, TimeSeries) else leaf
+        spatial = tuple(arr.shape[-2:])
+        if spatial != nodal:
+            raise ValueError(
+                f"forcing.emissions_file {path!r}: field {name!r} has "
+                f"horizontal shape {spatial}, but the model grid is {nodal}. "
+                "Regrid the file with jcm.data.emissions.prepare first."
+            )
 
 
 # ---------------------------------------------------------------------------
