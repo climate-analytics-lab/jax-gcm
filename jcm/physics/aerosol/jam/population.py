@@ -27,6 +27,7 @@ Design notes
 from __future__ import annotations
 
 import dataclasses
+import math
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,6 +85,40 @@ class AerosolMode:
     soluble: bool
     can_activate: bool
     sediments: bool
+
+    # ------------------------------------------------------------------
+    # Geometry: per-class conversions from mass to number / surface area.
+    #
+    # These are the family-agnostic interface a process harness uses to turn
+    # a per-class dry-aerosol *volume* (mass / material-density) into a
+    # number- or area-concentration without knowing whether the class is a
+    # log-normal mode or a size bin. The modal realisation below uses the
+    # log-normal moments; a sectional class (#491) exposes the same two
+    # properties from its bin geometry, so consumers (e.g. the ice-nucleation
+    # IN populations) stay invariant to the aerosol family.
+    # ------------------------------------------------------------------
+
+    @property
+    def number_factor(self) -> float:
+        """Particle number per unit dry-aerosol volume [1/m³].
+
+        ``number = (mass / ρ_material) · number_factor``. Modal: the
+        reciprocal mean single-particle volume of the log-normal,
+        ``v_p = (π/6)·dgnum³·exp(4.5·ln²σ_g)``.
+        """
+        ln_sigma = math.log(self.geom_std_dev)
+        v_p = (math.pi / 6.0) * self.dgnum ** 3 * math.exp(4.5 * ln_sigma ** 2)
+        return 1.0 / v_p
+
+    @property
+    def area_factor(self) -> float:
+        """Particle surface area per unit dry-aerosol volume [1/m].
+
+        ``area = (mass / ρ_material) · area_factor``. Modal: the surface-area
+        moment of the log-normal, ``6/(dgnum·exp(2.5·ln²σ_g))``.
+        """
+        ln_sigma = math.log(self.geom_std_dev)
+        return 6.0 / (self.dgnum * math.exp(2.5 * ln_sigma ** 2))
 
 
 @dataclasses.dataclass(frozen=True)

@@ -3048,6 +3048,8 @@ def cloud_microphysics_2m(
     layer_thickness: jnp.ndarray,   # (nlev,)  m   (dz, full-level layer depths)
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
+    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   immersion het INP (JAM #494); 0 → DeMott floor
+    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP → cirrus nucleation
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
 ) -> tuple[MicrophysicsTendencies_2M, jnp.ndarray, jnp.ndarray]:
@@ -3213,7 +3215,7 @@ def cloud_microphysics_2m(
         deposition_rate,
         zero,                 # tompkins_genti
         zero,                 # tompkins_gentl
-        zero,                 # newly_formed_ice (cirrus scheme not plumbed)
+        ice_nuclei_deposition,  # newly_formed_ice: cirrus deposition nucleation (#494)
         q_tmp,                # specific_humidity_tmp
         qsat_tmp,             # sat_spec_humidity_tmp
         air_density,
@@ -3251,17 +3253,18 @@ def cloud_microphysics_2m(
     )
 
     # ------------------------------------------------------------------
-    # Heterogeneous mixed-phase freezing via DeMott (2010) INP
+    # Heterogeneous mixed-phase freezing INP [1/m³]
     #
-    # Replaces the ECHAM6 het_mxphase_freezing call (which needs 9 modal
-    # aerosol inputs from JAM, see #436) with a simpler INP-based
-    # parameterization that only needs temperature + prescribed total
-    # aerosol number > 0.5 μm.
+    # Prefer the online JAM heterogeneous ice nucleation (immersion+deposition
+    # on prognostic dust/BC, #494) where it is active; fall back to the DeMott
+    # (2010) parameterization on a prescribed coarse-aerosol number wherever the
+    # online source is empty (≈0) — e.g. clean air or before the JAM tracers
+    # spin up. Mirrors the ``activated_cdnc``/SPA-floor pattern for droplets.
     # ------------------------------------------------------------------
     het_condition = (temperature < params.tmelt) & (temperature >= params.cthomi)
 
-    # DeMott (2010) INP concentration [1/m³] in the mixed-phase range.
-    n_inp = demott2010_inp(temperature, params.n_aer_coarse)
+    demott_floor = demott2010_inp(temperature, params.n_aer_coarse)
+    n_inp = jnp.where(ice_nuclei > 0.0, ice_nuclei, demott_floor)
 
     # Where het freezing is active and INP > current ICNC, set ICNC to
     # INP and freeze a corresponding amount of liquid → ice.
@@ -3706,15 +3709,24 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, spa_floor)
 
+        # Online heterogeneous ice nuclei (JAM #494); 0 where absent so the
+        # core falls back to its DeMott floor. Immersion drives the mixed-phase
+        # het freezing; deposition drives the cirrus nucleation hook.
+        zeros_2d = jnp.zeros_like(state.temperature)
+        ice_nuclei = diagnostics.get("ice_nuclei", zeros_2d)
+        ice_nuclei_deposition = diagnostics.get(
+            "ice_nuclei_deposition", zeros_2d
+        )
+
         tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
             cloud_microphysics_2m,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
             out_axes=(0, 0, 0),
         )(
             state.temperature, state.specific_humidity, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
             cloud_fraction, air_density, layer_thickness, tke,
-            activated_cdnc, dt, params_2m,
+            activated_cdnc, ice_nuclei, ice_nuclei_deposition, dt, params_2m,
         )
 
         tendency = PhysicsTendency(

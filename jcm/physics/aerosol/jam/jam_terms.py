@@ -37,6 +37,10 @@ from jcm.physics.aerosol.jam.emissions.seasalt import (
     SeaSaltEmissions,
     SeaSaltParameters,
 )
+from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
+from jcm.physics.aerosol.jam.ice_nucleation.params import (
+    IceNucleationParameters,
+)
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
@@ -96,6 +100,8 @@ def jam_aerosol_physics(
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
     aqueous_scheme: str = "full",
+    ice_scheme: str = "niemand",
+    ice_nucleation_params: IceNucleationParameters | None = None,
     activation: ArgParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
@@ -113,6 +119,9 @@ def jam_aerosol_physics(
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
             ``"simple"`` (H2O2-limited stoichiometric oxidation).
+        ice_scheme: heterogeneous freezing scheme — ``"niemand"`` (default,
+            singular/active-site) or ``"lohmann_diehl"`` (ECHAM-HAM number-based);
+            ``ice_nucleation_params`` overrides the differentiable defaults.
         activation/sedimentation/drydep/wetdep: optional per-process
             ``Parameters`` overrides (each ``None`` resolves to its default).
 
@@ -139,6 +148,11 @@ def jam_aerosol_physics(
     optics_terms = [JamOpticsTerm(spec=spec)] if optics else []
     post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
+        # Heterogeneous ice nucleation on dust/BC → ``ice_nuclei`` for the 2M
+        # cloud scheme (#494). Harmless with the 1M scheme (diagnostic unused).
+        IceNucleation(
+            params=ice_nucleation_params, spec=spec, scheme=ice_scheme,
+        ),
         StokesSedimentation(params=sedimentation, spec=spec),
         SlinnDryDeposition(params=drydep, spec=spec),
         # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
