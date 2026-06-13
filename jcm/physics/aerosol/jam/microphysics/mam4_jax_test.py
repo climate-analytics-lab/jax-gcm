@@ -122,6 +122,40 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_wet) >= np.asarray(aer.r_dry)))
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
+    def test_substep_backend_runs_finite_and_physical(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+
+        # The opt-in operator-split condensation backend must produce finite,
+        # physical output through the full wrapper. Restore the process-global
+        # default afterwards so it can't leak into other tests.
+        state, diagnostics = _column_state()
+        try:
+            term = Mam4JaxMicrophysics(
+                condensation_backend="substep", n_substeps=4,
+            )
+            self.assertEqual(_amicphys._COND["backend"], "substep")
+            tend, diags = term(state, diagnostics, None, None)
+            for v in tend.tracers.values():
+                self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+            aer = diags["_jam_state"]
+            for f in (aer.r_dry, aer.r_wet, aer.rho, aer.kappa):
+                self.assertTrue(np.all(np.isfinite(np.asarray(f))))
+            self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
+            key = mass_name(
+                MAM4_SPEC.modes[0].species[0], MAM4_SPEC.modes[0].short
+            )
+            self.assertIn(key, tend.tracers)
+        finally:
+            _amicphys.configure_condensation(backend="diffrax")
+
     def test_input_sanitisation_keeps_finite(self):
         from jcm.physics.aerosol.jam import mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (

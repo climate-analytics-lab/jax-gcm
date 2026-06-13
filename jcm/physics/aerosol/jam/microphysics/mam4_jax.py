@@ -146,18 +146,36 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         rtol: float = 1e-6,
         atol: float = 1e-15,
         max_steps: int = 4096,
+        condensation_backend: str = "diffrax",
+        n_substeps: int = 4,
     ):
         """Import the core, enable float64, configure the solver, precompute maps.
 
-        ``rtol`` / ``atol`` set the per-cell implicit-solver tolerances. The
-        upstream defaults (1e-9 / 1e-20) force float64 and many tiny adaptive
-        steps — the dominant cost of the step. Relaxing to 1e-6 / 1e-15 is
-        ~2.8x faster on the core for ~0.1% per-step error (see the JAM perf
-        study). The solver is also run with ``throw=False`` so a cell that hits
-        ``max_steps`` returns its best estimate instead of aborting the whole
-        vmapped batch; combined with the non-negativity clamp in ``__call__``,
-        this gates cold-start / outlier cells that would otherwise stall the
-        per-cell solve (the batch is paced by its worst cell).
+        ``rtol`` / ``atol`` set the per-cell implicit-solver tolerances of the
+        ``"diffrax"`` condensation backend. The upstream defaults (1e-9 / 1e-20)
+        force float64 and many tiny adaptive steps — the dominant cost of the
+        step. Relaxing to 1e-6 / 1e-15 is ~2.8x faster on the core for ~0.1%
+        per-step error (see the JAM perf study). The solver is also run with
+        ``throw=False`` so a cell that hits ``max_steps`` returns its best
+        estimate instead of aborting the whole vmapped batch; combined with the
+        non-negativity clamp in ``__call__``, this gates cold-start / outlier
+        cells that would otherwise stall the per-cell solve (the batch is paced
+        by its worst cell).
+
+        ``condensation_backend`` selects how the gas/aerosol condensation in
+        ``gasaerexch`` is integrated:
+
+        * ``"diffrax"`` (default) — the adaptive Kvaerno5 solve, governed by the
+          tolerances above.
+        * ``"substep"`` — an operator-split fixed-substep integrator (analytic
+          H2SO4 + ``n_substeps`` frozen-``g_star`` SOA substeps). ~10x faster
+          than the relaxed-tolerance diffrax path (~28x over the tight upstream
+          default) at ~0.3%/step vs the tight reference, and it removes the
+          adaptive while-loop entirely (no ``max_steps`` fragility / worst-cell
+          gating). Default stays ``"diffrax"`` pending multi-day accuracy
+          accumulation validation; flip to ``"substep"`` via config to adopt the
+          fast path. Requires a mam4_jax with ``configure_condensation``
+          (reflective-org/MAM4-JAX#59).
         """
         if spec is not None:
             self.spec = spec
@@ -167,6 +185,20 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             rtol=rtol, atol=atol, max_steps=max_steps, throw=False,
         )
         self._rtol, self._atol = float(rtol), float(atol)
+
+        from mam4_jax.processes import amicphys as _amicphys
+        if hasattr(_amicphys, "configure_condensation"):
+            _amicphys.configure_condensation(
+                backend=condensation_backend, n_substeps=n_substeps,
+            )
+        elif condensation_backend != "diffrax":
+            raise RuntimeError(
+                f"condensation_backend={condensation_backend!r} needs a mam4_jax "
+                "with configure_condensation (reflective-org/MAM4-JAX#59); the "
+                "installed version only supports the 'diffrax' backend."
+            )
+        self._condensation_backend = str(condensation_backend)
+        self._n_substeps = int(n_substeps)
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
