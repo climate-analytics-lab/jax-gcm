@@ -122,7 +122,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_wet) >= np.asarray(aer.r_dry)))
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
-    def test_substep_backend_runs_finite_and_physical(self):
+    def _assert_backend_runs_finite(self, backend):
         from mam4_jax.processes import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
@@ -133,15 +133,16 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         if not hasattr(_amicphys, "configure_condensation"):
             self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
 
-        # The opt-in operator-split condensation backend must produce finite,
-        # physical output through the full wrapper. Restore the process-global
-        # default afterwards so it can't leak into other tests.
+        # A condensation backend must produce finite, physical output through
+        # the full wrapper. Restore the process-global default afterwards so it
+        # can't leak into other tests sharing this process.
         state, diagnostics = _column_state()
         try:
             term = Mam4JaxMicrophysics(
-                condensation_backend="substep", n_substeps=4,
+                condensation_backend=backend, n_substeps=4,
             )
-            self.assertEqual(_amicphys._COND["backend"], "substep")
+            self.assertEqual(_amicphys._COND["backend"], backend)
+            self.assertEqual(term._condensation_backend, backend)
             tend, diags = term(state, diagnostics, None, None)
             for v in tend.tracers.values():
                 self.assertTrue(np.all(np.isfinite(np.asarray(v))))
@@ -153,6 +154,27 @@ class Mam4JaxAdapterTest(unittest.TestCase):
                 MAM4_SPEC.modes[0].species[0], MAM4_SPEC.modes[0].short
             )
             self.assertIn(key, tend.tracers)
+        finally:
+            _amicphys.configure_condensation(backend="diffrax")
+
+    def test_substep_backend_runs_finite_and_physical(self):
+        self._assert_backend_runs_finite("substep")
+
+    def test_astem_backend_runs_finite_and_physical(self):
+        self._assert_backend_runs_finite("astem")
+
+    def test_default_backend_is_substep(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+        try:
+            term = Mam4JaxMicrophysics()
+            self.assertEqual(term._condensation_backend, "substep")
         finally:
             _amicphys.configure_condensation(backend="diffrax")
 

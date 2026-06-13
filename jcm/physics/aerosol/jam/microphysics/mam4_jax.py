@@ -146,7 +146,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         rtol: float = 1e-6,
         atol: float = 1e-15,
         max_steps: int = 4096,
-        condensation_backend: str = "diffrax",
+        condensation_backend: str = "substep",
         n_substeps: int = 4,
     ):
         """Import the core, enable float64, configure the solver, precompute maps.
@@ -165,17 +165,25 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         ``condensation_backend`` selects how the gas/aerosol condensation in
         ``gasaerexch`` is integrated:
 
-        * ``"diffrax"`` (default) — the adaptive Kvaerno5 solve, governed by the
-          tolerances above.
-        * ``"substep"`` — an operator-split fixed-substep integrator (analytic
-          H2SO4 + ``n_substeps`` frozen-``g_star`` SOA substeps). ~10x faster
-          than the relaxed-tolerance diffrax path (~28x over the tight upstream
-          default) at ~0.3%/step vs the tight reference, and it removes the
-          adaptive while-loop entirely (no ``max_steps`` fragility / worst-cell
-          gating). Default stays ``"diffrax"`` pending multi-day accuracy
-          accumulation validation; flip to ``"substep"`` via config to adopt the
-          fast path. Requires a mam4_jax with ``configure_condensation``
-          (reflective-org/MAM4-JAX#59).
+        * ``"substep"`` (default) — an operator-split fixed-substep integrator
+          (analytic H2SO4 + ``n_substeps`` frozen-``g_star`` SOA substeps, each
+          the exact closed form of the linear sub-ODE). ~10x faster than the
+          relaxed-tolerance diffrax path (~28x over the tight upstream default)
+          at ~0.3%/step vs the tight reference, with no adaptive while-loop (no
+          ``max_steps`` fragility / worst-cell gating). This is the production
+          default; ``n_substeps`` is speed-insensitive so set it for accuracy.
+        * ``"astem"`` — the Fortran-faithful adaptive scheme (upstream
+          semi-implicit step1/step2 SOA with adaptive ``dtcur = alpha/tmpa`` via
+          a per-cell ``while_loop`` + the same analytic H2SO4). Use this to match
+          the CAM/E3SM reference exactly (it reintroduces worst-cell gating, but
+          each substep is cheap arithmetic, not a Newton solve).
+        * ``"diffrax"`` — the adaptive Kvaerno5 solve, governed by the tolerances
+          above. The original path; slowest, kept for reference/validation.
+
+        ``"substep"`` / ``"astem"`` need a mam4_jax with
+        ``configure_condensation`` (reflective-org/MAM4-JAX#59); if it is absent
+        the wrapper falls back to ``"diffrax"`` with a warning so a stale install
+        still runs.
         """
         if spec is not None:
             self.spec = spec
@@ -191,12 +199,14 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             _amicphys.configure_condensation(
                 backend=condensation_backend, n_substeps=n_substeps,
             )
-        elif condensation_backend != "diffrax":
-            raise RuntimeError(
-                f"condensation_backend={condensation_backend!r} needs a mam4_jax "
-                "with configure_condensation (reflective-org/MAM4-JAX#59); the "
-                "installed version only supports the 'diffrax' backend."
-            )
+        else:
+            if condensation_backend != "diffrax":
+                logger.warning(
+                    "mam4_jax lacks configure_condensation "
+                    "(reflective-org/MAM4-JAX#59); falling back to the 'diffrax' "
+                    "condensation backend (requested %r).", condensation_backend,
+                )
+            condensation_backend = "diffrax"
         self._condensation_backend = str(condensation_backend)
         self._n_substeps = int(n_substeps)
 
