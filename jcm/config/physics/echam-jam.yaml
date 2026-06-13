@@ -1,0 +1,32 @@
+# ECHAM physics with the JAM prognostic aerosol module.
+#
+# Unlike the term-list presets (``echam.yaml`` etc.), this is **factory-built**:
+# ``physics.builder`` tells ``runners.build_physics`` to call
+# ``echam_physics(**these_kwargs)``, which encodes the JAM aerosol chain's
+# validated ordering (the chain is split around the cloud term, so a flat term
+# list can't express it). Only scalar flags below are forwarded; per-scheme
+# ``Parameters`` keep their ``.default()``.
+#
+# End-to-end usage (supply emissions on the model grid; auto-routes by content):
+#
+#     python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+#         forcing.emissions_file=/path/to/emissions_on_model_grid.nc
+#
+# Both emission terms are enabled but **inert until a matching file is given**,
+# so a plain ``physics=echam-jam`` run is the zero-emission JAM baseline.
+
+builder: echam_physics
+
+aerosol_module: jam
+cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
+radiation_scheme: grey      # set radiation_scheme=rrtmgp for RRTMGP
+jam_microphysics: placeholder
+jam_arg_variant: arg2000    # or ghosh2025
+jam_aqueous_scheme: full
+
+# Prescribed-emission terms (driven by forcing.emissions_file):
+jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
+jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+
+# Consumed by Model (not the factory); null = auto-detect from device HBM.
+radiation_chunk_size: null

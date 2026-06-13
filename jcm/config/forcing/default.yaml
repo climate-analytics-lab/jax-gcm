@@ -6,3 +6,11 @@ kind: default
 # ``forcing/from_file.yaml`` for the format. Null → use the analytical
 # fallback in ``EchamBoundaryConditions``.
 ozone_file: null
+
+# Optional prescribed aerosol emissions netCDF, already on the model grid
+# (regrid a source product with ``jcm.data.emissions.prepare`` first). Auto-
+# routes by content: ``emis_<sector>_<species>`` variables → the bulk /
+# differentiable path; ``aero_emis_<tracer>`` → the CAM6-faithful pre-speciated
+# path. Requires a JAM physics package with the emission term(s) enabled (e.g.
+# ``physics=echam-jam``). Null → no prescribed emissions.
+emissions_file: null

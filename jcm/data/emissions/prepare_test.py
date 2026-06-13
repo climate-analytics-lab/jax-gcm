@@ -36,6 +36,87 @@ class UnitConversionTest(unittest.TestCase):
         self.assertAlmostEqual(molec_flux_to_mass_flux(64.0), 64.0 * 10.0 / na)
 
 
+def _synthetic_source(path, *, elevated=False, var="emiss", mw=64.0,
+                      ncol=300, nt=3):
+    """Write a tiny unstructured (ncol) source emission file like the CESM ones."""
+    import xarray as xr
+
+    rng = np.random.default_rng(0)
+    lon = rng.uniform(0.0, 360.0, ncol)
+    lat = rng.uniform(-89.0, 89.0, ncol)
+    area = np.full(ncol, 4.0 * np.pi / ncol)  # steradians, sums to 4π
+    coords = {"lon": ("ncol", lon), "lat": ("ncol", lat),
+              "area": ("ncol", area), "time": np.arange(nt)}
+    if elevated:
+        nalt = 4
+        data = {var: (("time", "altitude", "ncol"),
+                      np.full((nt, nalt, ncol), 1.0e3))}
+        coords["altitude_int"] = ("altitude_int",
+                                  np.linspace(0.0, 0.4, nalt + 1))  # km
+    else:
+        data = {var: (("time", "ncol"), np.full((nt, ncol), 1.0e10))}
+    ds = xr.Dataset(data, coords=coords)
+    ds[var].attrs["molecular_weight"] = mw
+    ds.to_netcdf(path)
+    return path
+
+
+class PrepareSyntheticTest(unittest.TestCase):
+    """Fast coverage of the prepare pipeline on a tiny synthetic source."""
+
+    def setUp(self):
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        self.nodal = self.coords.horizontal.nodal_shape
+
+    def test_prepare_emissions_bulk(self):
+        from jcm.data.emissions.prepare import Channel, prepare_emissions
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src = _synthetic_source(os.path.join(d, "so2.nc"), mw=64.0)
+            ds = prepare_emissions(
+                (Channel("emis_surface_combustion_so2", src, molar_mass=64.0),),
+                self.coords, time_index=0)
+        v = ds["emis_surface_combustion_so2"]
+        self.assertEqual(v.values.shape, self.nodal)
+        self.assertEqual(v.attrs["units"], "kg m-2 s-1")
+        self.assertTrue(np.all(np.isfinite(v.values)) and v.values.max() > 0)
+
+    def test_prepare_speciated_surface_and_elevated(self):
+        from jcm.data.emissions.prepare import (
+            SpeciatedChannel, prepare_speciated_emissions)
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            surf = _synthetic_source(os.path.join(d, "a2.nc"), mw=115.0)
+            elev = _synthetic_source(os.path.join(d, "ene.nc"), elevated=True,
+                                     mw=115.0)
+            ds = prepare_speciated_emissions(
+                (SpeciatedChannel("m_so4_ait", surf),
+                 SpeciatedChannel("m_so4_acc", elev, elevated=True)),
+                self.coords, time_index=0)
+        for t in ("m_so4_ait", "m_so4_acc"):
+            arr = ds[f"aero_emis_{t}"].values
+            self.assertEqual(arr.shape, self.nodal)
+            self.assertTrue(np.all(np.isfinite(arr)) and arr.max() > 0)
+
+    def test_adapter_builders_construct_channels(self):
+        from jcm.data.emissions.prepare import (
+            cesm_bb4cmip7, cesm_cmip_anthro, cesm_mam4_speciated)
+        anthro = {c.contract_var for c in cesm_cmip_anthro("/d")}
+        self.assertEqual(anthro, {"emis_surface_combustion_so2",
+                                  "emis_surface_combustion_bc",
+                                  "emis_surface_combustion_oc"})
+        self.assertEqual({c.contract_var for c in cesm_bb4cmip7("/d")},
+                         {"emis_biomass_burning_so2", "emis_biomass_burning_bc",
+                          "emis_biomass_burning_oc"})
+        spec = cesm_mam4_speciated("/d")
+        tracers = {c.tracer for c in spec}
+        self.assertEqual(tracers, {"m_so4_acc", "m_so4_ait", "m_bc_pcm",
+                                   "m_poa_pcm", "n_acc", "n_ait", "n_pcm",
+                                   "g_so2"})
+        # The energy-sector sulfate is the elevated (mo_extfrc) channel.
+        self.assertTrue(any(c.elevated for c in spec))
+
+
 @pytest.mark.slow
 @unittest.skipUnless(os.path.exists(_ANTHRO_SO2), "ne30 reference files absent")
 class PrepareFromCesmTest(unittest.TestCase):

@@ -169,6 +169,22 @@ from jcm.data.emissions import prepare_emissions, cesm_cmip_anthro
 ds = prepare_emissions(cesm_cmip_anthro(source_dir), coords, time_index=month)
 ```
 
+### From the CLI
+
+The `echam-jam` physics preset enables JAM with both emission terms (inert until
+fed). Point `forcing.emissions_file` at a model-grid file — it auto-routes by
+content (`emis_*` bulk vs `aero_emis_*` pre-speciated), and a wrong-grid file
+raises rather than silently zeroing:
+
+```
+python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
+    forcing.emissions_file=/path/to/emissions_on_model_grid.nc
+```
+
+`echam-jam` is *factory-built* (`physics.builder: echam_physics`) rather than a
+flat term list, because the JAM chain's ordering (split around the cloud term) is
+encoded by `echam_physics()` — `build_physics` delegates to it.
+
 See `.claude/aerosol_emissions_plan.md` for the full design, the data-source
 investigation (the raw 0.5° gridded CEDS is ESGF-only; a self-hosted compressed
 mirror is a tracked follow-up), and the CESM adapter's documented approximations.
