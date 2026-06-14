@@ -26,7 +26,7 @@ import pandas as pd
 from functools import partial
 import logging
 
-from jcm.constants import physical_constants
+import jcm.constants as jcm_constants
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
@@ -138,7 +138,24 @@ class ModelPredictions:
         for _term in getattr(self._physics, 'terms', []):
             _spec = getattr(_term, 'spec', None)
             if _spec is not None and hasattr(_spec, 'mode_shorts'):
-                additional_coords['mode'] = _np.asarray(list(_spec.mode_shorts))
+                _mode_shorts = list(_spec.mode_shorts)
+                # data_to_xarray assigns dims purely by array shape, so a mode
+                # axis whose length equals the vertical layer count is genuinely
+                # indistinguishable from the level axis — a (mode, level, lon,
+                # lat) field can't be disambiguated from (level, …). This only
+                # bites the unphysical case n_modes == n_levels (MAM4 has 4
+                # modes, so only an L4 run). Fail early and specifically rather
+                # than deep inside data_to_xarray's generic shape lookup.
+                if len(_mode_shorts) == coords.vertical.layers:
+                    raise ValueError(
+                        f"Aerosol mode count ({len(_mode_shorts)}) equals the "
+                        f"vertical layer count ({coords.vertical.layers}); the "
+                        "per-mode aerosol state can't be given a distinct 'mode' "
+                        "dimension because data_to_xarray infers dims from shape "
+                        "alone. Use a vertical resolution other than "
+                        f"{coords.vertical.layers} levels to serialize jam_state."
+                    )
+                additional_coords['mode'] = _np.asarray(_mode_shorts)
                 break
 
         pred_ds = data_to_xarray(
@@ -479,7 +496,13 @@ class Model:
             sigma_b = jnp.asarray(vertical.boundaries)
             a_half = jnp.zeros_like(sigma_b)
             b_half = sigma_b
-        ps = physics_state_grid.normalized_surface_pressure * physical_constants.p0
+        # Read p0 from the live constants singleton (module attribute access),
+        # not a frozen import: in the Hydra path ``jcm.runners`` imports ``Model``
+        # before applying ``cfg.constants``, so an import-time binding would use
+        # the stale default p0 while the dycore/state bridge use the overridden
+        # value — making these Δp weights inconsistent with the column mass the
+        # model integrates. (See the constants convention in CLAUDE.md.)
+        ps = physics_state_grid.normalized_surface_pressure * jcm_constants.p0
         bcast = (slice(None),) + (jnp.newaxis,) * ps.ndim
         pressure_half = a_half[bcast] + b_half[bcast] * ps[jnp.newaxis, ...]
         dp = jnp.diff(pressure_half, axis=0)              # (nlev, *spatial)
