@@ -26,6 +26,7 @@ import pandas as pd
 from functools import partial
 import logging
 
+from jcm.constants import physical_constants
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
@@ -39,6 +40,32 @@ from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 
 logger = logging.getLogger(__name__)
+
+
+def _mass_conserving_positivity(q, m):
+    """Clip ``q`` to non-negative while conserving its column-integrated mass.
+
+    Spectral transport of a sharp source (e.g. CEDS industrial/shipping
+    emissions) leaves Gibbs-ringing negatives in the tracer field; fed to the
+    physics (MAM4 size/condensation, ARG activation, …) a negative aerosol
+    mass/number produces NaNs. A naïve floor at zero would *add* mass, so instead
+    clip the negatives and rescale the surviving positive part of each column so
+    the column mass is unchanged ("hole-filling"):
+
+        q' = max(0, q) · max(M, 0) / M_clip,
+        M = Σ_k m_k q_k,   M_clip = Σ_k m_k max(0, q_k),
+
+    with ``m_k`` the per-layer air mass (∝ Δp). Non-negative by construction and
+    column-mass-conserving when ``M > 0``; a column whose mass is spuriously
+    net-negative is zeroed (the only, unavoidable, non-conservation). ``q`` and
+    ``m`` are ``(nlev, *spatial)``; the reduction is over the leading level axis.
+    """
+    q_clip = jnp.maximum(0.0, q)
+    col_mass = jnp.sum(m * q, axis=0)
+    col_mass_clip = jnp.sum(m * q_clip, axis=0)
+    scale = jnp.where(col_mass_clip > 0.0,
+                      jnp.maximum(col_mass, 0.0) / col_mass_clip, 0.0)
+    return q_clip * scale[jnp.newaxis, ...]
 
 
 class ModelPredictions:
@@ -102,7 +129,17 @@ class ModelPredictions:
 
         additional_coords = {}
         if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
-            additional_coords = self._physics.cached_coords.xarray_additional_coords()
+            additional_coords = dict(self._physics.cached_coords.xarray_additional_coords())
+        # Aerosol-mode coordinate so per-mode JAM state fields (``jam_state.*``,
+        # shaped ``(mode, level, lon, lat)``) serialize with a named ``mode`` dim
+        # rather than failing the shape→dims lookup. Sourced from the aerosol
+        # population spec carried by the microphysics term.
+        import numpy as _np
+        for _term in getattr(self._physics, 'terms', []):
+            _spec = getattr(_term, 'spec', None)
+            if _spec is not None and hasattr(_spec, 'mode_shorts'):
+                additional_coords['mode'] = _np.asarray(list(_spec.mode_shorts))
+                break
 
         pred_ds = data_to_xarray(
             dynamics_predictions.asdict() | physics_preds_dict,
@@ -421,6 +458,35 @@ class Model:
             tracer_specs=tracer_specs,
         )
 
+    def _filter_tracer_positivity(self, physics_state_grid):
+        """Apply the mass-conserving positivity filter to all gridpoint tracers.
+
+        No-op when there are no tracers (e.g. dry dynamical-core configs). The
+        per-layer air-mass weight ``Δp`` is reconstructed from the vertical
+        coordinate (hybrid ``a``/``b`` or pure sigma) and the column surface
+        pressure, exactly as :class:`MoistAirColumnState` does, so the rescale
+        conserves the same column mass the model integrates.
+        """
+        tracers = physics_state_grid.tracers
+        if not tracers:
+            return physics_state_grid
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+        vertical = self.coords.vertical
+        if isinstance(vertical, HybridCoordinates):
+            a_half = jnp.asarray(vertical.a_boundaries)
+            b_half = jnp.asarray(vertical.b_boundaries)
+        else:
+            sigma_b = jnp.asarray(vertical.boundaries)
+            a_half = jnp.zeros_like(sigma_b)
+            b_half = sigma_b
+        ps = physics_state_grid.normalized_surface_pressure * physical_constants.p0
+        bcast = (slice(None),) + (jnp.newaxis,) * ps.ndim
+        pressure_half = a_half[bcast] + b_half[bcast] * ps[jnp.newaxis, ...]
+        dp = jnp.diff(pressure_half, axis=0)              # (nlev, *spatial)
+        filtered = {k: _mass_conserving_positivity(q, dp)
+                    for k, q in tracers.items()}
+        return physics_state_grid.copy(tracers=filtered)
+
     def _get_op_split_step_fn(self, forcing: ForcingData):
         """Build the operator-split single-step function (Lie split a).
 
@@ -435,6 +501,36 @@ class Model:
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             physics_state_grid = self.dycore.to_physics_state(state)
+            # Keep forcing in the model's working float precision. ``ForcingData``
+            # is often built before the MAM4-JAX core enables ``jax_enable_x64``
+            # (so its arrays are float32), whereas the x64 model state is float64.
+            # The diagnostics that read forcing (radiation solar geometry, surface
+            # fields) would then come out float32 against a float64 scan carry —
+            # a "carry input/output types differ" error. Cast float leaves of the
+            # selected forcing to the gridpoint-state dtype to stay consistent.
+            _fdtype = physics_state_grid.temperature.dtype
+            forcing_now = jax.tree_util.tree_map(
+                lambda x: x.astype(_fdtype)
+                if (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating))
+                else x,
+                forcing_now,
+            )
+            # Mass-conserving positivity guard on the gridpoint tracers *before*
+            # they reach physics. Spectral transport of sharp, near-zero aerosol
+            # sources (CEDS industrial/shipping) leaves Gibbs-ringing negatives;
+            # a negative mass or number fed to any term (MAM4 size/condensation,
+            # ARG activation, radiation aerosol optics) is unphysical, so floor
+            # them here at the dynamics→physics boundary where every term benefits.
+            #
+            # This is a guard, not a cure for the deeper instability: it cannot
+            # restore *modal mass/number consistency*. Independent ringing of a
+            # mode's mass and number fields drives their ratio (∝ particle size)
+            # orders of magnitude out of the dgnumlo/dgnumhi bounds, which NaNs
+            # the microphysics at T63+ even with non-negative inputs. The root-
+            # cause fix is dynamical (tracer hyperdiffusion / a sign- and ratio-
+            # preserving tracer transport) and/or a calcsize robustness clamp in
+            # mam4-jax — tracked separately; see issue.
+            physics_state_grid = self._filter_tracer_positivity(physics_state_grid)
             physics_tendency, new_physics_state = compute_physics_step_gridpoint(
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,

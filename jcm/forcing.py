@@ -539,12 +539,29 @@ def _is_monthly_climatology(ds) -> bool:
 def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
     """Convert a netCDF dataset's `time` coordinate to seconds since
     `MODEL_EPOCH` (1970-01-01 UTC). Returned as a 1-D float array.
+
+    Handles both numpy ``datetime64`` axes (standard/proleptic-Gregorian) and
+    ``cftime`` axes from non-standard calendars — the CESM emission files use a
+    ``365_day`` (noleap) calendar, which xarray decodes to ``cftime`` objects
+    that pandas can't ingest.
     """
-    import pandas as pd
     import numpy as np
-    times = pd.DatetimeIndex(ds["time"].values)
-    epoch = pd.Timestamp("1970-01-01")
-    delta = (times - epoch).total_seconds().to_numpy()
+    vals = np.asarray(ds["time"].values)
+    if vals.dtype == object:
+        # cftime objects (a non-standard calendar like 365_day) — pandas can't
+        # ingest these; convert in the file's own calendar.
+        import cftime
+        flat = np.ravel(vals)
+        cal = ((getattr(flat[0], "calendar", None)
+                or ds["time"].encoding.get("calendar", "standard"))
+               if flat.size else "standard")
+        delta = cftime.date2num(
+            vals, "seconds since 1970-01-01 00:00:00", calendar=cal)
+    else:
+        # datetime64, or plain numeric (pandas interprets the latter as ns).
+        import pandas as pd
+        delta = (pd.DatetimeIndex(vals)
+                 - pd.Timestamp("1970-01-01")).total_seconds().to_numpy()
     return jnp.asarray(np.asarray(delta, dtype=float))
 
 
@@ -563,11 +580,13 @@ def _resolve_align_mode(align_mode: str, ds) -> int:
             f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', or 'by_date'"
         )
     # Auto-detect: if the time axis spans <= ~1.05 years, treat as climatology.
-    import pandas as pd
-    times = pd.DatetimeIndex(ds["time"].values)
-    if len(times) <= 1:
+    # Reuse the calendar-aware seconds conversion so non-standard (cftime)
+    # calendars work here too.
+    import numpy as np
+    seconds = np.asarray(_time_axis_seconds_from_ds(ds))
+    if seconds.size <= 1:
         return WRAP_YEAR
-    span_days = (times[-1] - times[0]).days
+    span_days = (seconds[-1] - seconds[0]) / 86400.0
     return WRAP_YEAR if span_days <= 380 else BY_DATE
 
 
