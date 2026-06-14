@@ -99,6 +99,55 @@ class JamOpticsTermTest(unittest.TestCase):
             float(jnp.sum(d1["aerosol"].aod_sw_per_band)),
         )
 
+    def test_column_aod_550_diagnostic(self):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics_interface import PhysicsState
+
+        # Bands chosen so the 550 nm pick is unambiguous (500 nm is closest).
+        nlev, ncols = 4, 3
+        sw = (350.0, 500.0, 900.0)
+        lw = (8000.0, 20000.0)
+        band = RadiationBandConfig(lw_band_centers_nm=lw, sw_band_centers_nm=sw)
+        term = self._term(band)
+        self.assertEqual(term._cache.aod_band_idx, 1)   # 500 nm is closest to 550
+        self.assertEqual(term._cache.aod_band_nm, 500.0)
+
+        n_modes = MAM4_SPEC.n_modes()
+        shape = (n_modes, nlev, ncols)
+        aer = JamAerosolState(
+            r_dry=jnp.full(shape, 0.1e-6), r_wet=jnp.full(shape, 0.2e-6),
+            rho=jnp.full(shape, 1800.0), kappa=jnp.full(shape, 0.5),
+            mass=jnp.full(shape, 1e-9), number=jnp.full(shape, 1.0e8),
+        )
+        tracers = {}
+        for mode in MAM4_SPEC.modes:
+            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full((nlev, ncols), 1e-9)
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 285.0), tracers=tracers,
+        )
+        diagnostics = {
+            "_jam_state": aer,
+            "aerosol": AerosolData.zeros((ncols,), nlev, n_bnd_sw=3, n_bnd_lw=2),
+            "air_density": jnp.full((nlev, ncols), 1.0),
+            "layer_thickness": jnp.full((nlev, ncols), 500.0),
+            "_band_config": band,
+        }
+        _, diag = term(state, diagnostics, None, None)
+
+        aod = diag["aerosol_optical_depth"]
+        # Column field, one value per column; finite and physical.
+        self.assertEqual(aod.shape, (ncols,))
+        self.assertTrue(np.all(np.isfinite(np.asarray(aod))))
+        self.assertTrue(bool(jnp.all(aod > 0.0)))
+        # It is exactly the column sum of the 550 nm-band per-layer AOD.
+        per_layer_550 = diag["aerosol"].aod_sw_per_band[1]
+        np.testing.assert_allclose(
+            np.asarray(aod), np.asarray(jnp.sum(per_layer_550, axis=0)),
+            rtol=1e-6,
+        )
+
     def test_grad_through_mass(self):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)

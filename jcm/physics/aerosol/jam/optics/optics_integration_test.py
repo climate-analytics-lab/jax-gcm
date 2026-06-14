@@ -45,6 +45,14 @@ class OpticsIntegrationTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(dyn.temperature > 150.0)))
         self.assertTrue(bool(jnp.all(dyn.temperature < 360.0)))
 
+        # The column AOD (~550 nm) diagnostic surfaces in the physics output,
+        # finite and non-negative. (Magnitudes are tiny here — cold-start spin-up
+        # has barely any aerosol — but the field must be present and physical.)
+        aod = predictions.physics["aerosol_optical_depth"]
+        aod = np.asarray(aod)
+        self.assertTrue(np.all(np.isfinite(aod)))
+        self.assertTrue(np.all(aod >= 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()
