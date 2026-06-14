@@ -155,7 +155,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             )
             self.assertIn(key, tend.tracers)
         finally:
-            _amicphys.configure_condensation(backend="diffrax")
+            _amicphys.configure_condensation(backend="substep")
 
     def test_substep_backend_runs_finite_and_physical(self):
         self._assert_backend_runs_finite("substep")
@@ -176,7 +176,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             term = Mam4JaxMicrophysics()
             self.assertEqual(term._condensation_backend, "substep")
         finally:
-            _amicphys.configure_condensation(backend="diffrax")
+            _amicphys.configure_condensation(backend="substep")
 
     def test_enable_x64_control(self):
         from mam4_jax.processes import amicphys as _amicphys
@@ -198,67 +198,11 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             )
             self.assertFalse(term._enable_x64)
             self.assertFalse(jax.config.read("jax_enable_x64"))
-            # diffrax needs float64 — enable_x64=False is overridden (warns).
-            with self.assertLogs(level="WARNING"):
-                dterm = Mam4JaxMicrophysics(
-                    condensation_backend="diffrax", enable_x64=False,
-                )
-            self.assertTrue(dterm._enable_x64)
-            self.assertTrue(jax.config.read("jax_enable_x64"))
+            # diffrax is not a supported backend.
+            with self.assertRaises(ValueError):
+                Mam4JaxMicrophysics(condensation_backend="diffrax")
         finally:
-            _amicphys.configure_condensation(backend="diffrax")
-
-    def test_input_sanitisation_keeps_finite(self):
-        from jcm.physics.aerosol.jam import mass_name
-        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
-            Mam4JaxMicrophysics,
-        )
-
-        # A non-finite / negative input tracer must be sanitised before the
-        # solve so it can never produce a NaN tendency.
-        state, diagnostics = _column_state()
-        bad = dict(state.tracers)
-        bad[mass_name("so4", "acc")] = bad[mass_name("so4", "acc")].at[0, 0].set(
-            jnp.nan
-        )
-        bad[mass_name("bc", "acc")] = bad[mass_name("bc", "acc")].at[1, 0].set(
-            -1.0
-        )
-        state = state.copy(tracers=bad)
-        tend, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
-        for v in tend.tracers.values():
-            self.assertTrue(np.all(np.isfinite(np.asarray(v))))
-
-    def test_nonconvergence_gate_keeps_finite_and_logs(self):
-        from unittest import mock
-
-        from jcm.physics.aerosol.jam import mass_name
-        from jcm.physics.aerosol.jam.microphysics import mam4_jax as _m
-
-        # Force the core to emit non-finite output (a diverged / non-converged
-        # solve). The gate must (a) keep the whole output finite (fall back to a
-        # zero tendency) and (b) log the count rather than silently hiding it.
-        state, diagnostics = _column_state()
-        calcsize, wateruptake, amicphys, data = _m._core()
-
-        def poisoned_amicphys(s):
-            out = dict(amicphys(s))
-            out["q"] = out["q"] * jnp.inf  # every cell non-finite
-            return out
-
-        term = _m.Mam4JaxMicrophysics()
-        key = mass_name("so4", "acc")
-        with mock.patch.object(
-            _m, "_core",
-            return_value=(calcsize, wateruptake, poisoned_amicphys, data),
-        ):
-            with self.assertLogs(_m.logger, level="WARNING") as cm:
-                tend, _ = term(state, diagnostics, None, None)
-                jax.block_until_ready(tend.tracers[key])
-
-        for v in tend.tracers.values():
-            self.assertTrue(np.all(np.isfinite(np.asarray(v))))
-        self.assertTrue(any("did not converge" in m for m in cm.output))
+            _amicphys.configure_condensation(backend="substep")
 
     def test_grad_through_a_tracer_is_finite(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
@@ -286,12 +230,10 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 class Mam4JaxModelTest(unittest.TestCase):
     """End-to-end: the MAM4-JAX core runs inside the full ECHAM GCM.
 
-    Guards the per-cell ``jax.vmap`` of the box-model core. amicphys's
-    gas-exchange uses an implicit diffrax solver; handing it the whole grid as
-    one batched state couples its Jacobian across every cell and the T21
-    compile exceeds 80 GB. With the per-cell vmap the same run compiles in
-    ~1 GB — so a regression here surfaces as an out-of-memory blow-up, not a
-    silent slowdown.
+    Guards the per-cell ``jax.vmap`` of the box-model core: the upstream MAM4
+    box model runs a single cell, so each (level, column) point is integrated
+    independently. A regression that batches the whole grid through the core at
+    once would surface here as a blow-up rather than a silent slowdown.
     """
 
     def setUp(self):

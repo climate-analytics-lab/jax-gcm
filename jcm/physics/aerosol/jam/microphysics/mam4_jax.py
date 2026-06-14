@@ -25,12 +25,13 @@ Licensing & precision
 ----------------------
 MAM4-JAX is **GPL-3.0**; jcm is Apache-2.0. It is therefore an *optional*
 dependency (``pip install jcm[mam4]``) imported lazily here, so a plain jcm
-import never pulls in GPL code. The core's diffrax SOA-exchange ODE solver
-only converges in **float64** (it diverges in float32), so this term enables
-``jax_enable_x64`` at construction and runs the core in float64, casting
-jcm's float32 tracers to float64 at the boundary and the resulting
-tendencies / ``_jam_state`` back to the model dtype. The dynamical core
-keeps creating float32 arrays and is unaffected.
+import never pulls in GPL code. The condensation is integrated with the
+operator-split ``substep`` / ``astem`` backends (the original adaptive diffrax
+solver is not supported — too expensive), both of which are float32-safe. By
+default the term runs the core in float64 (``MAM4_JAX_ENABLE_X64``), casting
+jcm's float32 tracers to the working precision at the boundary and the
+resulting tendencies / ``_jam_state`` back to the model dtype; with
+``enable_x64=False`` the whole model (this core included) runs float32.
 
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
@@ -44,24 +45,12 @@ Deliberately not coupled yet (follow-ups)
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-logger = logging.getLogger(__name__)
-
-
-def _log_nonconverged(n_bad, n_total) -> None:
-    """Host-side log when the non-convergence gate fires (called only if >0)."""
-    logger.warning(
-        "jam/mam4 microphysics: %d of %d cells did not converge in the "
-        "per-cell aerosol solve; their tendency was gated to zero this step.",
-        int(n_bad), int(n_total),
-    )
 
 from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
@@ -144,98 +133,66 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self,
         spec: ModalAerosolSpec | None = None,
         *,
-        rtol: float = 1e-6,
-        atol: float = 1e-15,
-        max_steps: int = 4096,
         condensation_backend: str = "substep",
         n_substeps: int = 4,
         enable_x64: bool | None = None,
     ):
-        """Import the core, set precision, configure the solver, precompute maps.
+        """Import the core, set precision, select the condensation backend.
 
-        ``rtol`` / ``atol`` set the per-cell implicit-solver tolerances of the
-        ``"diffrax"`` condensation backend. The upstream defaults (1e-9 / 1e-20)
-        force float64 and many tiny adaptive steps — the dominant cost of the
-        step. Relaxing to 1e-6 / 1e-15 is ~2.8x faster on the core for ~0.1%
-        per-step error (see the JAM perf study). The solver is also run with
-        ``throw=False`` so a cell that hits ``max_steps`` returns its best
-        estimate instead of aborting the whole vmapped batch; combined with the
-        non-negativity clamp in ``__call__``, this gates cold-start / outlier
-        cells that would otherwise stall the per-cell solve (the batch is paced
-        by its worst cell).
+        The original adaptive ``diffrax`` (Kvaerno5) condensation solve is **not
+        supported** here — it is ~40x the cost of the operator-split backends and
+        not worth it for this model. Only the two operator-split backends are
+        offered:
 
-        ``condensation_backend`` selects how the gas/aerosol condensation in
-        ``gasaerexch`` is integrated:
-
-        * ``"substep"`` (default) — an operator-split fixed-substep integrator
-          (analytic H2SO4 + ``n_substeps`` frozen-``g_star`` SOA substeps, each
-          the exact closed form of the linear sub-ODE). ~10x faster than the
-          relaxed-tolerance diffrax path (~28x over the tight upstream default)
-          at ~0.3%/step vs the tight reference, with no adaptive while-loop (no
-          ``max_steps`` fragility / worst-cell gating). This is the production
-          default; ``n_substeps`` is speed-insensitive so set it for accuracy.
+        * ``"substep"`` (default) — analytic H2SO4 + ``n_substeps``
+          frozen-``g_star`` SOA substeps, each the exact closed form of the
+          linear sub-ODE. No adaptive while-loop, so no ``max_steps`` fragility
+          or worst-cell gating; ``n_substeps`` is speed-insensitive (set it for
+          accuracy).
         * ``"astem"`` — the Fortran-faithful adaptive scheme (upstream
-          semi-implicit step1/step2 SOA with adaptive ``dtcur = alpha/tmpa`` via
-          a per-cell ``while_loop`` + the same analytic H2SO4). Use this to match
-          the CAM/E3SM reference exactly (it reintroduces worst-cell gating, but
-          each substep is cheap arithmetic, not a Newton solve).
-        * ``"diffrax"`` — the adaptive Kvaerno5 solve, governed by the tolerances
-          above. The original path; slowest, kept for reference/validation.
+          semi-implicit step1/step2 SOA with adaptive ``dtcur = alpha/tmpa``,
+          plus the same analytic H2SO4). Use this to match the CAM/E3SM
+          reference exactly.
 
-        ``"substep"`` / ``"astem"`` need a mam4_jax with
-        ``configure_condensation`` (reflective-org/MAM4-JAX#59); if it is absent
-        the wrapper falls back to ``"diffrax"`` with a warning so a stale install
-        still runs.
+        Both need a mam4_jax with ``configure_condensation``
+        (reflective-org/MAM4-JAX#59).
 
-        ``enable_x64`` controls model precision. ``diffrax`` requires float64
-        (its ``atol=1e-20`` is below float32 eps). ``substep`` / ``astem`` are
-        float32-safe, so float32 runs the *whole* coupled model in float32 — the
-        dynamics + 60-tracer spectral transport are the dominant,
-        memory-bandwidth-bound cost, and float32 roughly halves that traffic.
-        ``None`` (default) reads the ``MAM4_JAX_ENABLE_X64`` env var (default
-        ``"1"`` → float64, preserving current behaviour); ``True`` / ``False``
-        override it. The flag is applied here, at construction, so the dycore
-        state built afterwards inherits it.
+        ``enable_x64`` controls model precision. Both backends are float32-safe
+        (the coag ``qv12`` underflow was fixed upstream), so float32 runs the
+        *whole* coupled model in float32 — useful memory headroom (the dynamics +
+        60-tracer spectral transport ~halve their traffic). ``None`` (default)
+        reads the ``MAM4_JAX_ENABLE_X64`` env var (default ``"1"`` → float64,
+        the safe default); ``True`` / ``False`` override it. Applied here, at
+        construction, so the dycore state built afterwards inherits it.
         """
         if spec is not None:
             self.spec = spec
         _, _, _, data = _core()
-        from mam4_jax import solvers as _solvers
-        _solvers.configure(
-            rtol=rtol, atol=atol, max_steps=max_steps, throw=False,
-        )
-        self._rtol, self._atol = float(rtol), float(atol)
 
-        from mam4_jax.processes import amicphys as _amicphys
-        if hasattr(_amicphys, "configure_condensation"):
-            _amicphys.configure_condensation(
-                backend=condensation_backend, n_substeps=n_substeps,
+        if condensation_backend not in ("substep", "astem"):
+            raise ValueError(
+                "condensation_backend must be 'substep' or 'astem' "
+                f"(diffrax is not supported); got {condensation_backend!r}."
             )
-        else:
-            if condensation_backend != "diffrax":
-                logger.warning(
-                    "mam4_jax lacks configure_condensation "
-                    "(reflective-org/MAM4-JAX#59); falling back to the 'diffrax' "
-                    "condensation backend (requested %r).", condensation_backend,
-                )
-            condensation_backend = "diffrax"
+        from mam4_jax.processes import amicphys as _amicphys
+        if not hasattr(_amicphys, "configure_condensation"):
+            raise RuntimeError(
+                "mam4_jax lacks configure_condensation; the operator-split "
+                "condensation backends need reflective-org/MAM4-JAX#59."
+            )
+        _amicphys.configure_condensation(
+            backend=condensation_backend, n_substeps=n_substeps,
+        )
         self._condensation_backend = str(condensation_backend)
         self._n_substeps = int(n_substeps)
 
-        # Precision. diffrax needs float64; substep/astem are float32-safe.
-        # Applied during construction so the dycore state built afterwards (in
-        # bootstrap/run) inherits the precision — toggling it later would leave
-        # an f64 state meeting f32 tendencies (mixed-dtype lax.cond errors).
+        # Precision — applied during construction so the dycore state built
+        # afterwards (in bootstrap/run) inherits it; toggling it later would
+        # leave an f64 state meeting f32 tendencies (mixed-dtype errors).
         if enable_x64 is None:
             want_x64 = os.environ.get("MAM4_JAX_ENABLE_X64", "1") != "0"
         else:
             want_x64 = bool(enable_x64)
-        if self._condensation_backend == "diffrax" and not want_x64:
-            logger.warning(
-                "diffrax condensation backend requires float64; "
-                "ignoring enable_x64=False."
-            )
-            want_x64 = True
         jax.config.update("jax_enable_x64", want_x64)
         self._enable_x64 = want_x64
 
@@ -330,17 +287,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         for name, idx in self._qqcw_pack:
             qqcw = qqcw.at[..., idx].set(fetch(name))
 
-        # Gate (inputs): sanitise to finite, non-negative mixing ratios before
-        # the per-cell solve. Dynamical overshoot / cold-start leaves small
-        # negative (and occasionally non-finite) tracer values that push the
-        # implicit solver into stiff, non-converging regimes — and because the
-        # solve is vmapped, the batch is paced by its worst cell. The same
-        # sanitised values are used for the tendency below, so a bad input can
-        # never produce a NaN tendency.
-        clean = lambda a: jnp.where(jnp.isfinite(a), jnp.maximum(a, 0.0), 0.0)
-        q = clean(q)
-        qqcw = clean(qqcw)
-
         rh = relative_humidity(
             state.temperature, state.specific_humidity,
             diagnostics["pressure_full"],
@@ -376,15 +322,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # full physics (mdo_gasaerexch=rename=newnuc=coag=1, its defaults).
         #
         # The step is ``vmap``-ed over a flattened cell axis so each (level,
-        # column) point solves its OWN box-model ODE. This is essential, not
-        # cosmetic: amicphys's gas-exchange uses an *implicit* diffrax solver,
-        # and passing the whole grid as one batched state makes that solver
-        # form a Jacobian coupled across every cell — its compile cost grows
-        # with (n_cells)² and explodes (>80 GB at T21). Per-cell vmap keeps the
-        # Jacobian at the single-cell size (the upstream box model only ever
-        # ran one cell), collapsing T21 compile to ~1 GB while giving each cell
-        # its own adaptive timestep — the physically correct box-model
-        # semantics.
+        # column) point integrates its OWN box-model — the upstream MAM4 box
+        # model only ever ran a single cell, and per-cell vmap is the faithful
+        # structure for the operator-split substep / astem integrators.
         n_cells = int(np.prod(shape)) if shape else 1
 
         def to_cells(a):
@@ -405,36 +345,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             k: from_cells(flat_out[k])
             for k in ("q", "qqcw", "dgncur_a", "dgncur_awet", "wetdens")
         }
-        # Gate (cont.): a non-converged cell (throw=False) can return non-finite
-        # state. Count those cells and log it — we gate the pathology but do not
-        # hide it. The host callback is wrapped in a cond so the common
-        # all-converged path pays no per-step host sync.
-        nonfinite_cell = ~(
-            jnp.isfinite(out["q"]).all(axis=-1)
-            & jnp.isfinite(out["qqcw"]).all(axis=-1)
-        )
-        n_bad = jnp.sum(nonfinite_cell.astype(jnp.int32))
-        n_total = int(np.prod(shape)) if shape else 1
-        jax.lax.cond(
-            n_bad > 0,
-            lambda nb: jax.debug.callback(_log_nonconverged, nb, n_total),
-            lambda nb: None,
-            n_bad,
-        )
-
-        # Fall back to the input for q/qqcw (→ zero tendency for that cell this
-        # step) and to the prescribed dry diameters / a unit wet density for the
-        # size fields, so one outlier cell never NaN-poisons the aerosol field
-        # or the downstream optics/activation.
-        dgn0 = jnp.broadcast_to(
-            jnp.asarray(self._dgnum, jnp.float64), shape + (self._ntot,)
-        )
-        finite = lambda new, fallback: jnp.where(jnp.isfinite(new), new, fallback)
-        out["q"] = finite(out["q"], q)
-        out["qqcw"] = finite(out["qqcw"], qqcw)
-        out["dgncur_a"] = finite(out["dgncur_a"], dgn0)
-        out["dgncur_awet"] = finite(out["dgncur_awet"], dgn0)
-        out["wetdens"] = finite(out["wetdens"], jnp.ones_like(out["wetdens"]))
         q_new, qqcw_new = out["q"], out["qqcw"]
 
         tracer_tends: dict[str, jnp.ndarray] = {}
