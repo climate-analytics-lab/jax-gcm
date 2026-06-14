@@ -36,6 +36,12 @@ _TINY = 1.0e-30
 _FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 
 
+#: Reference wavelength for the column AOD diagnostic — 550 nm is the
+#: standard visible wavelength for satellite (MODIS/MISR) and AERONET AOD,
+#: so it is the natural observable to validate the scheme against.
+_AOD_REF_NM = 550.0
+
+
 @dataclasses.dataclass(frozen=True)
 class _OpticsCache:
     """Per-band centers and refractive indices (static; nnx treats as a leaf)."""
@@ -44,6 +50,8 @@ class _OpticsCache:
     lw_nm: np.ndarray
     ri_sw: dict          # species -> (n[bands], k[bands])
     ri_lw: dict
+    aod_band_idx: int    # SW band index whose centre is closest to 550 nm
+    aod_band_nm: float   # that band's actual centre wavelength [nm]
 
 
 class JamOpticsTerm(PhysicsTerm):
@@ -54,7 +62,7 @@ class JamOpticsTerm(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "_jam_state", "aerosol", "air_density", "layer_thickness",
     )
-    provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+    provides: ClassVar[tuple[str, ...]] = ("aerosol", "aerosol_optical_depth")
 
     def __init__(self, *, spec: ModalAerosolSpec | None = None):
         """Build the Mie lookup table and hold the population."""
@@ -73,7 +81,15 @@ class JamOpticsTerm(PhysicsTerm):
             n_lw, k_lw = refractive_index_at(sp, jnp.asarray(lw_nm))
             ri_sw[sp] = (np.asarray(n_sw), np.asarray(k_sw))
             ri_lw[sp] = (np.asarray(n_lw), np.asarray(k_lw))
-        self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw)
+        # SW band whose centre is closest to 550 nm — the band the column AOD
+        # diagnostic reports (exact 550 nm with RRTMGP's banding; the single
+        # broadband centre for grey radiation).
+        if sw_nm.size:
+            aod_idx = int(np.argmin(np.abs(sw_nm - _AOD_REF_NM)))
+            aod_nm = float(sw_nm[aod_idx])
+        else:
+            aod_idx, aod_nm = 0, float("nan")
+        self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm)
 
     def _band_optics(self, state, aer, num_per_area, centers_nm, ri):
         """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``.
@@ -157,5 +173,24 @@ class JamOpticsTerm(PhysicsTerm):
             aod_sw_per_band=aod_sw, ssa_sw_per_band=ssa_sw, asy_sw_per_band=asy_sw,
             aod_lw_per_band=aod_lw, ssa_lw_per_band=ssa_lw, asy_lw_per_band=asy_lw,
         )
+
+        # Column aerosol optical depth at ~550 nm: the total-column extinction
+        # optical depth (sum of the per-layer band AOD over the vertical axis 0)
+        # in the SW band closest to 550 nm. This is the standard satellite /
+        # AERONET observable, so it is the cleanest external check on the scheme.
+        # ``aod_sw`` is ``(n_band, nlev, *horiz)``; the column AOD is ``(*horiz)``.
+        # Clamp at 0: optical depth is non-negative by definition, but spectral
+        # transport leaves small negative aerosol number on the near-zero
+        # cold-start field (Gibbs ringing), which can drive a tiny negative
+        # per-layer extinction. The floor keeps the reported observable physical.
+        if aod_sw.shape[0]:
+            aod_550 = jnp.maximum(jnp.sum(aod_sw[c.aod_band_idx], axis=0), 0.0)
+        else:
+            aod_550 = jnp.zeros_like(state.temperature[0])
+
         tendency = PhysicsTendency.zeros(state.temperature.shape)
-        return tendency, {**diagnostics, "aerosol": new_aerosol}
+        return tendency, {
+            **diagnostics,
+            "aerosol": new_aerosol,
+            "aerosol_optical_depth": aod_550,
+        }
