@@ -179,8 +179,12 @@ class JamOpticsTerm(PhysicsTerm):
         # in the SW band closest to 550 nm. This is the standard satellite /
         # AERONET observable, so it is the cleanest external check on the scheme.
         # ``aod_sw`` is ``(n_band, nlev, *horiz)``; the column AOD is ``(*horiz)``.
+        # Clamp at 0: optical depth is non-negative by definition, but spectral
+        # transport leaves small negative aerosol number on the near-zero
+        # cold-start field (Gibbs ringing), which can drive a tiny negative
+        # per-layer extinction. The floor keeps the reported observable physical.
         if aod_sw.shape[0]:
-            aod_550 = jnp.sum(aod_sw[c.aod_band_idx], axis=0)
+            aod_550 = jnp.maximum(jnp.sum(aod_sw[c.aod_band_idx], axis=0), 0.0)
         else:
             aod_550 = jnp.zeros_like(state.temperature[0])
 
