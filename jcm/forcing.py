@@ -544,22 +544,41 @@ def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
     ``cftime`` axes from non-standard calendars — the CESM emission files use a
     ``365_day`` (noleap) calendar, which xarray decodes to ``cftime`` objects
     that pandas can't ingest.
+
+    Both kinds are placed on the **same Gregorian clock the model runs on** by
+    aligning on the *nominal* calendar date ``(year, month, day, …)``. This is
+    deliberate: the ``BY_DATE`` lookup target is
+    :func:`jcm.date.absolute_seconds_since_epoch`, which is built from
+    ``jax_datetime`` and is leap-aware Gregorian (the model has no real noleap
+    clock — see #449). Converting a ``365_day`` axis with *noleap day-counting*
+    (e.g. ``cftime.date2num(..., calendar='365_day')``) would instead drift
+    against that target by the accumulated leap days (~7 days by 2000, growing
+    every leap year), so ``searchsorted`` would pick the wrong slice and corrupt
+    multi-year prescribed-emissions runs. Mapping each cftime date by its
+    calendar components onto the Gregorian epoch keeps file and model on one
+    clock; noleap dates are always valid Gregorian dates (no 29 Feb), so the
+    mapping is exact.
     """
     import numpy as np
+    import pandas as pd
     vals = np.asarray(ds["time"].values)
     if vals.dtype == object:
-        # cftime objects (a non-standard calendar like 365_day) — pandas can't
-        # ingest these; convert in the file's own calendar.
-        import cftime
+        # cftime objects (a non-standard calendar like 365_day). Reinterpret
+        # each by its (y, m, d, h, m, s) components on the Gregorian clock —
+        # NOT by the file calendar's day count — so the axis matches the model's
+        # leap-aware lookup target (see docstring).
+        import datetime as _dt
         flat = np.ravel(vals)
-        cal = ((getattr(flat[0], "calendar", None)
-                or ds["time"].encoding.get("calendar", "standard"))
-               if flat.size else "standard")
-        delta = cftime.date2num(
-            vals, "seconds since 1970-01-01 00:00:00", calendar=cal)
+        py_dates = [
+            _dt.datetime(d.year, d.month, d.day,
+                         getattr(d, "hour", 0), getattr(d, "minute", 0),
+                         getattr(d, "second", 0))
+            for d in flat
+        ]
+        idx = pd.DatetimeIndex(py_dates) if py_dates else pd.DatetimeIndex([])
+        delta = (idx - pd.Timestamp("1970-01-01")).total_seconds().to_numpy()
     else:
         # datetime64, or plain numeric (pandas interprets the latter as ns).
-        import pandas as pd
         delta = (pd.DatetimeIndex(vals)
                  - pd.Timestamp("1970-01-01")).total_seconds().to_numpy()
     return jnp.asarray(np.asarray(delta, dtype=float))
