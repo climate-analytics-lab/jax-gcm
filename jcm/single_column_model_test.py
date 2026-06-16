@@ -9,9 +9,30 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers, create_single_column_state
+
+
+class _IdentityTempPhysics(Physics):
+    """Minimal physics whose temperature tendency equals the temperature.
+
+    Lets the free-evolution and ``state_closure`` hooks be tested with exact
+    arithmetic: with ``dt`` seconds, ``T_{n+1} = T_n + dt·T_seen``, where
+    ``T_seen`` is whatever temperature the closure leaves on the state.
+    """
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            temperature=state.temperature,
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
 
 
 def _make_column_state(nlev: int) -> PhysicsState:
@@ -148,6 +169,91 @@ class TestSCMHelpers(unittest.TestCase):
         self.assertEqual(set(tracers), {'qc', 'qi'})
         self.assertEqual(tracers['qc'].shape, (4,))
         self.assertAlmostEqual(float(tracers['qc'][0]), 1e-4)
+
+
+def _simple_column(nlev: int, temperature) -> PhysicsState:
+    """Build a minimal 1-D column with a given temperature profile (zeros elsewhere)."""
+    return PhysicsState(
+        u_wind=jnp.zeros(nlev),
+        v_wind=jnp.zeros(nlev),
+        temperature=jnp.asarray(temperature, dtype=jnp.float32),
+        specific_humidity=jnp.zeros(nlev),
+        geopotential=jnp.zeros(nlev),
+        normalized_surface_pressure=jnp.asarray(1.0),
+        tracers={},
+    )
+
+
+class TestSCMFreeEvolveAndClosure(unittest.TestCase):
+    """The ``free_evolve`` and ``state_closure`` hooks (issue #523 RCE support)."""
+
+    def test_free_evolve_overlap_raises(self):
+        with self.assertRaises(ValueError):
+            SingleColumnModel(
+                physics=_IdentityTempPhysics(),
+                vertical=SigmaCoordinates.equidistant(4),
+                relaxation_timescales={'temperature': 100.0},
+                free_evolve=('temperature',),
+            )
+
+    def test_free_evolve_integrates_physics_tendency(self):
+        """With ``dT/dt = T`` and ``dt = 1 s``, T doubles every step (no nudging)."""
+        nlev = 4
+        T0 = jnp.array([280.0, 260.0, 240.0, 220.0])
+        column = _simple_column(nlev, T0)
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=('temperature',),
+        )
+        preds = scm.run([column, column, column])
+        T_hist = preds.relaxed_states['temperature']
+        self.assertEqual(T_hist.shape, (3, nlev))
+        for k in range(3):
+            # Post-step value after k+1 doublings.
+            self.assertTrue(
+                jnp.allclose(T_hist[k], T0 * 2.0 ** (k + 1), rtol=1e-5),
+            )
+        # The tendency recorded at step k is the temperature physics *saw*.
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(
+                    preds.tendencies.temperature[k], T0 * 2.0 ** k, rtol=1e-5,
+                ),
+            )
+
+    def test_state_closure_overwrites_state_before_physics(self):
+        """A closure pinning T to a constant makes physics see that constant."""
+        nlev = 4
+        T0 = jnp.array([280.0, 260.0, 240.0, 220.0])
+        C = 300.0
+        column = _simple_column(nlev, T0)
+
+        def pin_temperature(state, forcing):
+            return state.copy(
+                temperature=jnp.full_like(state.temperature, C),
+            )
+
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=('temperature',),
+            state_closure=pin_temperature,
+        )
+        preds = scm.run([column, column, column])
+        # Physics always sees the pinned constant, so every recorded tendency is C.
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(preds.tendencies.temperature[k], C, rtol=1e-6),
+            )
+        # Free-evolving T accumulates dt·C each step from the IC.
+        T_hist = preds.relaxed_states['temperature']
+        for k in range(3):
+            self.assertTrue(
+                jnp.allclose(T_hist[k], T0 + (k + 1) * C, rtol=1e-5),
+            )
 
 
 # Slow-marked companions — see jcm/runners_test.py for rationale.
