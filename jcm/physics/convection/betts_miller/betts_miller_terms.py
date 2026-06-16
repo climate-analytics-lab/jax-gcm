@@ -64,20 +64,19 @@ class BettsMillerConvection(PhysicsTerm):
         phalf = a_half + b_half * ps[None]                     # (kx+1, *horiz)
         pfull = 0.5 * (phalf[:-1] + phalf[1:])                 # (kx, *horiz)
 
-        # PhysicsState carries specific humidity in kg/kg — the canonical
-        # physics convention (the dynamics→physics bridge produces kg/kg and the
-        # radiation / Sundqvist / Tiedtke terms all consume kg/kg), which is
-        # exactly the unit ``betts_miller_tendencies`` works in. No conversion.
-        dtemp_dt, dq_dt, precip = betts_miller_tendencies(
-            state.temperature, state.specific_humidity, pfull, phalf, dt,
-            self.params.get_value(),
+        # PhysicsState carries specific humidity in g/kg; the scheme works in
+        # SI kg/kg internally.
+        q_kgkg = state.specific_humidity / 1000.0
+
+        dtemp_dt, dq_dt_kgkg, precip = betts_miller_tendencies(
+            state.temperature, q_kgkg, pfull, phalf, dt, self.params.get_value(),
         )
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
             v_wind=jnp.zeros_like(state.v_wind),
             temperature=dtemp_dt,
-            specific_humidity=dq_dt,                            # kg/kg/s
+            specific_humidity=dq_dt_kgkg * 1000.0,             # kg/kg/s -> g/kg/s
         )
 
         diagnostics = dict(diagnostics)

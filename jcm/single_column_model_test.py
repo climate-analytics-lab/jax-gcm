@@ -35,6 +35,26 @@ class _IdentityTempPhysics(Physics):
         return {}
 
 
+class _DryingPhysics(Physics):
+    """Returns a constant strong negative specific-humidity tendency.
+
+    Used to check that a freely evolving ``specific_humidity`` is floored at
+    zero in the carry rather than going negative.
+    """
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            specific_humidity=jnp.full_like(state.specific_humidity, -1.0),
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
+
+
 def _make_column_state(nlev: int) -> PhysicsState:
     """Build a vertically stratified 1-D column state."""
     z = jnp.linspace(0, 30000, nlev)[::-1]
@@ -222,6 +242,25 @@ class TestSCMFreeEvolveAndClosure(unittest.TestCase):
                     preds.tendencies.temperature[k], T0 * 2.0 ** k, rtol=1e-5,
                 ),
             )
+
+    def test_free_evolved_humidity_is_floored_at_zero(self):
+        """A freely evolving specific_humidity never carries a negative value."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0)).copy(
+            specific_humidity=jnp.full(nlev, 0.5),
+        )
+        scm = SingleColumnModel(
+            physics=_DryingPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            free_evolve=("specific_humidity",),
+        )
+        preds = scm.run([column, column, column])
+        q_hist = preds.relaxed_states["specific_humidity"]
+        # dq/dt = -1, dt = 1 would drive 0.5 -> -0.5 on step 0; the clamp holds
+        # it at 0 and keeps it there.
+        self.assertTrue(bool(jnp.all(q_hist >= 0.0)))
+        self.assertTrue(jnp.allclose(q_hist, 0.0))
 
     def test_state_closure_overwrites_state_before_physics(self):
         """A closure pinning T to a constant makes physics see that constant."""

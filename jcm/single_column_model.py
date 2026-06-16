@@ -333,9 +333,15 @@ class SingleColumnModel:
                 else:
                     target_val = getattr(prescribed_column, name)
                     nudging_tend = (target_val - current_val) / tau
-                updated_evolving_vars[name] = (
-                    current_val + dt_seconds * (phys_tend + nudging_tend)
-                )
+                updated = current_val + dt_seconds * (phys_tend + nudging_tend)
+                # Keep positive-definite prognostics non-negative in the carry,
+                # mirroring the tracer update above and ``verify_state`` in the
+                # full ``Model`` path: an interactive step whose physics dries a
+                # layer by more than its current humidity over ``dt`` would
+                # otherwise carry a negative ``specific_humidity`` forward.
+                if name == "specific_humidity":
+                    updated = jnp.maximum(updated, 0.0)
+                updated_evolving_vars[name] = updated
 
             return tendencies, updated_tracers, updated_evolving_vars, new_physics_data
 
