@@ -8,11 +8,12 @@ Everything runs through the same ``compute_tendencies`` path the full model uses
 
 The pieces it wires together:
 
-* **Radiation + convection as terms.** :func:`rce_physics` starts from
-  ``echam_physics(...)`` and, for a clean fixed-SST RCE, trims it to the
-  radiatively essential preamble + the radiation term + the chosen convection
-  term (Betts-Miller by default — "moist-adiabat relaxation at fixed RH", which
-  is exactly Case 1 of #523).
+* **Radiation + convection as terms.** :func:`rce_physics` composes — directly
+  with ``ComposablePhysics`` — just the radiation and convection terms plus the
+  small diagnostic preamble radiation requires (pressure/density, surface BCs,
+  zeroed aerosol + clouds). Betts-Miller is the default convection ("moist-
+  adiabat relaxation at fixed RH" = Case 1 of #523); pass any radiation /
+  convection term, or hand the SCM a fully custom ``physics`` instead.
 * **Fixed SST as the lower boundary.** Set on ``forcing.sea_surface_temperature``;
   ``EchamBoundaryConditions`` (which runs before radiation) copies it into the
   ``surface`` diagnostic the radiation term reads. No surface-flux term needed.
@@ -50,7 +51,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -59,59 +60,73 @@ from dinosaur.hybrid_coordinates import HybridCoordinates
 
 import jcm.constants as c
 from jcm.forcing import ForcingData, SolarGeometry
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.physics.aerosol.aerosol_types import AerosolData
+from jcm.physics.clouds.cloud_data import CloudData
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.convection.betts_miller import (
     BettsMillerConvection,
     BettsMillerParameters,
 )
+from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
+from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
 from jcm.physics.echam.echam_levels import get_echam_levels
-from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
+from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers
 
-# Categories stripped from ``echam_physics`` for a clean fixed-SST RCE. These
-# all run *after* radiation in the ECHAM ordering and nothing upstream of them
-# (the radiation preamble + radiation + convection we keep) consumes what they
-# provide, so dropping them leaves a package that still passes
-# ``ComposablePhysics`` ordering validation. ``"clouds"`` is the cloud
-# *microphysics* term (``Echam1MMicrophysics`` / ``Lohmann2MMicrophysics``);
-# the diagnostic cloud-fraction term radiation needs is ``"cloud_fraction"``
-# (``SundqvistCloudFraction``), which is kept.
-_NON_RCE_CATEGORIES = ("clouds", "vertical_diffusion", "surface", "hines", "sso")
+
+class _ClearSky(PhysicsTerm):
+    """Provide zeroed ``aerosol`` and ``clouds`` diagnostics for a clear-sky RCE.
+
+    A radiation term ``requires`` the ``aerosol`` and ``clouds`` diagnostic keys,
+    but for a clean clear-sky, aerosol-free RCE both are zero (cf. the zeroed
+    ``aerosol_data`` and cloud fields in the issue #523 prototype). This stands
+    in for the full ``Macv2SpAerosol`` + ``SundqvistCloudFraction`` terms; the SW
+    band count for the aerosol optics is read from the active radiation backend.
+    """
+
+    name: ClassVar[str] = "clear_sky"
+    category: ClassVar[str] = "clear_sky"
+    provides: ClassVar[tuple[str, ...]] = ("aerosol", "clouds")
+
+    def __init__(self) -> None:
+        self._n_bnd_sw = 14
+        self._n_bnd_lw = 16
+
+    def cache_band_config(self, band_config) -> None:
+        """Match the aerosol band count to the radiation backend (RRTMGP / grey)."""
+        self._n_bnd_sw = len(band_config.sw_band_centers_nm)
+        self._n_bnd_lw = len(band_config.lw_band_centers_nm)
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Return zero tendency and zeroed aerosol + cloud diagnostics."""
+        nlev, ncols = state.temperature.shape
+        return PhysicsTendency.zeros(state.temperature.shape), {
+            **diagnostics,
+            "aerosol": AerosolData.zeros(
+                (ncols,), nlev, n_bnd_sw=self._n_bnd_sw, n_bnd_lw=self._n_bnd_lw,
+            ),
+            "clouds": CloudData.zeros((ncols,), nlev),
+        }
 
 
-def _half_level_coeffs(vertical):
-    """Return ``(a_half, b_half)`` so that ``p_half = a_half + b_half · p_s``.
+def _pressure_centers(vertical, surface_pressure_pa):
+    """Full-level pressure [Pa] for a single column from the vertical coordinate.
 
-    Mirrors :meth:`BettsMillerConvection.cache_coords`: hybrid grids carry
-    ``a_boundaries`` (Pa) and ``b_boundaries`` directly; sigma grids are pure
-    ``b`` (``a = 0``).
+    Reuses :meth:`HybridCoordinates.pressure_centers`; for sigma coordinates the
+    full-level pressure is just ``sigma_centers · p_s``. Top-first (index 0 =
+    model top), matching the column-state ordering.
     """
     if isinstance(vertical, HybridCoordinates):
-        a_half = jnp.asarray(vertical.a_boundaries)   # Pa
-        b_half = jnp.asarray(vertical.b_boundaries)   # dimensionless
-    else:  # SigmaCoordinates
-        sigma_boundaries = jnp.asarray(vertical.boundaries)
-        a_half = jnp.zeros_like(sigma_boundaries)
-        b_half = sigma_boundaries
-    return a_half, b_half
-
-
-def _full_level_pressure(a_half, b_half, surface_pressure_pa):
-    """Full-level pressure (Pa) from the half-level coefficients and ``p_s``.
-
-    Broadcasting-native: ``surface_pressure_pa`` may be a scalar (single column)
-    or carry trailing horizontal axes, matching the column-physics convention.
-    """
-    lev = (-1,) + (1,) * jnp.ndim(surface_pressure_pa)
-    phalf = (
-        a_half.reshape(lev)
-        + b_half.reshape(lev) * surface_pressure_pa[None]
-    )
-    return 0.5 * (phalf[:-1] + phalf[1:])
+        return vertical.pressure_centers(surface_pressure_pa)
+    return jnp.asarray(vertical.centers) * surface_pressure_pa
 
 
 # Manabe & Wetherald (1967) sigma at which the prescribed RH reaches zero
@@ -159,14 +174,13 @@ def fixed_rh_closure(
     humidity to the freely evolving temperature — the fixed-RH assumption of
     Case 1 in issue #523.
     """
-    a_half, b_half = _half_level_coeffs(vertical)
     rh = float(relative_humidity)
 
     def closure(state: PhysicsState, forcing: ForcingData) -> PhysicsState:
         ps = state.normalized_surface_pressure * c.p0
-        pfull = _full_level_pressure(a_half, b_half, ps)
-        q_gkg = _fixed_rh_specific_humidity(pfull, ps, state.temperature, rh)
-        return state.copy(specific_humidity=q_gkg)
+        pfull = _pressure_centers(vertical, ps)
+        q = _fixed_rh_specific_humidity(pfull, ps, state.temperature, rh)
+        return state.copy(specific_humidity=q)
 
     return closure
 
@@ -194,70 +208,46 @@ def steady_insolation(
 
 
 def rce_physics(
-    *,
-    radiation_scheme: str = "rrtmgp",
-    convection: str = "betts_miller",
-    solar_constant: float = 728.4,
-    relative_humidity: float = 0.7,
-    tau_convection: float = 7200.0,
-    interactive: bool = False,
-    **echam_kwargs,
+    radiation: PhysicsTerm | None = None,
+    convection: PhysicsTerm | None = None,
 ) -> ComposablePhysics:
-    """Build the RCE physics package from the composable ECHAM terms.
+    """Compose the minimal radiative-convective stack with ``ComposablePhysics``.
+
+    A radiation term needs a few diagnostics, so the package is just what it
+    requires — :class:`MoistAirColumnState` (pressure, density),
+    :class:`EchamBoundaryConditions` (surface temperature/albedo and the analytic
+    ozone/CO₂ radiation reads), and :class:`_ClearSky` (zeroed aerosol + cloud
+    diagnostics) — followed by the ``radiation`` and ``convection`` terms. Six
+    terms, composed directly: a clean clear-sky, fixed-SST radiative-convective
+    column with no surface fluxes, vertical diffusion, microphysics or aerosol.
 
     Args:
-        radiation_scheme: ``"rrtmgp"`` (default), ``"grey"``, or ``"emulated"``
-            — forwarded to ``echam_physics``.
-        convection: ``"betts_miller"`` (default; moist-adiabat relaxation toward
-            ``relative_humidity``) or ``"tiedtke"`` (keep the ECHAM mass-flux
-            scheme). Custom schemes can be swapped in afterwards with
-            ``physics.replace("convection", term)``.
-        solar_constant: Solar constant [W/m²] on ``RadiationParameters``; sets
-            the insolation magnitude.
-        relative_humidity: Target RH for the Betts-Miller reference profile
-            (``rhbm``); should match the :func:`fixed_rh_closure` value.
-        tau_convection: Betts-Miller relaxation timescale ``tau_bm`` [s].
-        interactive: When ``False`` (default), trim the stack to the
-            radiatively essential preamble + radiation + convection (see
-            :data:`_NON_RCE_CATEGORIES`) for a clean fixed-SST, fixed-RH RCE.
-            When ``True``, keep the full ECHAM stack (surface fluxes, vertical
-            diffusion, microphysics, gravity waves) — the interactive-moisture /
-            RCEMIP-style configuration.
-        **echam_kwargs: Forwarded to ``echam_physics`` (e.g. ``cloud_scheme``).
+        radiation: Radiation ``PhysicsTerm``; defaults to RRTMGP. Pass a
+            ``GreyTwoStreamRadiation`` for a cheap test, or any custom term.
+        convection: Convection ``PhysicsTerm``; defaults to Betts-Miller.
 
     Returns:
-        A ready-to-run ``ComposablePhysics``.
+        A ``ComposablePhysics`` (column-vectorised) ready for the SCM.
 
     """
-    physics = echam_physics(
-        radiation_scheme=radiation_scheme,
-        radiation=RadiationParameters.default(solar_constant=solar_constant),
-        **echam_kwargs,
+    radiation = radiation or RRTMGPRadiation(params=RadiationParameters.default())
+    convection = convection or BettsMillerConvection()
+    band_config = (
+        RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
+        if isinstance(radiation, RRTMGPRadiation)
+        else RadiationBandConfig.broadband()
     )
-
-    if convection == "betts_miller":
-        params = BettsMillerParameters.default().replace(
-            tau_bm=jnp.asarray(float(tau_convection)),
-            rhbm=jnp.asarray(float(relative_humidity)),
-        )
-        physics = physics.replace("convection", BettsMillerConvection(params))
-    elif convection != "tiedtke":
-        raise ValueError(
-            f"Unknown convection={convection!r}; choose 'betts_miller' or 'tiedtke'."
-        )
-
-    if not interactive:
-        # Rebuild once with the non-RCE categories filtered out (rather than a
-        # chain of ``.remove`` calls) so ordering validation runs a single time
-        # on the final term set.
-        physics = ComposablePhysics(
-            terms=[t for t in physics.terms if t.category not in _NON_RCE_CATEGORIES],
-            checkpoint_terms=physics.checkpoint_terms,
-            vectorize_columns=physics.vectorize_columns,
-            dt_seconds=physics.dt_seconds,
-            band_config=physics.band_config,
-        )
-    return physics
+    return ComposablePhysics(
+        terms=[
+            MoistAirColumnState(),
+            EchamBoundaryConditions(),
+            _ClearSky(),
+            radiation,
+            convection,
+        ],
+        vectorize_columns=True,
+        band_config=band_config,
+    )
 
 
 def rce_initial_state(
@@ -277,15 +267,14 @@ def rce_initial_state(
     zero; ``qc``/``qi`` tracers are zero. Surface pressure defaults to the
     thermodynamic reference ``c.p0``.
     """
-    a_half, b_half = _half_level_coeffs(vertical)
     ps = c.p0 if surface_pressure is None else float(surface_pressure)
-    pfull = _full_level_pressure(a_half, b_half, jnp.asarray(ps))
+    pfull = _pressure_centers(vertical, jnp.asarray(ps))
 
     # Hydrostatic height with a 7.6 km scale height (matches #523's prototype),
     # purely to seed a plausible lapse-rate profile.
     z = -7.6e3 * jnp.log(pfull / ps)
     temperature = jnp.maximum(sst - lapse_rate * z, stratosphere_temperature)
-    q_gkg = _fixed_rh_specific_humidity(
+    q = _fixed_rh_specific_humidity(
         pfull, jnp.asarray(ps), temperature, float(relative_humidity),
     )
     nlev = pfull.shape[0]
@@ -294,7 +283,7 @@ def rce_initial_state(
         u_wind=jnp.zeros(nlev),
         v_wind=jnp.zeros(nlev),
         temperature=temperature,
-        specific_humidity=q_gkg,
+        specific_humidity=q,
         geopotential=c.grav * z,
         normalized_surface_pressure=jnp.asarray(ps / c.p0),
         tracers=create_initial_tracers(nlev),
@@ -320,7 +309,7 @@ def rce_column(
 ) -> SingleColumnModel:
     """Configure a :class:`SingleColumnModel` for radiative-convective equilibrium.
 
-    Builds the trimmed RCE physics (unless ``physics`` is supplied), a fixed-SST
+    Builds the minimal RCE physics (unless ``physics`` is supplied), a fixed-SST
     + steady-insolation + fixed-CO₂ ``ForcingData``, and wires temperature into
     ``free_evolve`` with a :func:`fixed_rh_closure` ``state_closure`` (unless
     ``interactive_humidity=True``, in which case humidity evolves freely too and
@@ -337,10 +326,14 @@ def rce_column(
         vertical: Optional explicit vertical coordinate (e.g. a
             ``SigmaCoordinates`` for a cheap test grid); overrides ``nlev``.
         dt_seconds: Physics timestep [s].
-        radiation_scheme, convection, tau_convection, interactive_humidity:
-            See :func:`rce_physics`.
+        radiation_scheme: ``"rrtmgp"`` (default) or ``"grey"``.
+        convection: ``"betts_miller"`` (default) or ``"tiedtke"``.
+        tau_convection: Betts-Miller relaxation timescale ``tau_bm`` [s].
+        interactive_humidity: When ``True``, evolve humidity freely (no closure)
+            instead of slaving it to fixed RH.
         day_of_year_fraction: Sun position for :func:`steady_insolation`.
-        physics: Optional pre-built physics package (skips :func:`rce_physics`).
+        physics: Pre-built ``ComposablePhysics`` (skips the default build, so
+            you compose any terms you like — the point of ``ComposablePhysics``).
 
     Returns:
         A ``SingleColumnModel`` ready for :func:`run_rce`.
@@ -350,14 +343,27 @@ def rce_column(
         vertical = get_echam_levels(nlev)
 
     if physics is None:
-        physics = rce_physics(
-            radiation_scheme=radiation_scheme,
-            convection=convection,
-            solar_constant=solar_constant,
-            relative_humidity=relative_humidity,
-            tau_convection=tau_convection,
-            interactive=interactive_humidity,
-        )
+        rad_params = RadiationParameters.default(solar_constant=solar_constant)
+        if radiation_scheme == "rrtmgp":
+            radiation = RRTMGPRadiation(params=rad_params)
+        elif radiation_scheme == "grey":
+            radiation = GreyTwoStreamRadiation(params=rad_params)
+        else:
+            raise ValueError(
+                f"Unknown radiation_scheme={radiation_scheme!r}; choose 'rrtmgp' or 'grey'."
+            )
+        if convection == "betts_miller":
+            convection_term = BettsMillerConvection(BettsMillerParameters.default().replace(
+                rhbm=jnp.asarray(float(relative_humidity)),
+                tau_bm=jnp.asarray(float(tau_convection)),
+            ))
+        elif convection == "tiedtke":
+            convection_term = TiedtkeConvection()
+        else:
+            raise ValueError(
+                f"Unknown convection={convection!r}; choose 'betts_miller' or 'tiedtke'."
+            )
+        physics = rce_physics(radiation=radiation, convection=convection_term)
 
     forcing = ForcingData.zeros((1, 1)).copy(
         sea_surface_temperature=jnp.full((1, 1), float(sst)),

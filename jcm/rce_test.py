@@ -21,8 +21,7 @@ from jcm.forcing import SolarGeometry
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.rce import (
     _STRATOSPHERE_Q_FLOOR,
-    _full_level_pressure,
-    _half_level_coeffs,
+    _pressure_centers,
     fixed_rh_closure,
     rce_column,
     rce_initial_state,
@@ -48,9 +47,8 @@ class TestFixedRhClosure(unittest.TestCase):
         closure = fixed_rh_closure(rh, self.vertical)
         out = closure(self.ic, forcing=None)
 
-        a_half, b_half = _half_level_coeffs(self.vertical)
         ps = float(self.ic.normalized_surface_pressure) * c.p0
-        pfull = _full_level_pressure(a_half, b_half, jnp.asarray(ps))
+        pfull = _pressure_centers(self.vertical, jnp.asarray(ps))
         sigma = pfull / ps
         rh_profile = rh * jnp.clip((sigma - 0.02) / 0.98, 0.0, 1.0)
         expected = jnp.maximum(
@@ -97,42 +95,28 @@ class TestSteadyInsolation(unittest.TestCase):
 
 
 class TestRcePhysicsComposition(unittest.TestCase):
-    """``rce_physics`` term selection."""
+    """``rce_physics`` composes the minimal radiative-convective stack directly."""
 
-    def test_default_is_trimmed_radiative_convective(self):
-        physics = rce_physics(radiation_scheme="grey")
-        categories = [t.category for t in physics.terms]
+    def test_default_is_minimal_radiative_convective(self):
+        physics = rce_physics()
         self.assertEqual(
-            categories,
-            ["prepare", "forcing", "aerosol", "chemistry",
-             "cloud_fraction", "radiation", "convection"],
+            [t.category for t in physics.terms],
+            ["prepare", "forcing", "clear_sky", "radiation", "convection"],
         )
-        convection = [t for t in physics.terms if t.category == "convection"][0]
-        self.assertEqual(convection.name, "betts_miller_convection")
+        names = {t.category: t.name for t in physics.terms}
+        self.assertEqual(names["radiation"], "rrtmgp_radiation")
+        self.assertEqual(names["convection"], "betts_miller_convection")
 
-    def test_betts_miller_rh_matches_request(self):
-        physics = rce_physics(radiation_scheme="grey", relative_humidity=0.65,
-                              tau_convection=5400.0)
-        bm = [t for t in physics.terms if t.category == "convection"][0]
-        params = bm.params.get_value()
-        self.assertAlmostEqual(float(params.rhbm), 0.65, places=5)
-        self.assertAlmostEqual(float(params.tau_bm), 5400.0, places=3)
+    def test_accepts_custom_radiation_and_convection_terms(self):
+        from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
+        from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 
-    def test_interactive_keeps_full_stack(self):
-        physics = rce_physics(radiation_scheme="grey", interactive=True)
-        categories = {t.category for t in physics.terms}
-        # The trimmed-away terms are present in the interactive configuration.
-        self.assertIn("surface", categories)
-        self.assertIn("vertical_diffusion", categories)
-
-    def test_tiedtke_convection_option(self):
-        physics = rce_physics(radiation_scheme="grey", convection="tiedtke")
-        convection = [t for t in physics.terms if t.category == "convection"][0]
-        self.assertEqual(convection.name, "tiedtke_convection")
-
-    def test_unknown_convection_raises(self):
-        with self.assertRaises(ValueError):
-            rce_physics(convection="nope")
+        physics = rce_physics(
+            radiation=GreyTwoStreamRadiation(), convection=TiedtkeConvection(),
+        )
+        names = {t.category: t.name for t in physics.terms}
+        self.assertEqual(names["radiation"], "grey_two_stream_radiation")
+        self.assertEqual(names["convection"], "tiedtke_convection")
 
 
 class TestRceColumnConstruction(unittest.TestCase):
@@ -145,6 +129,23 @@ class TestRceColumnConstruction(unittest.TestCase):
         self.assertEqual(scm.free_evolve, ("temperature",))
         self.assertIsNotNone(scm.state_closure)
         self.assertAlmostEqual(float(scm.forcing.sea_surface_temperature[0, 0]), 302.0)
+
+    def test_betts_miller_params_from_rce_column(self):
+        scm = rce_column(relative_humidity=0.65, tau_convection=5400.0,
+                         vertical=SigmaCoordinates.equidistant(8), radiation_scheme="grey")
+        bm = [t for t in scm.physics.terms if t.category == "convection"][0]
+        params = bm.params.get_value()
+        self.assertAlmostEqual(float(params.rhbm), 0.65, places=5)
+        self.assertAlmostEqual(float(params.tau_bm), 5400.0, places=3)
+
+    def test_unknown_radiation_scheme_raises(self):
+        with self.assertRaises(ValueError):
+            rce_column(radiation_scheme="nope", vertical=SigmaCoordinates.equidistant(8))
+
+    def test_unknown_convection_raises(self):
+        with self.assertRaises(ValueError):
+            rce_column(radiation_scheme="grey", convection="nope",
+                       vertical=SigmaCoordinates.equidistant(8))
 
     def test_interactive_humidity_frees_q_and_drops_closure(self):
         scm = rce_column(relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),
