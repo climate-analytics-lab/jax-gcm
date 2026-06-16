@@ -29,22 +29,13 @@ The pieces it wires together:
   terms communicate only through tendencies and the diagnostics dict, so one
   term cannot overwrite the ``q`` that downstream terms read within a step.)
 
-.. warning::
-
-   **Known blocker — specific-humidity unit inconsistency.** The closure here
-   follows the *canonical* ``PhysicsState.specific_humidity`` convention of
-   **g/kg** (what ``jcm/dycore/dinosaur/state_bridge.py`` produces and what
-   ``BettsMillerConvection`` consumes — it divides by 1000 internally). But the
-   radiation terms (grey two-stream and RRTMGP) and ``SundqvistCloudFraction``
-   currently treat ``state.specific_humidity`` as **kg/kg** (they clip it to
-   ``[0, 0.99]`` and form ``h2o_vmr = q/(1-q)·1.608`` without a g/kg→kg/kg
-   conversion). Consequences for RCE today: the radiation/cloud terms see a
-   column ~1000× too moist (clipped to saturation), and RRTMGP NaNs outright on
-   realistic moisture. The *framework* below is correct and becomes physically
-   faithful the moment the convention is unified upstream; until then the
-   integration helpers are useful for exercising the machinery (grey radiation
-   stays finite), not for quantitative RCE. Default radiation is therefore
-   ``"grey"`` (RRTMGP NaNs under the bug).
+Units note: ``PhysicsState.specific_humidity`` is **kg/kg** — the canonical
+physics convention (confirmed against a full-model run: surface q ≈ 0.02 kg/kg,
+RH ~0.2–1), which radiation, ``SundqvistCloudFraction``, ``TiedtkeConvection``
+and the Betts-Miller *core* all consume directly. Building this testbed surfaced
+a ``/1000`` unit bug in the ``BettsMillerConvection`` *term wrapper* (it treated
+the kg/kg state as g/kg), which is fixed alongside this module; the closure here
+therefore emits kg/kg.
 
 Example::
 
@@ -130,33 +121,30 @@ def _full_level_pressure(a_half, b_half, surface_pressure_pa):
 # stratospheric moisture that destabilises the column.
 _MW_RH_FLOOR_SIGMA = 0.02
 
-# Stratospheric specific-humidity floor [g/kg] ≈ 1.6 ppmv. The Manabe-Wetherald
+# Stratospheric specific-humidity floor [kg/kg] ≈ 1.6 ppmv. The Manabe-Wetherald
 # taper drives RH (and hence ``q``) to exactly zero aloft, but RRTMGP's gas
 # optics returns NaN on a zero water-vapour amount, so we floor ``q`` at a small,
 # physically realistic stratospheric value (real lower-stratosphere H₂O is
 # ~3–5 ppmv) rather than zero.
-_STRATOSPHERE_Q_FLOOR_GKG = 1.0e-3
+_STRATOSPHERE_Q_FLOOR = 1.0e-6
 
 
 def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
-    """Manabe-Wetherald fixed-RH specific humidity in **g/kg**.
+    """Manabe-Wetherald fixed-RH specific humidity in **kg/kg**.
 
     RH profile ``rh · max((σ − σ_floor)/(1 − σ_floor), 0)`` with ``σ = p/p_s``:
     surface RH ``rh``, tapering linearly to zero at ``σ = _MW_RH_FLOOR_SIGMA``,
-    then floored at :data:`_STRATOSPHERE_Q_FLOOR_GKG` so the dry stratosphere
-    still carries a trace amount (a hard zero NaNs RRTMGP). The result is g/kg:
-    ``PhysicsState.specific_humidity`` is g/kg by convention (the
-    dynamics→physics bridge dimensionalises moisture to g/kg and the ECHAM terms
-    divide by 1000 internally), whereas :func:`saturation_specific_humidity`
-    returns kg/kg — hence the ``× 1000``.
+    then floored at :data:`_STRATOSPHERE_Q_FLOOR` so the dry stratosphere still
+    carries a trace amount (a hard zero NaNs RRTMGP). The result is kg/kg, the
+    canonical ``PhysicsState.specific_humidity`` unit and the same unit
+    :func:`saturation_specific_humidity` returns.
     """
     sigma = pfull / surface_pressure_pa
     rh_profile = rh * jnp.clip(
         (sigma - _MW_RH_FLOOR_SIGMA) / (1.0 - _MW_RH_FLOOR_SIGMA), 0.0, 1.0,
     )
     qsat = saturation_specific_humidity(pfull, temperature)  # kg/kg
-    q_gkg = 1000.0 * rh_profile * qsat                       # g/kg
-    return jnp.maximum(q_gkg, _STRATOSPHERE_Q_FLOOR_GKG)
+    return jnp.maximum(rh_profile * qsat, _STRATOSPHERE_Q_FLOOR)
 
 
 def fixed_rh_closure(
@@ -207,7 +195,7 @@ def steady_insolation(
 
 def rce_physics(
     *,
-    radiation_scheme: str = "grey",
+    radiation_scheme: str = "rrtmgp",
     convection: str = "betts_miller",
     solar_constant: float = 728.4,
     relative_humidity: float = 0.7,
@@ -218,10 +206,8 @@ def rce_physics(
     """Build the RCE physics package from the composable ECHAM terms.
 
     Args:
-        radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``, or ``"emulated"``
-            — forwarded to ``echam_physics``. See the module-level warning:
-            ``"rrtmgp"`` NaNs on realistic moisture under the current
-            specific-humidity unit inconsistency.
+        radiation_scheme: ``"rrtmgp"`` (default), ``"grey"``, or ``"emulated"``
+            — forwarded to ``echam_physics``.
         convection: ``"betts_miller"`` (default; moist-adiabat relaxation toward
             ``relative_humidity``) or ``"tiedtke"`` (keep the ECHAM mass-flux
             scheme). Custom schemes can be swapped in afterwards with
@@ -325,7 +311,7 @@ def rce_column(
     nlev: int = 47,
     vertical=None,
     dt_seconds: float = 1200.0,
-    radiation_scheme: str = "grey",
+    radiation_scheme: str = "rrtmgp",
     convection: str = "betts_miller",
     tau_convection: float = 7200.0,
     interactive_humidity: bool = False,

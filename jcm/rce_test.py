@@ -1,19 +1,12 @@
 """Tests for ``jcm.rce`` — single-column radiative-convective equilibrium.
 
-The fast tests cover the *machinery* — the fixed-RH humidity closure, the
-steady-insolation helper, and the physics-package composition — none of which
-depend on the absolute radiative fluxes. The slow test runs a short grey-
-radiation RCE end-to-end and asserts the column stays finite, approaches a
-steady state (atmospheric ``dT/dt → 0``; note the TOA flux need *not* vanish in
-a fixed-SST RCE — the imbalance is the implied ocean heat flux), and keeps a
-convectively bounded lapse rate.
-
-Quantitative RCE assertions (equilibrium temperature, OLR, climate sensitivity)
-are intentionally **not** made yet: they are blocked by the model-wide
-specific-humidity unit inconsistency documented in :mod:`jcm.rce` (radiation and
-cloud terms read ``state.specific_humidity`` as kg/kg while the canonical
-convention is g/kg). Once that is resolved these become the natural next
-assertions, and the RRTMGP path (which NaNs under the bug) can be exercised.
+The fast tests cover the *machinery* — the fixed-RH humidity closure (kg/kg,
+the canonical convention), the steady-insolation helper, and the physics-package
+composition. The slow tests run short RCE integrations end-to-end (grey and
+RRTMGP) and assert the column stays finite, approaches a steady atmospheric
+state (``dT/dt → 0``; note the TOA flux need *not* vanish in a fixed-SST RCE —
+the imbalance is the implied ocean heat flux), keeps a convectively bounded
+lapse rate, and produces order-of-magnitude-reasonable OLR.
 """
 
 import unittest
@@ -27,7 +20,7 @@ import jcm.constants as c
 from jcm.forcing import SolarGeometry
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.rce import (
-    _STRATOSPHERE_Q_FLOOR_GKG,
+    _STRATOSPHERE_Q_FLOOR,
     _full_level_pressure,
     _half_level_coeffs,
     fixed_rh_closure,
@@ -49,8 +42,8 @@ class TestFixedRhClosure(unittest.TestCase):
         # (index 0 = model top, index -1 = surface).
         self.ic = rce_initial_state(self.vertical, sst=300.0, relative_humidity=0.7)
 
-    def test_closure_sets_rh_qsat_in_g_per_kg(self):
-        """Closure output equals ``rh(σ)·qsat`` in g/kg at the resolved levels."""
+    def test_closure_sets_rh_qsat_in_kg_per_kg(self):
+        """Closure output equals ``rh(σ)·qsat`` in kg/kg at the resolved levels."""
         rh = 0.7
         closure = fixed_rh_closure(rh, self.vertical)
         out = closure(self.ic, forcing=None)
@@ -61,14 +54,14 @@ class TestFixedRhClosure(unittest.TestCase):
         sigma = pfull / ps
         rh_profile = rh * jnp.clip((sigma - 0.02) / 0.98, 0.0, 1.0)
         expected = jnp.maximum(
-            1000.0 * rh_profile * saturation_specific_humidity(pfull, self.ic.temperature),
-            _STRATOSPHERE_Q_FLOOR_GKG,
+            rh_profile * saturation_specific_humidity(pfull, self.ic.temperature),
+            _STRATOSPHERE_Q_FLOOR,
         )
         self.assertTrue(jnp.allclose(out.specific_humidity, expected, rtol=1e-5))
-        # Surface (index -1) value is a realistic several-g/kg — confirms g/kg,
-        # not kg/kg (a kg/kg reading would be ~0.01).
-        self.assertGreater(float(out.specific_humidity[-1]), 5.0)
-        self.assertLess(float(out.specific_humidity[-1]), 30.0)
+        # Surface (index -1) value is a realistic several g/kg expressed in kg/kg
+        # (~0.005–0.03); a ~1000x reading would mean the closure emitted g/kg.
+        self.assertGreater(float(out.specific_humidity[-1]), 0.005)
+        self.assertLess(float(out.specific_humidity[-1]), 0.03)
 
     def test_stratosphere_is_dry_floor(self):
         """The Manabe-Wetherald taper drives the top to the trace floor (no NaN)."""
@@ -77,10 +70,10 @@ class TestFixedRhClosure(unittest.TestCase):
         # Top (index 0) is dry: RH taper × tiny cold-point qsat falls below the
         # floor, so it clamps to the trace stratospheric value.
         self.assertAlmostEqual(
-            float(out.specific_humidity[0]), _STRATOSPHERE_Q_FLOOR_GKG, places=6,
+            float(out.specific_humidity[0]), _STRATOSPHERE_Q_FLOOR, places=9,
         )
         self.assertTrue(jnp.all(jnp.isfinite(out.specific_humidity)))
-        self.assertTrue(jnp.all(out.specific_humidity >= _STRATOSPHERE_Q_FLOOR_GKG))
+        self.assertTrue(jnp.all(out.specific_humidity >= _STRATOSPHERE_Q_FLOOR))
 
     def test_humidity_tracks_temperature(self):
         """Warmer columns hold more vapour at the surface (q slaved to T)."""
@@ -163,13 +156,10 @@ class TestRceColumnConstruction(unittest.TestCase):
 
 @pytest.mark.slow
 class TestRceIntegrationGrey(unittest.TestCase):
-    """End-to-end grey-radiation RCE: machinery + equilibration.
+    """End-to-end grey-radiation RCE: finiteness, equilibration, lapse rate.
 
-    Grey radiation is used because RRTMGP NaNs on realistic moisture under the
-    specific-humidity unit inconsistency (see :mod:`jcm.rce`). These assertions
-    test that the framework runs, stays finite, reaches a steady atmospheric
-    state, and that convection bounds the lapse rate — properties that hold
-    independent of the (currently mis-scaled) absolute humidity.
+    Grey radiation on a cheap sigma grid keeps this fast; the RRTMGP Case-1
+    configuration is exercised separately in :class:`TestRceIntegrationRrtmgp`.
     """
 
     def _run(self, sst=300.0, n_days=40.0):
@@ -217,3 +207,43 @@ class TestRceIntegrationGrey(unittest.TestCase):
         lapse = -dT / dz  # K/m
         self.assertTrue(np.all(lapse < 0.011),
                         f"super-adiabatic lapse rate: max {np.max(lapse) * 1000:.1f} K/km")
+
+
+@pytest.mark.slow
+class TestRceIntegrationRrtmgp(unittest.TestCase):
+    """RRTMGP + Betts-Miller fixed-RH RCE on echam-47 — issue #523 Case 1.
+
+    With specific humidity in its canonical kg/kg units, RRTMGP runs cleanly and
+    the column reaches a radiative-convective balance with an Earth-like OLR and
+    a near-surface RH that matches the prescribed value.
+    """
+
+    def test_case1_equilibrates_with_reasonable_olr_and_rh(self):
+        scm = rce_column(
+            sst=300.0, relative_humidity=0.7, solar_constant=728.4, lat_deg=42.55,
+            nlev=47, radiation_scheme="rrtmgp", dt_seconds=1200.0,
+        )
+        ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7)
+        preds = run_rce(scm, ic, n_days=20.0)
+
+        T = preds.relaxed_states["temperature"]
+        dT = preds.tendencies.temperature
+        rad = preds.physics_data["radiation"]
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(T[-1]))))
+
+        rms0 = float(jnp.sqrt(jnp.mean(dT[0] ** 2)) * 86400.0)
+        rms_end = float(jnp.sqrt(jnp.mean(dT[-1] ** 2)) * 86400.0)
+        self.assertLess(rms_end, 0.3 * rms0)  # settling toward equilibrium
+
+        # Outgoing longwave should sit in the broad terrestrial range.
+        olr = float(rad.toa_lw_up[-1].reshape(-1)[0])
+        self.assertGreater(olr, 150.0)
+        self.assertLess(olr, 320.0)
+
+        # The fixed-RH closure holds the diagnosed near-surface RH at the
+        # requested value — a direct check that kg/kg units are correct
+        # end-to-end (a unit error would put this near saturation or ~0).
+        rh = np.asarray(preds.physics_data["relative_humidity"])
+        rh_surface = float(rh[-1].reshape(T.shape[1], -1)[-1, 0])
+        self.assertAlmostEqual(rh_surface, 0.70, delta=0.1)

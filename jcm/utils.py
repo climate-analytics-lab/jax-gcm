@@ -504,12 +504,7 @@ def create_single_column_state(
 
     Args:
       temperature: Temperature profile [K], shape ``(nlev,)``.
-      specific_humidity: Specific humidity profile, shape ``(nlev,)``. Stored
-        verbatim into ``PhysicsState.specific_humidity``, whose canonical unit
-        is **g/kg** (the dynamics→physics bridge dimensionalises moisture to
-        g/kg, and the ECHAM terms divide by 1000 internally — see
-        ``jcm/dycore/dinosaur/state_bridge.py`` and ``BettsMillerConvection``).
-        Pass g/kg, not kg/kg.
+      specific_humidity: Specific humidity profile [kg/kg], shape ``(nlev,)``.
       u_wind: Optional zonal wind profile [m/s]; defaults to zeros.
       v_wind: Optional meridional wind profile [m/s]; defaults to zeros.
       surface_pressure: Surface pressure [Pa].
