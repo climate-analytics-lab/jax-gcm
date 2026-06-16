@@ -134,7 +134,7 @@ def level_dependent_scaling(
 
     For each level ``k`` with order ``p_k``:
 
-        scaling[k, 0, n] = exp( -(dt/timescale) * (|eig[n]| / |eig[-1]|) ** p_k )
+        scaling[k, 0, n] = exp( -(dt/timescale) * (|eig[n]| / max|eig|) ** p_k )
 
     Algebraically equivalent to the textbook formulation
     ``exp(-dt/(τ·|eig_max|^p) · |eig|^p)`` but float-stable: the
@@ -158,7 +158,12 @@ def level_dependent_scaling(
 
     """
     pos_eig = jnp.abs(eigenvalues)                                  # (lat_modes,)
-    pos_eig_max = pos_eig[-1]                                       # scalar
+    # ``.max()`` rather than ``[-1]``: under SPMD the modal axis is padded with
+    # zeros so it divides evenly across devices, and those zeros land on the
+    # last index. ``[-1]`` would then read 0 and blow up the normalisation;
+    # ``max(|eig|)`` is the true largest-wavenumber eigenvalue either way
+    # (padding zeros never exceed a real magnitude).
+    pos_eig_max = pos_eig.max()                                     # scalar
     p = orders_per_level[:, None].astype(jnp.float32)               # (nlev, 1)
     norm_eig = pos_eig[None, :] / pos_eig_max                       # (1, lat_modes), in [0, 1]
     pow_norm = norm_eig ** p                                        # (nlev, lat_modes)
@@ -179,5 +184,7 @@ def uniform_scaling(
     once ``order >= 4``).
     """
     pos_eig = jnp.abs(eigenvalues)
-    norm_eig = pos_eig / pos_eig[-1]
+    # ``.max()`` not ``[-1]`` — robust to the zero-padding of the modal axis
+    # under SPMD sharding (see :func:`level_dependent_scaling`).
+    norm_eig = pos_eig / pos_eig.max()
     return jnp.exp(-(time_step / timescale) * norm_eig ** order)

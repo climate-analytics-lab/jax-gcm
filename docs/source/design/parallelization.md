@@ -111,12 +111,23 @@ otherwise defaults to Explicit axes and the constraints raise.
 JAX exposes a **single** CPU device by default no matter how many cores
 the host has. The device count must be raised *before the CPU backend
 initialises*, so the most reliable way is an environment variable set
-before the process starts:
+before the process starts. Set **two** flags:
 
 ```bash
-export XLA_FLAGS=--xla_force_host_platform_device_count=8
+export XLA_FLAGS="--xla_force_host_platform_device_count=8 \
+                  --xla_cpu_enable_concurrency_optimized_scheduler=false"
 python -m jcm.main grid.spmd_mesh='[8,1,1]'
 ```
+
+The second flag serialises CPU collectives. Without it, complex graphs
+(notably ECHAM physics) crash at **>= 8 CPU devices** with an XLA-CPU
+`collective permute` rendezvous failure (`Check failed: id < num_threads`)
+— the spectral transform's concurrent all-to-all ops over-subscribe the
+CPU thread rendezvous. It is an XLA-CPU backend limitation, not a
+jax-gcm sharding bug (it does not occur on GPU, which uses NCCL
+collectives, and simpler graphs such as SPEEDY are unaffected even at 40
+CPU devices). The flag is harmless on GPU and for simple models, so the
+recipe above always sets it.
 
 The Hydra CLI also accepts `host_device_count`, but importing the model
 stack already initialises the JAX backend, so under the CLI it can no
@@ -136,14 +147,46 @@ the device count. On GPU,
 `host_device_count` is irrelevant — set `CUDA_VISIBLE_DEVICES` and a mesh
 whose product matches the number of visible GPUs.
 
-## Known limitation: dycore transform on >1 device
+## A subtlety: the diffusion filter and modal-axis padding
 
-The physics sharding described here is independent of, and tested
-separately from, the dynamical core's spectral-transform sharding. The
-dinosaur spectral transform currently trips over a `shard_map` strict
-spec check on its (replicated, numpy-constant) basis matrices, which a
-multi-device run must work around by pre-sharding those constants (see
-the documented monkey-patch in `run_logs/benchmark_rrtmgp_scaling.py`).
-Folding that fix into jax-gcm proper is tracked separately; until then,
-full end-to-end multi-device *model* runs need that workaround even
-though the physics path itself shards cleanly.
+`FastSphericalHarmonics` pads the modal (total-wavenumber) axis with
+zeros so it divides evenly across devices. The hyperdiffusion filters
+normalise by the largest-magnitude Laplacian eigenvalue, and the old code
+read that as `eigenvalues[-1]` — which the padding turns into **0**, giving
+`scale = dt / 0 = inf` and NaN-ing every diffused field on the first step
+of any multi-device run. The fix (`jcm.diffusion`,
+`DinosaurDycore._make_diffusion_fn`) normalises by `max(|eigenvalues|)`
+instead, which is the true largest eigenvalue with or without padding.
+This is the one substantive change needed to make the *dynamical core*
+run multi-device; the spectral transforms themselves shard correctly as
+shipped.
+
+## Grid divisibility
+
+The mesh size must divide the grid, or `FastSphericalHarmonics` pads the
+nodal grid up to an FFT-friendly multiple — silently changing the
+resolution. For a longitude-only mesh `(N, 1, 1)` this means the nodal
+longitude count must be `N × (FFT-friendly integer)`. Examples: T31 (96
+lon) is fine at N ∈ {2, 4} but pads at N = 8; T106 (320 lon) and T213
+(640 lon) are clean at N = 40. If `coords.horizontal.nodal_shape` changes
+when you add the mesh, pick a different N (or resolution).
+
+## Validation
+
+Verified that a sharded run reproduces the single-device result of the
+*same* (`FastSphericalHarmonics`) algorithm — the apples-to-apples test
+that isolates sharding from the `RealSphericalHarmonics` ↔
+`FastSphericalHarmonics` algorithm difference:
+
+- **2× A100 GPU**, SPEEDY and ECHAM T63: a single sharded step is
+  **bit-identical** to the single-GPU step (`rel = 0`). Over a multi-step
+  run the two diverge at ~1e-3, which is chaotic amplification of GPU
+  non-deterministic reductions, not a sharding error.
+- **40× CPU**, SPEEDY T106: matches single-device to `rel ≈ 9e-6`.
+- **40× CPU**, ECHAM T106: matches once the serialized-collective flag is
+  set (see *Multiple CPU devices*).
+
+`jcm/dycore/dinosaur/sharding_test.py` pins the full-model case (a 2-CPU
+SPEEDY integration must stay finite and match the single-device run);
+`jcm/physics/composable_physics_sharding_test.py` pins the physics path;
+`jcm/diffusion_test.py` pins the modal-padding eigenvalue fix.

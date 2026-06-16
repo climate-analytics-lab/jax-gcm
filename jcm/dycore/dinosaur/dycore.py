@@ -204,7 +204,12 @@ class DinosaurDycore(DynamicalCore):
         if level_orders is None:
             def diffusion_filter(u, u_next):
                 eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-                scale = self._dt / (timescale * abs(eigenvalues[-1]) ** order)
+                # ``abs(...).max()`` not ``abs(eigenvalues[-1])``: under SPMD
+                # the modal axis is zero-padded to divide across devices, so the
+                # last entry is a padding 0 and ``[-1]`` would give ``scale =
+                # dt/0 = inf`` (NaN-ing the filtered field). The max is the true
+                # largest-wavenumber eigenvalue with or without padding.
+                scale = self._dt / (timescale * abs(eigenvalues).max() ** order)
                 filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
                 u_temp = filter_fn(u_next)
                 return replace_fn(u_next, u_temp)

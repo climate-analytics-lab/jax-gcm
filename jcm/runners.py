@@ -10,6 +10,7 @@ Hydra's CLI machinery.
 from __future__ import annotations
 
 import logging
+import os
 import types
 from pathlib import Path
 from typing import Any
@@ -41,17 +42,31 @@ def configure_host_device_count(n: int | None) -> None:
     the very first thing after ``import jax`` in a script/notebook (before
     importing ``jcm``).
 
+    We also append ``--xla_cpu_enable_concurrency_optimized_scheduler=false``
+    to ``XLA_FLAGS`` (idempotently): without it, complex graphs (e.g. ECHAM
+    physics) crash at >= 8 CPU devices because the spectral transform's
+    concurrent ``collective permute`` ops over-subscribe the XLA-CPU thread
+    rendezvous. Like the device count, this only takes effect when set before
+    the backend initialises.
+
     ``None`` or ``<= 1`` is a no-op (single-device run). If the backend is
     already live (e.g. under the CLI, where importing the model stack
-    initialises it) the count can no longer change: we leave it, then validate
-    and log a warning if it falls short, pointing at the env-var lever
-    (``XLA_FLAGS=--xla_force_host_platform_device_count=N``) that the shell can
-    set before the process starts.
+    initialises it) neither the count nor the flag can change: we leave them,
+    then validate and log a warning if the count falls short, pointing at the
+    env-var lever the shell can set before the process starts:
+    ``XLA_FLAGS="--xla_force_host_platform_device_count=N
+    --xla_cpu_enable_concurrency_optimized_scheduler=false"``.
     """
     if not n or int(n) <= 1:
         return
     n = int(n)
     import jax
+
+    # Serialise CPU collectives (idempotent). Harmless on GPU. Must precede any
+    # device touch to take effect, hence set on the env before the calls below.
+    _flag = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
+    if _flag not in os.environ.get("XLA_FLAGS", ""):
+        os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _flag).strip()
 
     try:
         jax.config.update("jax_num_cpu_devices", n)

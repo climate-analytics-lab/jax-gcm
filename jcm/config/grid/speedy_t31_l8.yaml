@@ -7,6 +7,10 @@ spectral_truncation: 31
 # docs/source/design/parallelization.md.
 spmd_mesh: null
 # Number of CPU devices to expose for the mesh above (no-op on GPU / for
-# single-device runs). Must equal the spmd_mesh product. Alternatively set
-# XLA_FLAGS=--xla_force_host_platform_device_count=N in the shell.
+# single-device runs). Must equal the spmd_mesh product. For the CLI the
+# reliable lever is the shell env, set before launch:
+#   XLA_FLAGS="--xla_force_host_platform_device_count=N \
+#              --xla_cpu_enable_concurrency_optimized_scheduler=false"
+# (the second flag is needed for complex physics at >= 8 CPU devices; see
+# docs/source/design/parallelization.md).
 host_device_count: null
