@@ -2,4 +2,11 @@
 vertical: sigma
 layers: 8
 spectral_truncation: 31
+# SPMD device mesh (longitude, latitude, vertical); null = single device.
+# Use a longitude-only mesh, e.g. [4, 1, 1]; see
+# docs/source/design/parallelization.md.
 spmd_mesh: null
+# Number of CPU devices to expose for the mesh above (no-op on GPU / for
+# single-device runs). Must equal the spmd_mesh product. Alternatively set
+# XLA_FLAGS=--xla_force_host_platform_device_count=N in the shell.
+host_device_count: null

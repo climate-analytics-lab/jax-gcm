@@ -325,9 +325,21 @@ class DinosaurDycore(DynamicalCore):
         return State(**state.asdict(), sim_time=sim_time)
 
     def to_physics_state(self, state: State) -> PhysicsState:
-        return dynamics_state_to_physics_state(
+        physics_state = dynamics_state_to_physics_state(
             state, self._primitive, tracer_specs=self.tracer_specs,
         )
+        # Pin the gridpoint state to dinosaur's "physics" sharding before it
+        # crosses into the (dycore-agnostic) physics packages. That spec
+        # (``P(None, ('x', 'z'), 'y')``) replicates the vertical axis so every
+        # column lives wholly on one device, and carries the device split on
+        # longitude/latitude instead — the layout column physics wants, since
+        # each column is independent. The dycore itself runs on
+        # ``dycore_partition_spec`` (``P('z', 'x', 'y')``); the modal→nodal
+        # transform here is where the two layouts meet. Under the recommended
+        # longitude-only mesh ``(N, 1, 1)`` the two specs coincide, so this is
+        # a free relabelling rather than a reshard. No-op without an
+        # ``spmd_mesh``. See docs/source/design/parallelization.md.
+        return self.coords.with_physics_sharding(physics_state)
 
     def step(
         self,
@@ -340,6 +352,12 @@ class DinosaurDycore(DynamicalCore):
         IMEX-RK SIL3 dynamics step → spectral filters.
         """
         if physics_tendency is not None:
+            # The tendency comes back from physics in the "physics" sharding;
+            # pin it explicitly so the gridpoint→modal transform inside
+            # ``physics_tendency_to_dynamics_tendency`` reshards from a known
+            # layout rather than whatever GSPMD happened to infer. No-op
+            # without an ``spmd_mesh``.
+            physics_tendency = self.coords.with_physics_sharding(physics_tendency)
             dyn_tendency = physics_tendency_to_dynamics_tendency(
                 physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
             )

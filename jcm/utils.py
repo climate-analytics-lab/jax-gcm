@@ -62,6 +62,14 @@ def get_coords(
             is used; otherwise the model runs on a single device. This is the only
             place to configure SPMD — ``Model`` consumes the sharding via ``coords``.
 
+            Recommended layout (see docs/source/design/parallelization.md): a
+            longitude-only mesh ``(N, 1, 1)``. The dycore shards longitude for
+            the spectral transforms while column physics keeps whole columns
+            local, so the two layouts coincide and no per-step reshard is
+            needed. Splitting latitude (``y > 1``) forces a reshard at the
+            physics column-flatten, so keep ``y = 1`` unless you have measured
+            a reason not to.
+
     Returns:
         CoordinateSystem object
 
@@ -97,7 +105,16 @@ def get_coords(
     grid_radius = constants.rearth
 
     if spmd_mesh is not None:
-        spmd_mesh = jax.make_mesh(spmd_mesh, ('x', 'y', 'z'))
+        # Build the mesh with Auto axis types. dinosaur (and the physics-
+        # boundary wiring in jax-gcm) drive sharding with
+        # ``jax.lax.with_sharding_constraint``, which requires Auto axes —
+        # JAX's ``make_mesh`` otherwise defaults to Explicit axes, under which
+        # those constraints raise and demand the ``reshard`` API instead.
+        from jax.sharding import AxisType
+        spmd_mesh = jax.make_mesh(
+            spmd_mesh, ('x', 'y', 'z'),
+            axis_types=(AxisType.Auto,) * 3,
+        )
         spherical_harmonics_impl = FastSphericalHarmonics
     else:
         spherical_harmonics_impl = RealSphericalHarmonics
