@@ -94,12 +94,27 @@ class DinosaurDycore(DynamicalCore):
         constants: PhysicalConstants | None = None,
         tracer_specs: Mapping[str, Any] | None = None,
         diffusion: DiffusionFilter | None = None,
+        tracer_filter: Any | None = None,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics."""
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
         self.diffusion = diffusion or DiffusionFilter.default()
+        # Optional gridpoint tracer filter (e.g. mass-conserving positivity)
+        # applied as this spectral core projects to the physics gridpoint state
+        # — see ``to_physics_state``. ``None`` disables it (the default). The
+        # half-level (a, b) coefficients let ``to_physics_state`` reconstruct the
+        # per-layer air mass ``Δp`` the filter weights by, dycore-side, from the
+        # core's own vertical coordinate (hybrid a/b, or pure sigma → a=0, b=σ).
+        self.tracer_filter = tracer_filter
+        if isinstance(self.coords.vertical, HybridCoordinates):
+            self._a_half = jnp.asarray(self.coords.vertical.a_boundaries)
+            self._b_half = jnp.asarray(self.coords.vertical.b_boundaries)
+        else:
+            sigma_b = jnp.asarray(self.coords.vertical.boundaries)
+            self._a_half = jnp.zeros_like(sigma_b)
+            self._b_half = sigma_b
         self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
 
         # Physical constants drive both nondimensionalisation and the primitive
@@ -325,9 +340,27 @@ class DinosaurDycore(DynamicalCore):
         return State(**state.asdict(), sim_time=sim_time)
 
     def to_physics_state(self, state: State) -> PhysicsState:
-        return dynamics_state_to_physics_state(
+        physics_state = dynamics_state_to_physics_state(
             state, self._primitive, tracer_specs=self.tracer_specs,
         )
+        # Clean the gridpoint tracers as we hand them to the physics. A spectral
+        # projection of a sharp, near-zero tracer source rings into negatives
+        # (unphysical for aerosol microphysics / activation / optics); the
+        # optional ``tracer_filter`` floors them here, dycore-side, so neither
+        # the operator split nor the physics need to know about it. ``dp`` is the
+        # per-layer air mass (∝ Δp) the mass-conserving rescale weights by, built
+        # from this core's own (a, b) half-levels and the column surface
+        # pressure. No-op (returns the state unchanged) when no filter is set or
+        # there are no tracers.
+        if self.tracer_filter is not None and physics_state.tracers:
+            ps = physics_state.normalized_surface_pressure * self.constants.p0
+            bcast = (slice(None),) + (jnp.newaxis,) * ps.ndim
+            pressure_half = self._a_half[bcast] + self._b_half[bcast] * ps[jnp.newaxis, ...]
+            dp = jnp.diff(pressure_half, axis=0)            # (nlev, *horiz)
+            physics_state = physics_state.copy(
+                tracers=self.tracer_filter(physics_state.tracers, dp),
+            )
+        return physics_state
 
     def step(
         self,

@@ -19,192 +19,24 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import jax_datetime as jdt
-from numpy import timedelta64
 from typing import Callable, Any
 from dinosaur.scales import units
-import pandas as pd
 from functools import partial
 import logging
 
-import jcm.constants as jcm_constants
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
+from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 
 logger = logging.getLogger(__name__)
-
-
-def _mass_conserving_positivity(q, m):
-    """Clip ``q`` to non-negative while conserving its column-integrated mass.
-
-    Spectral transport of a sharp source (e.g. CEDS industrial/shipping
-    emissions) leaves Gibbs-ringing negatives in the tracer field; fed to the
-    physics (MAM4 size/condensation, ARG activation, …) a negative aerosol
-    mass/number produces NaNs. A naïve floor at zero would *add* mass, so instead
-    clip the negatives and rescale the surviving positive part of each column so
-    the column mass is unchanged ("hole-filling"):
-
-        q' = max(0, q) · max(M, 0) / M_clip,
-        M = Σ_k m_k q_k,   M_clip = Σ_k m_k max(0, q_k),
-
-    with ``m_k`` the per-layer air mass (∝ Δp). Non-negative by construction and
-    column-mass-conserving when ``M > 0``; a column whose mass is spuriously
-    net-negative is zeroed (the only, unavoidable, non-conservation). ``q`` and
-    ``m`` are ``(nlev, *spatial)``; the reduction is over the leading level axis.
-    """
-    q_clip = jnp.maximum(0.0, q)
-    col_mass = jnp.sum(m * q, axis=0)
-    col_mass_clip = jnp.sum(m * q_clip, axis=0)
-    scale = jnp.where(col_mass_clip > 0.0,
-                      jnp.maximum(col_mass, 0.0) / col_mass_clip, 0.0)
-    return q_clip * scale[jnp.newaxis, ...]
-
-
-class ModelPredictions:
-    """User-facing container for model prediction outputs.
-
-    Wraps the internal :class:`Predictions` pytree with the coordinate system
-    and physics module needed for xarray conversion. Returned by
-    :meth:`Model.run`, :meth:`Model.resume`, and :meth:`Model.run_from_state`.
-
-    Attributes:
-        dynamics (PhysicsState): The physical state variables.
-        physics (Any): Diagnostic physics data.
-        times (Any): Timestamps of the predictions.
-
-    """
-
-    def __init__(self, predictions: Predictions, coords, physics: Physics):  # noqa: D107
-        self._predictions = predictions
-        self._coords = coords
-        self._physics = physics
-
-    @property
-    def dynamics(self):
-        return self._predictions.dynamics
-
-    @property
-    def physics(self):
-        return self._predictions.physics
-
-    @property
-    def times(self):
-        return self._predictions.times
-
-    def to_xarray(self):
-        """Convert the full prediction trajectory to an xarray.Dataset.
-
-        Returns:
-            An xarray.Dataset ready for analysis and plotting.
-
-        """
-        from jcm.utils import data_to_xarray
-
-        # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
-        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
-        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives.
-        float0s_to_nans = lambda pytree: tree_map(
-            lambda x: jnp.full_like(x, jnp.nan, dtype=float) if x.dtype == jax.dtypes.float0 else x,
-            pytree,
-        )
-
-        dynamics_predictions = float0s_to_nans(self.dynamics)
-        physics_predictions = float0s_to_nans(self.physics)
-
-        nodal_shape = dynamics_predictions.u_wind.shape[1:]
-
-        # Per-physics flattening of the diagnostic struct into a dict of named fields.
-        physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
-
-        times = jax.device_get(self.times)
-        coords = jax.device_get(self._coords)
-
-        additional_coords = {}
-        if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
-            additional_coords = dict(self._physics.cached_coords.xarray_additional_coords())
-        # Aerosol-mode coordinate so per-mode JAM state fields (``jam_state.*``,
-        # shaped ``(mode, level, lon, lat)``) serialize with a named ``mode`` dim
-        # rather than failing the shape→dims lookup. Sourced from the aerosol
-        # population spec carried by the microphysics term.
-        import numpy as _np
-        for _term in getattr(self._physics, 'terms', []):
-            _spec = getattr(_term, 'spec', None)
-            if _spec is not None and hasattr(_spec, 'mode_shorts'):
-                _mode_shorts = list(_spec.mode_shorts)
-                # data_to_xarray assigns dims purely by array shape, so a mode
-                # axis whose length equals the vertical layer count is genuinely
-                # indistinguishable from the level axis — a (mode, level, lon,
-                # lat) field can't be disambiguated from (level, …). This only
-                # bites the unphysical case n_modes == n_levels (MAM4 has 4
-                # modes, so only an L4 run). Fail early and specifically rather
-                # than deep inside data_to_xarray's generic shape lookup.
-                if len(_mode_shorts) == coords.vertical.layers:
-                    raise ValueError(
-                        f"Aerosol mode count ({len(_mode_shorts)}) equals the "
-                        f"vertical layer count ({coords.vertical.layers}); the "
-                        "per-mode aerosol state can't be given a distinct 'mode' "
-                        "dimension because data_to_xarray infers dims from shape "
-                        "alone. Use a vertical resolution other than "
-                        f"{coords.vertical.layers} levels to serialize jam_state."
-                    )
-                additional_coords['mode'] = _np.asarray(_mode_shorts)
-                break
-
-        pred_ds = data_to_xarray(
-            dynamics_predictions.asdict() | physics_preds_dict,
-            coords=coords, serialize_coords_to_attrs=False,
-            times=times - times[0],
-            additional_coords=additional_coords,
-        )
-
-        # Attach units / descriptions from the physics-specific units table.
-        units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
-        if self._physics.UNITS_TABLE_CSV_PATH is not None:
-            units_df = pd.concat([units_df, pd.read_csv(self._physics.UNITS_TABLE_CSV_PATH)], ignore_index=True)
-        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
-            if var in pred_ds:
-                pred_ds[var].attrs["units"] = unit
-                pred_ds[var].attrs["description"] = desc
-
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere.
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
-
-        # Convert sim-day timestamps to datetimes.
-        pred_ds['time'] = (
-            times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
-        ).astype('datetime64[ns]')
-
-        return pred_ds
-
-
-def _model_predictions_flatten(mp):
-    """Flatten ModelPredictions for JAX pytree operations (tree_map, etc.).
-
-    Only the internal Predictions pytree is treated as array data. Coords and
-    physics are not in aux_data so that ``tree_map`` works across ModelPredictions
-    from different Model instances.
-    """
-    children = (mp._predictions,)
-    return children, None
-
-
-def _model_predictions_unflatten(aux_data, children):
-    return ModelPredictions(children[0], None, None)
-
-
-jax.tree_util.register_pytree_node(
-    ModelPredictions,
-    _model_predictions_flatten,
-    _model_predictions_unflatten,
-)
 
 
 def _op_split_trajectory(
@@ -475,41 +307,6 @@ class Model:
             tracer_specs=tracer_specs,
         )
 
-    def _filter_tracer_positivity(self, physics_state_grid):
-        """Apply the mass-conserving positivity filter to all gridpoint tracers.
-
-        No-op when there are no tracers (e.g. dry dynamical-core configs). The
-        per-layer air-mass weight ``Δp`` is reconstructed from the vertical
-        coordinate (hybrid ``a``/``b`` or pure sigma) and the column surface
-        pressure, exactly as :class:`MoistAirColumnState` does, so the rescale
-        conserves the same column mass the model integrates.
-        """
-        tracers = physics_state_grid.tracers
-        if not tracers:
-            return physics_state_grid
-        from dinosaur.hybrid_coordinates import HybridCoordinates
-        vertical = self.coords.vertical
-        if isinstance(vertical, HybridCoordinates):
-            a_half = jnp.asarray(vertical.a_boundaries)
-            b_half = jnp.asarray(vertical.b_boundaries)
-        else:
-            sigma_b = jnp.asarray(vertical.boundaries)
-            a_half = jnp.zeros_like(sigma_b)
-            b_half = sigma_b
-        # Read p0 from the live constants singleton (module attribute access),
-        # not a frozen import: in the Hydra path ``jcm.runners`` imports ``Model``
-        # before applying ``cfg.constants``, so an import-time binding would use
-        # the stale default p0 while the dycore/state bridge use the overridden
-        # value — making these Δp weights inconsistent with the column mass the
-        # model integrates. (See the constants convention in CLAUDE.md.)
-        ps = physics_state_grid.normalized_surface_pressure * jcm_constants.p0
-        bcast = (slice(None),) + (jnp.newaxis,) * ps.ndim
-        pressure_half = a_half[bcast] + b_half[bcast] * ps[jnp.newaxis, ...]
-        dp = jnp.diff(pressure_half, axis=0)              # (nlev, *spatial)
-        filtered = {k: _mass_conserving_positivity(q, dp)
-                    for k, q in tracers.items()}
-        return physics_state_grid.copy(tracers=filtered)
-
     def _get_op_split_step_fn(self, forcing: ForcingData):
         """Build the operator-split single-step function (Lie split a).
 
@@ -518,42 +315,31 @@ class Model:
         Order: ``state → gridpoint projection → physics_tendency → dycore.step``
         (which itself does the forward-Euler add, the dynamics step, and the
         spectral filters). Mirrors ECHAM6's ``physc`` → ``sccd``/``scctp`` →
-        ``hdiff`` chain.
+        ``hdiff`` chain. The dynamics→physics gridpoint projection
+        (:meth:`DynamicalCore.to_physics_state`) is where any dycore-side tracer
+        cleaning (e.g. a spectral core's mass-conserving positivity filter)
+        happens, so the step body stays agnostic to it.
         """
+        # Align the forcing to the model's working float precision once, up
+        # front, before the scan time-slices it. ``ForcingData`` is often built
+        # before the MAM4-JAX core enables ``jax_enable_x64`` (so its arrays are
+        # float32), whereas the working model state is float64; a per-step
+        # float32 forcing feeding the physics diagnostics would then clash with
+        # the float64 scan carry ("carry input/output types differ"). Casting
+        # here only ever upcasts (x64 path) or is a no-op (non-x64, where forcing
+        # and state share float32), so the selection time axis is unaffected.
+        work_dtype = jnp.zeros(()).dtype
+        forcing = jax.tree_util.tree_map(
+            lambda x: x.astype(work_dtype)
+            if (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating))
+            else x,
+            forcing,
+        )
+
         def step(state, physics_state):
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             physics_state_grid = self.dycore.to_physics_state(state)
-            # Keep forcing in the model's working float precision. ``ForcingData``
-            # is often built before the MAM4-JAX core enables ``jax_enable_x64``
-            # (so its arrays are float32), whereas the x64 model state is float64.
-            # The diagnostics that read forcing (radiation solar geometry, surface
-            # fields) would then come out float32 against a float64 scan carry —
-            # a "carry input/output types differ" error. Cast float leaves of the
-            # selected forcing to the gridpoint-state dtype to stay consistent.
-            _fdtype = physics_state_grid.temperature.dtype
-            forcing_now = jax.tree_util.tree_map(
-                lambda x: x.astype(_fdtype)
-                if (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating))
-                else x,
-                forcing_now,
-            )
-            # Mass-conserving positivity guard on the gridpoint tracers *before*
-            # they reach physics. Spectral transport of sharp, near-zero aerosol
-            # sources (CEDS industrial/shipping) leaves Gibbs-ringing negatives;
-            # a negative mass or number fed to any term (MAM4 size/condensation,
-            # ARG activation, radiation aerosol optics) is unphysical, so floor
-            # them here at the dynamics→physics boundary where every term benefits.
-            #
-            # This is a guard, not a cure for the deeper instability: it cannot
-            # restore *modal mass/number consistency*. Independent ringing of a
-            # mode's mass and number fields drives their ratio (∝ particle size)
-            # orders of magnitude out of the dgnumlo/dgnumhi bounds, which NaNs
-            # the microphysics at T63+ even with non-negative inputs. The root-
-            # cause fix is dynamical (tracer hyperdiffusion / a sign- and ratio-
-            # preserving tracer transport) and/or a calcsize robustness clamp in
-            # mam4-jax — tracked separately; see issue.
-            physics_state_grid = self._filter_tracer_positivity(physics_state_grid)
             physics_tendency, new_physics_state = compute_physics_step_gridpoint(
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,

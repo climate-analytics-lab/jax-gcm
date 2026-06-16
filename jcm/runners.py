@@ -540,6 +540,25 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
 # Top-level model construction
 # ---------------------------------------------------------------------------
 
+def build_tracer_filter(cfg: DictConfig):
+    """Build the optional dycore-side gridpoint tracer filter.
+
+    Enabled via ``cfg.diffusion.tracer_positivity`` (default off). The only
+    filter currently is mass-conserving positivity, which a spectral core
+    applies as it projects to the physics gridpoint state so the sharp-source
+    tracer fields of prescribed aerosol emissions stay non-negative at the
+    dynamics→physics boundary (Gibbs ringing otherwise NaNs the microphysics;
+    see issue #521). Returns ``None`` when disabled — a no-op on the dycore.
+    """
+    diffusion = cfg.get("diffusion", None)
+    enabled = (False if diffusion is None
+               else bool(diffusion.get("tracer_positivity", False)))
+    if not enabled:
+        return None
+    from jcm.filters import MassConservingPositivity
+    return MassConservingPositivity()
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config."""
     from jcm.dycore.dinosaur.dycore import DinosaurDycore
@@ -549,11 +568,13 @@ def build_model(cfg: DictConfig) -> Model:
     physics = maybe_add_sponge(physics, cfg)
     terrain = build_terrain(cfg, coords)
     diffusion = build_diffusion(cfg)
+    tracer_filter = build_tracer_filter(cfg)
 
     log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
     # Build the dycore explicitly so the diffusion config flows in via the
     # dycore constructor (Model itself no longer takes a diffusion kwarg —
-    # that's a dinosaur-backend concern).
+    # that's a dinosaur-backend concern). The tracer filter is the same kind of
+    # dycore-side knob.
     time_step = float(cfg.run.time_step)
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
     dycore = DinosaurDycore(
@@ -562,6 +583,7 @@ def build_model(cfg: DictConfig) -> Model:
         dt_seconds=time_step * 60.0,
         tracer_specs=tracer_specs,
         diffusion=diffusion,
+        tracer_filter=tracer_filter,
     )
     return Model(
         dycore,
