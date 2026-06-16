@@ -229,7 +229,7 @@ class TestBettsMillerTermAndGradients(unittest.TestCase):
         ix, il = coords.horizontal.nodal_shape
         sig = jnp.linspace(0.05, 0.97, kx)
         T1d = 295.0 - 55.0 * (1.0 - sig)
-        q1d = 0.9 * saturation_specific_humidity(T1d, sig * 1e5) * 1000.0  # g/kg
+        q1d = 0.9 * saturation_specific_humidity(T1d, sig * 1e5)  # kg/kg
         T = jnp.broadcast_to(T1d[:, None, None], (kx, ix, il))
         q = jnp.broadcast_to(q1d[:, None, None], (kx, ix, il))
         state = PhysicsState.zeros((kx, ix, il), temperature=T,
