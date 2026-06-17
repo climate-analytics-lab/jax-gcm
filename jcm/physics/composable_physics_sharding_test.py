@@ -37,6 +37,7 @@ from dinosaur.sigma_coordinates import SigmaCoordinates  # noqa: E402
 from jcm.physics.composable_physics import (  # noqa: E402
     ComposablePhysics,
     _flattened_column_sharding,
+    _shard_columns,
 )
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -148,6 +149,102 @@ class FlattenedColumnShardingSpecTest(unittest.TestCase):
         # axis, matching the lon-major (nlon, nlat) -> ncols reshape.
         self.assertEqual(state_sharding.spec, P(None, ("x", "z", "y")))
         self.assertEqual(surface_sharding.spec, P(("x", "z", "y")))
+
+    def test_merge_branches_for_degenerate_specs(self):
+        # A (1, 1, 1) mesh needs only one device, so these branch checks run
+        # in the single-device fast suite while exercising the real merge
+        # logic. Vary the partition spec to hit each ``merged`` case.
+        dev = jax.devices()[0]
+        mesh = jax.sharding.Mesh(
+            np.asarray([dev]).reshape(1, 1, 1), ("x", "y", "z"),
+        )
+
+        def col_spec(partition_spec):
+            ns = types.SimpleNamespace(
+                spmd_mesh=mesh, physics_partition_spec=partition_spec,
+            )
+            return _flattened_column_sharding(ns)[0].spec
+
+        # No horizontal axes sharded -> empty merge -> column axis replicated.
+        self.assertEqual(col_spec(P(None, None, None)), P(None, None))
+        # A single horizontal axis -> column carries that one axis (not a tuple).
+        self.assertEqual(col_spec(P(None, "x", None)), P(None, "x"))
+
+    def test_shard_columns_constrains_by_rank(self):
+        # Build the (1, 1, 1) shardings and check ``_shard_columns`` applies
+        # the 2-D / 1-D constraints and leaves higher-rank leaves untouched.
+        dev = jax.devices()[0]
+        mesh = jax.sharding.Mesh(
+            np.asarray([dev]).reshape(1, 1, 1), ("x", "y", "z"),
+        )
+        fake_coords = types.SimpleNamespace(
+            spmd_mesh=mesh, physics_partition_spec=P(None, ("x", "z"), "y"),
+        )
+        state_sharding, surface_sharding = _flattened_column_sharding(fake_coords)
+
+        tree = {
+            "state": jnp.ones((_NLEV, 8)),     # 2-D (nlev, ncols)
+            "surface": jnp.ones((8,)),         # 1-D (ncols,)
+            "scalar": jnp.asarray(3.0),        # 0-D, passthrough
+        }
+        out = _shard_columns(tree, state_sharding, surface_sharding)
+        self.assertEqual(out["state"].sharding.spec, state_sharding.spec)
+        self.assertEqual(out["surface"].sharding.spec, surface_sharding.spec)
+        npt.assert_array_equal(np.asarray(out["scalar"]), 3.0)
+
+        # None state_sharding (single device) is an identity no-op.
+        self.assertIs(_shard_columns(tree, None, None), tree)
+
+
+class ColumnShardingUnitMeshTest(unittest.TestCase):
+    """Run the sharded column path on a degenerate (1, 1, 1) mesh.
+
+    A unit mesh needs only the single device the fast suite always has, yet
+    drives the *real* sharded code path: ``cache_coords`` derives non-None
+    column shardings and ``compute_tendencies`` routes the flattened state and
+    accumulated tendencies through ``_shard_columns`` (the
+    ``with_sharding_constraint`` calls). This deterministically covers the
+    sharding-active branches that :class:`ColumnShardingRunTest` only reaches
+    when 2+ devices happen to be present. Correctness is unchanged by a unit
+    mesh, so the result must match the unsharded run.
+    """
+
+    def test_unit_mesh_matches_single_device(self):
+        coords_mesh = get_coords(
+            SigmaCoordinates.equidistant(_NLEV),
+            spectral_truncation=21,
+            spmd_mesh=(1, 1, 1),
+        )
+        coords_single = get_coords(
+            SigmaCoordinates.equidistant(_NLEV),
+            spectral_truncation=21,
+            spmd_mesh=None,
+        )
+        state = _make_state((_NLEV, _NLON, _NLAT))
+        forcing = ForcingData.zeros(coords_mesh.horizontal.nodal_shape)
+        terrain = TerrainData.aquaplanet(coords_mesh)
+
+        phys_mesh = _column_physics(coords_mesh)
+        phys_single = _column_physics(coords_single)
+
+        @jax.jit
+        def run_mesh(s):
+            tend, _ = phys_mesh.compute_tendencies(s, forcing, terrain)
+            return tend
+
+        tend_mesh = run_mesh(state)
+        tend_single, _ = phys_single.compute_tendencies(state, forcing, terrain)
+
+        npt.assert_allclose(
+            np.asarray(tend_mesh.temperature),
+            np.asarray(tend_single.temperature),
+            rtol=1e-6, atol=1e-6,
+        )
+        npt.assert_allclose(
+            np.asarray(tend_mesh.specific_humidity),
+            np.asarray(tend_single.specific_humidity),
+            rtol=1e-6, atol=1e-6,
+        )
 
 
 class ColumnShardingRunTest(unittest.TestCase):
