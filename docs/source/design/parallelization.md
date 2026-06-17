@@ -190,3 +190,68 @@ that isolates sharding from the `RealSphericalHarmonics` ↔
 SPEEDY integration must stay finite and match the single-device run);
 `jcm/physics/composable_physics_sharding_test.py` pins the physics path;
 `jcm/diffusion_test.py` pins the modal-padding eigenvalue fix.
+
+## Throughput scaling in practice
+
+Reproducing the single-device answer (above) is correctness; it says nothing
+about *speed*. This section records measured throughput so you can decide
+when multi-device is worth it. The numbers below are from an **8× A100 80 GB
+PCIe** host (**no NVLink** — inter-GPU collectives go over PCIe), full ECHAM +
+RRTMGP physics, longitude-only mesh `(N, 1, 1)`. Treat them as
+order-of-magnitude guidance for *this* class of interconnect, not portable
+constants.
+
+**The headline: the multi-GPU benefit grows with horizontal resolution, and
+there is a crossover.** Every spherical-harmonic transform needs a global
+all-to-all (longitude is split, so the FFT must communicate). At small grids
+that fixed communication dominates the modest compute per step, so adding
+devices *loses*. As the grid grows, compute per step rises faster than the
+communication, and 2-way sharding crosses into a real win:
+
+| grid (lon×lat)     | 2-GPU speedup | 4-GPU speedup |
+| ------------------ | ------------- | ------------- |
+| T63   (192×96)     | 0.95×         | 0.94× (8-GPU 0.53×) |
+| TL127 (256×128)    | 0.92×         | 0.81×         |
+| TL179 (360×180)    | 1.08×         | 0.88×         |
+| TL255 (512×256)    | **1.79×** (89 % eff) | 1.46×  |
+
+Speedups are per-grid versus that grid's single-GPU run. By **TL255** two
+GPUs deliver a **near-linear 1.79×**; four stays positive (1.46×) but below
+two — past two devices the PCIe all-to-all reasserts itself. So on this box:
+
+* **Low resolution (≤ TL127): run single-GPU.** Multi-GPU only buys *capacity*
+  (a model too big for one card), not speed.
+* **High resolution (TL255+): two GPUs are worth it.** Four or more would need
+  a faster interconnect (NVLink / NVSwitch, i.e. A100 SXM or H100) to pay off.
+
+### Why not split the level axis instead? (option C)
+
+A natural idea is to shard the *dynamics* by level (`(1, 1, N)`, the
+`dycore_partition_spec = P('z', 'x', 'y')` layout): the spherical-harmonic
+transform is independent per level, so a level split makes it
+communication-free. It runs — the semi-implicit solve and the physics
+boundary tolerate it — but it does **not** beat the longitude split. Measured
+on SPEEDY T106 L8 (same dycore, cheap physics, so it isolates the dynamics):
+2-GPU `B = 0.96×` vs `C = 0.89×`; 4-GPU `B = 0.71×` vs `C = 0.72×`. The freed
+transform cost simply reappears elsewhere: (a) the physics↔dynamics boundary
+becomes an all-to-all *transpose* (level-split dynamics is the transpose of
+column-local physics), and (b) the dynamics couples levels (the geopotential
+integral and semi-implicit solve), so splitting `z` adds communication inside
+the dynamics too. It also can't shard a prime level count — `(1, 1, 2)` on the
+ECHAM L47 grid fails outright (`47` is not divisible). The wiring leaves the
+door open (it is just a different `spmd_mesh`), but option B is the supported,
+faster path.
+
+### Caveats
+
+* **Interconnect-specific.** All of the above is dominated by PCIe collective
+  cost. NVLink/NVSwitch would shift every crossover point and likely make
+  4-GPU and level-sharding viable.
+* **Cross-grid absolute throughput is not apples-to-apples** if the RRTMGP
+  implementation changed between runs (e.g. the single-vmap refactor roughly
+  doubled single-GPU TL255 throughput). The *per-grid* speedup ratios are
+  valid regardless — numerator and denominator use the same code — but do not
+  compare raw sim-days/wall-day across a code change.
+* Benchmark harness: `run_logs/benchmark_rrtmgp_scaling.py` (`--grid TL127`
+  etc. for the linear grids); the dynamics-layout A/B test is
+  `run_logs/benchmark_speedy_scaling.py`.
