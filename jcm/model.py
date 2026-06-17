@@ -310,7 +310,6 @@ class Model:
                  physics: Physics = None,
                  start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
                  calendar: str = "365_day",
-                 radiation_chunk_size: int | None = None,
                  log_level=logging.CRITICAL) -> None:
         """Initialise the model.
 
@@ -336,23 +335,12 @@ class Model:
                 forcing-driven and date-aware terms can read it).
             calendar: Calendar string (``"365_day"`` or ``"gregorian"``) for
                 the same date conversion.
-            radiation_chunk_size: Override the RRTMGP chunked-vmap chunk size
-                (cells per chunk). Default ``None`` auto-detects from the JAX
-                device's HBM. No-op when the active radiation scheme is not
-                RRTMGP.
             log_level: Logging verbosity level.
 
         """
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
         self.start_date = start_date
-
-        # Wire the RRTMGP chunked-vmap chunk-size override (only takes
-        # effect if the physics actually uses RRTMGP — the setter is a
-        # no-op for other radiation backends).
-        if radiation_chunk_size is not None:
-            from jcm.physics.radiation import rrtmgp as _rrtmgp_mod
-            _rrtmgp_mod.set_chunk_size(radiation_chunk_size)
 
         self.dt_si = (time_step * units.minute).to(units.second)
         self.physics = physics if physics is not None else speedy_physics()
