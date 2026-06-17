@@ -24,8 +24,9 @@ timestep, and unpacks the change back into per-tracer tendencies
 Licensing & precision
 ----------------------
 MAM4-JAX is **GPL-3.0**; jcm is Apache-2.0. It is therefore an *optional*
-dependency (``pip install jcm[mam4]``) imported lazily here, so a plain jcm
-import never pulls in GPL code. The condensation is integrated with the
+dependency (``pip install jcm[mam4]``). It is imported at this module's top, but
+this adapter module is itself loaded only when JAM selects the mam4_jax core
+(lazily, via ``jam_terms``), so a plain jcm import never pulls in GPL code. The condensation is integrated with the
 operator-split ``substep`` / ``astem`` backends (the original adaptive diffrax
 solver is not supported — too expensive), both of which are float32-safe. By
 default the term runs the core in float64 (``MAM4_JAX_ENABLE_X64``), casting
@@ -65,6 +66,19 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
 
+# MAM4-JAX (GPL-3.0) core. Imported at module level — this whole adapter module
+# is itself only imported when JAM selects the mam4_jax core (lazily, via
+# ``jam_terms``), so a plain jcm import never reaches this GPL dependency. The
+# import enables ``jax_enable_x64`` by default; ``__init__`` sets the final
+# precision per-instance (see ``enable_x64``). If the ``jcm[mam4]`` extra isn't
+# installed this raises ``ImportError`` here, which is the right signal.
+import mam4_jax  # noqa: F401
+from mam4_jax import data
+from mam4_jax.processes import amicphys as _amicphys
+from mam4_jax.processes.amicphys import amicphys
+from mam4_jax.processes.calcsize import calcsize
+from mam4_jax.processes.wateruptake import wateruptake
+
 # amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
 # maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.
 _GAS_IGAS: dict[str, int] = {"soag": 0, "h2so4": 1}
@@ -84,32 +98,6 @@ _TOKEN_TO_TYPE: dict[str, int] = {
 }
 
 _TINY_VOL = 1.0e-40   # m³/kg — floor for the volume-weighted κ guard.
-
-#: Cached ``(calcsize, wateruptake, amicphys, data)`` from MAM4-JAX. Imported
-#: once, lazily, so plain jcm import never touches the GPL dependency.
-_CORE = None
-
-
-def _core():
-    """Lazily import the MAM4-JAX core functions.
-
-    Precision is **not** forced here — it is decided per-instance in
-    ``Mam4JaxMicrophysics.__init__`` (see ``enable_x64`` there). The ``diffrax``
-    condensation backend needs float64; the ``substep`` / ``astem`` backends are
-    float32-safe (the coag ``qv12`` coefficient was reformulated upstream to
-    avoid a float32 underflow), so they can run the whole coupled model in
-    float32. Importing ``mam4_jax`` still enables float64 *by default* (unless
-    ``MAM4_JAX_ENABLE_X64=0``); the wrapper overrides it as needed.
-    """
-    global _CORE
-    if _CORE is None:
-        import mam4_jax  # noqa: F401  — enables jax_enable_x64 by default
-        from mam4_jax import data
-        from mam4_jax.processes.amicphys import amicphys
-        from mam4_jax.processes.calcsize import calcsize
-        from mam4_jax.processes.wateruptake import wateruptake
-        _CORE = (calcsize, wateruptake, amicphys, data)
-    return _CORE
 
 
 def relative_humidity(temperature, specific_humidity, pressure):
@@ -167,19 +155,8 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         """
         if spec is not None:
             self.spec = spec
-        _, _, _, data = _core()
 
-        if condensation_backend not in ("substep", "astem"):
-            raise ValueError(
-                "condensation_backend must be 'substep' or 'astem' "
-                f"(diffrax is not supported); got {condensation_backend!r}."
-            )
-        from mam4_jax.processes import amicphys as _amicphys
-        if not hasattr(_amicphys, "configure_condensation"):
-            raise RuntimeError(
-                "mam4_jax lacks configure_condensation; the operator-split "
-                "condensation backends need reflective-org/MAM4-JAX#59."
-            )
+        # Let mam4_jax validate the backend and own its own capability errors.
         _amicphys.configure_condensation(
             backend=condensation_backend, n_substeps=n_substeps,
         )
@@ -267,7 +244,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         )
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        calcsize, wateruptake, amicphys, _ = _core()
         out_dtype = state.temperature.dtype
         shape = state.temperature.shape
         zeros64 = jnp.zeros(shape, jnp.float64)

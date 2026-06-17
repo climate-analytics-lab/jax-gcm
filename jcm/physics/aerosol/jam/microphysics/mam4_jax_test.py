@@ -198,9 +198,10 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             )
             self.assertFalse(term._enable_x64)
             self.assertFalse(jax.config.read("jax_enable_x64"))
-            # diffrax is not a supported backend.
+            # Backend validation is delegated to mam4_jax: an unknown backend
+            # raises the library's own ValueError (jcm adds no guard of its own).
             with self.assertRaises(ValueError):
-                Mam4JaxMicrophysics(condensation_backend="diffrax")
+                Mam4JaxMicrophysics(condensation_backend="not-a-backend")
         finally:
             _amicphys.configure_condensation(backend="substep")
 
