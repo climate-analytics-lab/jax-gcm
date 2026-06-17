@@ -19,138 +19,24 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import jax_datetime as jdt
-from numpy import timedelta64
 from typing import Callable, Any
 from dinosaur.scales import units
-import pandas as pd
 from functools import partial
 import logging
 
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
+from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
-from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 
 logger = logging.getLogger(__name__)
-
-
-class ModelPredictions:
-    """User-facing container for model prediction outputs.
-
-    Wraps the internal :class:`Predictions` pytree with the coordinate system
-    and physics module needed for xarray conversion. Returned by
-    :meth:`Model.run`, :meth:`Model.resume`, and :meth:`Model.run_from_state`.
-
-    Attributes:
-        dynamics (PhysicsState): The physical state variables.
-        physics (Any): Diagnostic physics data.
-        times (Any): Timestamps of the predictions.
-
-    """
-
-    def __init__(self, predictions: Predictions, coords, physics: Physics):  # noqa: D107
-        self._predictions = predictions
-        self._coords = coords
-        self._physics = physics
-
-    @property
-    def dynamics(self):
-        return self._predictions.dynamics
-
-    @property
-    def physics(self):
-        return self._predictions.physics
-
-    @property
-    def times(self):
-        return self._predictions.times
-
-    def to_xarray(self):
-        """Convert the full prediction trajectory to an xarray.Dataset.
-
-        Returns:
-            An xarray.Dataset ready for analysis and plotting.
-
-        """
-        from jcm.utils import data_to_xarray
-
-        # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
-        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
-        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives.
-        float0s_to_nans = lambda pytree: tree_map(
-            lambda x: jnp.full_like(x, jnp.nan, dtype=float) if x.dtype == jax.dtypes.float0 else x,
-            pytree,
-        )
-
-        dynamics_predictions = float0s_to_nans(self.dynamics)
-        physics_predictions = float0s_to_nans(self.physics)
-
-        nodal_shape = dynamics_predictions.u_wind.shape[1:]
-
-        # Per-physics flattening of the diagnostic struct into a dict of named fields.
-        physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
-
-        times = jax.device_get(self.times)
-        coords = jax.device_get(self._coords)
-
-        additional_coords = {}
-        if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
-            additional_coords = self._physics.cached_coords.xarray_additional_coords()
-
-        pred_ds = data_to_xarray(
-            dynamics_predictions.asdict() | physics_preds_dict,
-            coords=coords, serialize_coords_to_attrs=False,
-            times=times - times[0],
-            additional_coords=additional_coords,
-        )
-
-        # Attach units / descriptions from the physics-specific units table.
-        units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
-        if self._physics.UNITS_TABLE_CSV_PATH is not None:
-            units_df = pd.concat([units_df, pd.read_csv(self._physics.UNITS_TABLE_CSV_PATH)], ignore_index=True)
-        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
-            if var in pred_ds:
-                pred_ds[var].attrs["units"] = unit
-                pred_ds[var].attrs["description"] = desc
-
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere.
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
-
-        # Convert sim-day timestamps to datetimes.
-        pred_ds['time'] = (
-            times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
-        ).astype('datetime64[ns]')
-
-        return pred_ds
-
-
-def _model_predictions_flatten(mp):
-    """Flatten ModelPredictions for JAX pytree operations (tree_map, etc.).
-
-    Only the internal Predictions pytree is treated as array data. Coords and
-    physics are not in aux_data so that ``tree_map`` works across ModelPredictions
-    from different Model instances.
-    """
-    children = (mp._predictions,)
-    return children, None
-
-
-def _model_predictions_unflatten(aux_data, children):
-    return ModelPredictions(children[0], None, None)
-
-
-jax.tree_util.register_pytree_node(
-    ModelPredictions,
-    _model_predictions_flatten,
-    _model_predictions_unflatten,
-)
 
 
 def _op_split_trajectory(
@@ -429,8 +315,27 @@ class Model:
         Order: ``state → gridpoint projection → physics_tendency → dycore.step``
         (which itself does the forward-Euler add, the dynamics step, and the
         spectral filters). Mirrors ECHAM6's ``physc`` → ``sccd``/``scctp`` →
-        ``hdiff`` chain.
+        ``hdiff`` chain. The dynamics→physics gridpoint projection
+        (:meth:`DynamicalCore.to_physics_state`) is where any dycore-side tracer
+        cleaning (e.g. a spectral core's mass-conserving positivity filter)
+        happens, so the step body stays agnostic to it.
         """
+        # Align the forcing to the model's working float precision once, up
+        # front, before the scan time-slices it. ``ForcingData`` is often built
+        # before the MAM4-JAX core enables ``jax_enable_x64`` (so its arrays are
+        # float32), whereas the working model state is float64; a per-step
+        # float32 forcing feeding the physics diagnostics would then clash with
+        # the float64 scan carry ("carry input/output types differ"). Casting
+        # here only ever upcasts (x64 path) or is a no-op (non-x64, where forcing
+        # and state share float32), so the selection time axis is unaffected.
+        work_dtype = jnp.zeros(()).dtype
+        forcing = jax.tree_util.tree_map(
+            lambda x: x.astype(work_dtype)
+            if (hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating))
+            else x,
+            forcing,
+        )
+
         def step(state, physics_state):
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)

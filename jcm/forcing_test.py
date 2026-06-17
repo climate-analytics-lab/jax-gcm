@@ -735,6 +735,37 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
             370.0,
         )
 
+    def test_time_axis_noleap_matches_model_gregorian_clock(self):
+        """A 365_day (noleap) emissions time axis must land on the SAME
+        leap-aware Gregorian clock as the BY_DATE lookup target.
+
+        The model has no real noleap clock (#449): the lookup target is
+        ``absolute_seconds_since_epoch`` built from ``jax_datetime`` (Gregorian).
+        So a cftime axis must be aligned on its *nominal* calendar date, not by
+        noleap day-counting — which would drift by accumulated leap days
+        (~7 days by 2000, growing) and select the wrong multi-year slice. This
+        is the Codex P1 on PR #522. The old ``cftime.date2num(..., '365_day')``
+        path would fail this by ~7 * 86400 s at 2000.
+        """
+        import cftime
+        import xarray as xr
+        import jax_datetime as jdt
+        from jcm.forcing import _time_axis_seconds_from_ds
+        from jcm.date import absolute_seconds_since_epoch
+
+        years = [2000, 2001, 2002]
+        ds = xr.Dataset(
+            coords={'time': ('time', [cftime.DatetimeNoLeap(y, 1, 1) for y in years])}
+        )
+        secs = np.asarray(_time_axis_seconds_from_ds(ds))
+
+        expected = np.array([
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(f'{y}-01-01'))))
+            for y in years
+        ])
+        np.testing.assert_allclose(secs, expected, rtol=0, atol=1.0)
+
     def test_select_under_jit(self):
         """Select must be JIT-compatible."""
         import jax
