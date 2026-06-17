@@ -69,13 +69,11 @@ from jcm.physics.convection.betts_miller import (
     BettsMillerConvection,
     BettsMillerParameters,
 )
-from jcm.physics.convection.tiedtke_nordeng import TiedtkeConvection
 from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.band_config import RadiationBandConfig
-from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
@@ -300,8 +298,8 @@ def rce_column(
     nlev: int = 47,
     vertical=None,
     dt_seconds: float = 1200.0,
-    radiation_scheme: str = "rrtmgp",
-    convection: str = "betts_miller",
+    radiation: PhysicsTerm | None = None,
+    convection: PhysicsTerm | None = None,
     tau_convection: float = 7200.0,
     interactive_humidity: bool = False,
     day_of_year_fraction: float = 0.22,
@@ -319,16 +317,19 @@ def rce_column(
         sst: Fixed sea-surface temperature [K] (the radiation lower boundary).
         relative_humidity: Fixed RH for the humidity closure and Betts-Miller.
         co2_ppmv: CO₂ volume mixing ratio [ppmv] on ``forcing.co2_vmr``.
-        solar_constant: Solar constant [W/m²]; tune to hit the target TOA SW.
+        solar_constant: Solar constant [W/m²] for the *default* radiation term;
+            tune to hit the target TOA SW. Ignored if ``radiation`` is given.
         lat_deg: Column latitude [deg] (fixes the zenith angle with ``solar``).
         nlev: Number of levels for ``get_echam_levels`` (47 or 40) when
             ``vertical`` is not given.
         vertical: Optional explicit vertical coordinate (e.g. a
             ``SigmaCoordinates`` for a cheap test grid); overrides ``nlev``.
         dt_seconds: Physics timestep [s].
-        radiation_scheme: ``"rrtmgp"`` (default) or ``"grey"``.
-        convection: ``"betts_miller"`` (default) or ``"tiedtke"``.
-        tau_convection: Betts-Miller relaxation timescale ``tau_bm`` [s].
+        radiation: Radiation ``PhysicsTerm``; defaults to RRTMGP at
+            ``solar_constant``.
+        convection: Convection ``PhysicsTerm``; defaults to Betts-Miller at
+            ``rhbm=relative_humidity``, ``tau_bm=tau_convection``.
+        tau_convection: ``tau_bm`` [s] for the *default* Betts-Miller term.
         interactive_humidity: When ``True``, evolve humidity freely (no closure)
             instead of slaving it to fixed RH.
         day_of_year_fraction: Sun position for :func:`steady_insolation`.
@@ -343,27 +344,16 @@ def rce_column(
         vertical = get_echam_levels(nlev)
 
     if physics is None:
-        rad_params = RadiationParameters.default(solar_constant=solar_constant)
-        if radiation_scheme == "rrtmgp":
-            radiation = RRTMGPRadiation(params=rad_params)
-        elif radiation_scheme == "grey":
-            radiation = GreyTwoStreamRadiation(params=rad_params)
-        else:
-            raise ValueError(
-                f"Unknown radiation_scheme={radiation_scheme!r}; choose 'rrtmgp' or 'grey'."
+        if radiation is None:
+            radiation = RRTMGPRadiation(
+                params=RadiationParameters.default(solar_constant=solar_constant),
             )
-        if convection == "betts_miller":
-            convection_term = BettsMillerConvection(BettsMillerParameters.default().replace(
+        if convection is None:
+            convection = BettsMillerConvection(BettsMillerParameters.default().replace(
                 rhbm=jnp.asarray(float(relative_humidity)),
                 tau_bm=jnp.asarray(float(tau_convection)),
             ))
-        elif convection == "tiedtke":
-            convection_term = TiedtkeConvection()
-        else:
-            raise ValueError(
-                f"Unknown convection={convection!r}; choose 'betts_miller' or 'tiedtke'."
-            )
-        physics = rce_physics(radiation=radiation, convection=convection_term)
+        physics = rce_physics(radiation=radiation, convection=convection)
 
     forcing = ForcingData.zeros((1, 1)).copy(
         sea_surface_temperature=jnp.full((1, 1), float(sst)),

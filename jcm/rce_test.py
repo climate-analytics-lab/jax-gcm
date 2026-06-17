@@ -29,6 +29,8 @@ from jcm.rce import (
     run_rce,
     steady_insolation,
 )
+from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.single_column_model import SingleColumnModel
 
 
@@ -124,32 +126,24 @@ class TestRceColumnConstruction(unittest.TestCase):
 
     def test_builds_scm_with_fixed_sst_and_free_temperature(self):
         scm = rce_column(sst=302.0, relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),
-                         radiation_scheme="grey")
+                         radiation=GreyTwoStreamRadiation())
         self.assertIsInstance(scm, SingleColumnModel)
         self.assertEqual(scm.free_evolve, ("temperature",))
         self.assertIsNotNone(scm.state_closure)
         self.assertAlmostEqual(float(scm.forcing.sea_surface_temperature[0, 0]), 302.0)
 
-    def test_betts_miller_params_from_rce_column(self):
+    def test_default_betts_miller_params_track_request(self):
+        # convection=None builds the default Betts-Miller from the column knobs.
         scm = rce_column(relative_humidity=0.65, tau_convection=5400.0,
-                         vertical=SigmaCoordinates.equidistant(8), radiation_scheme="grey")
+                         vertical=SigmaCoordinates.equidistant(8), radiation=GreyTwoStreamRadiation())
         bm = [t for t in scm.physics.terms if t.category == "convection"][0]
         params = bm.params.get_value()
         self.assertAlmostEqual(float(params.rhbm), 0.65, places=5)
         self.assertAlmostEqual(float(params.tau_bm), 5400.0, places=3)
 
-    def test_unknown_radiation_scheme_raises(self):
-        with self.assertRaises(ValueError):
-            rce_column(radiation_scheme="nope", vertical=SigmaCoordinates.equidistant(8))
-
-    def test_unknown_convection_raises(self):
-        with self.assertRaises(ValueError):
-            rce_column(radiation_scheme="grey", convection="nope",
-                       vertical=SigmaCoordinates.equidistant(8))
-
     def test_interactive_humidity_frees_q_and_drops_closure(self):
         scm = rce_column(relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),
-                         radiation_scheme="grey", interactive_humidity=True)
+                         radiation=GreyTwoStreamRadiation(), interactive_humidity=True)
         self.assertIn("specific_humidity", scm.free_evolve)
         self.assertIn("temperature", scm.free_evolve)
         self.assertIsNone(scm.state_closure)
@@ -166,8 +160,11 @@ class TestRceIntegrationGrey(unittest.TestCase):
     def _run(self, sst=300.0, n_days=40.0):
         vertical = SigmaCoordinates.equidistant(20)
         scm = rce_column(
-            sst=sst, relative_humidity=0.7, solar_constant=420.0, lat_deg=0.0,
-            vertical=vertical, radiation_scheme="grey", dt_seconds=1800.0,
+            sst=sst, relative_humidity=0.7, lat_deg=0.0,
+            radiation=GreyTwoStreamRadiation(
+                params=RadiationParameters.default(solar_constant=420.0),
+            ),
+            vertical=vertical, dt_seconds=1800.0,
         )
         ic = rce_initial_state(vertical, sst=sst, relative_humidity=0.7)
         return scm, run_rce(scm, ic, n_days=n_days)
@@ -222,7 +219,7 @@ class TestRceIntegrationRrtmgp(unittest.TestCase):
     def test_case1_equilibrates_with_reasonable_olr_and_rh(self):
         scm = rce_column(
             sst=300.0, relative_humidity=0.7, solar_constant=728.4, lat_deg=42.55,
-            nlev=47, radiation_scheme="rrtmgp", dt_seconds=1200.0,
+            nlev=47, dt_seconds=1200.0,  # RRTMGP is the default radiation
         )
         ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7)
         preds = run_rce(scm, ic, n_days=20.0)
