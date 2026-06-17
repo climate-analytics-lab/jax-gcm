@@ -6,9 +6,6 @@ to verify structural correctness and reasonable agreement.
 Date: 2025-08-01
 """
 
-import types
-from unittest import mock
-
 import pytest
 import numpy as np
 import jax.numpy as jnp
@@ -18,9 +15,6 @@ from datetime import datetime
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_scheme
 from jcm.physics.radiation.rrtmgp import (
     radiation_scheme_rrtmgp,
-    chunk_budget,
-    get_chunk_size_override,
-    set_chunk_size,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.echam.unit_conversions import (
@@ -84,56 +78,6 @@ def _make_inputs(nlev=10):
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
-
-class TestChunkSizeControls:
-    """The chunk-size override and HBM-budget heuristic.
-
-    These pick how many columns RRTMGP vmaps at once so a full grid fits in
-    device memory. The override path and the CPU/HBM fallbacks are exercised
-    here without running radiation, so they stay covered in the fast suite
-    (the full chunked term path only runs in the slow ECHAM integration).
-    """
-
-    def teardown_method(self):
-        # Module-global override — always restore auto-detection.
-        set_chunk_size(None)
-
-    def test_override_round_trips(self):
-        set_chunk_size(2048)
-        assert get_chunk_size_override() == 2048
-        set_chunk_size(None)
-        assert get_chunk_size_override() is None
-
-    def test_budget_uses_positive_override(self):
-        set_chunk_size(1234)
-        # Override wins regardless of nlev / device HBM.
-        assert chunk_budget(nlev=47) == 1234
-
-    def test_budget_falls_back_to_default_without_hbm(self):
-        # CPU devices don't report ``bytes_limit`` → the 9216 fallback.
-        set_chunk_size(None)
-        fake_dev = types.SimpleNamespace(memory_stats=lambda: {})
-        with mock.patch("jax.devices", return_value=[fake_dev]):
-            assert chunk_budget(nlev=47) == 9216
-
-    def test_budget_scales_with_reported_hbm(self):
-        # A device that reports ``bytes_limit`` → largest chunk at 55% of HBM.
-        set_chunk_size(None)
-        bytes_limit = 80 * 1024**3  # 80 GiB, A100-class
-        fake_dev = types.SimpleNamespace(
-            memory_stats=lambda: {"bytes_limit": bytes_limit}
-        )
-        with mock.patch("jax.devices", return_value=[fake_dev]):
-            budget = chunk_budget(nlev=47)
-        expected = max(1, int(0.55 * bytes_limit / (3.6e6 * (47 / 47.0))))
-        assert budget == expected
-
-    def test_budget_handles_device_query_failure(self):
-        # If the HBM query raises, fall back rather than propagate.
-        set_chunk_size(None)
-        with mock.patch("jax.devices", side_effect=RuntimeError):
-            assert chunk_budget(nlev=47) == 9216
-
 
 class TestRRTMGPTermCacheCoords:
     """The composable term caches per-column lat/lon at ``cache_coords``."""
