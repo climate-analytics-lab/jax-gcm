@@ -79,6 +79,31 @@ def _make_inputs(nlev=10):
 # Tests
 # ------------------------------------------------------------------
 
+class TestRRTMGPTermCacheCoords:
+    """The composable term caches per-column lat/lon at ``cache_coords``."""
+
+    def test_cache_coords_sets_per_column_latlon(self):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        from jcm.utils import get_coords
+
+        coords = get_coords(
+            SigmaCoordinates.equidistant(8), spectral_truncation=21,
+        )
+        term = RRTMGPRadiation()
+        assert not term._coords_cached
+        term.cache_coords(coords)
+        assert term._coords_cached
+        nlon, nlat = coords.horizontal.nodal_shape
+        ncols = nlon * nlat
+        # One latitude / longitude per column, in degrees.
+        lats = term._lats.get_value()
+        lons = term._lons.get_value()
+        assert lats.shape == (ncols,)
+        assert lons.shape == (ncols,)
+        assert float(jnp.max(jnp.abs(lats))) <= 90.0 + 1e-3
+
+
 class TestRRTMGPScheme:
     """Test the RRTMGP radiation scheme produces valid outputs."""
 

@@ -6,8 +6,10 @@ so it can run in the regular pytest sweep — we do not test the full ECHAM
 T85x47 grid here.
 """
 
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from jcm.runners import (
     build_model,
     build_physics,
     build_terrain,
+    configure_host_device_count,
     run,
 )
 
@@ -535,6 +538,60 @@ class TestMainCLI(unittest.TestCase):
                 HydraConfig.instance().set_config(cfg)
                 main_module.main.__wrapped__(cfg)
             self.assertTrue(Path(tmpdir, "cli_test.nc").exists())
+
+
+class TestConfigureHostDeviceCount(unittest.TestCase):
+    """In-process control flow of the CPU device-count helper.
+
+    The real multi-device branches are exercised by the subprocess-based
+    sharding tests (coverage can't see those). Here we mock the jax calls so
+    the test is deterministic and never actually changes the process-wide
+    device count, while still covering the no-op, idempotent ``XLA_FLAGS``
+    append, and "backend already live" warning paths.
+    """
+
+    _FLAG = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
+
+    def setUp(self):
+        self._saved_flags = os.environ.get("XLA_FLAGS")
+
+    def tearDown(self):
+        if self._saved_flags is None:
+            os.environ.pop("XLA_FLAGS", None)
+        else:
+            os.environ["XLA_FLAGS"] = self._saved_flags
+
+    def test_noop_for_single_or_none(self):
+        os.environ.pop("XLA_FLAGS", None)
+        for n in (None, 0, 1):
+            configure_host_device_count(n)
+            # A no-op must not touch the device count or the env.
+            self.assertNotIn("XLA_FLAGS", os.environ)
+
+    def test_appends_serialized_collective_flag(self):
+        os.environ.pop("XLA_FLAGS", None)
+        with mock.patch("jax.config.update"), \
+                mock.patch("jax.device_count", return_value=4):
+            configure_host_device_count(4)
+        self.assertIn(self._FLAG, os.environ["XLA_FLAGS"])
+
+    def test_flag_append_is_idempotent(self):
+        os.environ["XLA_FLAGS"] = f"--foo {self._FLAG}"
+        with mock.patch("jax.config.update"), \
+                mock.patch("jax.device_count", return_value=4):
+            configure_host_device_count(4)
+        self.assertEqual(os.environ["XLA_FLAGS"].count(self._FLAG), 1)
+
+    def test_warns_when_backend_already_live(self):
+        # config.update raising RuntimeError mimics a backend that is already
+        # initialised (the CLI case); device_count then falls short of the
+        # request, so the helper must warn rather than silently proceed.
+        os.environ.pop("XLA_FLAGS", None)
+        with mock.patch("jax.config.update", side_effect=RuntimeError), \
+                mock.patch("jax.device_count", return_value=1):
+            with self.assertLogs("jcm.runners", level="WARNING") as cm:
+                configure_host_device_count(8)
+        self.assertTrue(any("already initialised" in m for m in cm.output))
 
 
 # ---------------------------------------------------------------------------

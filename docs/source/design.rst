@@ -10,6 +10,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/composable_physics
    design/operator_split_physics
    design/writing_a_physics_scheme
+   design/parallelization
 
 Core Architecture
 -----------------

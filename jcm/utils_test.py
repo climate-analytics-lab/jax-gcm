@@ -46,6 +46,38 @@ class TestGetCoords(unittest.TestCase):
         self.assertEqual(coords.horizontal.nodal_shape, (64, 32))
         self.assertEqual(coords.horizontal.total_wavenumbers, 23)  # T21 + 2
 
+    def test_get_coords_t63_uses_explicit_construct(self):
+        """T63 has no Grid.T63 factory — it takes the Grid.construct branch.
+
+        The 192x96 ECHAM grid is built with gaussian_nodes=48 so it matches
+        the production boundary-condition files.
+        """
+        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        coords = get_coords(sigma_boundaries, spectral_truncation=63)
+        self.assertEqual(coords.horizontal.nodal_shape, (192, 96))
+
+    def test_get_coords_builds_spmd_mesh(self):
+        """A 1x1x1 spmd_mesh exercises the mesh-build path on one device.
+
+        The mesh product must equal the device count; (1, 1, 1) needs only the
+        single device the fast suite has, while still running the Auto-axis
+        ``make_mesh`` branch that multi-device runs rely on.
+        """
+        from jax.sharding import AxisType
+
+        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        coords = get_coords(
+            sigma_boundaries, spectral_truncation=21, spmd_mesh=(1, 1, 1),
+        )
+        self.assertIsNotNone(coords.spmd_mesh)
+        self.assertEqual(coords.spmd_mesh.axis_names, ("x", "y", "z"))
+        # Constraints require Auto axes (Explicit would make them raise).
+        self.assertTrue(
+            all(t == AxisType.Auto for t in coords.spmd_mesh.axis_types)
+        )
+        # Grid is unchanged by a unit mesh.
+        self.assertEqual(coords.horizontal.nodal_shape, (64, 32))
+
     def test_get_coords_invalid_spectral_truncation(self):
         """get_coords should raise error for invalid spectral truncation."""
         sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]

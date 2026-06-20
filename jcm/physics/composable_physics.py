@@ -24,6 +24,7 @@ from typing import Any, ClassVar
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
@@ -93,6 +94,11 @@ class ComposablePhysics(nnx.Module, Physics):
             band_config if band_config is not None
             else RadiationBandConfig.broadband()
         )
+        # Shardings for the flattened (nlev, ncols) / (ncols,) column layout,
+        # populated by ``cache_coords`` when an ``spmd_mesh`` is configured.
+        # ``None`` means "single device" — the constraints become no-ops.
+        self._column_state_sharding: NamedSharding | None = None
+        self._column_surface_sharding: NamedSharding | None = None
         self._validate_ordering()
 
     # ------------------------------------------------------------------
@@ -107,7 +113,15 @@ class ComposablePhysics(nnx.Module, Physics):
         ``initial_carry_state``) because terms with band-shaped carry
         slots — e.g. MACv2-SP aerosol's per-SW-band optics — need the
         band count *before* their ``initial_carry_state`` runs.
+
+        Also derives the column-layout shardings used by the
+        ``vectorize_columns`` path so the flattened ``(nlev, ncols)`` state
+        stays sharded across devices instead of being silently gathered by
+        XLA at the ``(nlon, nlat) -> ncols`` reshape.
         """
+        self._column_state_sharding, self._column_surface_sharding = (
+            _flattened_column_sharding(coords)
+        )
         for term in self.terms:
             term.cache_coords(coords)
             term.cache_band_config(self.band_config)
@@ -207,6 +221,15 @@ class ComposablePhysics(nnx.Module, Physics):
         ncols = nlat * nlon
 
         vectorized_state = _reshape_state_to_columns(state, nlev, ncols)
+        # Pin the flattened column layout: the level axis is replicated and the
+        # column axis (the merged nlon*nlat) carries the device split, so each
+        # whole column is local to one device and the per-column vmaps below
+        # need no cross-device communication. No-op on a single device.
+        vectorized_state = _shard_columns(
+            vectorized_state,
+            self._column_state_sharding,
+            self._column_surface_sharding,
+        )
 
         diagnostics: dict = {}
         if prev_physics_data is not None:
@@ -238,6 +261,14 @@ class ComposablePhysics(nnx.Module, Physics):
             )
             acc = _accumulate(acc, tend)
 
+        # Keep the accumulated tendencies column-sharded before the lon-major
+        # un-flatten, so the (nlev, ncols) -> (nlev, nlon, nlat) reshape lands
+        # back in the physics 3D sharding rather than triggering a gather.
+        acc = _shard_columns(
+            acc,
+            self._column_state_sharding,
+            self._column_surface_sharding,
+        )
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
         return tendencies, diagnostics
 
@@ -533,6 +564,76 @@ class ComposablePhysics(nnx.Module, Physics):
 # ------------------------------------------------------------------
 # Column vectorization helpers
 # ------------------------------------------------------------------
+
+def _flattened_column_sharding(coords):
+    """Shardings for the flattened column layout, or ``(None, None)``.
+
+    Physics flattens the ``(nlev, nlon, nlat)`` gridpoint state to
+    ``(nlev, ncols)`` with longitude as the major axis (C-order reshape of the
+    trailing two axes). dinosaur's ``physics_partition_spec`` —
+    ``P(None, ('x', 'z'), 'y')`` by default — replicates the level axis and
+    shards (lon, lat); merging the lon and lat mesh axes (lon first, matching
+    the lon-major flatten) gives the sharding for the single column axis.
+
+    Returns ``(state_sharding, surface_sharding)`` for the ``(nlev, ncols)``
+    and ``(ncols,)`` ranks respectively, or ``(None, None)`` when no
+    ``spmd_mesh`` is configured.
+
+    Note: under the recommended longitude-only mesh ``(N, 1, 1)`` the merged
+    axis reduces to ``'x'`` and the flatten is communication-free (only the
+    major axis is sharded). A 2-D horizontal mesh (latitude split, ``y > 1``)
+    is still correct but the flatten of two distinctly-sharded axes forces a
+    reshard — keep latitude replicated to avoid it.
+    """
+    mesh = getattr(coords, "spmd_mesh", None)
+    if mesh is None:
+        return None, None
+
+    spec = getattr(
+        coords, "physics_partition_spec", PartitionSpec(None, ("x", "z"), "y"),
+    )
+    level, lon, lat = spec
+
+    def _as_tuple(axis):
+        if axis is None:
+            return ()
+        return tuple(axis) if isinstance(axis, tuple) else (axis,)
+
+    merged = _as_tuple(lon) + _as_tuple(lat)  # lon-major flatten
+    if not merged:
+        col = None
+    elif len(merged) == 1:
+        col = merged[0]
+    else:
+        col = merged
+
+    return (
+        NamedSharding(mesh, PartitionSpec(level, col)),
+        NamedSharding(mesh, PartitionSpec(col)),
+    )
+
+
+def _shard_columns(tree, state_sharding, surface_sharding):
+    """Constrain flattened column leaves to ``state``/``surface`` shardings.
+
+    2-D ``(nlev, ncols)`` leaves take ``state_sharding``; 1-D ``(ncols,)``
+    surface leaves take ``surface_sharding``. A no-op when ``state_sharding``
+    is ``None`` (single device). Works on both ``PhysicsState`` and the plain
+    tendency-accumulator dict (the tracers sub-dict is traversed by tree_map).
+    """
+    if state_sharding is None:
+        return tree
+
+    def constrain(x):
+        ndim = getattr(x, "ndim", None)
+        if ndim == 2:
+            return jax.lax.with_sharding_constraint(x, state_sharding)
+        if ndim == 1:
+            return jax.lax.with_sharding_constraint(x, surface_sharding)
+        return x
+
+    return jax.tree_util.tree_map(constrain, tree)
+
 
 def _reshape_state_to_columns(state, nlev, ncols):
     """Reshape PhysicsState fields from 3D (nlev, nlon, nlat) to columns (nlev, ncols)."""

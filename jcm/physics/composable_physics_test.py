@@ -6,6 +6,7 @@ physics terms, and that composition operators work correctly.
 Date: 2026-04-12
 """
 
+import types
 import unittest
 from typing import ClassVar
 
@@ -559,6 +560,75 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
         # Neither should expand since shapes don't match the pattern
         self.assertIn("flux", result)
+
+    def test_data_struct_to_dict_unflattens_column_axis(self):
+        """A flattened ``ncols`` axis is reshaped back to ``(lon, lat)``.
+
+        ``vectorize_columns=True`` produces diagnostics with a single merged
+        ``ncols`` axis; ``data_struct_to_dict`` must restore the spatial pair
+        before xarray sees them, and leave arrays without an ncols axis (or
+        with an ambiguous double match) untouched.
+        """
+        physics = ComposablePhysics(terms=[LinearHeating()], vectorize_columns=True)
+        nodal_shape = (4, 4)          # ncols = 16
+        struct = {
+            "colvar": jnp.arange(47 * 16, dtype=jnp.float32).reshape(47, 16),
+            "noncol": jnp.ones((47, 5)),          # no ncols axis -> untouched
+            "ambiguous": jnp.ones((16, 16)),      # two ncols axes -> untouched
+            "chan": jnp.ones((4, 4, 3)),          # 3-D multichannel -> expanded
+        }
+        result = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        self.assertEqual(result["colvar"].shape, (47, 4, 4))
+        self.assertEqual(result["noncol"].shape, (47, 5))
+        self.assertEqual(result["ambiguous"].shape, (16, 16))
+        # 3-D field whose leading dims match nodal_shape expands per channel.
+        self.assertIn("chan.0", result)
+        self.assertIn("chan.2", result)
+        self.assertNotIn("chan", result)
+
+    def test_data_struct_to_dict_none_returns_empty(self):
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        self.assertEqual(physics.data_struct_to_dict(None), {})
+
+    def test_data_struct_to_dict_nondict_and_substruct(self):
+        """Non-dict input and ``_``-prefixed typed sub-structs.
+
+        A non-dict struct routes to the base recursive flattener; a typed
+        sub-struct stashed under ``_<name>`` is flattened into ``name.field``
+        user keys; a bare ``_`` key (empty user name) is dropped.
+        """
+        physics = ComposablePhysics(terms=[LinearHeating()])
+        nodal_shape = (4, 8)
+
+        # Non-dict struct -> base recursive flattener (fields must be arrays).
+        ns = types.SimpleNamespace(temperature=jnp.zeros((2, 4, 8)))
+        flat = physics.data_struct_to_dict(ns, nodal_shape=nodal_shape)
+        self.assertIn("temperature", flat)
+
+        struct = {
+            "_radiation": types.SimpleNamespace(flux=jnp.zeros((2, 4, 8))),
+            "_": jnp.zeros((2, 4, 8)),   # empty user key -> dropped
+            "plain": jnp.zeros((2, 4, 8)),
+        }
+        out = physics.data_struct_to_dict(struct, nodal_shape=nodal_shape)
+        self.assertIn("radiation.flux", out)   # sub-struct flattened
+        self.assertIn("plain", out)
+        self.assertNotIn("_", out)
+        self.assertNotIn("", out)
+
+    def test_composition_operators(self):
+        """``+``, ``sum()`` and the unsupported-operand paths."""
+        a = ComposablePhysics(terms=[LinearHeating()])
+        b = ComposablePhysics(terms=[QuadraticMoistening()])
+        # __add__ of two composables concatenates terms.
+        self.assertEqual(len(a.__add__(b).terms), 2)
+        # __add__ of a composable and a bare term.
+        self.assertEqual(len(a.__add__(QuadraticMoistening()).terms), 2)
+        # sum([...]) starts from 0, exercising __radd__'s ``0 + self`` branch.
+        self.assertEqual(len(sum([a, b]).terms), 2)
+        # Unsupported operands return NotImplemented (Python raises TypeError).
+        with self.assertRaises(TypeError):
+            _ = a + 5
 
     def test_data_struct_to_dict_non_array_values(self):
         """Plain Python values (ints, strings) drop out of the user dict.

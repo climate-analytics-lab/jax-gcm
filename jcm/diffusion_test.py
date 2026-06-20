@@ -4,6 +4,7 @@ import unittest
 
 import jax.numpy as jnp
 import numpy as np
+import numpy.testing as npt
 
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling, uniform_scaling
 
@@ -68,6 +69,40 @@ class UniformScalingTest(unittest.TestCase):
         s = uniform_scaling(_EIG_T63, timescale=24 * 3600.0, order=2, time_step=720.0)
         expected = float(np.exp(-720.0 / (24 * 3600.0)))
         self.assertAlmostEqual(float(s[-1]), expected, places=6)
+
+
+class SpmdPaddedEigenvaluesTest(unittest.TestCase):
+    """Modal-axis zero padding under SPMD must not break the normalisation.
+
+    ``FastSphericalHarmonics`` (used whenever an ``spmd_mesh`` is set) pads the
+    modal axis with zeros so it divides evenly across devices, and those zeros
+    land on the last index. The scaling helpers normalise by ``max(|eig|)``
+    rather than ``|eig[-1]|`` precisely so this padding cannot zero the
+    normaliser (``|eig[-1]| = 0`` → ``dt/0 = inf`` → NaN, which NaN'd every
+    diffused field in multi-device runs).
+    """
+
+    _N_PAD = 7
+
+    def _padded(self):
+        return jnp.concatenate([_EIG_T63, jnp.zeros(self._N_PAD)])
+
+    def test_uniform_scaling_ignores_trailing_padding(self):
+        s_pad = uniform_scaling(self._padded(), timescale=24 * 3600.0, order=4, time_step=720.0)
+        s_ref = uniform_scaling(_EIG_T63, timescale=24 * 3600.0, order=4, time_step=720.0)
+        self.assertFalse(bool(jnp.isnan(s_pad).any()))
+        # Real modes unchanged; padding modes are undamped (factor 1).
+        npt.assert_allclose(np.asarray(s_pad[:_T63_NLAT_MODES]), np.asarray(s_ref), rtol=1e-6)
+        npt.assert_allclose(np.asarray(s_pad[_T63_NLAT_MODES:]), 1.0, rtol=1e-6)
+
+    def test_level_dependent_scaling_ignores_trailing_padding(self):
+        orders = jnp.asarray([1, 2, 4], dtype=jnp.int32)
+        s_pad = level_dependent_scaling(self._padded(), 24 * 3600.0, orders, 720.0)
+        s_ref = level_dependent_scaling(_EIG_T63, 24 * 3600.0, orders, 720.0)
+        self.assertFalse(bool(jnp.isnan(s_pad).any()))
+        npt.assert_allclose(
+            np.asarray(s_pad[:, :, :_T63_NLAT_MODES]), np.asarray(s_ref), rtol=1e-6,
+        )
 
 
 class EchamL47FactoryTest(unittest.TestCase):

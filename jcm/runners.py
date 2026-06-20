@@ -10,6 +10,7 @@ Hydra's CLI machinery.
 from __future__ import annotations
 
 import logging
+import os
 import types
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,65 @@ from jcm.utils import get_coords
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Host (CPU) device topology
+# ---------------------------------------------------------------------------
+
+def configure_host_device_count(n: int | None) -> None:
+    """Expose ``n`` CPU devices to JAX so an ``spmd_mesh`` can shard over cores.
+
+    JAX presents a *single* CPU device by default regardless of how many cores
+    the host has, so multi-CPU SPMD needs the device count raised *before* the
+    CPU backend initialises. This sets ``jax_num_cpu_devices``, which only
+    takes effect if no JAX device has been touched yet — i.e. when called as
+    the very first thing after ``import jax`` in a script/notebook (before
+    importing ``jcm``).
+
+    We also append ``--xla_cpu_enable_concurrency_optimized_scheduler=false``
+    to ``XLA_FLAGS`` (idempotently): without it, complex graphs (e.g. ECHAM
+    physics) crash at >= 8 CPU devices because the spectral transform's
+    concurrent ``collective permute`` ops over-subscribe the XLA-CPU thread
+    rendezvous. Like the device count, this only takes effect when set before
+    the backend initialises.
+
+    ``None`` or ``<= 1`` is a no-op (single-device run). If the backend is
+    already live (e.g. under the CLI, where importing the model stack
+    initialises it) neither the count nor the flag can change: we leave them,
+    then validate and log a warning if the count falls short, pointing at the
+    env-var lever the shell can set before the process starts:
+    ``XLA_FLAGS="--xla_force_host_platform_device_count=N
+    --xla_cpu_enable_concurrency_optimized_scheduler=false"``.
+    """
+    if not n or int(n) <= 1:
+        return
+    n = int(n)
+    import jax
+
+    # Serialise CPU collectives (idempotent). Harmless on GPU. Must precede any
+    # device touch to take effect, hence set on the env before the calls below.
+    _flag = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
+    if _flag not in os.environ.get("XLA_FLAGS", ""):
+        os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _flag).strip()
+
+    try:
+        jax.config.update("jax_num_cpu_devices", n)
+    except RuntimeError:
+        # The CPU backend is already live (importing the model stack touches
+        # it), so the count can no longer be raised from here. If the env var
+        # was set before the process started we may already have the devices
+        # we need — only warn when we actually fall short.
+        pass
+
+    got = jax.device_count()
+    if got != n:
+        logger.warning(
+            "Requested %d CPU devices but JAX exposes %d — the backend was "
+            "already initialised. Set it before the process starts, e.g. "
+            "`export XLA_FLAGS=--xla_force_host_platform_device_count=%d`.",
+            n, got, n,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +814,19 @@ def run(cfg: DictConfig, model: Model | None = None):
       ``cfg.run.column.{lat_deg,lon_deg}``, and run :class:`SingleColumnModel`
       for tracer evolution at that column.
     """
+    # Best-effort raise of the CPU device count, looked up from
+    # ``grid.host_device_count`` with a top-level ``host_device_count``
+    # fallback; no-op on a single device or on GPU. Note that importing the
+    # model stack already initialises the JAX backend, so under the CLI this
+    # can no longer change the count — it then only validates that the running
+    # device count matches and warns (pointing at the ``XLA_FLAGS`` env var,
+    # which is the reliable lever before the process starts). The ``spmd_mesh``
+    # product must equal the device count either way.
+    configure_host_device_count(
+        cfg.get("host_device_count", None)
+        or cfg.get("grid", {}).get("host_device_count", None)
+    )
+
     # Apply any physical-constant overrides BEFORE the model is built, so the
     # dynamical core (which reads the live jcm.constants singleton at
     # construction) and the attribute-access physics both pick them up. Only base

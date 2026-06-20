@@ -219,7 +219,12 @@ class DinosaurDycore(DynamicalCore):
         if level_orders is None:
             def diffusion_filter(u, u_next):
                 eigenvalues = self.coords.horizontal.laplacian_eigenvalues
-                scale = self._dt / (timescale * abs(eigenvalues[-1]) ** order)
+                # ``abs(...).max()`` not ``abs(eigenvalues[-1])``: under SPMD
+                # the modal axis is zero-padded to divide across devices, so the
+                # last entry is a padding 0 and ``[-1]`` would give ``scale =
+                # dt/0 = inf`` (NaN-ing the filtered field). The max is the true
+                # largest-wavenumber eigenvalue with or without padding.
+                scale = self._dt / (timescale * abs(eigenvalues).max() ** order)
                 filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
                 u_temp = filter_fn(u_next)
                 return replace_fn(u_next, u_temp)
@@ -360,7 +365,18 @@ class DinosaurDycore(DynamicalCore):
             physics_state = physics_state.copy(
                 tracers=self.tracer_filter(physics_state.tracers, dp),
             )
-        return physics_state
+        # Then pin the cleaned gridpoint state to dinosaur's "physics" sharding
+        # before it crosses into the (dycore-agnostic) physics packages. That
+        # spec (``P(None, ('x', 'z'), 'y')``) replicates the vertical axis so
+        # every column lives wholly on one device, and carries the device split
+        # on longitude/latitude instead — the layout column physics wants, since
+        # each column is independent. The dycore itself runs on
+        # ``dycore_partition_spec`` (``P('z', 'x', 'y')``); the modal→nodal
+        # transform here is where the two layouts meet. Under the recommended
+        # longitude-only mesh ``(N, 1, 1)`` the two specs coincide, so this is
+        # a free relabelling rather than a reshard. No-op without an
+        # ``spmd_mesh``. See docs/source/design/parallelization.md.
+        return self.coords.with_physics_sharding(physics_state)
 
     def step(
         self,
@@ -373,6 +389,12 @@ class DinosaurDycore(DynamicalCore):
         IMEX-RK SIL3 dynamics step → spectral filters.
         """
         if physics_tendency is not None:
+            # The tendency comes back from physics in the "physics" sharding;
+            # pin it explicitly so the gridpoint→modal transform inside
+            # ``physics_tendency_to_dynamics_tendency`` reshards from a known
+            # layout rather than whatever GSPMD happened to infer. No-op
+            # without an ``spmd_mesh``.
+            physics_tendency = self.coords.with_physics_sharding(physics_tendency)
             dyn_tendency = physics_tendency_to_dynamics_tendency(
                 physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
             )
