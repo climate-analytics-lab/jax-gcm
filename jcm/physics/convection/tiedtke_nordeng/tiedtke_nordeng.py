@@ -28,6 +28,12 @@ from typing import NamedTuple, Tuple
 import tree_math
 
 import jcm.constants as c
+# Shared Tetens saturation thermodynamics (water+ice "auto" phase, as used
+# throughout the ECHAM/Tiedtke path). Re-exported for backward compatibility.
+from jcm.physics.convection.saturation import (  # noqa: F401
+    saturation_mixing_ratio,
+    saturation_vapor_pressure,
+)
 
 # Import updraft, downdraft and flux modules after they're defined
 # This avoids circular imports
@@ -191,57 +197,6 @@ class ConvectionData:
         )
 
 
-def saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation vapor pressure using Tetens formula
-    
-    Args:
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation vapor pressure (Pa)
-
-    """
-    # Tetens formula coefficients
-    a = 17.27
-    b = 35.86
-
-    # Wide math-safety clip — Tetens denominators t+237.3 and t+265.5 hit
-    # zero at T≈36K and T≈8K. Use a loose bound that only catches truly
-    # pathological values and doesn't mask upstream physics bugs.
-    temperature = jnp.clip(temperature, 50.0, 500.0)
-    t_celsius = temperature - c.tmelt
-
-    # Over water (T > 0°C) — denominator always > 150+237.3-273.15 > 114 when T clipped
-    es_water = 610.78 * jnp.exp(a * t_celsius / (t_celsius + 237.3))
-
-    # Over ice (T <= 0°C)
-    es_ice = 610.78 * jnp.exp(b * t_celsius / (t_celsius + 265.5))
-
-    # Use water or ice formula depending on temperature
-    es = jnp.where(temperature > c.tmelt, es_water, es_ice)
-
-    return es
-
-
-def saturation_mixing_ratio(pressure: jnp.ndarray, 
-                          temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation mixing ratio
-    
-    Args:
-        pressure: Pressure (Pa)
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation mixing ratio (kg/kg)
-
-    """
-    es = saturation_vapor_pressure(temperature)
-    # Cap es < 0.99*pressure so denominator can't approach zero at low P / high T
-    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
-    return jnp.clip(qs, 0.0, 0.5)
-
-
 def moist_static_energy(temperature: jnp.ndarray,
                        height: jnp.ndarray, 
                        mixing_ratio: jnp.ndarray) -> jnp.ndarray:
@@ -281,22 +236,24 @@ def initialize_convection(temperature: jnp.ndarray,
     """
     nlev = temperature.shape[0]
     
-    # Initialize updraft properties with environmental values (ensure float32)
-    tu = jnp.array(temperature, dtype=jnp.float32)
-    qu = jnp.array(humidity, dtype=jnp.float32)
-    lu = jnp.zeros_like(temperature, dtype=jnp.float32)
-    uu = jnp.array(u_wind, dtype=jnp.float32)
-    vu = jnp.array(v_wind, dtype=jnp.float32)
-    
-    # Initialize downdraft properties (ensure float32)
-    td = jnp.array(temperature, dtype=jnp.float32)
-    qd = jnp.array(humidity, dtype=jnp.float32)
-    ud = jnp.array(u_wind, dtype=jnp.float32)
-    vd = jnp.array(v_wind, dtype=jnp.float32)
-    
-    # Initialize mass fluxes to zero with explicit dtype
-    mfu = jnp.zeros_like(temperature, dtype=jnp.float32)
-    mfd = jnp.zeros_like(temperature, dtype=jnp.float32)
+    # Initialize updraft properties with environmental values. Dtype follows
+    # the inputs (not a hardcoded float32) so the scheme is correct whether the
+    # model runs in float32 or float64 — both ``lax.cond`` branches must agree.
+    tu = jnp.asarray(temperature)
+    qu = jnp.asarray(humidity)
+    lu = jnp.zeros_like(temperature)
+    uu = jnp.asarray(u_wind)
+    vu = jnp.asarray(v_wind)
+
+    # Initialize downdraft properties.
+    td = jnp.asarray(temperature)
+    qd = jnp.asarray(humidity)
+    ud = jnp.asarray(u_wind)
+    vd = jnp.asarray(v_wind)
+
+    # Initialize mass fluxes to zero.
+    mfu = jnp.zeros_like(temperature)
+    mfd = jnp.zeros_like(temperature)
     
     # Initialize convection diagnostics
     ktype = jnp.array(0)  # No convection initially
@@ -690,14 +647,16 @@ def tiedtke_nordeng_convection(
         lambda: jnp.array(0),  # No convection
     )
     
-    # Initialize tendencies to zero with explicit float32 dtype
-    dtedt = jnp.zeros_like(temperature, dtype=jnp.float32)
-    dqdt = jnp.zeros_like(humidity, dtype=jnp.float32)
-    dudt = jnp.zeros_like(u_wind, dtype=jnp.float32)
-    dvdt = jnp.zeros_like(v_wind, dtype=jnp.float32)
-    qc_conv = jnp.zeros_like(temperature, dtype=jnp.float32)
-    qi_conv = jnp.zeros_like(temperature, dtype=jnp.float32)
-    precip_conv = jnp.array(0.0, dtype=jnp.float32)
+    # Initialize tendencies to zero. Dtype follows the inputs so the scheme is
+    # float-structure agnostic (float32 or float64) and both ``lax.cond``
+    # branches agree on output types.
+    dtedt = jnp.zeros_like(temperature)
+    dqdt = jnp.zeros_like(humidity)
+    dudt = jnp.zeros_like(u_wind)
+    dvdt = jnp.zeros_like(v_wind)
+    qc_conv = jnp.zeros_like(temperature)
+    qi_conv = jnp.zeros_like(temperature)
+    precip_conv = jnp.zeros((), dtype=temperature.dtype)
     
     # Import modules here to avoid circular imports
     from .updraft import calculate_updraft

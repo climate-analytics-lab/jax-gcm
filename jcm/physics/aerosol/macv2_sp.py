@@ -484,6 +484,10 @@ class Macv2SpAerosol(PhysicsTerm):
         # Default 14 covers the standard RRTMGP SW gas-optics file so
         # standalone construction (no ComposablePhysics) still works.
         self._n_bnd_sw: int = 14
+        # LW band count for the carry slot's LW optics (zero for MACv2-SP,
+        # populated by the JAM optics term, #495). 16 covers the standard
+        # RRTMGP LW gas-optics file for standalone construction.
+        self._n_bnd_lw: int = 16
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (degrees) from the coordinate system.
@@ -513,9 +517,10 @@ class Macv2SpAerosol(PhysicsTerm):
         ``aerosol`` carry agree with what ``__call__`` writes back.
         """
         self._n_bnd_sw = len(band_config.sw_band_centers_nm)
+        self._n_bnd_lw = len(band_config.lw_band_centers_nm)
 
     def initial_carry_state(self, coords):
-        """Zero-fill the aerosol carry slot at the active SW band count."""
+        """Zero-fill the aerosol carry slot at the active SW/LW band counts."""
         ncols = (
             coords.horizontal.nodal_shape[0]
             * coords.horizontal.nodal_shape[1]
@@ -523,7 +528,8 @@ class Macv2SpAerosol(PhysicsTerm):
         nlev = coords.nodal_shape[0]
         return {
             "aerosol": AerosolData.zeros(
-                (ncols,), nlev, n_bnd_sw=self._n_bnd_sw,
+                (ncols,), nlev,
+                n_bnd_sw=self._n_bnd_sw, n_bnd_lw=self._n_bnd_lw,
             )
         }
 
@@ -550,9 +556,13 @@ class Macv2SpAerosol(PhysicsTerm):
             band_config.sw_band_centers_nm, dtype=jnp.float32,
         )
         n_bnd_sw = sw_band_centers_nm.shape[0]
+        n_bnd_lw = len(band_config.lw_band_centers_nm)
 
         prev = diagnostics.get(
-            "aerosol", AerosolData.zeros((ncols,), nlev, n_bnd_sw=n_bnd_sw),
+            "aerosol",
+            AerosolData.zeros(
+                (ncols,), nlev, n_bnd_sw=n_bnd_sw, n_bnd_lw=n_bnd_lw,
+            ),
         )
         new_aerosol = get_simple_aerosol(
             height_full=diagnostics["height_full"],

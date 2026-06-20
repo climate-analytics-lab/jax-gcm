@@ -580,6 +580,17 @@ def radiation_scheme_rrtmgp(
             "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_sw_per_band),
         }
 
+    # Per-LW-band aerosol optics from the JAM online-aerosol optics term (#495).
+    # Zero/absent for MACv2-SP (SW-only) → ``aerosol_optics_lw=None``.
+    aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
+    if (hasattr(aerosol_data, "aod_lw_per_band")
+            and aerosol_data.aod_lw_per_band.shape[0] > 0):
+        aerosol_optics_lw = {
+            "optical_depth":   _to_4d_per_band(aerosol_data.aod_lw_per_band),
+            "ssa":             _to_4d_per_band(aerosol_data.ssa_lw_per_band),
+            "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_lw_per_band),
+        }
+
     zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
     irrad_val = jnp.maximum(toa_flux, 0.0)
 
@@ -591,6 +602,7 @@ def radiation_scheme_rrtmgp(
         cloud_path_ice_sw_per_gpt=cpi_sw_4d,
         vmr_fields=vmr_fields or None,
         aerosol_optics_sw=aerosol_optics_sw,
+        aerosol_optics_lw=aerosol_optics_lw,
         **rrtmgp_input,
     )
 
@@ -604,6 +616,7 @@ def radiation_scheme_rrtmgp(
             zenith=zenith_angle, irrad=irrad_val,
             vmr_fields=vmr_fields or None,
             aerosol_optics_sw=aerosol_optics_sw,
+            aerosol_optics_lw=aerosol_optics_lw,
             **rrtmgp_input,
         )
         toa_sw_up_clear = (
@@ -808,6 +821,12 @@ class RRTMGPRadiation(PhysicsTerm):
         # transpose to ``(ncols, n_bnd_sw, nlev)`` so the column axis is
         # leading (vmap-friendly).
         n_bnd_sw = aerosol_in.aod_sw_per_band.shape[0]
+        n_bnd_lw = aerosol_in.aod_lw_per_band.shape[0]
+
+        def _per_band_to_col(arr, n_bnd):
+            """(n_bnd, nlev, ncols) → (ncols, n_bnd, nlev) for the column vmap."""
+            return arr.reshape(n_bnd, nlev, ncols).transpose(2, 0, 1)
+
         aerosol_for_vmap = aerosol_in.copy(
             aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
             ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
@@ -817,12 +836,12 @@ class RRTMGPRadiation(PhysicsTerm):
             aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
             aod_background=aerosol_in.aod_background.reshape(ncols),
             angstrom=aerosol_in.angstrom.reshape(ncols),
-            aod_sw_per_band=aerosol_in.aod_sw_per_band.reshape(
-                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
-            ssa_sw_per_band=aerosol_in.ssa_sw_per_band.reshape(
-                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
-            asy_sw_per_band=aerosol_in.asy_sw_per_band.reshape(
-                n_bnd_sw, nlev, ncols).transpose(2, 0, 1),
+            aod_sw_per_band=_per_band_to_col(aerosol_in.aod_sw_per_band, n_bnd_sw),
+            ssa_sw_per_band=_per_band_to_col(aerosol_in.ssa_sw_per_band, n_bnd_sw),
+            asy_sw_per_band=_per_band_to_col(aerosol_in.asy_sw_per_band, n_bnd_sw),
+            aod_lw_per_band=_per_band_to_col(aerosol_in.aod_lw_per_band, n_bnd_lw),
+            ssa_lw_per_band=_per_band_to_col(aerosol_in.ssa_lw_per_band, n_bnd_lw),
+            asy_lw_per_band=_per_band_to_col(aerosol_in.asy_lw_per_band, n_bnd_lw),
         )
 
         base_seed = self._base_seed

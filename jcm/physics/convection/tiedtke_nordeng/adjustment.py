@@ -34,47 +34,12 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import (
-    saturation_mixing_ratio, saturation_vapor_pressure
+from .tiedtke_nordeng import saturation_mixing_ratio
+# Analytic (qs, dqs/dT) for the cuadjtq Newton step; shared with the updraft
+# module via jcm.physics.convection.saturation.
+from jcm.physics.convection.saturation import (
+    saturation_specific_humidity_and_derivative as _qsat_and_dqsat_dt,
 )
-
-
-# Tetens coefficients matching ``saturation_vapor_pressure`` (water above
-# 0 °C, ice below). Same as updraft.py but kept here so this module can
-# stand alone.
-_TETENS_A_WATER = 17.27
-_TETENS_C_WATER = 237.3
-_TETENS_A_ICE = 35.86
-_TETENS_C_ICE = 265.5
-
-
-def _qsat_and_dqsat_dt(
-    temperature: jnp.ndarray,
-    pressure: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Saturation specific humidity and its temperature derivative.
-
-    Closed-form derivative of ``saturation_mixing_ratio`` for the Tetens
-    formulation, so the Newton step is bit-reproducible under JIT
-    without relying on autodiff through a saturation lookup table.
-    Mirrors what the ECHAM lookup tables ``ua/dua`` provide.
-    """
-    es = saturation_vapor_pressure(temperature)
-    p_safe = jnp.maximum(pressure, 1.0)
-    es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
-    qs = c.eps * es_safe / denom
-
-    tc = temperature - c.tmelt
-    des_dT_water = es * _TETENS_A_WATER * _TETENS_C_WATER / jnp.maximum(
-        (tc + _TETENS_C_WATER) ** 2, 1e-3,
-    )
-    des_dT_ice = es * _TETENS_A_ICE * _TETENS_C_ICE / jnp.maximum(
-        (tc + _TETENS_C_ICE) ** 2, 1e-3,
-    )
-    des_dT = jnp.where(temperature > c.tmelt, des_dT_water, des_dT_ice)
-    dqs_dT = c.eps * p_safe * des_dT / denom ** 2
-    return qs, dqs_dT
 
 
 def cuadjtq(

@@ -338,6 +338,14 @@ def _infer_dims_shape_and_coords(
         basic_shape_to_dims[value.shape + nodal_shape] = (dim,) + NODAL_AXES_NAMES
         basic_shape_to_dims[value.shape] = (dim,)
         basic_shape_to_dims[(coords.vertical.layers,) + value.shape] = (XR_LEVEL_NAME,) + (dim,)
+        # ``(extra, level, horizontal)`` fields — e.g. JAM's per-aerosol-mode
+        # state (mode, level, lon/lat), incl. the column-vectorized layout.
+        basic_shape_to_dims[
+            value.shape + (coords.vertical.layers,) + nodal_shape
+        ] = (dim, XR_LEVEL_NAME) + NODAL_AXES_NAMES
+        basic_shape_to_dims[
+            value.shape + (coords.vertical.layers, nlon * nlat)
+        ] = (dim, XR_LEVEL_NAME) + NODAL_AXES_NAMES
 
     update_shape_dims_fn = functools.partial(
         _maybe_update_shape_and_dim_with_realization_time_sample,

@@ -11,3 +11,10 @@
 # the chosen profile's timescales.
 kind: auto
 scale: 1.0
+
+# Optional dycore-side mass-conserving positivity filter on the gridpoint
+# tracers (applied as the spectral core projects to the physics state). Off by
+# default; turn on for prescribed-aerosol-emissions runs, whose sharp sources
+# otherwise ring negative and NaN the microphysics (see issue #521). Opt-in
+# because grid-point dycores don't need it and it slightly alters tracer output.
+tracer_positivity: false

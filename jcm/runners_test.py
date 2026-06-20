@@ -217,6 +217,131 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
         )
 
 
+class TestEmissionsConfig(unittest.TestCase):
+    """CLI/config plumbing for prescribed aerosol emissions (#498)."""
+
+    def _coords(self):
+        from jcm.runners import build_coords
+        return build_coords(_compose(["physics=echam", "grid=echam_t42_l8_sigma"]))
+
+    def _write(self, tmp, data_vars, nlon, nlat, lev=False):
+        import xarray as xr
+        coords = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                  "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+        if lev:
+            coords["lev"] = np.arange(4)
+        path = Path(tmp) / "emis.nc"
+        xr.Dataset(data_vars, coords=coords).to_netcdf(path)
+        return str(path)
+
+    def test_echam_jam_factory_includes_emission_terms(self):
+        # Exercise the factory-build path and emission-term wiring with
+        # lightweight overrides — the preset's real defaults (mam4_jax core,
+        # rrtmgp) need the optional ``jcm[mam4]`` extra / radiation data that the
+        # base CI image doesn't carry; the wiring under test is independent of
+        # both.
+        from jcm.runners import build_physics
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        names = [t.name for t in build_physics(cfg).terms]
+        self.assertIn("jam_anthropogenic_emissions", names)
+        self.assertIn("jam_prescribed_aerosol_emissions", names)
+
+    def test_unknown_builder_raises(self):
+        from jcm.runners import build_physics
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg.physics.builder = "not_a_factory"
+        with self.assertRaisesRegex(ValueError, "Unknown physics.builder"):
+            build_physics(cfg)
+
+    def test_bulk_file_autoroutes_to_anthropogenic(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            f = build_forcing(cfg, coords)
+        self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
+        self.assertIsNone(f.prescribed_aerosol_emissions)
+
+    def test_speciated_file_autoroutes_to_prescribed(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"aero_emis_m_so4_acc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            f = build_forcing(cfg, coords)
+        self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
+        self.assertIsNone(f.anthropogenic_emissions)
+
+    def test_multiple_files_merge_disjoint_channels(self):
+        # A list of files (e.g. anthropogenic + biomass burning) is merged by
+        # coords; channels from both end up on the forcing.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "anthro.nc"
+            p2 = Path(tmp) / "bb.nc"
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 1e-11))},
+                       coords=base).to_netcdf(p1)
+            xr.Dataset({"emis_biomass_burning_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 2e-11))},
+                       coords=base).to_netcdf(p2)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            f = build_forcing(cfg, coords)
+        self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
+        self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
+
+    def test_grid_mismatch_raises(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            # Wrong horizontal shape — must raise, not silently zero.
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon + 2, nlat, 12), 1e-11))},
+                            nlon + 2, nlat)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            with self.assertRaisesRegex(ValueError, "model grid"):
+                build_forcing(cfg, coords)
+
+    def test_file_without_emission_vars_raises(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"sst": (("lon", "lat", "time"),
+                                          np.zeros((nlon, nlat, 12)))}, nlon, nlat)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            with self.assertRaisesRegex(ValueError, "no emissions variables"):
+                build_forcing(cfg, coords)
+
+
 class TestEndToEnd(unittest.TestCase):
     """Tiny end-to-end runs at T31/L8.
 

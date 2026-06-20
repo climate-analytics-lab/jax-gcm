@@ -51,8 +51,15 @@ class AerosolData:
     ssa_sw_per_band: jnp.ndarray
     asy_sw_per_band: jnp.ndarray
 
+    # Per-LW-band optical properties, shape ``(n_bnd_lw, nlev, ncols)``.
+    # Zero for MACv2-SP (SW-only); populated by the JAM online-aerosol optics
+    # term (#495) and passed to RRTMGP via ``aerosol_optics_lw``.
+    aod_lw_per_band: jnp.ndarray
+    ssa_lw_per_band: jnp.ndarray
+    asy_lw_per_band: jnp.ndarray
+
     @classmethod
-    def zeros(cls, nodal_shape, nlev, n_bnd_sw=14):
+    def zeros(cls, nodal_shape, nlev, n_bnd_sw=14, n_bnd_lw=16):
         return cls(
             aod_profile=jnp.zeros((nlev,) + nodal_shape),
             ssa_profile=jnp.zeros((nlev,) + nodal_shape),
@@ -66,6 +73,9 @@ class AerosolData:
             aod_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
             ssa_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
             asy_sw_per_band=jnp.zeros((n_bnd_sw, nlev) + nodal_shape),
+            aod_lw_per_band=jnp.zeros((n_bnd_lw, nlev) + nodal_shape),
+            ssa_lw_per_band=jnp.zeros((n_bnd_lw, nlev) + nodal_shape),
+            asy_lw_per_band=jnp.zeros((n_bnd_lw, nlev) + nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -82,6 +92,9 @@ class AerosolData:
             'aod_sw_per_band': self.aod_sw_per_band,
             'ssa_sw_per_band': self.ssa_sw_per_band,
             'asy_sw_per_band': self.asy_sw_per_band,
+            'aod_lw_per_band': self.aod_lw_per_band,
+            'ssa_lw_per_band': self.ssa_lw_per_band,
+            'asy_lw_per_band': self.asy_lw_per_band,
         }
         new_data.update(kwargs)
         return AerosolData(**new_data)
