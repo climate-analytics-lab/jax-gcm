@@ -102,6 +102,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(

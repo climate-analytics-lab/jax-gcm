@@ -360,3 +360,84 @@ class TestRceIntegrationRrtmgp(unittest.TestCase):
         rh = np.asarray(preds.physics_data["relative_humidity"])
         rh_surface = float(rh[-1].reshape(T.shape[1], -1)[-1, 0])
         self.assertAlmostEqual(rh_surface, 0.70, delta=0.1)
+
+
+@pytest.mark.slow
+class TestRceWholeModelTiedtke(unittest.TestCase):
+    """RCE on the *full* ECHAM physics stack with Tiedtke convection.
+
+    Unlike the minimal radiative-convective ``rce_physics`` stack, this drives
+    the complete ``echam_physics()`` column — surface turbulent fluxes, TTE-TKE
+    vertical diffusion, 1-moment microphysics, Sundqvist clouds, Tiedtke-Nordeng
+    convection and radiation — as a genuine single-column integration of the
+    whole model. Humidity is prognostic (the surface evaporation supplies it; the
+    fixed-RH closure is incompatible with the model's own moisture physics).
+
+    The assertions are on the **time mean**: a single-column mass-flux scheme in
+    RCE has an intrinsic high-frequency convective cycle (a residual cloud-base
+    flicker remains — fully removing it needs the half-level flux re-stagger of
+    ``cuasc``/``cudtdq``, tracked separately), but the time-mean column must be a
+    physical radiative-convective equilibrium with continuously active
+    convection. This is the regression guard for the closure fix that anchors the
+    cloud-base mass flux to the surface moisture supply (ECHAM ``zmfub``) so
+    convection runs continuously instead of switching fully on/off.
+    """
+
+    def test_whole_model_column_reaches_physical_time_mean_rce(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        nlev = 47
+        physics = echam_physics(
+            radiation_scheme="grey",
+            radiation=RadiationParameters.default(solar_constant=420.0),
+        )
+        scm = rce_column(
+            sst=300.0, relative_humidity=0.7, lat_deg=0.0, nlev=nlev,
+            dt_seconds=900.0, physics=physics, interactive_humidity=True,
+        )
+        # Surface evaporation (the moisture source) needs a non-zero near-surface
+        # wind; rce_initial_state seeds zero wind, so set a light background flow.
+        ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7).copy(
+            u_wind=jnp.full(nlev, 5.0),
+        )
+        preds = run_rce(scm, ic, n_days=80.0)
+
+        T = np.asarray(preds.relaxed_states["temperature"])
+        q = np.asarray(preds.relaxed_states["specific_humidity"])
+        tot = np.asarray(preds.tendencies.temperature) * 86400.0  # K/day
+
+        # Stays finite over the whole integration (no blow-up).
+        self.assertTrue(np.all(np.isfinite(T)))
+        self.assertTrue(np.all(np.isfinite(q)))
+
+        # Time-mean radiative-convective equilibrium over the last 40 days: the
+        # mean total heating tends to zero even though instantaneous convection
+        # fluctuates.
+        spd = int(round(86400.0 / 900.0))
+        mean_tend = tot[-40 * spd:].mean(axis=0)
+        self.assertLess(float(np.sqrt(np.mean(mean_tend ** 2))), 0.2)  # K/day
+
+        # Physical near-surface state: air temperature within a few K of the SST,
+        # and a realistic surface specific humidity (several to ~25 g/kg).
+        self.assertGreater(float(T[-1, -1]), 294.0)
+        self.assertLess(float(T[-1, -1]), 306.0)
+        self.assertGreater(float(q[-1, -1]) * 1e3, 5.0)
+        self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
+
+        # Convection is genuinely (and near-continuously) active — the closure
+        # fix keeps it on rather than flickering fully off. Time-mean convective
+        # precip over the last 40 days is positive.
+        precip = np.asarray(
+            preds.physics_data["convection"].precip_conv
+        ).reshape(len(preds.times), -1)[:, 0]
+        self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
+
+        # The high-frequency convective flicker is bounded. The cloud-base
+        # mass-flux closure fix (anchoring to the surface moisture supply +
+        # keeping convection active while it is supplied) roughly halves the
+        # per-level temporal scatter of the total heating (≈14 → ≈7 K/day);
+        # the bare-CAPE on/off closure exceeds this bound. (A residual flicker
+        # remains pending the half-level flux re-stagger — see the class
+        # docstring — so this is an upper bound, not a "smooth" assertion.)
+        max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
+        self.assertLess(max_temporal_std, 10.0)  # K/day
