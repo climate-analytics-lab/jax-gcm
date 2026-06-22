@@ -244,5 +244,102 @@ class TestRCEConvection(unittest.TestCase):
         )
 
 
+class TestMoistureSupplyClosure(unittest.TestCase):
+    """The cloud-base mass-flux closure anchored to the surface moisture supply.
+
+    These distil the single-column RCE finding that drove the closure fix: the
+    bare-CAPE closure (``moisture_supply=0``) sets the cloud-base mass flux to
+    the CFL cap ``layer_mass/dt`` whenever CAPE is large, so the convective
+    burst *grows as the timestep shrinks* and empties CAPE in one step — the
+    on/off cloud-base flicker. ECHAM instead anchors the flux to the
+    boundary-layer moisture supply (``zmfub`` ≈ E/(q_u−q_e), mo_cumastr.f90),
+    a smooth, timestep-independent rate. Passing the surface evaporation as
+    ``moisture_supply`` switches the scheme onto that closure.
+    """
+
+    def _run(self, moisture_supply, dt=1800.0, surface_T=305.0,
+             surface_rh=0.9, lapse=7.0):
+        T, q, p, dz, rho = _tropical_sounding(
+            surface_T=surface_T, surface_rh=surface_rh, lapse_K_per_km=lapse,
+        )
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        tend, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, dt, ConvectionParameters.default(),
+            moisture_supply=jnp.asarray(float(moisture_supply)),
+        )
+        return tend, state
+
+    def test_moisture_anchored_flux_is_timestep_invariant(self):
+        """The flicker mechanism: anchored flux is dt-independent, CAPE-cap isn't.
+
+        With a moisture supply the peak convective heating is the same at
+        dt=1800 s and dt=600 s (the flux is E/(q_u−q_e), independent of dt). The
+        bare-CAPE closure instead rides the ``layer_mass/dt`` CFL cap, so its
+        peak heating grows markedly as dt shrinks — the per-step amplification
+        that becomes the temporal flicker in an integration.
+        """
+        anch_long = float(jnp.max(jnp.abs(self._run(1.0e-4, dt=1800.0)[0].dtedt)))
+        anch_short = float(jnp.max(jnp.abs(self._run(1.0e-4, dt=600.0)[0].dtedt)))
+        cape_long = float(jnp.max(jnp.abs(self._run(0.0, dt=1800.0)[0].dtedt)))
+        cape_short = float(jnp.max(jnp.abs(self._run(0.0, dt=600.0)[0].dtedt)))
+
+        # Anchored: essentially dt-invariant.
+        self.assertLess(anch_short / anch_long, 1.25)
+        # Bare CAPE: grows as dt shrinks (CFL-cap dependence → flicker).
+        self.assertGreater(cape_short / cape_long, 1.25)
+
+    def test_moisture_anchored_flux_is_smaller_and_bounded(self):
+        """The evaporation-limited flux is far gentler than the CAPE-cap burst.
+
+        On the same explosive sounding the moisture-anchored cloud-base mass
+        flux is a small fraction of the bare-CAPE-cap flux — it removes CAPE
+        gradually (keeping convection on) rather than dumping it in one step.
+        """
+        mfu_anchored = float(jnp.max(self._run(1.0e-4)[1].mfu))
+        mfu_cape = float(jnp.max(self._run(0.0)[1].mfu))
+        self.assertGreater(mfu_anchored, 0.0)  # convection still active
+        self.assertLess(mfu_anchored, 0.5 * mfu_cape)
+
+    def test_precip_scales_with_moisture_supply(self):
+        """Moisture-budget content: precip exports the supplied moisture.
+
+        Because M_b = E/(q_u−q_e), the convective mass flux — and hence the
+        precipitation it produces — is linear in the supply E. Doubling the
+        surface evaporation roughly doubles the convective precip.
+        """
+        pr_1x = float(self._run(1.0e-4)[0].precip_conv)
+        pr_2x = float(self._run(2.0e-4)[0].precip_conv)
+        self.assertGreater(pr_1x, 0.0)
+        self.assertGreater(pr_2x / pr_1x, 1.8)
+        self.assertLess(pr_2x / pr_1x, 2.2)
+
+    def test_zero_supply_falls_back_to_cape_closure(self):
+        """No moisture supply ⇒ unchanged (bare-CAPE) behaviour.
+
+        Radiative-convective-only stacks (and any caller that does not provide a
+        surface evaporation) must see the original CAPE closure. The default
+        ``moisture_supply=0`` reproduces the no-argument call exactly and still
+        fires convection on an unstable sounding.
+        """
+        T, q, p, dz, rho = _tropical_sounding(
+            surface_T=305.0, surface_rh=0.9, lapse_K_per_km=7.0,
+        )
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        cfg = ConvectionParameters.default()
+        default_tend, _ = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
+        )
+        explicit_tend, _ = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
+            moisture_supply=jnp.asarray(0.0),
+        )
+        self.assertTrue(
+            jnp.allclose(default_tend.dtedt, explicit_tend.dtedt)
+        )
+        self.assertGreater(float(jnp.max(jnp.abs(default_tend.dtedt))), 1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()
