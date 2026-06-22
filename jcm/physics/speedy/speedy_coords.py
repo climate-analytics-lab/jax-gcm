@@ -2,17 +2,21 @@ import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem
 import jcm.constants as c
-from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
 
 def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     """Create a CoordinateSystem with SPEEDY's standard sigma layers.
 
     This is a convenience wrapper around jcm.utils.get_coords() that uses
-    SPEEDY's standard sigma layer boundaries.
+    SPEEDY's sigma layer boundaries. The boundaries come from
+    :func:`compute_sigma_boundaries`, which returns the hand-tuned SPEEDY tables
+    for ``layers`` in {7, 8} and an analytic Frierson (2006) stretch for any
+    other count, so an arbitrary number of vertical levels is supported.
 
     Args:
-        layers: Number of vertical levels (7 or 8)
+        layers: Number of vertical levels (any int >= 2; 7/8 use the exact
+            SPEEDY tables, other counts use the Frierson (2006) stretch).
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
         spmd_mesh: Optional ``(x, y, z)`` tuple giving the SPMD device mesh over
@@ -23,11 +27,8 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
         CoordinateSystem object with SPEEDY sigma levels
 
     """
-    if layers not in SIGMA_LAYER_BOUNDARIES:
-        raise ValueError(f"SPEEDY physics supports {list(SIGMA_LAYER_BOUNDARIES.keys())} layers, got {layers}")
-
     return get_coords(
-        vertical_coords=SIGMA_LAYER_BOUNDARIES[layers],
+        vertical_coords=compute_sigma_boundaries(layers),
         spectral_truncation=spectral_truncation,
         nodal_shape=nodal_shape,
         spmd_mesh=spmd_mesh
@@ -36,21 +37,20 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
 def compute_speedy_vertical_coords(kx: int):
         """Compute SPEEDY vertical coordinate transformations.
 
+        The sigma half-level boundaries come from
+        :func:`compute_sigma_boundaries`, so any ``kx >= 2`` is supported (7/8
+        reproduce the original SPEEDY tables exactly). Everything below is
+        derived generically from those boundaries.
+
         Args:
-            kx: Number of vertical levels
+            kx: Number of vertical levels (>= 2)
 
         Returns:
             Tuple of (hsg, fsg, dhs, sigl, grdsig, grdscp, wvi)
 
-        Raises:
-            ValueError: If kx is not a supported number of vertical levels
-
         """
-        if kx not in SIGMA_LAYER_BOUNDARIES:
-            raise ValueError(f"Invalid number of vertical levels: {kx}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
-
         # Layer boundaries and midpoints
-        hsg = SIGMA_LAYER_BOUNDARIES[kx]
+        hsg = compute_sigma_boundaries(kx)
         fsg = (hsg[1:] + hsg[:-1]) / 2.
         dhs = jnp.diff(hsg)
         sigl = jnp.log(fsg)
