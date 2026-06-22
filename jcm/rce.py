@@ -42,8 +42,11 @@ Example::
 
     from jcm.rce import rce_column, rce_initial_state, run_rce
 
+    # RRTMGP is the default radiation; convective_rh defaults to
+    # relative_humidity − 0.1 so Betts-Miller actually precipitates (see
+    # ``rce_column`` on why rhbm must sit below the environmental RH).
     scm = rce_column(sst=300.0, relative_humidity=0.7, solar_constant=728.4,
-                     co2_ppmv=0.0, radiation_scheme="rrtmgp")
+                     co2_ppmv=0.0)
     ic  = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7)
     preds = run_rce(scm, ic, n_days=100)
     t_equilibrium = preds.relaxed_states["temperature"][-1]   # (nlev,) profile
@@ -127,34 +130,48 @@ def _pressure_centers(vertical, surface_pressure_pa):
     return jnp.asarray(vertical.centers) * surface_pressure_pa
 
 
-# Manabe & Wetherald (1967) sigma at which the prescribed RH reaches zero
-# (≈ 20 hPa for a 1000 hPa surface). The taper keeps the stratosphere dry:
-# without it, ``rh·qsat`` at the near-vacuum top-of-model pressures approaches
-# the saturation cap (~1 kg/kg) and injects hundreds of g/kg of spurious
-# stratospheric moisture that destabilises the column.
-_MW_RH_FLOOR_SIGMA = 0.02
+# Pressure window [Pa] over which the prescribed RH tapers from its full
+# tropospheric value (at and below ``_RH_TAPER_BASE_PA``) to zero (at and above
+# ``_RH_TAPER_TOP_PA``). The taper exists *only* to keep the stratosphere dry:
+# at the near-vacuum top-of-model pressures ``qsat`` diverges (``es`` exceeds the
+# ambient pressure), so an unmodified ``rh·qsat`` injects spurious stratospheric
+# moisture (and NaNs RRTMGP). Crucially the taper lives in the *stratosphere*
+# (above ~100 hPa), leaving the whole convecting troposphere at the uniform
+# environmental RH — the configuration of the validated homebrew RCE. An earlier
+# Manabe-Wetherald σ-taper from the surface instead dried the *mid-troposphere*
+# (RH ~0.05–0.36 there), which starved Betts-Miller's parcel-referenced trigger
+# and silently switched convection off; see :func:`rce_column`.
+_RH_TAPER_BASE_PA = 1.0e4   # 100 hPa: full RH at and below this (troposphere)
+_RH_TAPER_TOP_PA = 2.0e3    # 20 hPa: RH forced to zero at and above this
 
-# Stratospheric specific-humidity floor [kg/kg] ≈ 1.6 ppmv. The Manabe-Wetherald
-# taper drives RH (and hence ``q``) to exactly zero aloft, but RRTMGP's gas
-# optics returns NaN on a zero water-vapour amount, so we floor ``q`` at a small,
-# physically realistic stratospheric value (real lower-stratosphere H₂O is
-# ~3–5 ppmv) rather than zero.
+# Stratospheric specific-humidity floor [kg/kg] ≈ 1.6 ppmv. The taper drives RH
+# (and hence ``q``) to zero aloft, but RRTMGP's gas optics returns NaN on a zero
+# water-vapour amount, so we floor ``q`` at a small, physically realistic
+# stratospheric value (real lower-stratosphere H₂O is ~3–5 ppmv) rather than zero.
 _STRATOSPHERE_Q_FLOOR = 1.0e-6
 
 
 def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
-    """Manabe-Wetherald fixed-RH specific humidity in **kg/kg**.
+    """Fixed-RH specific humidity in **kg/kg**: uniform troposphere, dry stratosphere.
 
-    RH profile ``rh · max((σ − σ_floor)/(1 − σ_floor), 0)`` with ``σ = p/p_s``:
-    surface RH ``rh``, tapering linearly to zero at ``σ = _MW_RH_FLOOR_SIGMA``,
-    then floored at :data:`_STRATOSPHERE_Q_FLOOR` so the dry stratosphere still
-    carries a trace amount (a hard zero NaNs RRTMGP). The result is kg/kg, the
-    canonical ``PhysicsState.specific_humidity`` unit and the same unit
+    RH equals the environmental value ``rh`` everywhere in the troposphere
+    (``p ≥`` :data:`_RH_TAPER_BASE_PA`), tapers linearly to zero across the
+    stratosphere (:data:`_RH_TAPER_BASE_PA` → :data:`_RH_TAPER_TOP_PA`), and the
+    resulting ``q`` is floored at :data:`_STRATOSPHERE_Q_FLOOR` so the dry top
+    still carries a trace amount (a hard zero NaNs RRTMGP). Holding the *whole
+    troposphere* at the uniform environmental RH (rather than tapering from the
+    surface) is what keeps the column moist enough for Betts-Miller to convect —
+    the validated homebrew RCE setup. The result is kg/kg, the canonical
+    ``PhysicsState.specific_humidity`` unit and the same unit
     :func:`saturation_specific_humidity` returns.
+
+    ``surface_pressure_pa`` is unused now that the taper is in absolute pressure
+    (kept in the signature so callers need not special-case it).
     """
-    sigma = pfull / surface_pressure_pa
+    del surface_pressure_pa
     rh_profile = rh * jnp.clip(
-        (sigma - _MW_RH_FLOOR_SIGMA) / (1.0 - _MW_RH_FLOOR_SIGMA), 0.0, 1.0,
+        (pfull - _RH_TAPER_TOP_PA) / (_RH_TAPER_BASE_PA - _RH_TAPER_TOP_PA),
+        0.0, 1.0,
     )
     qsat = saturation_specific_humidity(pfull, temperature)  # kg/kg
     return jnp.maximum(rh_profile * qsat, _STRATOSPHERE_Q_FLOOR)
@@ -166,11 +183,11 @@ def fixed_rh_closure(
     """Build a fixed-relative-humidity ``state_closure`` for the SCM.
 
     Returns ``f(state, forcing) -> state`` that overwrites ``specific_humidity``
-    with the Manabe & Wetherald (1967) fixed-RH profile (see
-    :func:`_fixed_rh_specific_humidity`) computed from the column's *current*
-    temperature. Applied by the SCM each step before physics, this slaves
-    humidity to the freely evolving temperature — the fixed-RH assumption of
-    Case 1 in issue #523.
+    with the fixed-RH profile (uniform environmental RH through the troposphere,
+    dry stratosphere; see :func:`_fixed_rh_specific_humidity`) computed from the
+    column's *current* temperature. Applied by the SCM each step before physics,
+    this slaves humidity to the freely evolving temperature — the fixed-RH
+    assumption of Case 1 in issue #523.
     """
     rh = float(relative_humidity)
 
@@ -292,6 +309,7 @@ def rce_column(
     *,
     sst: float = 300.0,
     relative_humidity: float = 0.7,
+    convective_rh: float | None = None,
     co2_ppmv: float = 348.0,
     solar_constant: float = 728.4,
     lat_deg: float = 42.55,
@@ -313,9 +331,30 @@ def rce_column(
     ``interactive_humidity=True``, in which case humidity evolves freely too and
     no closure is applied).
 
+    Why ``rhbm`` is *not* ``relative_humidity``: these are two physically distinct
+    relative humidities and conflating them silently kills convection. The
+    environmental RH (``relative_humidity``) is what the fixed-RH closure holds the
+    column at; ``rhbm`` is the target RH of Betts-Miller's moist-adiabatic
+    *reference* profile. Because the reference humidity is built on the warmer
+    lifted *parcel* (Isca's default, ``do_envsat=False``), deep — i.e.
+    *precipitating* — convection only switches on when the column is moister than
+    that reference, which requires ``rhbm < relative_humidity``. With
+    ``rhbm == relative_humidity`` the column lands in Betts-Miller's
+    non-precipitating "shallow" branch, which under the default ``SIMP`` flavor
+    returns *zero* tendency: the column then relaxes to pure *radiative*
+    equilibrium (looks equilibrated, OLR fine) with convection doing nothing. So
+    ``convective_rh`` defaults to ``relative_humidity − 0.1`` (the working homebrew
+    used env 0.7 / rhbm 0.6), and supplying ``convective_rh >= relative_humidity``
+    for the default Betts-Miller term is rejected as a no-op misconfiguration.
+
     Args:
         sst: Fixed sea-surface temperature [K] (the radiation lower boundary).
-        relative_humidity: Fixed RH for the humidity closure and Betts-Miller.
+        relative_humidity: Environmental RH the fixed-RH humidity closure holds
+            the column at (also seeds ``rce_initial_state``).
+        convective_rh: Target RH ``rhbm`` of the *default* Betts-Miller reference
+            profile. Must be ``< relative_humidity`` for deep convection (see
+            above). Defaults to ``relative_humidity − 0.1`` (floored at 0.05).
+            Ignored if ``convection`` is supplied.
         co2_ppmv: CO₂ volume mixing ratio [ppmv] on ``forcing.co2_vmr``.
         solar_constant: Solar constant [W/m²] for the *default* radiation term;
             tune to hit the target TOA SW. Ignored if ``radiation`` is given.
@@ -331,7 +370,11 @@ def rce_column(
             ``rhbm=relative_humidity``, ``tau_bm=tau_convection``.
         tau_convection: ``tau_bm`` [s] for the *default* Betts-Miller term.
         interactive_humidity: When ``True``, evolve humidity freely (no closure)
-            instead of slaving it to fixed RH.
+            instead of slaving it to fixed RH. NB: the minimal RCE stack has no
+            moisture *source* (no surface evaporation / vertical diffusion term),
+            so a freely evolving ``q`` only ever dries out and convection then
+            shuts off — for an interactive-``q`` RCE add a surface-flux term to
+            ``physics``. The fixed-RH default (this flag ``False``) is Case 1.
         day_of_year_fraction: Sun position for :func:`steady_insolation`.
         physics: Pre-built ``ComposablePhysics`` (skips the default build, so
             you compose any terms you like — the point of ``ComposablePhysics``).
@@ -349,8 +392,22 @@ def rce_column(
                 params=RadiationParameters.default(solar_constant=solar_constant),
             )
         if convection is None:
+            rhbm = (
+                max(float(relative_humidity) - 0.1, 0.05)
+                if convective_rh is None
+                else float(convective_rh)
+            )
+            if rhbm >= float(relative_humidity):
+                raise ValueError(
+                    f"convective_rh ({rhbm}) must be < relative_humidity "
+                    f"({float(relative_humidity)}) for the default Betts-Miller "
+                    "term: deep (precipitating) convection only fires when the "
+                    "column is moister than the convective reference profile. "
+                    "With convective_rh >= relative_humidity the scheme stays in "
+                    "its non-precipitating branch and produces zero tendency."
+                )
             convection = BettsMillerConvection(BettsMillerParameters.default().replace(
-                rhbm=jnp.asarray(float(relative_humidity)),
+                rhbm=jnp.asarray(rhbm),
                 tau_bm=jnp.asarray(float(tau_convection)),
             ))
         physics = rce_physics(radiation=radiation, convection=convection)

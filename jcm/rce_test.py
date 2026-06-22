@@ -35,7 +35,7 @@ from jcm.single_column_model import SingleColumnModel
 
 
 class TestFixedRhClosure(unittest.TestCase):
-    """The Manabe-Wetherald fixed-RH humidity closure."""
+    """The fixed-RH humidity closure (uniform troposphere, dry stratosphere)."""
 
     def setUp(self):
         self.vertical = SigmaCoordinates.equidistant(20)
@@ -43,37 +43,41 @@ class TestFixedRhClosure(unittest.TestCase):
         # (index 0 = model top, index -1 = surface).
         self.ic = rce_initial_state(self.vertical, sst=300.0, relative_humidity=0.7)
 
-    def test_closure_sets_rh_qsat_in_kg_per_kg(self):
-        """Closure output equals ``rh(σ)·qsat`` in kg/kg at the resolved levels."""
+    def test_closure_sets_uniform_tropospheric_rh_in_kg_per_kg(self):
+        """Closure holds RH = env value through the troposphere (kg/kg)."""
         rh = 0.7
         closure = fixed_rh_closure(rh, self.vertical)
         out = closure(self.ic, forcing=None)
 
         ps = float(self.ic.normalized_surface_pressure) * c.p0
         pfull = _pressure_centers(self.vertical, jnp.asarray(ps))
-        sigma = pfull / ps
-        rh_profile = rh * jnp.clip((sigma - 0.02) / 0.98, 0.0, 1.0)
-        expected = jnp.maximum(
-            rh_profile * saturation_specific_humidity(pfull, self.ic.temperature),
-            _STRATOSPHERE_Q_FLOOR,
-        )
-        self.assertTrue(jnp.allclose(out.specific_humidity, expected, rtol=1e-5))
+        qsat = saturation_specific_humidity(pfull, self.ic.temperature)
+        # Tropospheric levels (p ≥ 100 hPa) sit at the uniform environmental RH —
+        # no surface-to-top taper that would dry the convecting layer.
+        trop = np.asarray(pfull) >= 1.0e4
+        rh_diag = np.asarray(out.specific_humidity) / np.asarray(qsat)
+        self.assertTrue(np.allclose(rh_diag[trop], rh, atol=1e-4))
         # Surface (index -1) value is a realistic several g/kg expressed in kg/kg
         # (~0.005–0.03); a ~1000x reading would mean the closure emitted g/kg.
         self.assertGreater(float(out.specific_humidity[-1]), 0.005)
         self.assertLess(float(out.specific_humidity[-1]), 0.03)
 
-    def test_stratosphere_is_dry_floor(self):
-        """The Manabe-Wetherald taper drives the top to the trace floor (no NaN)."""
-        closure = fixed_rh_closure(0.7, self.vertical)
-        out = closure(self.ic, forcing=None)
-        # Top (index 0) is dry: RH taper × tiny cold-point qsat falls below the
-        # floor, so it clamps to the trace stratospheric value.
-        self.assertAlmostEqual(
-            float(out.specific_humidity[0]), _STRATOSPHERE_Q_FLOOR, places=9,
-        )
+    def test_stratosphere_is_tapered_dry_and_floored(self):
+        """RH tapers off in the stratosphere; q stays finite and ≥ trace floor."""
+        # A grid that reaches the near-vacuum top, so the hard floor is exercised.
+        vertical = SigmaCoordinates.equidistant(60)
+        ic = rce_initial_state(vertical, sst=300.0, relative_humidity=0.7)
+        out = fixed_rh_closure(0.7, vertical)(ic, forcing=None)
+        pfull = np.asarray(_pressure_centers(vertical, jnp.asarray(c.p0)))
+
         self.assertTrue(jnp.all(jnp.isfinite(out.specific_humidity)))
         self.assertTrue(jnp.all(out.specific_humidity >= _STRATOSPHERE_Q_FLOOR))
+        # Above the taper window (p ≤ 20 hPa) RH is forced to zero, so q clamps
+        # to the trace floor — no spurious stratospheric moisture for RRTMGP.
+        strat = pfull <= 2.0e3
+        self.assertTrue(np.any(strat))
+        self.assertTrue(np.allclose(
+            np.asarray(out.specific_humidity)[strat], _STRATOSPHERE_Q_FLOOR))
 
     def test_humidity_tracks_temperature(self):
         """Warmer columns hold more vapour at the surface (q slaved to T)."""
@@ -132,14 +136,32 @@ class TestRceColumnConstruction(unittest.TestCase):
         self.assertIsNotNone(scm.state_closure)
         self.assertAlmostEqual(float(scm.forcing.sea_surface_temperature[0, 0]), 302.0)
 
-    def test_default_betts_miller_params_track_request(self):
+    def test_default_betts_miller_rhbm_sits_below_environmental_rh(self):
         # convection=None builds the default Betts-Miller from the column knobs.
+        # rhbm is decoupled from the environmental/closure RH and defaults to
+        # relative_humidity − 0.1 so deep (precipitating) convection fires; a
+        # degenerate rhbm == relative_humidity would zero the scheme out.
         scm = rce_column(relative_humidity=0.65, tau_convection=5400.0,
                          vertical=SigmaCoordinates.equidistant(8), radiation=GreyTwoStreamRadiation())
-        bm = [t for t in scm.physics.terms if t.category == "convection"][0]
-        params = bm.params.get_value()
-        self.assertAlmostEqual(float(params.rhbm), 0.65, places=5)
+        params = [t for t in scm.physics.terms if t.category == "convection"][0].params.get_value()
+        self.assertAlmostEqual(float(params.rhbm), 0.55, places=5)
+        self.assertLess(float(params.rhbm), 0.65)
         self.assertAlmostEqual(float(params.tau_bm), 5400.0, places=3)
+
+    def test_explicit_convective_rh_is_tracked(self):
+        scm = rce_column(relative_humidity=0.8, convective_rh=0.6,
+                         vertical=SigmaCoordinates.equidistant(8), radiation=GreyTwoStreamRadiation())
+        params = [t for t in scm.physics.terms if t.category == "convection"][0].params.get_value()
+        self.assertAlmostEqual(float(params.rhbm), 0.6, places=5)
+
+    def test_degenerate_convective_rh_is_rejected(self):
+        # convective_rh >= relative_humidity is a silent no-op (the bug this PR
+        # fixes): the default Betts-Miller stays in its non-precipitating branch
+        # and produces zero tendency. Reject it at construction.
+        with self.assertRaisesRegex(ValueError, "convective_rh"):
+            rce_column(relative_humidity=0.7, convective_rh=0.7,
+                       vertical=SigmaCoordinates.equidistant(8),
+                       radiation=GreyTwoStreamRadiation())
 
     def test_interactive_humidity_frees_q_and_drops_closure(self):
         scm = rce_column(relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),
@@ -208,6 +230,90 @@ class TestRceIntegrationGrey(unittest.TestCase):
 
 
 @pytest.mark.slow
+class TestRceRadiativeConvectiveBalance(unittest.TestCase):
+    """The defining RCE check: convection *balances* radiation through the column.
+
+    The other slow tests assert the column equilibrates (``dT/dt → 0``) and stays
+    physical — but a fixed-SST column reaches those targets in pure *radiative*
+    equilibrium with convection doing nothing (the regression this guards: an
+    rhbm tied to the environmental RH puts Betts-Miller in its non-precipitating
+    branch). This test instead asserts convection is genuinely active and that
+    convective heating cancels radiative cooling layer-by-layer in the convecting
+    troposphere — the homebrew RCE result (issue #523): both terms ~O(0.1–1)
+    K/day, opposed, summing to a near-zero residual.
+
+    Grey radiation on a cheap sigma grid keeps a ~50-day integration fast; the
+    physics of the convective trigger is identical to the RRTMGP case.
+    """
+
+    def _run(self, sst=300.0, relative_humidity=0.7, n_days=50.0):
+        vertical = SigmaCoordinates.equidistant(20)
+        scm = rce_column(
+            sst=sst, relative_humidity=relative_humidity, lat_deg=0.0,
+            radiation=GreyTwoStreamRadiation(
+                params=RadiationParameters.default(solar_constant=420.0),
+            ),
+            vertical=vertical, dt_seconds=1800.0,  # convective_rh defaults to RH−0.1
+        )
+        ic = rce_initial_state(vertical, sst=sst, relative_humidity=relative_humidity)
+        return vertical, scm, run_rce(scm, ic, n_days=n_days)
+
+    @staticmethod
+    def _heating_rates(preds):
+        """Convective and radiative heating [K/day] at the final step, ``(nlev,)``.
+
+        Radiation and convection are the only terms touching temperature in the
+        RCE stack, so the convective contribution is the total physics tendency
+        minus the radiative heating reported in the diagnostics dict.
+        """
+        rad = preds.physics_data["radiation"]
+        rad_h = (np.asarray(rad.sw_heating_rate)[..., 0]
+                 + np.asarray(rad.lw_heating_rate)[..., 0]) * 86400.0
+        total = np.asarray(preds.tendencies.temperature) * 86400.0
+        conv_h = total - rad_h
+        return conv_h[-1], rad_h[-1], total[-1]
+
+    def test_convection_is_active_and_balances_radiation(self):
+        _, _, preds = self._run()
+        conv, rad, net = self._heating_rates(preds)
+        self.assertTrue(np.all(np.isfinite(conv)))
+
+        # 1) Convection is genuinely doing work — precip > 0 and substantial
+        #    heating somewhere in the column (this is exactly zero under the bug).
+        precip = np.asarray(
+            preds.physics_data["betts_miller_precip"]
+        ).reshape(len(preds.times), -1)[-1, -1]
+        self.assertGreater(float(precip) * 86400.0, 0.05,
+                           "no precipitation — convection never fired")
+        self.assertGreater(np.max(np.abs(conv)), 0.1,
+                           "convective heating is negligible — convection silent")
+
+        # 2) Radiative-convective balance in the convecting layer: where
+        #    convection is active it cancels the radiative cooling, so the net
+        #    residual is small compared to either large opposing term.
+        active = np.abs(conv) > 0.2 * np.max(np.abs(conv))
+        self.assertGreaterEqual(int(np.sum(active)), 3)
+        rms_conv = np.sqrt(np.mean(conv[active] ** 2))
+        rms_rad = np.sqrt(np.mean(rad[active] ** 2))
+        rms_net = np.sqrt(np.mean(net[active] ** 2))
+        self.assertGreater(rms_rad, 0.5 * rms_conv)   # comparable magnitudes
+        self.assertLess(rms_net, 0.3 * rms_conv)      # they cancel → balance
+
+        # 3) Layer-by-layer the two terms are near mirror images (the figure in
+        #    the homebrew notebook): convective heating ≈ −radiative heating.
+        corr = np.corrcoef(conv[active], -rad[active])[0, 1]
+        self.assertGreater(corr, 0.9)
+
+    def test_settles_toward_equilibrium(self):
+        _, _, preds = self._run()
+        dT = preds.tendencies.temperature
+        rms0 = float(jnp.sqrt(jnp.mean(dT[0] ** 2)) * 86400.0)
+        rms_end = float(jnp.sqrt(jnp.mean(dT[-1] ** 2)) * 86400.0)
+        self.assertLess(rms_end, 0.3 * rms0)
+        self.assertLess(rms_end, 0.2)  # K/day, near steady
+
+
+@pytest.mark.slow
 class TestRceIntegrationRrtmgp(unittest.TestCase):
     """RRTMGP + Betts-Miller fixed-RH RCE on echam-47 — issue #523 Case 1.
 
@@ -233,6 +339,15 @@ class TestRceIntegrationRrtmgp(unittest.TestCase):
         rms0 = float(jnp.sqrt(jnp.mean(dT[0] ** 2)) * 86400.0)
         rms_end = float(jnp.sqrt(jnp.mean(dT[-1] ** 2)) * 86400.0)
         self.assertLess(rms_end, 0.3 * rms0)  # settling toward equilibrium
+
+        # Convection must actually be running (not a silent radiative-only
+        # equilibrium): the column precipitates. With the default convective_rh
+        # (= relative_humidity − 0.1 = 0.6) Betts-Miller stays in its deep,
+        # precipitating branch.
+        precip = np.asarray(
+            preds.physics_data["betts_miller_precip"]
+        ).reshape(len(preds.times), -1)[-1, -1]
+        self.assertGreater(float(precip) * 86400.0, 0.05)
 
         # Outgoing longwave should sit in the broad terrestrial range.
         olr = float(rad.toa_lw_up[-1].reshape(-1)[0])
