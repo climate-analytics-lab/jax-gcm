@@ -9,6 +9,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.speedy_coords import stratosphere_mask
 import jcm.constants as c
 # alhc is the SPEEDY latent heat in J/g (consistent with q in g/kg); it is a
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
@@ -70,10 +71,17 @@ def diagnose_convection(
         ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0 # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
     )
 
-    # If there is any instability, cloud top is the first unstable level (from top down)
-    # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
-    possible_cltop_levels = jnp.arange(2, kx-3)
+    # Cloud top is the highest (least-sigma) unstable level. SPEEDY searched
+    # k=3..kx-3 (1-indexed), i.e. indices 2..kx-4 here, which hardcodes "the top
+    # two levels are stratosphere and cannot hold a cloud top". We replace that
+    # upper bound with the sigma<0.2 stratosphere mask so the search range scales
+    # with nlev: candidate levels run from the first interface below the very top
+    # down to kx-4, and any candidate falling in the stratosphere is masked out
+    # of the instability test so it is never chosen. The cloud *base* is the PBL
+    # (lowest layer), which is already physical. strat_mask is static (fsg).
+    possible_cltop_levels = jnp.arange(1, kx-3)
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
+    not_strat_cand = (~strat_mask[possible_cltop_levels])[:, jnp.newaxis, jnp.newaxis]
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
         (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
@@ -81,10 +89,10 @@ def diagnose_convection(
     )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    ktop1 = get_cloud_top(mss0 > mss2[2:kx-3])
+    ktop1 = get_cloud_top((mss0 > mss2[1:kx-3]) & not_strat_cand)
 
     # Check 2: gradient of actual moist static energy between lower and upper troposphere
-    ktop2 = get_cloud_top(mse1 > mss2[2:kx-3])
+    ktop2 = get_cloud_top((mse1 > mss2[1:kx-3]) & not_strat_cand)
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
     # Check 3: RH > RH_c at both k=kx and k=kx-1

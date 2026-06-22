@@ -5,6 +5,57 @@ import jcm.constants as c
 from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
 
+# Single source of truth for "where is the stratosphere" in SPEEDY physics.
+#
+# Original Fortran SPEEDY hardcodes the top two model levels (indices 0, 1) as
+# the stratosphere. At its native 7/8 levels those two levels sit at sigma<~0.2,
+# but a fixed *count* does not scale: at nlev=30 only 2 of 30 levels would be
+# stratospheric, giving a physically far-too-thin stratosphere. Following
+# SpeedyWeather.jl (which distributes shortwave ozone with the weight
+# 50*max(0, 1/5 - sigma), i.e. ozone where sigma<0.2), we identify the
+# stratosphere by the *physical* sigma threshold below instead of by index, so
+# the stratospheric level range scales with the grid.
+#
+# fsg (sigma layer midpoints) is fixed at coords-build time, so every mask
+# derived from this threshold is a STATIC boolean array -> fully differentiable
+# (no traced predicate, no jnp.where on state needed).
+STRATOSPHERE_SIGMA_THRESHOLD = 0.2
+
+# A layer midpoint that lands mathematically exactly on the threshold (e.g. the
+# SPEEDY 8-level table puts a midpoint at sigma=0.2 exactly: (0.14+0.26)/2) is
+# the TOP of the troposphere, not the stratosphere, under SpeedyWeather's strict
+# "sigma < 0.2". In float32 that midpoint stores as 0.19999998, which would
+# spuriously satisfy "< 0.2" and pull an extra (tropospheric) layer into the
+# stratosphere. We subtract a small tolerance so exact-0.2 midpoints stay
+# tropospheric, keeping the nlev=8 stratosphere at the intended top two layers.
+_STRAT_EPS = 1e-5
+
+
+def stratosphere_mask(fsg: jnp.ndarray) -> jnp.ndarray:
+    """Boolean mask (shape ``(kx,)``) selecting stratospheric layers.
+
+    A layer is stratospheric when its sigma midpoint is below
+    :data:`STRATOSPHERE_SIGMA_THRESHOLD` (0.2), with a tiny tolerance so a
+    midpoint sitting exactly on 0.2 (the troposphere top) is excluded despite
+    float32 rounding. Because ``fsg`` is static this mask is a compile-time
+    constant and fully differentiable.
+    """
+    return fsg < (STRATOSPHERE_SIGMA_THRESHOLD - _STRAT_EPS)
+
+
+def ozone_sigma_weight(fsg: jnp.ndarray) -> jnp.ndarray:
+    """SpeedyWeather.jl ozone distribution weight per layer (shape ``(kx,)``).
+
+    Returns ``50 * max(0, 1/5 - sigma)`` evaluated at the sigma midpoints
+    ``fsg``. This is the ozone vertical distribution used by SpeedyWeather's
+    shortwave scheme: it is non-zero only where ``sigma < 0.2`` (the
+    stratosphere) and increases toward the model top. It is multiplied by the
+    layer thickness ``dhs`` when applied so the total absorbed ozone flux is
+    the column integral of weight*dsigma. ``fsg`` is static, so this weight is a
+    compile-time constant.
+    """
+    return 50.0 * jnp.maximum(0.0, 0.2 - fsg)
+
 def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     """Create a CoordinateSystem with SPEEDY's standard sigma layers.
 
