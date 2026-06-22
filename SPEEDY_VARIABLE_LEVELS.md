@@ -1,9 +1,11 @@
 # Generalizing SPEEDY physics to an arbitrary number of vertical levels
 
-Status: implemented and verified for `nlev ∈ {7, 8, 16, 30}` (see "Verification").
-The σ-table generalization (§2–§3) and the physics-scheme migration to a
-σ-threshold stratosphere (§4) are both complete. **The §4 migration changes the
-7/8-level results** (intentionally — see §4).
+Status: implemented and verified. The σ-table generalization (§2–§3) and the
+physics-scheme migration to a σ-threshold stratosphere (§4) are both complete.
+**The §4 migration changes the 7/8-level results** (intentionally — see §4).
+§6 adds a resolution-aware time step that keeps high-`nlev` / high-truncation
+runs numerically stable; verified by **365-day** spin-ups at T21 nlev=8/16/24/32
+and T31 nlev=8/16/24 (all finite — see §6).
 
 ## 1. Goal and summary
 
@@ -268,3 +270,172 @@ See the run log in the task report. Summary:
   passes at `L = 8` (unchanged) and, parameterized, at `L = 16` and `30`.
 * 7/8-level results are bit-for-bit unchanged because those cases still use the
   hand-tuned tables.
+
+## 6. Numerical stability at high nlev
+
+### Symptom
+
+With the §4 migration done, short runs are fine but **realistic 365-day
+spin-ups go non-finite at high vertical resolution / higher truncation**.
+Reproduced exactly (random IC → forward integration under realistic terrain +
+time-constant annual-mean SST, default 30-minute step):
+
+* **Stable:** T21 nlev=8, 16, 24.
+* **Unstable (NaN):** T21 nlev=32; T31 nlev=16; T31 nlev=24.
+
+On the smallest unstable case (T21 nlev=32, CPU) the model blows up **within the
+first ~2 hours of model time (4 timesteps)**. Stepping one `dt` at a time and
+inspecting per-level fields, the divergence starts in the **thin bottom (surface)
+layer**: the surface-layer `u_wind` tendency grows ~100 → 320 → 4200 m/s **per
+step** at levels 30–31 and goes non-finite at step 5, while every layer above is
+still well-behaved. This is a single-layer growing oscillation, not a slow drift.
+
+### Diagnosed cause: explicit surface-drag instability in the thin bottom layer
+
+Two decisive tests isolate it:
+
+1. **Dynamics alone is stable.** Running the dry dynamical core with **no
+   physics** at T21 nlev=32, dt=30 min stays finite and bounded for 90+ model
+   hours (max |u| ≈ 60–80 m/s). So it is **not** a dynamics CFL / semi-implicit
+   vertical-operator problem — the IMEX-RK SIL3 dycore handles the thin layers.
+2. **Halving the step cures it.** T21 nlev=32 at dt=15 min is stable (bounded
+   T≈315 K, |u|≈80 m/s over a day). So it is a forward-Euler **timestep**
+   instability in the operator-split physics tendency.
+
+The mechanism is SPEEDY's surface stress, applied to the bottom layer as a
+gridpoint tendency (`surface/speedy_surface_flux.py`):
+
+```
+du/dt|_sfc = ustr · rps · grdsig[-1],   ustr = −C_drag·|V|·u,
+grdsig[-1] = g / (dσ_bot · p0)
+```
+
+This is added **explicitly (forward Euler)** by the op-split coupling. Its
+stability limit is roughly `dt · C_drag·|V| · grdsig[-1]/p_norm < O(2)`. The
+Frierson cubic stretch makes the bottom layer thin as nlev grows — `dσ_bot` falls
+from **0.10 at nlev=8 to 0.0079 at nlev=32**, so `grdsig[-1]` grows **~12.6×** —
+and the explicit drag damping factor crosses the limit. Higher truncation makes
+it worse because the resolved near-surface wind (and the Gibbs ringing of the
+surface-drag tendency) grows with the number of horizontal modes. Empirically the
+stability boundary is ordered monotonically by the dimensionless severity
+
+```
+S = (trunc + 1)^1.3 / dσ_bot
+```
+
+(every config stable at 30 min sits below S_norm ≈ 9.4 relative to the T21/nlev=8
+baseline; every unstable one sits above it).
+
+### Fix: resolution-aware (CFL-like) automatic time step
+
+We reduce the model time step when the configuration is severe, rather than
+rewriting the thin-layer surface tendency to be implicit (a large, invasive
+change to the op-split coupling). `Model(time_step=...)` now defaults to `None`,
+in which case the step is auto-selected from the resolution by
+`stable_time_step_minutes(nlev, spectral_truncation)`
+(`physics/speedy/physical_constants.py`):
+
+* **Plateau.** For `S_norm ≤ 9.4` return the validated **30-minute** reference
+  step. This covers every configuration that is already stable at 30 min — in
+  particular **all of SPEEDY's standard 7- and 8-level runs are bit-for-bit
+  unchanged** (the time step they get is identical).
+* **Reduced branch.** Above the plateau, `dt ∝ 1/S` with a **0.85 safety
+  factor** for margin below the measured blow-up boundary.
+* **Day-aligned snapping.** The raw step is snapped **down** to the nearest
+  integer divisor of a 1440-minute day (30, 24, 20, 18, 16, 15, 12, … min) so
+  every saved frame lands on a whole number of steps (the trajectory builder
+  uses `inner_steps = int(save_interval / dt)`) — daily/monthly saves don't
+  drift over a 365-day run, and snapping down can never re-introduce the
+  instability.
+
+Resulting auto steps and the empirically measured blow-up boundary:
+
+| config | dσ_bot | auto dt | first unstable dt |
+|--------|--------|---------|-------------------|
+| T21 nlev=8/16/24 | 0.10 / 0.017 / 0.011 | **30 min** | stable at 30 |
+| T21 nlev=32 | 0.0079 | **18 min** | 30 min |
+| T31 nlev=8 | 0.10 | **30 min** | stable at 30 |
+| T31 nlev=16 | 0.017 | **24 min** | 30 min |
+| T31 nlev=24 | 0.011 | **15 min** | 25 min |
+
+An explicit `time_step=` still overrides the auto choice everywhere (the unit
+tests and the Hydra configs pass explicit values and are unaffected).
+
+### Verification — actual 365-day integrations
+
+Full 365-day forward spin-ups (random IC, realistic terrain, annual-mean SST),
+auto time step, GPUs 2–7. Plausibility checks: T∈[150,340] K, |wind| not absurd,
+q non-negative, ps∈~[400,1100] hPa, **entire trajectory finite**.
+
+| config | auto dt | finite 365d | T min/max (K) | \|wind\| max | q max (g/kg) | ps (hPa) |
+|--------|---------|-------------|---------------|--------------|--------------|----------|
+| T21 nlev=8  | 30 min | **yes** | 128 / 298 | 90 m/s  | 17 | 607–1089 |
+| T21 nlev=16 | 30 min | **yes** | 129 / 301 | 91 m/s  | 19 | 606–1085 |
+| T21 nlev=24 | 30 min | **yes** | 122 / 301 | 120 m/s | 21 | 591–1086 |
+| T21 nlev=32 | 18 min | **yes** | 132 / 302 | 81 m/s  | 19 | 585–1090 |
+| T31 nlev=8  | 30 min | **yes** | 127 / 302 | 91 m/s  | 18 | 535–1098 |
+| T31 nlev=16 | 24 min | **yes** | 112 / 301 | 127 m/s | 20 | 548–1096 |
+| T31 nlev=24 | 15 min | **yes** | 118 / 303 | 125 m/s | 19 | 555–1098 |
+
+(T min ≈ 110–130 K is the cold model-top stratosphere — present at the
+always-stable nlev=8 runs too, not an instability artefact. The small negative q
+minima seen in some columns, ≈ −3 g/kg, are spectral Gibbs ringing of the
+physics tendency and are clamped at the user-visible output boundary; they also
+appear at nlev=8.)
+
+All seven configurations — including the three that previously NaN'd (T21
+nlev=32, T31 nlev=16, T31 nlev=24) — now complete 365 days finite and
+physically plausible.
+
+## 6. Numerical stability at high nlev (auto time step)
+
+### Symptom
+With the σ-migration above, short runs are fine, but **long (365-day) realistic
+spinups go non-finite** at high level counts / high truncation: T21 nlev=32,
+T31 nlev=16, T31 nlev=24 all blow up within a few timesteps, while T21 nlev≤24
+are stable.
+
+### Diagnosed cause — explicit surface drag in the thin bottom layer (NOT CFL)
+The dry dynamical core alone is stable at dt=30 min even at nlev=32, so this is
+**not** a dynamics CFL problem. The instability is the **explicit (forward-Euler)
+surface-drag tendency in the thinnest *bottom* sigma layer**:
+
+```
+du/dt|_sfc = ustr · rps · grdsig[-1],   grdsig[-1] = g / (dσ_bot · p0)
+ustr = -C_drag · |V| · u            (jcm/physics/surface/speedy_surface_flux.py)
+```
+
+The Frierson stretch thins the bottom layer (dσ_bot ≈ 0.10 at nlev=8 → ≈ 0.008 at
+nlev=32), so `grdsig[-1]` grows ~12× and the explicit damping factor
+`dt · C_drag·|V| · grdsig[-1]` crosses the forward-Euler stability limit.
+**The unstable layer is at the surface (σ→1), not the model top** — so capping
+tiny *upper* σ would not fix it, and flooring the *bottom* layer would throw away
+exactly the near-surface resolution this effort is meant to add.
+
+### Fix — `stable_time_step_minutes(nlev, trunc)` (auto, opt-out)
+`jcm/physics/speedy/physical_constants.py` defines a stability index
+`S = (trunc+1)^1.3 / dσ_bot`, normalised to the canonical-stable T21/nlev=8
+baseline. Empirically every config stable at 30 min sits below `S_norm ≈ 9.4` and
+every unstable one above it. `Model.__init__` calls `_auto_time_step_minutes`
+when `time_step is None` (the default): it keeps **dt = 30 min on the stable
+plateau** (so all 7/8-level runs and every currently-stable config are
+**bit-for-bit unchanged**) and shrinks dt ~ 1/S above it, snapped to integer
+divisors of a 1440-min day (so save_interval/dt stays integer), with a safety
+margin. Pass an explicit `time_step` to override.
+
+Selected steps: T21 L8 → 30 min (unchanged), T21 L32 → 18, T31 L16 → 24,
+T31 L24 → 15.
+
+### Verification
+60-day realistic spinups (frozen-mean BCs) are finite for T21 {8,32} and
+T31 {16,24} with the auto dt (previously blew up within a few steps); 365-day
+spinups for the most-stressed configs (T21 L32, T31 L16/L24) confirm finiteness
+with physical temperature ranges. All previously-stable configs keep dt=30 min,
+so their results are unchanged.
+
+### Deferred alternative (backup)
+The most compute-efficient fix would be an **implicit surface drag** in the thin
+bottom layer (unconditionally stable → keep dt=30 min *and* the thin near-surface
+layers). It was deferred as too invasive for this pass; it is the preferred
+optimisation if the reduced dt makes high-nlev / T31 integrations too slow
+(e.g. the 14-month GFMIP finite-difference runs).

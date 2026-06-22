@@ -109,3 +109,106 @@ def compute_sigma_boundaries(nlev: int) -> jnp.ndarray:
     # Pin the endpoints exactly (the exp only reaches them approximately).
     sigma = sigma.at[0].set(0.0).at[-1].set(1.0)
     return sigma
+
+
+# --- Numerical-stability time step at high vertical resolution ---------------
+#
+# Background (see SPEEDY_VARIABLE_LEVELS.md "Numerical stability at high nlev"):
+# the model goes non-finite within a few timesteps at high nlev / high
+# truncation. The diagnosed cause is an *explicit (forward-Euler) surface-drag*
+# instability in the thinnest bottom sigma layer, NOT a dynamics CFL problem
+# (the dry dynamical core alone is stable at dt=30 min and nlev=32).
+#
+# SPEEDY's surface stress is applied as a tendency
+#     du/dt|_sfc = ustr * rps * grdsig[-1],   grdsig[-1] = g / (dsigma_bot * p0)
+# with ustr = -C_drag * |V| * u (see jcm/physics/surface/speedy_surface_flux.py).
+# The Frierson stretch makes the bottom layer thin (dsigma_bot ~0.10 at nlev=8
+# but ~0.008 at nlev=32), so grdsig[-1] grows ~12x and the explicit drag
+# damping factor dt * C_drag*|V| * grdsig[-1] crosses the forward-Euler
+# stability limit, producing a growing oscillation that blows up in the surface
+# layer first. Higher truncation makes it worse because the resolved
+# near-surface |V| (and the Gibbs ringing of the surface-drag tendency) grows
+# with the number of horizontal modes.
+#
+# Rather than make every thin-layer surface tendency implicit (a large, invasive
+# change to the operator-split coupling), we reduce the model time step when the
+# configuration is severe. Empirically (T21/T31 x nlev=8..32 spinups) the
+# stability boundary is ordered monotonically by the dimensionless severity
+#     S = (trunc + 1)**1.3 / dsigma_bot
+# normalised to the canonical-stable T21/nlev=8 baseline. All configurations
+# that are stable at 30 min sit below S_norm ~= 9.4; every unstable one sits
+# above it. We keep dt = 30 min on that plateau (so every currently-stable
+# config -- including all 7/8-level runs -- is bit-for-bit unchanged) and shrink
+# dt ~ 1/S above it, with a safety factor for margin below the measured blow-up
+# boundary.
+_DT_REFERENCE_MINUTES = 30.0   # validated dt at the T21/nlev=8 baseline
+_DT_SEVERITY_EXPONENT = 1.3    # truncation weighting in the severity number
+_DT_SEVERITY_PLATEAU  = 9.4    # S_norm below which dt stays at the reference
+_DT_SEVERITY_SAFETY   = 0.85   # margin applied on the reduced branch
+
+# Candidate time steps (minutes): integer divisors of a 1440-minute day, in
+# descending order. Snapping the raw stability step DOWN to one of these keeps
+# every saved frame aligned to an exact whole number of steps (the trajectory
+# builder uses ``inner_steps = int(save_interval / dt)``), so daily/monthly
+# save intervals don't drift over a 365-day run. Snapping down (never up) also
+# means the snapped step is always <= the raw stability step, so it cannot
+# re-introduce the instability.
+_DT_DAY_DIVISORS_MINUTES = (30.0, 24.0, 20.0, 18.0, 16.0, 15.0, 12.0, 10.0,
+                            9.0, 8.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0)
+
+
+def _bottom_layer_thickness(nlev: int) -> float:
+    boundaries = compute_sigma_boundaries(nlev)
+    return float(boundaries[-1] - boundaries[-2])
+
+
+# Reference severity for the canonical-stable T21 (trunc=21), nlev=8 run.
+_S_REFERENCE = (21 + 1) ** _DT_SEVERITY_EXPONENT / _bottom_layer_thickness(8)
+
+
+def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
+    """Numerically-stable model time step (minutes) for a SPEEDY configuration.
+
+    Returns a time step that keeps a realistic SPEEDY spin-up finite over long
+    integrations. The binding constraint at high vertical resolution is the
+    *explicit surface-drag* tendency in the thin bottom sigma layer (see the
+    module-level note above), whose forward-Euler stability limit is crossed as
+    ``dsigma_bot`` shrinks (high ``nlev``) and as the resolved near-surface wind
+    grows (high ``spectral_truncation``).
+
+    The criterion is a CFL-like rule on the dimensionless severity
+
+        S = (spectral_truncation + 1) ** 1.3 / dsigma_bot
+
+    normalised to the validated T21/nlev=8 baseline. On the stable plateau
+    (``S_norm <= 9.4``) the reference 30-minute step is returned unchanged, so
+    every configuration that is already stable at 30 min -- in particular all of
+    SPEEDY's standard 7- and 8-level runs -- is bit-for-bit unaffected. Above the
+    plateau the step is reduced as ``dt ~ 1/S`` with a 0.85 safety factor for
+    margin below the empirically measured blow-up boundary.
+
+    Args:
+        nlev: Number of vertical levels.
+        spectral_truncation: Triangular spectral truncation (e.g. 21 for T21).
+
+    Returns:
+        Time step in minutes.
+
+    """
+    s_norm = (
+        (spectral_truncation + 1) ** _DT_SEVERITY_EXPONENT
+        / _bottom_layer_thickness(nlev)
+    ) / _S_REFERENCE
+    if s_norm <= _DT_SEVERITY_PLATEAU:
+        raw = _DT_REFERENCE_MINUTES
+    else:
+        raw = (
+            _DT_REFERENCE_MINUTES * _DT_SEVERITY_SAFETY
+            * _DT_SEVERITY_PLATEAU / s_norm
+        )
+    # Snap DOWN to a divisor of a 1440-minute day so saved frames stay aligned
+    # (and the snapped step is never larger than the stability bound).
+    for candidate in _DT_DAY_DIVISORS_MINUTES:
+        if candidate <= raw:
+            return candidate
+    return _DT_DAY_DIVISORS_MINUTES[-1]

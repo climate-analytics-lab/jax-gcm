@@ -191,7 +191,7 @@ class Model:
                  dycore: DynamicalCore | None = None,
                  *,
                  coords=None,
-                 time_step: float = 30.0,
+                 time_step: float | None = None,
                  terrain: TerrainData = None,
                  physics: Physics = None,
                  start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
@@ -209,7 +209,15 @@ class Model:
             coords: CoordinateSystem. Required when ``dycore`` is ``None``.
                 To enable SPMD parallelization, pass ``spmd_mesh`` to the
                 coords helper (e.g. :func:`get_speedy_coords`).
-            time_step: Model time step in minutes.
+            time_step: Model time step in minutes. When ``None`` (the default)
+                the step is auto-selected from the resolution via
+                :func:`jcm.physics.speedy.physical_constants.stable_time_step_minutes`
+                so that high vertical-level / high-truncation configurations stay
+                numerically stable over long integrations (the explicit
+                surface-drag tendency in the thin bottom sigma layer is the
+                binding constraint -- see SPEEDY_VARIABLE_LEVELS.md). On the
+                stable plateau this returns 30 minutes, so SPEEDY's standard 7/8
+                level runs are unchanged. Pass an explicit value to override.
             terrain: :class:`TerrainData` (orography, land-sea mask, etc.).
                 Defaults to an aquaplanet when building the default dycore.
             physics: :class:`Physics` describing the model physics. Defaults
@@ -228,6 +236,8 @@ class Model:
         self.calendar = calendar
         self.start_date = start_date
 
+        if time_step is None:
+            time_step = self._auto_time_step_minutes(dycore, coords)
         self.dt_si = (time_step * units.minute).to(units.second)
         self.physics = physics if physics is not None else speedy_physics()
 
@@ -277,6 +287,36 @@ class Model:
         # ``bootstrap_state`` so that ``run() + resume()`` matches a single
         # ``run()`` of the combined duration.
         self._final_physics_state = None
+
+    @staticmethod
+    def _auto_time_step_minutes(dycore, coords) -> float:
+        """Resolution-aware default model time step (minutes).
+
+        Chooses a numerically stable step from the active horizontal/vertical
+        resolution. The binding constraint at high vertical resolution is the
+        explicit surface-drag tendency in the thin bottom sigma layer (see
+        :func:`jcm.physics.speedy.physical_constants.stable_time_step_minutes`
+        and SPEEDY_VARIABLE_LEVELS.md). Derives ``nlev`` from the number of
+        sigma layers and ``spectral_truncation`` from the horizontal grid's
+        longitude wavenumbers; on the stable plateau this returns 30 min so the
+        standard 7/8-level SPEEDY configurations are unchanged.
+
+        Falls back to the historical 30-minute default if the resolution cannot
+        be inferred (e.g. a non-sigma vertical coordinate or a custom dycore
+        whose grid does not expose ``longitude_wavenumbers``).
+        """
+        from jcm.physics.speedy.physical_constants import stable_time_step_minutes
+
+        cs = coords if coords is not None else getattr(dycore, "coords", None)
+        if cs is None:
+            return 30.0
+        try:
+            nlev = int(cs.vertical.layers)
+            # Triangular truncation: longitude_wavenumbers = trunc + 1.
+            spectral_truncation = int(cs.horizontal.longitude_wavenumbers) - 1
+        except AttributeError:
+            return 30.0
+        return stable_time_step_minutes(nlev, spectral_truncation)
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         # Stop gradient: date/calendar computations use non-differentiable ops
