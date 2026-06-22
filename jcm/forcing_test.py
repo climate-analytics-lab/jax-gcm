@@ -442,6 +442,39 @@ class TestForcingDataFromFile(unittest.TestCase):
 class TestForcingDataFromFileValidation(unittest.TestCase):
     """Tests for ForcingData.from_file validation logic using mock files."""
 
+    def test_from_dataset_reads_prescribed_ghgs(self):
+        """CO2/CH4/N2O present in a forcing file must be read, not defaulted.
+
+        Regression for the silent fallback flagged on the GHG single-source PR:
+        ``from_dataset`` previously special-cased only CO2, so N2O (and CH4) in a
+        scenario file were ignored and radiation used the constant default.
+        """
+        import pandas as pd
+        import xarray as xr
+
+        valid_shape = (96, 48)  # T31
+        n_times = 12
+        times = pd.date_range("1990-01-01", periods=n_times, freq="MS")
+        ds = xr.Dataset(
+            data_vars={
+                'stl': (['lon', 'lat', 'time'], np.full((*valid_shape, n_times), 280.0)),
+                'icec': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'sst': (['lon', 'lat', 'time'], np.full((*valid_shape, n_times), 290.0)),
+                'alb': (['lon', 'lat'], np.full(valid_shape, 0.1)),
+                'soilw_am': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                'snowc': (['lon', 'lat', 'time'], np.zeros((*valid_shape, n_times))),
+                # Scalars distinct from every default (CO2 420, CH4 1.9, N2O 0.327).
+                'co2': 700.0,
+                'ch4': 2.5,
+                'n2o': 0.5,
+            },
+            coords={'time': times},
+        )
+        forcing = ForcingData.from_dataset(ds, validate=False)
+        self.assertAlmostEqual(float(forcing.co2_vmr), 700.0)
+        self.assertAlmostEqual(float(forcing.ch4_vmr), 2.5)
+        self.assertAlmostEqual(float(forcing.n2o_vmr), 0.5)
+
     def test_from_file_validates_nodal_shape(self):
         """from_file should reject invalid nodal shapes when coords is None."""
         import xarray as xr

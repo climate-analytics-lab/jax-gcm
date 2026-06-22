@@ -450,21 +450,29 @@ class ForcingData:
         # Prescribed SSTs
         sea_surface_temperature = _ts(ds["sst"])
 
-        # Optional CO2: if the netCDF includes it, treat as a scalar (per-time)
-        # series; otherwise keep the default scalar from `ForcingData.zeros`.
-        co2_vmr = None
-        if "co2" in ds.data_vars:
-            co2_arr = jnp.asarray(ds["co2"])
-            if co2_arr.ndim == 0:
-                co2_vmr = co2_arr
-            else:
-                co2_vmr = make_time_series(co2_arr, time_seconds, align_mode=resolved_align_mode)
+        # Optional well-mixed GHG scalars (CO2/CH4/N2O): if the netCDF includes
+        # one, treat it as a scalar (per-time) series; otherwise keep the default
+        # from `ForcingData.zeros`. Radiation reads CO2 and N2O straight from the
+        # forcing (and CH4 via the chemistry seed), so reading every prescribed
+        # gas here — not just CO2 — is what lets a scenario file actually drive
+        # them rather than silently fall back to the default.
+        def _optional_ghg(name):
+            if name not in ds.data_vars:
+                return None
+            arr = jnp.asarray(ds[name])
+            if arr.ndim == 0:
+                return arr
+            return make_time_series(arr, time_seconds, align_mode=resolved_align_mode)
+
+        co2_vmr = _optional_ghg("co2")
+        ch4_vmr = _optional_ghg("ch4")
+        n2o_vmr = _optional_ghg("n2o")
 
         return cls.zeros(
             nodal_shape=alb0.shape,
             alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
-            co2_vmr=co2_vmr,
+            co2_vmr=co2_vmr, ch4_vmr=ch4_vmr, n2o_vmr=n2o_vmr,
         )
 
     def copy(self,alb0=None,
