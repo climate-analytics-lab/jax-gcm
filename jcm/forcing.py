@@ -117,17 +117,24 @@ def _validate_bc_fields(ds) -> None:
 WRAP_YEAR = 0   # index by `floor(date.tyear * n_time) % n_time` — climatology mode
 BY_DATE = 1     # index by absolute time, using `time_seconds` as the lookup axis
 
-# Default scalar CO2 mixing ratio (ppmv) when no time series is supplied. 360
-# ppmv is SPEEDY's reference 1990s baseline, which the legacy `ablco2_ref`
-# constant was tuned against — keeping the default at 360 ppmv means runs that
-# do not pass a CO2 forcing reproduce SPEEDY's pre-`increase_co2` behavior.
-DEFAULT_CO2_VMR_PPMV = 360.0
+# Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
+# 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
+# previously hard-coded in ``ChemistryParameters``); SPEEDY's ``ablco2`` simply
+# scales linearly against its own reference, so this single forcing default now
+# drives every backend's CO2.
+DEFAULT_CO2_VMR_PPMV = 420.0
 
 # Default scalar CH4 mixing ratio (ppmv) when no time series is supplied.
 # 1.9 ppmv ≈ early-2020s tropospheric mean (CH4 has roughly doubled since
 # pre-industrial); previously hardcoded inside ``EchamBoundaryConditions``
 # as ``1900.0e-3`` ppmv. Issue #347.
 DEFAULT_CH4_VMR_PPMV = 1.9
+
+# Default scalar N2O mixing ratio (ppmv) when no time series is supplied.
+# 0.327 ppmv (327 ppbv) matches the value RRTMGP previously took from its
+# ``vmr_global_means.json`` fallback, so prescribing N2O from the forcing here
+# preserves the calibrated radiative effect while removing the silent fallback.
+DEFAULT_N2O_VMR_PPMV = 0.327
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +213,11 @@ class ForcingData:
     # ``EchamBoundaryConditions``; promoted to forcing in #347.
     ch4_vmr: jnp.ndarray
 
+    # N2O volume mixing ratio (ppmv). Scalar for fixed-N2O runs; TimeSeries for
+    # historical / scenario forcing. Prescribed here so RRTMGP no longer falls
+    # back silently to its ``vmr_global_means.json`` value.
+    n2o_vmr: jnp.ndarray
+
     # Aerosol temporal forcing (MACv2-SP plume weights). Today these are
     # placeholder 1-D `(nplumes,)` arrays; the multi-axis version will land
     # in the MACv2-SP fix PR (#437).
@@ -264,6 +276,7 @@ class ForcingData:
               solar=None,
               ozone_climatology=None,
               ch4_vmr=None,
+              n2o_vmr=None,
               nplumes=9):
         # Land + SST temperatures default to ~15 °C — a sensible global
         # mean surface temperature — so that ``ForcingData.zeros(...)``
@@ -280,6 +293,7 @@ class ForcingData:
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.full(nodal_shape, T_default),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
             ch4_vmr=ch4_vmr if ch4_vmr is not None else jnp.array(DEFAULT_CH4_VMR_PPMV),
+            n2o_vmr=n2o_vmr if n2o_vmr is not None else jnp.array(DEFAULT_N2O_VMR_PPMV),
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
             solar=solar if solar is not None else SolarGeometry.zero(),
@@ -298,6 +312,7 @@ class ForcingData:
              solar=None,
              ozone_climatology=None,
              ch4_vmr=None,
+             n2o_vmr=None,
              nplumes=9):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
@@ -308,6 +323,7 @@ class ForcingData:
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
             ch4_vmr=ch4_vmr if ch4_vmr is not None else jnp.array(DEFAULT_CH4_VMR_PPMV),
+            n2o_vmr=n2o_vmr if n2o_vmr is not None else jnp.array(DEFAULT_N2O_VMR_PPMV),
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
             solar=solar if solar is not None else SolarGeometry.zero(),
@@ -459,6 +475,7 @@ class ForcingData:
              solar=None,
              ozone_climatology=None,
              ch4_vmr=None,
+             n2o_vmr=None,
              nudging_target=_UNSET,
              dms_seawater=None,
              dust_source=None,
@@ -477,6 +494,7 @@ class ForcingData:
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else self.sea_surface_temperature,
             co2_vmr=co2_vmr if co2_vmr is not None else self.co2_vmr,
             ch4_vmr=ch4_vmr if ch4_vmr is not None else self.ch4_vmr,
+            n2o_vmr=n2o_vmr if n2o_vmr is not None else self.n2o_vmr,
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else self.aerosol_year_weight,
             aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else self.aerosol_ann_cycle,
             solar=solar if solar is not None else self.solar,

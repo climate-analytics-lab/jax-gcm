@@ -166,9 +166,11 @@ class EchamBoundaryConditions(PhysicsTerm):
         surface_temperature = surface_temperature.reshape(ncols)
         roughness_length = roughness_length.reshape(ncols)
 
-        # CO2 and CH4 both come from ``ForcingData`` (#347). Defaults are
-        # 360 ppmv (CO2) and 1.9 ppmv (CH4) — the legacy hardcoded values.
-        co2_vmr_value = forcing.co2_vmr
+        # CH4 comes from ``ForcingData`` (#347) and seeds the chemistry
+        # diagnostic (where the methane-loss scheme evolves it). CO2 is *not*
+        # seeded here: it is a prescribed forcing read straight from
+        # ``forcing.co2_vmr`` by radiation, so the chemistry diagnostic never
+        # carries it.
         ch4_vmr_value = forcing.ch4_vmr
 
         # O3: prefer the realistic CMIP6/ECHAM-style climatology carried
@@ -204,8 +206,6 @@ class EchamBoundaryConditions(PhysicsTerm):
                 methane_surface_vmr=defaults.methane_surface_vmr,
                 methane_lifetime=defaults.methane_lifetime,
                 methane_oh_scaling=defaults.methane_oh_scaling,
-                co2_vmr=defaults.co2_vmr,
-                co2_growth_rate=defaults.co2_growth_rate,
             )
             ozone_vmr_ppmv = fixed_ozone_distribution(
                 pressure=diagnostics["pressure_full"],
@@ -234,7 +234,6 @@ class EchamBoundaryConditions(PhysicsTerm):
             "chemistry", ChemistryData.zeros((ncols,), nlev),
         )
         chemistry = chemistry_zero.copy(
-            co2_vmr=jnp.ones_like(chemistry_zero.co2_vmr) * co2_vmr_value,
             methane_vmr=jnp.ones_like(chemistry_zero.methane_vmr)
             * ch4_vmr_value,
             ozone_vmr=ozone_vmr_ppmv,

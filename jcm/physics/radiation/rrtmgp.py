@@ -398,6 +398,7 @@ def radiation_scheme_rrtmgp(
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: Optional[jnp.ndarray] = None,
     ch4_vmr: Optional[jnp.ndarray] = None,
+    n2o_vmr: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -556,6 +557,12 @@ def radiation_scheme_rrtmgp(
     if ch4_vmr is not None:
         vmr_fields["ch4"] = _to_3d_with_filled_halo(
             jnp.broadcast_to(ch4_vmr, (nlev,)), nlev, halo,
+        )
+    if n2o_vmr is not None:
+        # Prescribed from ``forcing.n2o_vmr``; overrides RRTMGP's
+        # ``vmr_global_means.json`` fallback for N2O.
+        vmr_fields["n2o"] = _to_3d_with_filled_halo(
+            jnp.broadcast_to(n2o_vmr, (nlev,)), nlev, halo,
         )
 
     # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
@@ -803,10 +810,17 @@ class RRTMGPRadiation(PhysicsTerm):
             state, diagnostics,
         )
 
+        # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):
+        #   O3, CH4  <- the chemistry diagnostic (O3 analytic/climatology; CH4
+        #               forcing-seeded then evolved by the methane-loss scheme)
+        #   CO2, N2O <- prescribed forcings read straight from ForcingData
+        # Radiation never reads a GHG concentration from its own parameters, and
+        # never lets a value be silently redeclared.
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6     # (nlev, ncols)
-        co2_vmr = chemistry.co2_vmr * 1e-6         # (nlev, ncols)
         ch4_vmr = chemistry.methane_vmr * 1e-6     # (nlev, ncols)
+        co2_vmr = forcing.co2_vmr * 1e-6           # scalar
+        n2o_vmr = forcing.n2o_vmr * 1e-6           # scalar
 
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
@@ -878,6 +892,7 @@ class RRTMGPRadiation(PhysicsTerm):
             ozone_vmr=lev_to_col(ozone_vmr),
             co2_vmr=lev_to_col(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
             ch4_vmr=lev_to_col(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
+            n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
         )
 
         # We tried a day/night split here (solve the dark ~half LW-only, skip
@@ -894,7 +909,7 @@ class RRTMGPRadiation(PhysicsTerm):
                 None, 0, 0,
                 None, 0,
                 0, None, None, None,  # col_index, model_step, base_seed, cre
-                0, 0, 0,              # ozone_vmr, co2_vmr, ch4_vmr
+                0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
             ),
             out_axes=(0, 0),
         )(
@@ -907,7 +922,7 @@ class RRTMGPRadiation(PhysicsTerm):
             solar, cols["latitudes"], cols["longitudes"],
             params, cols["aerosol"], cols["column_indices"],
             model_step, base_seed, compute_cre,
-            cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+            cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
         )
 
         # Per-gpoint flux profiles are summed over g-points inside the

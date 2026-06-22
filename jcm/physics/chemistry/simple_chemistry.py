@@ -23,15 +23,15 @@ class ChemistryParameters:
     ozone_tropopause_height: float # Height of ozone maximum (m)
     ozone_stratosphere_coeff: float # Stratospheric ozone coefficient
     
-    # Methane parameters  
+    # Methane parameters
     methane_surface_vmr: float     # Surface methane VMR (ppbv)
     methane_lifetime: float        # Methane lifetime (s)
     methane_oh_scaling: float      # OH scaling factor
-    
-    # CO2 parameters
-    co2_vmr: float                 # CO2 volume mixing ratio (ppmv)
-    co2_growth_rate: float         # CO2 growth rate (ppmv/year)
-    
+
+    # NB: there is deliberately no CO2 parameter here. CO2 is a prescribed
+    # forcing (``forcing.co2_vmr``), read straight from there by radiation; the
+    # chemistry scheme never redeclares it.
+
     @classmethod
     def default(cls) -> 'ChemistryParameters':
         """Return default chemistry parameters"""
@@ -43,8 +43,6 @@ class ChemistryParameters:
             methane_surface_vmr=jnp.array(1900.0),     # 1.9 ppmv
             methane_lifetime=jnp.array(9.0 * 365.25 * 24 * 3600), # 9 years
             methane_oh_scaling=jnp.array(1.0),
-            co2_vmr=jnp.array(420.0),                   # 420 ppmv
-            co2_growth_rate=jnp.array(2.5)             # 2.5 ppmv/year
         )
 
 
@@ -54,8 +52,7 @@ class ChemistryState(NamedTuple):
     # Gas concentrations (volume mixing ratios)
     ozone_vmr: jnp.ndarray          # Ozone VMR (ppbv)
     methane_vmr: jnp.ndarray        # Methane VMR (ppbv)
-    co2_vmr: jnp.ndarray           # CO2 VMR (ppmv)
-    
+
     # Production/loss rates
     ozone_production: jnp.ndarray   # Ozone production rate (ppbv/s)
     ozone_loss: jnp.ndarray        # Ozone loss rate (ppbv/s)
@@ -68,25 +65,24 @@ class ChemistryTendencies(NamedTuple):
     # Trace gas tendencies (mixing ratio per second)
     ozone_tend: jnp.ndarray         # Ozone tendency (ppbv/s)
     methane_tend: jnp.ndarray       # Methane tendency (ppbv/s)
-    co2_tend: jnp.ndarray          # CO2 tendency (ppmv/s)
 
 
 @tree_math.struct
 class ChemistryData:
     """Diagnostic sub-struct for the chemistry diagnostic-dict slot.
 
-    Seeded by ``EchamBoundaryConditions`` (which fills CO2/CH4/O3 VMRs
-    from forcing) and consumed by the radiation terms; the
+    Seeded by ``EchamBoundaryConditions`` (which fills the CH4/O3 VMRs, CH4
+    from ``forcing.ch4_vmr``) and consumed by the radiation terms; the
     ``SimpleChemistry`` term also writes its production/loss diagnostics
-    here. Lives next to the chemistry scheme so a future replacement
-    chemistry term can extend or replace this struct without reaching
-    into the ECHAM tree.
+    here. CO2 is NOT carried here — it is a prescribed forcing read directly
+    from ``forcing.co2_vmr`` by radiation. Lives next to the chemistry scheme so
+    a future replacement chemistry term can extend or replace this struct
+    without reaching into the ECHAM tree.
     """
 
     # Gas concentrations (volume mixing ratios)
     ozone_vmr: jnp.ndarray           # Ozone VMR [ppbv] (nlev, ncols)
     methane_vmr: jnp.ndarray         # Methane VMR [ppbv] (nlev, ncols)
-    co2_vmr: jnp.ndarray            # CO2 VMR [ppmv] (nlev, ncols)
 
     # Production/loss rates
     ozone_production: jnp.ndarray    # Ozone production rate [ppbv/s] (nlev, ncols)
@@ -113,7 +109,6 @@ class ChemistryData:
         return cls(
             ozone_vmr=jnp.zeros(column_shape),
             methane_vmr=jnp.zeros(column_shape),
-            co2_vmr=jnp.zeros(column_shape),
             ozone_production=jnp.zeros(column_shape),
             ozone_loss=jnp.zeros(column_shape),
             methane_loss=jnp.zeros(column_shape),
@@ -125,7 +120,6 @@ class ChemistryData:
         new_data = {
             'ozone_vmr': self.ozone_vmr,
             'methane_vmr': self.methane_vmr,
-            'co2_vmr': self.co2_vmr,
             'ozone_production': self.ozone_production,
             'ozone_loss': self.ozone_loss,
             'methane_loss': self.methane_loss,
@@ -288,23 +282,17 @@ def simple_chemistry(
         pressure, temperature, current_methane, dt, config
     )
     methane_tendency = -methane_loss
-    
-    # CO2 is fixed (no tendency)
-    co2_tendency = jnp.zeros_like(current_ozone)
-    co2_vmr = jnp.ones_like(current_ozone) * config.co2_vmr
-    
+
     # Create tendencies
     tendencies = ChemistryTendencies(
         ozone_tend=ozone_tendency,
         methane_tend=methane_tendency,
-        co2_tend=co2_tendency
     )
-    
+
     # Create state
     state = ChemistryState(
         ozone_vmr=current_ozone,
         methane_vmr=current_methane,
-        co2_vmr=co2_vmr,
         ozone_production=jnp.maximum(ozone_tendency, 0.0),
         ozone_loss=jnp.maximum(-ozone_tendency, 0.0),
         methane_loss=methane_loss
@@ -345,14 +333,10 @@ def initialize_chemistry_tracers(
     # Higher concentration at surface, decreasing with height
     height = compute_height_from_pressure(pressure, surface_pressure, temperature)
     methane_vmr = config.methane_surface_vmr * jnp.exp(-height / 8000.0)  # 8 km scale height
-    
-    # Initialize CO2 as constant
-    co2_vmr = jnp.ones((nlev, ncols)) * config.co2_vmr
 
     return ChemistryState(
         ozone_vmr=ozone_vmr,
         methane_vmr=methane_vmr,
-        co2_vmr=co2_vmr,
         ozone_production=jnp.zeros((nlev, ncols)),
         ozone_loss=jnp.zeros((nlev, ncols)),
         methane_loss=jnp.zeros((nlev, ncols))
@@ -426,7 +410,6 @@ class SimpleChemistry(PhysicsTerm):
         chemistry = chemistry.copy(
             ozone_vmr=new_state.ozone_vmr,
             methane_vmr=new_state.methane_vmr,
-            co2_vmr=new_state.co2_vmr,
             ozone_production=new_state.ozone_production,
             ozone_loss=new_state.ozone_loss,
             methane_loss=new_state.methane_loss,
