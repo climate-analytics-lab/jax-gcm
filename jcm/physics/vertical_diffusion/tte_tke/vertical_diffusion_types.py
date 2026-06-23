@@ -192,12 +192,6 @@ class VDiffDiagnostics(NamedTuple):
     # Mixing length
     mixing_length: jnp.ndarray           # Mixing length [m] (ncol, nlev)
     
-    # Surface fluxes
-    surface_momentum_flux_u: jnp.ndarray  # u-momentum flux [N/m²] (ncol,)
-    surface_momentum_flux_v: jnp.ndarray  # v-momentum flux [N/m²] (ncol,)
-    surface_heat_flux: jnp.ndarray        # Sensible heat flux [W/m²] (ncol,)
-    surface_moisture_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncol,)
-    
     # Energy dissipation
     kinetic_energy_dissipation: jnp.ndarray  # KE dissipation [W/m²] (ncol,)
 

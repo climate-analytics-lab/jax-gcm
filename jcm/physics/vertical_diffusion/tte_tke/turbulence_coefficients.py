@@ -405,146 +405,6 @@ def compute_friction_velocity(
 
 
 @jax.jit
-def stability_function_momentum(zeta: jnp.ndarray) -> jnp.ndarray:
-    """Monin-Obukhov stability function for momentum.
-    
-    Args:
-        zeta: Stability parameter z/L
-        
-    Returns:
-        Stability function value
-
-    """
-    # Stable conditions (zeta > 0)
-    stable = 1.0 + 5.0 * zeta
-    
-    # Unstable conditions (zeta < 0)
-    x = (1.0 - 16.0 * zeta)**(0.25)
-    unstable = (2.0 * jnp.log((1.0 + x) / 2.0) + 
-                jnp.log((1.0 + x**2) / 2.0) - 
-                2.0 * jnp.arctan(x) + jnp.pi / 2.0)
-    
-    return jnp.where(zeta >= 0, stable, unstable)
-
-
-@jax.jit
-def stability_function_heat(zeta: jnp.ndarray) -> jnp.ndarray:
-    """Monin-Obukhov stability function for heat/moisture.
-    
-    Args:
-        zeta: Stability parameter z/L
-        
-    Returns:
-        Stability function value
-
-    """
-    # Stable conditions (zeta > 0)
-    stable = 1.0 + 5.0 * zeta
-    
-    # Unstable conditions (zeta < 0)
-    x = (1.0 - 16.0 * zeta)**(0.5)
-    unstable = 2.0 * jnp.log((1.0 + x) / 2.0)
-    
-    return jnp.where(zeta >= 0, stable, unstable)
-
-
-@jax.jit
-def compute_surface_fluxes(
-    state: VDiffState,
-    params: VDiffParameters,
-    z_half: jnp.ndarray,
-    air_density: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute surface momentum, heat, and moisture fluxes using Monin-Obukhov similarity theory.
-    
-    Args:
-        state: Vertical diffusion state
-        params: Parameters
-        z_half: Half-level heights
-        air_density: Air density at surface
-        
-    Returns:
-        Tuple of (momentum_flux_u, momentum_flux_v, heat_flux, moisture_flux)
-
-    """
-    # Surface wind speed
-    wind_u = state.u[:, -1]
-    wind_v = state.v[:, -1]
-    wind_speed = jnp.sqrt(wind_u**2 + wind_v**2)
-    wind_speed = jnp.maximum(wind_speed, 0.1)  # Minimum wind speed
-    
-    # Reference height: lowest *full* level above the surface, NOT the
-    # bottom half-level (which is the surface itself = 0 m, giving
-    # ``log(0/z0) = -inf`` → friction-velocity NaN). Pre-existing bug
-    # found via the moist-perturbation diagnostic at day 5; the
-    # diagnostic ``surface_friction_velocity`` had been NaN ever since
-    # the function was added but no production path consumed it.
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
-
-    # Surface roughness lengths (simplified - would come from surface model)
-    z0_momentum = jnp.full_like(wind_speed, 0.001)  # 1 mm for momentum
-    z0_heat = z0_momentum * 0.1  # Heat roughness length
-    
-    # Temperature and humidity differences
-    temp_surface = state.surface_temperature[:, 0]  # Use first surface type
-    temp_air = state.temperature[:, -1]
-    theta_surface = temp_surface  # Simplified - would include pressure correction
-    theta_air = temp_air
-    
-    # Specific humidity (simplified)
-    q_surface = jnp.full_like(temp_surface, 0.01)  # Simplified surface humidity
-    q_air = state.qv[:, -1]
-    
-    # Initial estimates for iterative solution
-    ustar = c.karman_const * wind_speed / jnp.log(z_ref / z0_momentum)
-
-    # Iterative solution for Monin-Obukhov length
-    L_obukhov = jnp.full_like(ustar, 1000.0)  # Initial guess
-    
-    # Iterate to find consistent solution
-    for _ in range(5):  # Fixed number of iterations for JAX compatibility
-        # Stability parameter
-        zeta = z_ref / L_obukhov
-        zeta = jnp.clip(zeta, -5.0, 5.0)  # Limit stability parameter
-        
-        # Stability functions
-        psi_m = stability_function_momentum(zeta)
-        psi_h = stability_function_heat(zeta)
-        
-        # Update friction velocity
-        ustar = c.karman_const * wind_speed / (jnp.log(z_ref / z0_momentum) - psi_m)
-        ustar = jnp.maximum(ustar, 0.01)  # Minimum friction velocity
-
-        # Heat transfer coefficient
-        ch = c.karman_const**2 / ((jnp.log(z_ref / z0_momentum) - psi_m) *
-                                (jnp.log(z_ref / z0_heat) - psi_h))
-
-        # Surface heat flux
-        heat_flux = -air_density * c.cpd * ch * wind_speed * (theta_air - theta_surface)
-
-        # Update Monin-Obukhov length
-        L_obukhov = jnp.where(
-            jnp.abs(heat_flux) > 1e-10,
-            -air_density * c.cpd * theta_air * ustar**3 / (c.karman_const * c.grav * heat_flux),
-            1000.0  # Neutral conditions
-        )
-        L_obukhov = jnp.clip(L_obukhov, -1000.0, 1000.0)  # Reasonable limits
-    
-    # Final flux calculations
-    # Momentum fluxes
-    tau_u = -air_density * ustar**2 * wind_u / wind_speed
-    tau_v = -air_density * ustar**2 * wind_v / wind_speed
-    
-    # Heat flux (already computed above)
-    heat_flux = -air_density * c.cpd * ch * wind_speed * (theta_air - theta_surface)
-
-    # Moisture flux (similar to heat flux)
-    moisture_flux = -air_density * ch * wind_speed * (q_air - q_surface)
-    
-    return tau_u, tau_v, heat_flux, moisture_flux
-
-
-@jax.jit
 def compute_turbulence_diagnostics(
     state: VDiffState,
     params: VDiffParameters,
@@ -602,15 +462,28 @@ def compute_turbulence_diagnostics(
     )
     
     # Air density at surface
-    air_density = (state.pressure_full[:, -1] / 
-                  (c.rd * state.temperature[:, -1]))
-    
-    # Compute surface fluxes using Monin-Obukhov similarity theory
-    (surface_momentum_flux_u, surface_momentum_flux_v, 
-     surface_heat_flux, surface_moisture_flux) = compute_surface_fluxes(
-        state, params, state.height_half, air_density
+    air_density = (state.pressure_full[:, -1] /
+                   (c.rd * state.temperature[:, -1]))
+
+    # Friction velocity from the SAME per-tile surface momentum exchange
+    # coefficient (CM·|U|, m/s) that drives the surface stress and the vdiff
+    # implicit damping — a single ECHAM-style ``sfc_exchange_coeff``, not a
+    # separate bulk-Richardson solve. Collapse the per-tile CM·|U| to a grid
+    # value with the surface-type fractions (the same area weighting the
+    # EchamSurface term applies to form its grid-mean momentum stress
+    # ``tau = rho·⟨CM·|U|⟩·U``), so u*² = |U|·⟨CM·|U|⟩ is exactly the friction
+    # velocity implied by that stress. This keeps the u* consumed downstream by
+    # aerosol dry deposition and wind-driven dust/sea-salt emission consistent
+    # with the surface momentum exchange rather than a parallel bulk estimate.
+    exchange_momentum_grid = jnp.sum(
+        state.surface_fraction * surface_exchange_momentum, axis=1
+    )  # ⟨CM·|U|⟩ [m/s] (ncol,)
+    surface_momentum_flux_u = (
+        air_density * exchange_momentum_grid * state.u[:, -1]
     )
-    
+    surface_momentum_flux_v = (
+        air_density * exchange_momentum_grid * state.v[:, -1]
+    )
     friction_velocity = compute_friction_velocity(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
     )
@@ -630,9 +503,5 @@ def compute_turbulence_diagnostics(
         convective_velocity=convective_velocity,
         richardson_number=ri,
         mixing_length=mixing_length,
-        surface_momentum_flux_u=surface_momentum_flux_u,
-        surface_momentum_flux_v=surface_momentum_flux_v,
-        surface_heat_flux=surface_heat_flux,
-        surface_moisture_flux=surface_moisture_flux,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget
     )

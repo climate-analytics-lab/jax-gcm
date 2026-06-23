@@ -1,12 +1,16 @@
 """``SlinnDryDeposition`` — turbulent/Brownian dry removal at the surface.
 
 Per-mode non-gravitational deposition velocity (resistance-in-series) applied
-to the interstitial aerosol in the lowest model layer. Friction velocity and
-Monin-Obukhov length are read from the ``vertical_diffusion`` diagnostic (the
-TTE-TKE term already exposes ``surface_friction_velocity``); because that term
-runs *after* the aerosol block in the default ECHAM ordering, the values come
-from the previous step (or the floored carry on step 1), so it is read with a
-fallback rather than declared as a hard ``requires``.
+to the interstitial aerosol in the lowest model layer. The friction velocity is
+read from the ``vertical_diffusion`` diagnostic's ``surface_friction_velocity``,
+which the TTE-TKE term derives from the unified surface momentum exchange
+coefficient (u*² = |U|·⟨CM·|U|⟩), so it is consistent with the surface stress
+and the vdiff damping. Because that term runs *after* the aerosol block in the
+default ECHAM ordering, the value comes from the previous step (or the floored
+carry on step 1), so it is read with a fallback rather than declared as a hard
+``requires``. The aerodynamic resistance uses a neutral log-law; a
+Monin-Obukhov stability correction is a future refinement (the diagnostic does
+not yet carry a usable surface ``L``).
 
 Mirrors ``mo_hammoz_drydep``.
 """
