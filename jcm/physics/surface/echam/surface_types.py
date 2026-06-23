@@ -240,6 +240,12 @@ class SurfaceData:
 
     # Evaporation
     evaporation: jnp.ndarray         # Evaporation [kg/m²/s] (ncols,)
+    # Effective evaporation actually added to the lowest layer this step, i.e.
+    # the raw flux times the implicit surface-flux damping ``imp_moist`` (see
+    # ``surface_physics``). This is the moisture the column truly received and is
+    # what the Tiedtke moisture-budget closure should anchor to; the raw
+    # ``evaporation`` above is the undamped surface flux (P-E diagnostics).
+    effective_evaporation: jnp.ndarray  # Damped evaporation [kg/m²/s] (ncols,)
 
     # Exchange coefficients
     ch: jnp.ndarray                  # Heat exchange coefficient [1] (ncols,)
@@ -256,6 +262,7 @@ class SurfaceData:
             skin_temperature=jnp.zeros(nodal_shape),
             roughness_length=jnp.zeros(nodal_shape),
             evaporation=jnp.zeros(nodal_shape),
+            effective_evaporation=jnp.zeros(nodal_shape),
             ch=jnp.zeros(nodal_shape),
             cm=jnp.zeros(nodal_shape),
         )
@@ -270,6 +277,7 @@ class SurfaceData:
             'skin_temperature': self.skin_temperature,
             'roughness_length': self.roughness_length,
             'evaporation': self.evaporation,
+            'effective_evaporation': self.effective_evaporation,
             'ch': self.ch,
             'cm': self.cm,
         }

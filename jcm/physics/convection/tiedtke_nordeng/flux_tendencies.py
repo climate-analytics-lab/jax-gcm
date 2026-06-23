@@ -192,9 +192,17 @@ def calculate_tendencies(
     # signed-dp / signed-diff convention applies.
     lh_source = c.alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
 
-    # Signed layer mass per unit area (sign matches ``dp_signed``); the
-    # division below cancels the sign so the tendency comes out positive
-    # for heating regardless of ordering.
+    # Layer mass per unit area for the flux divergence. NOTE on staggering: the
+    # convective fluxes above are evaluated at FULL levels, so ``diff(flux)``
+    # lives on the dual grid (between full-level centres) and its consistent mass
+    # is the centre-to-centre spacing ``diff(pressure)`` — NOT the model layer
+    # mass ρ·Δz. ECHAM ``cudtdq`` is a genuine finite-volume scheme whose fluxes
+    # live at HALF levels and which divides by the model layer mass; matching it
+    # would require reworking the updraft (``cuasc``) to carry half-level mass
+    # fluxes. Swapping in ρ·Δz here *without* that rework mixes a dual-grid flux
+    # with a model-grid mass (inconsistent staggering) and empirically worsens
+    # the cloud-base noise, so we keep the self-consistent dual-grid form. The
+    # sign is carried so the heating comes out positive regardless of ordering.
     layer_mass_per_area = dp_signed / c.grav  # kg/m² (signed), shape (nlev-1)
 
     dtedt_k_levels = (dse_flux_div + lh_source) / (c.cpd * layer_mass_per_area)
