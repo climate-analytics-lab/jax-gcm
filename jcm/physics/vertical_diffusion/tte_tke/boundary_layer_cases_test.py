@@ -32,13 +32,25 @@ to the prognostic state (those come from the surface scheme + dynamics in the
 full model; the ``u*`` / surface-flux / PBL-height *diagnostics* it returns
 are computed but decoupled from the column evolution).
 
-Consequently the *surface-coupled* signatures from the ``jax_scm`` plots — the
-low-level jet, the surface-driven inversion, daytime mixed-layer growth, and
-the ~0.2 entrainment ratio — are out of scope for this term in isolation.
-These tests instead pin the *turbulence-closure* physics the term does own,
-flavoured by the three regimes above. That is exactly the part the canonical
-cases are designed to stress, and where the previous tests were weakest
-(mostly bounds / finiteness checks).
+This file therefore has two layers:
+
+1. **Isolated interior operator** — the classes up to
+   ``TestInteriorOperatorConservation``. With zero-flux boundaries the
+   *surface-coupled* signatures cannot appear, so these pin the
+   *turbulence-closure* physics the term owns, flavoured by the three regimes
+   above. That is exactly the part the canonical cases stress, and where the
+   previous tests were weakest (mostly bounds / finiteness checks).
+
+2. **Full single-column-model harness** — the ``Test*Scm`` classes near the
+   bottom of the file. They close the loop the canonical cases actually run:
+   the real interior scheme is driven by jcm's *own* surface fluxes plus a
+   minimal Coriolis / geostrophic forcing, so the surface-coupled signatures
+   emerge and can be asserted — the neutral Ekman spiral + jet (Andren), the
+   nocturnal low-level jet + surface inversion (GABLS1), and the growing
+   convective mixed layer (Wangara). See the long comment above that section
+   for precisely what is real vs supplied. (Quantitative entrainment-ratio
+   matching stays out of scope — that needs a non-local closure this
+   down-gradient scheme does not have.)
 
 Grid / array convention
 -----------------------
@@ -52,6 +64,8 @@ them into this top-first convention, so the tests below can be written in
 
 import jax.numpy as jnp
 import numpy as np
+
+from functools import lru_cache
 
 import jcm.constants as c
 from .vertical_diffusion_types import VDiffParameters, VDiffState
@@ -643,6 +657,371 @@ class TestInteriorOperatorConservation:
 
         assert abs(heat1 / heat0 - 1.0) < 1e-3, (
             f"Heat content should be conserved, ratio={heat1 / heat0:.6f}"
+        )
+
+
+# ===========================================================================
+# Full single-column-model harness (surface-coupled signatures)
+# ===========================================================================
+# The classes above test the TTE-TKE term as an isolated *interior* operator.
+# The harness below closes the loop the canonical cases actually exercise: it
+# drives the real interior scheme with surface fluxes and large-scale forcing
+# so the *surface-coupled* signatures emerge.
+#
+# Faithfulness — what is real vs supplied here
+# --------------------------------------------
+# REAL jcm physics (nothing in the physics is mocked):
+#   * Interior turbulent mixing: ``vertical_diffusion_column`` (the term under
+#     test), used unchanged.
+#   * Surface fluxes: jcm's OWN bulk Monin-Obukhov ``compute_surface_fluxes``,
+#     consumed via the ``surface_heat_flux`` / ``surface_momentum_flux_*``
+#     fields of the diagnostics that ``vertical_diffusion_column`` already
+#     returns. We apply those scheme-computed fluxes; we do not recompute them.
+#
+# SUPPLIED by the harness (not physics parameterizations; absolutely needed to
+# drive a column, and verified absent from this code path):
+#   * Coriolis + geostrophic pressure-gradient forcing
+#     ``du/dt = f (v - v_g)``, ``dv/dt = -f (u - u_g)`` — the dynamical core's
+#     job, prescribed here as the large-scale forcing each case specifies.
+#   * The surface-flux -> lowest-level coupling (flux divergence into the
+#     bottom layer) and the explicit time integration. jcm currently wires NO
+#     surface<->atmosphere coupling into this physics path (the vdiff matrix's
+#     bottom boundary is zero-flux; the ECHAM surface scheme is not attached),
+#     so this operator-split glue is the minimal necessary bridge.
+#
+# PRESCRIBED per case (boundary conditions, as the cases define them): surface
+# temperature / cooling rate, geostrophic wind, Coriolis parameter.
+#
+# Fidelity caveats (why assertions are qualitative, not LES-quantitative): the
+# diagnostic ``compute_surface_fluxes`` hardcodes a ~1 mm roughness and a
+# placeholder surface humidity, is single-tile and drops the Exner correction.
+# So columns run dry (no moisture flux applied) and we assert qualitative
+# regime signatures, not LES-matched profiles. The faithful ECHAM-Louis surface
+# layer (``surface_layer.py``) exists but does not expose its momentum
+# coefficient, so it cannot supply the surface stress without a small
+# production change — hence the scheme's own M-O fluxes are used here.
+
+_SCM_DT = 30.0  # s — resolves the inertial oscillation and the explicit
+#                       surface-flux update for the lowest (~10 m) layer.
+
+
+def _scm_step(state, params, dt, f, u_g, v_g):
+    """Advance one SCM step: real interior mixing + jcm surface fluxes + forcing.
+
+    ``state.surface_temperature`` is the prescribed boundary condition for this
+    step (the caller sets it). Returns ``(new_state, diagnostics)``.
+    """
+    tend, diag = vertical_diffusion_column(state, params, dt)
+
+    # jcm's own surface fluxes applied to the lowest level (index -1) as a flux
+    # divergence into that layer's air mass [kg/m^2]. tau is already a drag
+    # (sign opposes the wind); heat flux is positive upward (warms the air when
+    # the surface is warmer).
+    air_mass_low = state.air_mass[:, -1]
+    du = tend.u_tendency.at[:, -1].add(diag.surface_momentum_flux_u / air_mass_low)
+    dv = tend.v_tendency.at[:, -1].add(diag.surface_momentum_flux_v / air_mass_low)
+    dT = tend.temperature_tendency.at[:, -1].add(
+        diag.surface_heat_flux / (CPD * air_mass_low)
+    )
+
+    # Large-scale dynamics forcing on every level (geostrophic balance aloft).
+    du = du + f * (state.v - v_g)
+    dv = dv - f * (state.u - u_g)
+
+    new_state = state._replace(
+        u=state.u + dt * du,
+        v=state.v + dt * dv,
+        temperature=state.temperature + dt * dT,
+        tke=jnp.maximum(state.tke + dt * tend.tke_tendency, 0.01),
+    )
+    return new_state, diag
+
+
+def _scm_run(state, params, dt, nsteps, f, u_g, v_g, surface_temperature_fn):
+    """Integrate the SCM ``nsteps`` steps.
+
+    ``surface_temperature_fn(step)`` returns the prescribed surface temperature
+    ``(ncol, nsfc)`` for each step (constant, or a ramp such as GABLS1 cooling).
+    """
+    diag = None
+    for k in range(nsteps):
+        state = state._replace(surface_temperature=surface_temperature_fn(k))
+        state, diag = _scm_step(state, params, dt, f, u_g, v_g)
+    return state, diag
+
+
+def _surface_first(field_2d):
+    """First column of a top-first ``(ncol, nlev)`` field, flipped surface-first."""
+    return np.asarray(field_2d[0])[::-1]
+
+
+def _potential_temperature_sf(state):
+    """Surface-first potential temperature profile [K] for the first column."""
+    p = _surface_first(state.pressure_full)
+    t = _surface_first(state.temperature)
+    return t * (P0 / p) ** (RD / CPD)
+
+
+def _wind_speed_sf(state):
+    """Surface-first wind speed profile [m/s] for the first column."""
+    return np.hypot(_surface_first(state.u), _surface_first(state.v))
+
+
+def _mixed_layer_depth(theta_sf, zf, skip_below=40.0, tol=0.5):
+    """Depth of the near-uniform convective layer above the surface skin.
+
+    Anchored to the first level above ``skip_below`` (skipping the
+    superadiabatic surface skin that forms under strong heating); returns the
+    highest contiguous height where theta stays within ``tol`` K of that anchor
+    — i.e. the base of the capping inversion.
+    """
+    i0 = int(np.argmin(np.abs(zf - skip_below)))
+    theta_ref = theta_sf[i0]
+    depth = zf[i0]
+    for i in range(i0, theta_sf.size):
+        if abs(theta_sf[i] - theta_ref) < tol:
+            depth = zf[i]
+        else:
+            break
+    return float(depth)
+
+
+# --- Cached case rollouts: each runs once and is shared across its tests -----
+
+@lru_cache(maxsize=None)
+def _ekman_result():
+    """Andren neutral Ekman: 10 h spin-up under steady geostrophic forcing.
+
+    Neutral (constant theta, surface temperature held at the lowest air
+    temperature so there is no heat flux); surface drag + Coriolis build the
+    Ekman spiral.
+    """
+    z = _stretched_grid(ztop=2000.0, nlev=40, dz0=20.0)
+    n = len(z) - 1
+    zf = 0.5 * (z[:-1] + z[1:])
+    u_g, f = 10.0, 1.0e-4
+    state = _make_column(np.full(n, 290.0), np.full(n, u_g), np.zeros(n), z, tke0=0.1)
+    sfc_t = state.surface_temperature  # neutral
+    state, diag = _scm_run(state, VDiffParameters.default(), _SCM_DT, 1200,
+                           f, u_g, 0.0, lambda k: sfc_t)
+    spd = _wind_speed_sf(state)
+    u_sf, v_sf = _surface_first(state.u), _surface_first(state.v)
+    return {
+        "u_g": u_g, "zf": zf, "spd": spd,
+        "v_surface": float(v_sf[0]),
+        "spd_surface": float(spd[0]),
+        "spd_top": float(spd[-1]),
+        "spd_max": float(spd.max()),
+        "jet_height": float(zf[int(np.argmax(spd))]),
+        "angle_surface": float(np.degrees(np.arctan2(v_sf[0], u_sf[0]))),
+        "u_star": float(diag.friction_velocity[0]),
+    }
+
+
+@lru_cache(maxsize=None)
+def _gabls1_result():
+    """GABLS1 stable BL: 9 h with surface cooling at 0.25 K/h (73 N, Vg=8)."""
+    z = _stretched_grid(ztop=1000.0, nlev=40, dz0=12.0)
+    n = len(z) - 1
+    zf = 0.5 * (z[:-1] + z[1:])
+    u_g, f = 8.0, 1.39e-4
+    theta = np.where(zf <= 100.0, 265.0, 265.0 + 0.01 * (zf - 100.0))
+    state = _make_column(theta, np.full(n, u_g), np.zeros(n), z, tke0=0.1)
+    t_low0 = float(_surface_first(state.temperature)[0])
+    nsfc = state.surface_temperature.shape[1]
+
+    def cooling(k):
+        return jnp.full((1, nsfc), t_low0 - 0.25 / 3600.0 * (k * _SCM_DT))
+
+    state, diag = _scm_run(state, VDiffParameters.default(), _SCM_DT, 1080,
+                           f, u_g, 0.0, cooling)
+    spd = _wind_speed_sf(state)
+    t_sf = _surface_first(state.temperature)
+    km_sf = np.asarray(diag.exchange_coeff_momentum[0])[::-1]
+    return {
+        "u_g": u_g, "zf": zf, "spd": spd,
+        "spd_max": float(spd.max()),
+        "jet_height": float(zf[int(np.argmax(spd))]),
+        "t_surface": float(t_sf[0]),
+        "t_above": float(t_sf[3]),
+        "max_tke": float(jnp.max(state.tke)),
+        "n_turbulent_levels": int(np.sum(km_sf > 1.0)),
+    }
+
+
+@lru_cache(maxsize=None)
+def _wangara_result():
+    """Wangara convective BL: surface heating for 6 h, snapshots at 2 h and 6 h."""
+    z = _stretched_grid(ztop=2500.0, nlev=40, dz0=20.0)
+    n = len(z) - 1
+    zf = 0.5 * (z[:-1] + z[1:])
+    u_g, f = 3.0, 0.9e-4
+    theta = np.where(zf <= 100.0, 288.0, 288.0 + 0.004 * (zf - 100.0))
+    state = _make_column(theta, np.full(n, u_g), np.zeros(n), z, tke0=0.1)
+    t_low0 = float(_surface_first(state.temperature)[0])
+    nsfc = state.surface_temperature.shape[1]
+    theta0 = _potential_temperature_sf(state)
+    i_1km = int(np.argmin(np.abs(zf - 1000.0)))
+
+    def heating(k):
+        return jnp.full((1, nsfc), t_low0 + 4.0 + 6.0 * (k / 600.0))
+
+    params = VDiffParameters.default()
+    snaps = {}
+    for k in range(720):  # 6 h
+        state = state._replace(surface_temperature=heating(k))
+        state, _ = _scm_step(state, params, _SCM_DT, f, u_g, 0.0)
+        if (k + 1) in (240, 720):
+            th = _potential_temperature_sf(state)
+            snaps[k + 1] = (_mixed_layer_depth(th, zf), th, float(jnp.max(state.tke)))
+
+    mld_early, _, tke_early = snaps[240]
+    mld_late, theta_late, tke_late = snaps[720]
+    in_ml = (zf > 40.0) & (zf < mld_late)
+    return {
+        "zf": zf,
+        "mld_early": mld_early, "mld_late": mld_late,
+        "tke_early": tke_early, "tke_late": tke_late,
+        "theta_std_in_ml": float(np.std(theta_late[in_ml])),
+        "theta_1km_initial": float(theta0[i_1km]),
+        "theta_1km_final": float(theta_late[i_1km]),
+        "theta_surface_initial": float(theta0[0]),
+        "theta_surface_final": float(theta_late[0]),
+    }
+
+
+class TestNeutralEkmanSpiralScm:
+    """Andren neutral Ekman layer driven by the full SCM harness."""
+
+    def test_surface_wind_is_subgeostrophic_and_backed(self):
+        """Surface drag leaves a sub-geostrophic wind backed toward low pressure.
+
+        The defining feature of the Ekman spiral: friction slows the near-surface
+        wind below geostrophic and Coriolis turns it across the isobars (here a
+        positive ``v`` develops from a purely zonal geostrophic wind).
+        """
+        r = _ekman_result()
+        assert r["spd_surface"] < 0.9 * r["u_g"], (
+            f"Surface wind should be sub-geostrophic: |V|={r['spd_surface']:.2f} "
+            f"vs Vg={r['u_g']}"
+        )
+        assert r["v_surface"] > 0.5, (
+            f"Surface wind should be backed (v>0), got v={r['v_surface']:.2f}"
+        )
+        assert 10.0 < r["angle_surface"] < 45.0, (
+            f"Cross-isobaric angle should be ~10-45 deg, got {r['angle_surface']:.1f}"
+        )
+
+    def test_wind_recovers_geostrophic_aloft(self):
+        """Above the friction layer the wind returns to the geostrophic value."""
+        r = _ekman_result()
+        assert abs(r["spd_top"] - r["u_g"]) < 1.0, (
+            f"Wind aloft should approach Vg={r['u_g']}, got {r['spd_top']:.2f}"
+        )
+
+    def test_supergeostrophic_ekman_jet_and_ustar(self):
+        """A supergeostrophic jet sits atop the Ekman layer, with a sane u*.
+
+        The Ekman solution overshoots the geostrophic wind just above the
+        friction layer (the classic spiral wind maximum), and the surface stress
+        gives a realistic friction velocity.
+        """
+        r = _ekman_result()
+        assert r["spd_max"] > r["spd_top"], (
+            f"An Ekman jet should exceed the free-stream wind: max={r['spd_max']:.2f} "
+            f"vs aloft={r['spd_top']:.2f}"
+        )
+        assert r["jet_height"] < 600.0, (
+            f"The Ekman jet should sit in the lower BL, got z={r['jet_height']:.0f} m"
+        )
+        assert 0.1 < r["u_star"] < 1.0, (
+            f"Friction velocity out of range: u*={r['u_star']:.3f} m/s"
+        )
+
+
+class TestStableLowLevelJetScm:
+    """GABLS1 stable boundary layer driven by the full SCM harness."""
+
+    def test_nocturnal_low_level_jet_forms(self):
+        """Surface cooling decouples the flow aloft, forming a supergeostrophic LLJ.
+
+        As turbulent friction collapses, the wind above the shallow stable layer
+        accelerates past geostrophic and the inertial oscillation builds a
+        low-level jet — the headline GABLS1 signature.
+        """
+        r = _gabls1_result()
+        assert r["spd_max"] > r["u_g"], (
+            f"A supergeostrophic LLJ should form: max|V|={r['spd_max']:.2f} "
+            f"vs Vg={r['u_g']}"
+        )
+        assert r["jet_height"] < 400.0, (
+            f"The nocturnal jet should be low, got z={r['jet_height']:.0f} m"
+        )
+
+    def test_surface_inversion_develops(self):
+        """Surface cooling builds a temperature inversion (T increases upward)."""
+        r = _gabls1_result()
+        assert r["t_above"] > r["t_surface"], (
+            f"A surface inversion should form: T(surface)={r['t_surface']:.2f} "
+            f"< T(aloft)={r['t_above']:.2f}"
+        )
+
+    def test_turbulence_is_shallow_and_weak(self):
+        """Stable stratification keeps turbulence shallow and weak.
+
+        Unlike the deep neutral/convective layers, the GABLS1 turbulent layer is
+        confined near the surface and the TKE stays small.
+        """
+        r = _gabls1_result()
+        assert r["max_tke"] < 1.0, (
+            f"Stable-BL TKE should stay small, got {r['max_tke']:.3f}"
+        )
+        assert r["n_turbulent_levels"] <= 3, (
+            f"Stable turbulence should be shallow, got {r['n_turbulent_levels']} "
+            f"levels with Km>1"
+        )
+
+
+class TestConvectiveMixedLayerScm:
+    """Wangara convective boundary layer driven by the full SCM harness."""
+
+    def test_mixed_layer_grows_in_depth(self):
+        """Surface heating drives a convective mixed layer that deepens in time.
+
+        Daytime heating fuels buoyant mixing that erodes the overlying stable
+        layer, so the mixed-layer depth grows through the run — the defining
+        convective-BL behaviour (Wangara mixed-layer growth).
+        """
+        r = _wangara_result()
+        assert r["mld_late"] > r["mld_early"], (
+            f"Mixed layer should deepen: {r['mld_early']:.0f} m -> {r['mld_late']:.0f} m"
+        )
+        assert r["mld_late"] > 500.0, (
+            f"A convective mixed layer should grow deep, got {r['mld_late']:.0f} m"
+        )
+        assert r["tke_late"] > r["tke_early"], "Convective TKE should grow with heating"
+
+    def test_layer_is_well_mixed_in_potential_temperature(self):
+        """Potential temperature is near-uniform through the convective layer."""
+        r = _wangara_result()
+        assert r["theta_surface_final"] > r["theta_surface_initial"], (
+            "Surface heating should warm the near-surface potential temperature"
+        )
+        assert r["theta_std_in_ml"] < 0.5, (
+            f"The mixed layer should be well mixed in theta, std={r['theta_std_in_ml']:.3f} K"
+        )
+
+    def test_free_atmosphere_above_is_undisturbed(self):
+        """The stable layer above the growing mixed layer is left untouched.
+
+        The convective mixing is confined below the capping inversion, so the
+        free-atmosphere potential temperature (here at 1 km, above the ~720 m
+        mixed layer) barely changes.
+        """
+        r = _wangara_result()
+        assert abs(r["theta_1km_final"] - r["theta_1km_initial"]) < 0.3, (
+            f"Free-atmosphere theta at 1 km should be ~unchanged: "
+            f"{r['theta_1km_initial']:.2f} -> {r['theta_1km_final']:.2f} K"
         )
 
 
