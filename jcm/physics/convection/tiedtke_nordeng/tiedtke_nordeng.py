@@ -181,6 +181,16 @@ class ConvectionData:
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
+    # Convective heating / moistening rates actually applied to the column
+    # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
+    # are the genuine per-level convective tendencies — the thing that balances
+    # radiative cooling in an RCE column — exposed as first-class diagnostics so
+    # they ride the saved trajectory exactly like ``RadiationData``'s
+    # ``sw_heating_rate`` / ``lw_heating_rate``, rather than being recoverable
+    # only by re-running the term. ``heating_rate`` mirrors the radiation naming
+    # convention ([K/s]); ``moistening_rate`` is its specific-humidity analog.
+    heating_rate: jnp.ndarray        # Convective heating rate [K/s] (nlev, ncols)
+    moistening_rate: jnp.ndarray     # Convective moistening rate [kg/kg/s] (nlev, ncols)
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -194,6 +204,8 @@ class ConvectionData:
             precip_conv=jnp.zeros(nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
+            heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            moistening_rate=jnp.zeros((nlev,) + nodal_shape),
         )
 
 
@@ -1093,7 +1105,11 @@ class TiedtkeConvection(PhysicsTerm):
         # Mass-flux / cloud-base/top / CAPE diagnostics aren't populated
         # by the wrapper today (the scheme returns the per-column state
         # but we don't reduce or surface it yet) — they stay as zeros
-        # for back-compat with existing xarray field names.
+        # for back-compat with existing xarray field names. The heating /
+        # moistening rates, by contrast, are the *applied* (post-cap)
+        # tendencies returned above, surfaced so downstream analysis (e.g.
+        # an RCE convective-vs-radiative heating balance) reads them straight
+        # off the trajectory instead of re-running the term.
         convection = ConvectionData(
             mass_flux_up=jnp.zeros_like(pressure_full),
             mass_flux_down=jnp.zeros_like(pressure_full),
@@ -1103,6 +1119,8 @@ class TiedtkeConvection(PhysicsTerm):
             precip_conv=tendencies_all.precip_conv,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
+            heating_rate=tendency.temperature,
+            moistening_rate=tendency.specific_humidity,
         )
 
         clouds = diagnostics["clouds"].copy(
