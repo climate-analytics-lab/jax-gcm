@@ -340,7 +340,6 @@ def test_radiation_scheme_custom_parameters():
         n_lw_bands=4,
         lw_band_limits=((10, 250), (250, 350), (350, 500), (500, 2500)),  # 4 LW bands
         sw_band_limits=((4000, 10000), (10000, 14500), (14500, 50000)),   # 3 SW bands
-        co2_vmr=500e-6         # Higher CO2
     )
     
     # Create aerosol data for custom parameters
@@ -364,7 +363,8 @@ def test_radiation_scheme_custom_parameters():
         surface_albedo_nir=jnp.array([0.2]),
         surface_albedo_vis=jnp.array([0.2]),
         surface_emissivity=jnp.array([0.95]),
-        surface_temperature=jnp.array([288.0])
+        surface_temperature=jnp.array([288.0]),
+        co2_vmr=500e-6,         # Higher CO2 (passed to the scheme, not parameters)
     )
 
     # The grey scheme hardcodes 2 SW / 3 LW bands internally regardless of

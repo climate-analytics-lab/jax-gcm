@@ -23,17 +23,15 @@ class TestChemistryParameters(TestCase):
         """Test default parameter creation"""
         config = ChemistryParameters.default()
         
-        # Check that all parameters are positive
+        # Check that all parameters are positive (CO2 is a prescribed forcing,
+        # not a chemistry parameter — see ForcingData.co2_vmr).
         self.assertGreater(config.ozone_scale_height, 0)
         self.assertGreater(config.ozone_max_vmr, 0)
         self.assertGreater(config.methane_surface_vmr, 0)
-        self.assertGreater(config.co2_vmr, 0)
-        
+
         # Check reasonable values
         self.assertGreater(config.ozone_max_vmr, 1000.0)  # > 1 ppmv
         self.assertLess(config.ozone_max_vmr, 20000.0)    # < 20 ppmv
-        self.assertGreater(config.co2_vmr, 300.0)         # > 300 ppmv
-        self.assertLess(config.co2_vmr, 1000.0)           # < 1000 ppmv
 
 
 class TestOzoneDistribution(TestCase):
@@ -132,10 +130,7 @@ class TestFullChemistry(TestCase):
         
         # Check that methane tendency is negative (loss)
         self.assertTrue(jnp.all(tendencies.methane_tend <= 0))
-        
-        # Check that CO2 is constant
-        self.assertTrue(jnp.all(tendencies.co2_tend == 0))
-        
+
     def test_chemistry_initialization(self):
         """Test chemistry tracer initialization"""
         config = ChemistryParameters.default()
@@ -150,18 +145,16 @@ class TestFullChemistry(TestCase):
             pressure, surface_pressure, temperature, config
         )
         
-        # Check output shapes
+        # Check output shapes (CO2 is not a chemistry field — it is a
+        # prescribed forcing).
         self.assertEqual(state.ozone_vmr.shape, (nlev, ncols))
         self.assertEqual(state.methane_vmr.shape, (nlev, ncols))
-        self.assertEqual(state.co2_vmr.shape, (nlev, ncols))
-        
+
         # Check all values are positive and finite
         self.assertTrue(jnp.all(state.ozone_vmr > 0))
         self.assertTrue(jnp.all(state.methane_vmr > 0))
-        self.assertTrue(jnp.all(state.co2_vmr > 0))
         self.assertTrue(jnp.all(jnp.isfinite(state.ozone_vmr)))
         self.assertTrue(jnp.all(jnp.isfinite(state.methane_vmr)))
-        self.assertTrue(jnp.all(jnp.isfinite(state.co2_vmr)))
         
         # Check that methane decreases with height
         self.assertGreater(state.methane_vmr[0, 0], state.methane_vmr[-1, 0])

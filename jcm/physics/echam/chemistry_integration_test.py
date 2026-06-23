@@ -73,15 +73,12 @@ class TestChemistryIntegration(TestCase):
         # Check that methane is initialized
         self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr > 0))
         self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr < 5000))  # Less than 5 ppmv
-        
-        # Check that CO2 is initialized
-        self.assertTrue(jnp.all(physics_data["chemistry"].co2_vmr > 300))
-        self.assertTrue(jnp.all(physics_data["chemistry"].co2_vmr < 1000))  # Between 300-1000 ppmv
-        
+
+        # CO2 is a prescribed forcing (forcing.co2_vmr), not a chemistry field.
+
         # Check shapes - chemistry data should have valid array shapes
         self.assertTrue(physics_data["chemistry"].ozone_vmr.shape != ())
         self.assertTrue(physics_data["chemistry"].methane_vmr.shape != ())
-        self.assertTrue(physics_data["chemistry"].co2_vmr.shape != ())
     
     def test_chemistry_evolution(self):
         """Test that chemistry tracers evolve over time"""

@@ -692,9 +692,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         )
 
         chemistry = diagnostics["chemistry"]
-        # Convert ppmv → VMR. CO2 is well-mixed; pass as scalar.
+        # Convert ppmv → mole fraction. Ozone is a chemistry field; CO2 is a
+        # prescribed forcing read straight from ForcingData (well-mixed scalar).
         ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
+        co2_vmr = forcing.co2_vmr * 1e-6
 
         # Surface temperature still lives in the legacy "surface" key
         # (until the EchamSurface migration); the radiation surface

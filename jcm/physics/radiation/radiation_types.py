@@ -41,10 +41,10 @@ class RadiationParameters:
     lw_band_limits: tuple    # LW bands
     sw_band_limits: tuple    # SW bands
 
-    # Gas concentrations (volume mixing ratios)
-    co2_vmr: float           # CO2 volume mixing ratio
-    ch4_vmr: float           # CH4 volume mixing ratio
-    n2o_vmr: float           # N2O volume mixing ratio
+    # NB: greenhouse-gas concentrations (CO2/CH4/N2O) are NOT stored here.
+    # CO2 and N2O come from ``ForcingData`` and CH4/O3 from the chemistry
+    # diagnostic — see the gas-sourcing note in ``rrtmgp.py``. Radiation never
+    # redeclares a GHG concentration.
 
     # Numerical parameters
     min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
@@ -73,7 +73,6 @@ class RadiationParameters:
                  n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
                  lw_band_limits=LW_BAND_LIMITS,
                  sw_band_limits=SW_BAND_LIMITS,
-                 co2_vmr=400e-6, ch4_vmr=1.8e-6, n2o_vmr=0.32e-6,
                  min_cos_zenith=0.035, flux_epsilon=1e-6,
                  cld_tau_min=1e-6, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
@@ -87,9 +86,6 @@ class RadiationParameters:
             n_lw_bands=jnp.asarray(n_lw_bands),
             lw_band_limits=jnp.asarray(lw_band_limits),
             sw_band_limits=jnp.asarray(sw_band_limits),
-            co2_vmr=jnp.array(co2_vmr),
-            ch4_vmr=jnp.array(ch4_vmr),
-            n2o_vmr=jnp.array(n2o_vmr),
             min_cos_zenith=jnp.array(min_cos_zenith),
             flux_epsilon=jnp.array(flux_epsilon),
             cld_tau_min=jnp.array(cld_tau_min),

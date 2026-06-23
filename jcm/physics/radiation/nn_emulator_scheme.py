@@ -294,7 +294,8 @@ class NNEmulatorRadiation(PhysicsTerm):
 
         chemistry = diagnostics["chemistry"]
         ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = jnp.mean(chemistry.co2_vmr) * 1e-6
+        # CO2 is a prescribed forcing read straight from ForcingData.
+        co2_vmr = forcing.co2_vmr * 1e-6
 
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
