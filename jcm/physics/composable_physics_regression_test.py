@@ -43,7 +43,7 @@ REFERENCE_DIR = (
 # XLA reduction-order drift (and dev-host vs GitHub Actions CPU drift)
 # while still catching refactors that perturb the integration
 # meaningfully. ``ATOL`` is set well above the cross-CPU reduction-
-# order noise floor (~1e-4 on this T31L8 1-day reference) so that
+# order noise floor (~1e-4 on these low-resolution 1-day references) so that
 # near-zero fields like ``u_wind`` early in the integration don't
 # fail on tiny absolute drift even when the *relative* difference is
 # large.
@@ -110,7 +110,7 @@ def _check_or_regenerate(name: str, actual_arrays: dict) -> None:
 
 
 class TestEchamReferenceTrajectory(unittest.TestCase):
-    """T31L8 aquaplanet 1-day ECHAM reference trajectory."""
+    """T21L16 aquaplanet 1-day ECHAM reference trajectory (stretched grid)."""
 
     @pytest.mark.slow
     def test_echam_default_reference(self):
@@ -118,7 +118,26 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
 
-        sigma_boundaries = np.linspace(0, 1, 9)  # 8 levels
+        # Stretched 16-level sigma grid with a thin (~33 m) near-surface
+        # layer. A uniform 8-level grid puts the lowest *full* level
+        # ~500-600 m up, which is not a physical surface layer: over that
+        # depth the dry-adiabatic potential-temperature offset (~5 K) makes
+        # the surface layer read as strongly stable in bulk-Richardson terms
+        # even over a warm ocean, so the faithful ECHAM ``echam_louis``
+        # exchange coefficients suppress the surface fluxes and the
+        # aquaplanet collapses to a near-dry state (q_max ~ 1e-6).
+        #
+        # Real ECHAM/ICON grids resolve the surface layer with thin
+        # (tens-of-metres) near-surface layers. The quadratic stretch below
+        # does the same: the lowest layer is ~33 m thick (lowest full level
+        # ~16 m), so the adiabatic offset is ~0.2 K and the surface layer
+        # reads ~neutral. ``echam_louis`` then produces a physically
+        # sensible moist boundary layer (q_max ~ 4e-3). This makes the
+        # reference a faithful target for the surface scheme rather than an
+        # artefact of an over-coarse vertical grid.
+        n_levels = 16
+        xi = np.linspace(0.0, 1.0, n_levels + 1)
+        sigma_boundaries = 1.0 - (1.0 - xi) ** 2  # dense near sigma=1 (surface)
         coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
         terrain = TerrainData.aquaplanet(coords)
         forcing = ForcingData.zeros((64, 32))
@@ -134,7 +153,7 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
             total_time=1.0,
         )
         _check_or_regenerate(
-            "echam_t31l8_1day", _final_state_arrays(preds),
+            "echam_t21l16_1day", _final_state_arrays(preds),
         )
 
 
