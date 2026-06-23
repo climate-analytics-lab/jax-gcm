@@ -14,17 +14,28 @@ name: Regenerate ECHAM regression reference (manual)
 # way to get a reference the test can match.
 #
 # This regenerates only the ECHAM T21L16 reference (the SPEEDY one is left
-# untouched) and pushes the result back to the branch it was dispatched on. The
-# push uses GITHUB_TOKEN, which deliberately does not re-trigger CI; validate by
-# pushing a follow-up commit (or re-running the test workflow) on the branch.
+# untouched) and pushes the result back to the branch. The push uses
+# GITHUB_TOKEN, which deliberately does not re-trigger CI; validate by pushing a
+# follow-up commit (or re-running the test workflow) on the branch.
+#
+# TRIGGERS: ``workflow_dispatch`` is the intended entry point once this file
+# lives on the default branch (a dispatchable workflow must be on the default
+# branch). Until then — e.g. while still on a feature branch — push a commit
+# whose message contains the ``[regen-ref]`` marker and the job runs; ordinary
+# pushes skip it.
 on:
   workflow_dispatch:
+  push:
 
 permissions:
   contents: write
 
 jobs:
   regenerate:
+    # Only run on an explicit dispatch or a marked commit — not every push.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[regen-ref]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
