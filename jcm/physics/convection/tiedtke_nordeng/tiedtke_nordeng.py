@@ -545,6 +545,16 @@ def cloud_depth_for_target_top(
     return jnp.clip(depth, min_layers, nlev - 2)
 
 
+# Minimum boundary-layer moisture supply [kg/m²/s] that counts as a real
+# evaporation anchor for the deep mass-flux closure. Below this (cold start,
+# numerical noise, a stack with no surface term) the moisture-budget flux is
+# meaningless, so both the activation trigger AND the closure-selection gate fall
+# back to the bare-CAPE closure. The two MUST use the same threshold: gating
+# activation on CAPE but then forcing a ~zero moisture flux would disable
+# convection while CAPE accumulates.
+_MIN_MOISTURE_SUPPLY = 1.0e-7
+
+
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -657,7 +667,7 @@ def tiedtke_nordeng_convection(
     # the (small) evaporation-balancing rate set by the moisture-budget closure.
     convection_active = jnp.logical_and(
         has_cloud_base,
-        jnp.logical_or(cape > 100.0, moisture_supply > 1.0e-7),
+        jnp.logical_or(cape > 100.0, moisture_supply > _MIN_MOISTURE_SUPPLY),
     )
     conv_type = lax.cond(
         convection_active,
@@ -741,7 +751,12 @@ def tiedtke_nordeng_convection(
         # tropical column) and removes CAPE gradually, so convection stays
         # *continuously* on at a rate that balances the moisture supply instead
         # of the CAPE-cap flux that empties CAPE in one step and switches off.
-        use_moisture = jnp.logical_and(conv_type >= 1, moisture_supply > 0.0)
+        # Same meaningful-supply threshold as the activation trigger: a high-CAPE
+        # column with only negligible evaporation (0 < E <= _MIN_MOISTURE_SUPPLY)
+        # must keep the CAPE closure, not be forced onto a clipped ~zero moisture
+        # flux that would stall convection while CAPE accumulates.
+        use_moisture = jnp.logical_and(
+            conv_type >= 1, moisture_supply > _MIN_MOISTURE_SUPPLY)
         mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
 
         # ECHAM mass-flux CFL cap (``mo_cumastr.f90:582-583``):
@@ -1020,8 +1035,19 @@ class TiedtkeConvection(PhysicsTerm):
         # is exactly how the on/off cloud-base flicker is avoided. Absent (e.g. a
         # radiative-convective stack with no surface term) it stays zero and the
         # scheme falls back to the CAPE closure.
+        #
+        # Use the *effective* (implicitly damped) evaporation — the moisture the
+        # surface step actually added to the column (imp_moist·E) — not the raw
+        # surface flux, so the budget closure can never export more water than
+        # was supplied. Fall back to the raw flux for any surface state predating
+        # that field.
         surface_diag = diagnostics.get("surface")
-        if surface_diag is not None and hasattr(surface_diag, "evaporation"):
+        if surface_diag is not None and getattr(
+            surface_diag, "effective_evaporation", None) is not None:
+            moisture_supply = jnp.maximum(
+                jnp.asarray(surface_diag.effective_evaporation).reshape(ncols), 0.0
+            )
+        elif surface_diag is not None and hasattr(surface_diag, "evaporation"):
             moisture_supply = jnp.maximum(
                 jnp.asarray(surface_diag.evaporation).reshape(ncols), 0.0
             )
