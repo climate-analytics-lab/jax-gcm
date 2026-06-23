@@ -527,7 +527,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             roughness_length_col,
         ], axis=1)
 
-        z0_water = jnp.exp(2.0 - 86.0 * roughness[:, 0] ** 0.375)
+        # Ocean heat roughness via the ECHAM kB⁻¹ relationship
+        # z0h = z0m·exp(2 − 86·z0m^0.375) (mo_surface_ocean). With z0m = 1e-4 m
+        # this gives z0h ≈ 4.9e-5 m, just below the momentum roughness. The
+        # ``z0m·`` prefactor is essential: the bare ``exp(2 − 86·z0m^0.375)``
+        # returns ≈0.49 m — an unphysically large ocean heat roughness (z0h ≫
+        # z0m) that corrupts the ECHAM-Louis neutral heat/moisture exchange.
+        z0_water = roughness[:, 0] * jnp.exp(2.0 - 86.0 * roughness[:, 0] ** 0.375)
         z0_ice = roughness[:, 1]
         z0_land = roughness[:, 2]
         roughness_heat = jnp.stack([z0_water, z0_ice, z0_land], axis=1)
