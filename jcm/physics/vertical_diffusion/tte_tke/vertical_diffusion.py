@@ -585,14 +585,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         pbl_height = vdiff_diagnostics.boundary_layer_height
         u_star = vdiff_diagnostics.friction_velocity
 
+        # Per-tile surface exchange velocities (CH·|U|, CE·|U|, CM·|U|, all
+        # m/s) from the configured surface-layer scheme. The momentum
+        # coefficient is now a real CM·|U| (Louis/Businger drag), not the
+        # interior diffusivity Km[lowest] (m²/s) it used to be tiled from —
+        # that mismatch made the surface-stress implicit-damping factor in the
+        # ``echam_surface`` term dimensionally wrong.
         surface_exchange_heat = vdiff_diagnostics.surface_exchange_heat
-        surface_exchange_moisture = (
-            vdiff_diagnostics.surface_exchange_moisture
-        )
-        surface_exchange_momentum = jnp.repeat(
-            vdiff_diagnostics.exchange_coeff_momentum[:, -1:],
-            nsfc_type, axis=1,
-        )
+        surface_exchange_moisture = vdiff_diagnostics.surface_exchange_moisture
+        surface_exchange_momentum = vdiff_diagnostics.surface_exchange_momentum
 
         # ``tke`` here is the *post-source* TKE (the analytic ECHAM-style
         # implicit update done in ``vertical_diffusion_column``);

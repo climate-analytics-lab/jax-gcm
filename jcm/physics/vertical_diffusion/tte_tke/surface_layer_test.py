@@ -49,18 +49,26 @@ def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
 class TestECHAMLouisScheme:
     """Behavioural tests for the ECHAM-Louis surface-layer scheme."""
 
+    def test_default_scheme_is_echam_louis(self):
+        """The faithful ECHAM-Louis scheme is the default (drives flux + damping)."""
+        assert (VDiffParameters.default().surface_layer_scheme
+                == VDiffParameters.SCHEME_ECHAM_LOUIS)
+
     def test_neutral_limit_is_finite_and_positive(self):
         # T_air ≈ T_sfc, q_air ≈ q_sat(T_sfc) → near-neutral
         state = _build_state(T_air=300.0, T_sfc=300.0, q_air=0.020)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH, sCM = compute_surface_exchange_coefficients_echam_louis(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         assert jnp.all(jnp.isfinite(sCH))
         assert jnp.all(sCH > 0)
         assert sCH.shape == (1, 3)
+        # Momentum coefficient (CM·|U|) is now returned, finite and positive.
+        assert jnp.all(jnp.isfinite(sCMom)) and jnp.all(sCMom > 0)
+        assert sCMom.shape == (1, 3)
 
     def test_unstable_enhances_neutral(self):
         # Cold air over warm surface: CH should exceed neutral
@@ -68,11 +76,11 @@ class TestECHAMLouisScheme:
         state_unstable = _build_state(T_air=200.0, T_sfc=300.0, q_air=0.001)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_unst, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_unst, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_unstable, params, wind,
             state_unstable.surface_temperature, state_unstable.temperature[:, -1],
         )
@@ -87,11 +95,11 @@ class TestECHAMLouisScheme:
         state_stable = _build_state(T_air=303.0, T_sfc=300.0, q_air=0.020)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_stab, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_stab, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_stable, params, wind,
             state_stable.surface_temperature, state_stable.temperature[:, -1],
         )
@@ -106,11 +114,11 @@ class TestECHAMLouisScheme:
         )
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH_neut, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_neut, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_neutral, params, wind,
             state_neutral.surface_temperature, state_neutral.temperature[:, -1],
         )
-        sCH_strong, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_strong, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state_strongly_unstable, params, wind,
             state_strongly_unstable.surface_temperature,
             state_strongly_unstable.temperature[:, -1],
@@ -125,25 +133,27 @@ class TestECHAMLouisScheme:
         state = _build_state(T_air=290.0, T_sfc=295.0, q_air=0.010)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([3.0])
-        sCH, sCM = compute_surface_exchange_coefficients_echam_louis(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         # The Louis form sets heat- and moisture-CH equal (no separate
-        # moisture roughness in this port).
+        # moisture roughness in this port). Momentum is a distinct drag.
         np.testing.assert_allclose(np.asarray(sCH), np.asarray(sCM))
+        assert jnp.all(sCMom > 0)
 
     def test_existing_businger_dyer_still_works(self):
         # Regression: don't break the original scheme.
         state = _build_state(T_air=290.0, T_sfc=295.0, q_air=0.010)
         params = VDiffParameters.default(surface_layer_scheme="businger_dyer")
         wind = jnp.array([5.0])
-        sCH, sCM = compute_surface_exchange_coefficients(
+        sCH, sCM, sCMom = compute_surface_exchange_coefficients(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         assert jnp.all(jnp.isfinite(sCH))
         assert jnp.all(sCH > 0)
+        assert jnp.all(jnp.isfinite(sCMom)) and jnp.all(sCMom > 0)
 
     def test_two_schemes_agree_within_factor_of_3_near_neutral(self):
         # Near neutral, Louis and Businger-Dyer should be close (both
@@ -153,11 +163,11 @@ class TestECHAMLouisScheme:
 
         params_bd = VDiffParameters.default(surface_layer_scheme="businger_dyer")
         params_el = VDiffParameters.default(surface_layer_scheme="echam_louis")
-        sCH_bd, _ = compute_surface_exchange_coefficients(
+        sCH_bd, _, _ = compute_surface_exchange_coefficients(
             state, params_bd, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
-        sCH_el, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH_el, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params_el, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
@@ -169,12 +179,12 @@ class TestECHAMLouisScheme:
         state = _build_state(T_air=300.0, T_sfc=300.0, q_air=0.005)
         params = VDiffParameters.default(surface_layer_scheme="echam_louis")
         wind = jnp.array([5.0])
-        sCH1, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH1, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )
         # Second call hits the cache
-        sCH2, _ = compute_surface_exchange_coefficients_echam_louis(
+        sCH2, _, _ = compute_surface_exchange_coefficients_echam_louis(
             state, params, wind,
             state.surface_temperature, state.temperature[:, -1],
         )

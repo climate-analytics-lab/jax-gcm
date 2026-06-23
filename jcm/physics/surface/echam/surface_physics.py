@@ -14,8 +14,8 @@ from .surface_types import (
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics
 )
 from .turbulent_fluxes import (
-    compute_bulk_richardson_number, compute_stability_functions,
-    compute_exchange_coefficients, compute_surface_resistances, compute_surface_diagnostics
+    compute_bulk_richardson_number,
+    compute_surface_resistances, compute_surface_diagnostics
 )
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
@@ -154,14 +154,20 @@ def surface_physics_step(
         atmospheric_state.humidity, surface_humidity, wind_speed
     )
     
-    # Compute stability functions
-    stability_heat, stability_momentum = compute_stability_functions(ri_bulk)
-    
-    # Compute exchange coefficients
-    exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture = compute_exchange_coefficients(
-        wind_speed, surface_state.roughness_momentum, surface_state.roughness_heat,
-        stability_heat, stability_momentum, params.min_wind_speed, params.von_karman
-    )
+    # Surface exchange velocities (CH·|U|, CE·|U|, CM·|U|, all m/s) come from
+    # the configured surface-layer scheme upstream (TteTkeVerticalDiffusion,
+    # ECHAM-Louis by default), threaded in via ``atmospheric_state``. Using
+    # those here — rather than recomputing a separate bulk-Richardson scheme —
+    # makes the flux and the vdiff-side coefficient one and the same, mirroring
+    # ECHAM's single ``sfc_exchange_coeff``. The standalone bulk-Richardson
+    # routines in this module (``compute_bulk_richardson_number`` /
+    # ``compute_stability_functions`` / ``compute_exchange_coefficients``)
+    # remain available and tested as a surface-side reference scheme, but are
+    # no longer in the default flux path. ``ri_bulk`` above is still used for
+    # the aerodynamic-resistance diagnostics below.
+    exchange_coeff_momentum = atmospheric_state.exchange_coeff_momentum
+    exchange_coeff_heat = atmospheric_state.exchange_coeff_heat
+    exchange_coeff_moisture = atmospheric_state.exchange_coeff_moisture
     
     # Initialize output arrays
     all_fluxes = []

@@ -227,28 +227,35 @@ def compute_surface_exchange_coefficients(
     wind_speed_surface: jnp.ndarray,
     temperature_surface: jnp.ndarray,
     temperature_air: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute surface exchange coefficients for different surface types.
-    
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Compute surface exchange coefficients (Businger-Dyer option).
+
+    The non-default surface-layer scheme (``surface_layer_scheme ==
+    SCHEME_BUSINGER_DYER``). Bulk-Richardson Monin-Obukhov with Businger-Dyer
+    stability functions on top of a κ²/[ln(z/z0)]² neutral drag.
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
         wind_speed_surface: Wind speed at surface [m/s] (ncol,)
         temperature_surface: Surface temperature [K] (ncol, nsfc_type)
         temperature_air: Air temperature at lowest level [K] (ncol,)
-        
+
     Returns:
-        Tuple of:
-        - Surface heat exchange coefficient [m²/s] (ncol, nsfc_type)
-        - Surface moisture exchange coefficient [m²/s] (ncol, nsfc_type)
+        Tuple of ``(surface_exchange_heat, surface_exchange_moisture,
+        surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|), each
+        [m/s] (ncol, nsfc_type). The momentum coefficient is returned so this
+        scheme can drive the surface stress on equal footing with the faithful
+        ECHAM-Louis default.
 
     """
     ncol, nsfc_type = temperature_surface.shape
-    
+
     # Roughness lengths for different surface types
     # [water, ice, land]
     z0_heat = jnp.array([1e-4, 1e-4, 1e-2])  # Thermal roughness
     z0_moisture = jnp.array([1e-4, 1e-4, 1e-2])  # Moisture roughness
+    z0_momentum = jnp.array([1e-4, 1e-3, 1e-1])  # Momentum roughness (rougher)
     
     # Reference height (lowest model level)
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
@@ -259,7 +266,8 @@ def compute_surface_exchange_coefficients(
     # Compute exchange coefficients for each surface type
     surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
     surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
-    
+    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
+
     for isfc in range(nsfc_type):
         # Stability correction (simplified)
         theta_surface = temperature_surface[:, isfc]
@@ -289,27 +297,43 @@ def compute_surface_exchange_coefficients(
             (1.0 - 16.0 * ri_surface)**(+0.5),  # Unstable: enhance
             1.0 / (1.0 + 5.0 * ri_surface),     # Stable: suppress
         )
-        
-        # Exchange coefficient: CH = κ² / [ln(z/z0)]²
+        # Momentum stability multiplier 1/Φm: Businger-Dyer gives a weaker
+        # unstable enhancement than heat ((1−16Ri)^(1/4) vs ^(1/2)); the stable
+        # branch matches heat.
+        stability_momentum = jnp.where(
+            ri_surface < 0,
+            (1.0 - 16.0 * ri_surface)**(+0.25),  # Unstable: enhance
+            1.0 / (1.0 + 5.0 * ri_surface),      # Stable: suppress
+        )
+
+        # Exchange coefficient: C = κ²·|U|·(1/Φ) / [ln(z/z0)]²
         # Guard the log arguments against zero / negative values
         log_ratio_heat = jnp.log(jnp.maximum(z_ref, 1.0)
                                  / jnp.maximum(z0_heat[isfc], 1e-5))
         log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
                                      / jnp.maximum(z0_moisture[isfc], 1e-5))
-        
-        exchange_heat = (von_karman**2 * wind_speed_surface * 
+        log_ratio_momentum = jnp.log(jnp.maximum(z_ref, 1.0)
+                                     / jnp.maximum(z0_momentum[isfc], 1e-5))
+
+        exchange_heat = (von_karman**2 * wind_speed_surface *
                         stability_heat / log_ratio_heat**2)
-        exchange_moisture = (von_karman**2 * wind_speed_surface * 
+        exchange_moisture = (von_karman**2 * wind_speed_surface *
                            stability_heat / log_ratio_moisture**2)
-        
+        exchange_momentum = (von_karman**2 * wind_speed_surface *
+                             stability_momentum / log_ratio_momentum**2)
+
         surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(
             jnp.maximum(exchange_heat, 1e-6)
         )
         surface_exchange_moisture = surface_exchange_moisture.at[:, isfc].set(
             jnp.maximum(exchange_moisture, 1e-6)
         )
-    
-    return surface_exchange_heat, surface_exchange_moisture
+        surface_exchange_momentum = surface_exchange_momentum.at[:, isfc].set(
+            jnp.maximum(exchange_momentum, 1e-6)
+        )
+
+    return (surface_exchange_heat, surface_exchange_moisture,
+            surface_exchange_momentum)
 
 
 @jax.jit
@@ -563,16 +587,18 @@ def compute_turbulence_diagnostics(
     from .surface_layer import compute_surface_exchange_coefficients_echam_louis
 
     wind_speed_surface = jnp.sqrt(state.u[:, -1]**2 + state.v[:, -1]**2)
-    surface_exchange_heat, surface_exchange_moisture = jax.lax.cond(
-        params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
-        lambda: compute_surface_exchange_coefficients_echam_louis(
-            state, params, wind_speed_surface,
-            state.surface_temperature, state.temperature[:, -1],
-        ),
-        lambda: compute_surface_exchange_coefficients(
-            state, params, wind_speed_surface,
-            state.surface_temperature, state.temperature[:, -1],
-        ),
+    surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum = (
+        jax.lax.cond(
+            params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
+            lambda: compute_surface_exchange_coefficients_echam_louis(
+                state, params, wind_speed_surface,
+                state.surface_temperature, state.temperature[:, -1],
+            ),
+            lambda: compute_surface_exchange_coefficients(
+                state, params, wind_speed_surface,
+                state.surface_temperature, state.temperature[:, -1],
+            ),
+        )
     )
     
     # Air density at surface
@@ -598,6 +624,7 @@ def compute_turbulence_diagnostics(
         exchange_coeff_moisture=exchange_coeff_moisture,
         surface_exchange_heat=surface_exchange_heat,
         surface_exchange_moisture=surface_exchange_moisture,
+        surface_exchange_momentum=surface_exchange_momentum,
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
