@@ -113,6 +113,18 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
     """T31L8 aquaplanet 1-day ECHAM reference trajectory."""
 
     @pytest.mark.slow
+    @pytest.mark.xfail(
+        reason=(
+            "PR #529 intentionally changes ECHAM convective heating (the "
+            "moisture-supply cloud-base closure), so the T31L8 1-day fingerprint "
+            "shifts up to ~3 K. The reference must be regenerated on the CI "
+            "hardware (REGENERATE=1) as part of the 3D ICON revalidation gate for "
+            "that change — a dev-box regeneration drifts ~0.01 m/s from CI (XLA "
+            "reduction order), above the 1e-4 tolerance. Drop this xfail once the "
+            "reference is regenerated on CI during revalidation."
+        ),
+        strict=False,
+    )
     def test_echam_default_reference(self):
         """Tolerance-based match for ``echam_physics()`` defaults."""
         from jcm.model import Model
