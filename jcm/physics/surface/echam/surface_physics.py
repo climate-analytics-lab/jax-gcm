@@ -612,6 +612,11 @@ class EchamSurface(PhysicsTerm):
             momentum_flux_u=tau_u,
             momentum_flux_v=tau_v,
             evaporation=evaporation,
+            # Moisture actually added to the lowest layer this step = raw flux
+            # times the implicit damping ``imp_moist`` (= qv_tend_sfc·ρ·Δz). This
+            # is the supply the Tiedtke moisture-budget closure anchors to, so it
+            # never exports more water than the surface delivered.
+            effective_evaporation=imp_moist * evaporation,
             ch=ch,
             cm=cm,
         )

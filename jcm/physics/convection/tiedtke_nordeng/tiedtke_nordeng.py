@@ -181,6 +181,16 @@ class ConvectionData:
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
+    # Convective heating / moistening rates actually applied to the column
+    # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
+    # are the genuine per-level convective tendencies — the thing that balances
+    # radiative cooling in an RCE column — exposed as first-class diagnostics so
+    # they ride the saved trajectory exactly like ``RadiationData``'s
+    # ``sw_heating_rate`` / ``lw_heating_rate``, rather than being recoverable
+    # only by re-running the term. ``heating_rate`` mirrors the radiation naming
+    # convention ([K/s]); ``moistening_rate`` is its specific-humidity analog.
+    heating_rate: jnp.ndarray        # Convective heating rate [K/s] (nlev, ncols)
+    moistening_rate: jnp.ndarray     # Convective moistening rate [kg/kg/s] (nlev, ncols)
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -194,6 +204,8 @@ class ConvectionData:
             precip_conv=jnp.zeros(nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
+            heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            moistening_rate=jnp.zeros((nlev,) + nodal_shape),
         )
 
 
@@ -545,6 +557,16 @@ def cloud_depth_for_target_top(
     return jnp.clip(depth, min_layers, nlev - 2)
 
 
+# Minimum boundary-layer moisture supply [kg/m²/s] that counts as a real
+# evaporation anchor for the deep mass-flux closure. Below this (cold start,
+# numerical noise, a stack with no surface term) the moisture-budget flux is
+# meaningless, so both the activation trigger AND the closure-selection gate fall
+# back to the bare-CAPE closure. The two MUST use the same threshold: gating
+# activation on CAPE but then forcing a ~zero moisture flux would disable
+# convection while CAPE accumulates.
+_MIN_MOISTURE_SUPPLY = 1.0e-7
+
+
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -558,6 +580,7 @@ def tiedtke_nordeng_convection(
     dt: float,
     config: ConvectionParameters = None,
     land_fraction: jnp.ndarray = jnp.array(0.0),
+    moisture_supply: jnp.ndarray = jnp.array(0.0),
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -577,6 +600,11 @@ def tiedtke_nordeng_convection(
             Selects ECHAM's per-surface ``zdnoprc`` precip-zone threshold
             via ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``.
             Defaults to 0 (ocean).
+        moisture_supply: Boundary-layer moisture supply rate [kg/m²/s] — the
+            surface evaporation feeding the subcloud layer. Anchors the deep
+            cloud-base mass flux to ECHAM's moisture-budget closure
+            (``zmfub`` ≈ E/(q_u−q_e), mo_cumastr.f90). Defaults to 0, which
+            falls back to the pure-CAPE closure (cold start / no surface term).
 
     Returns:
         Tuple of (tendencies, final_state) with fixed qc/qi transport
@@ -641,8 +669,20 @@ def tiedtke_nordeng_convection(
                             lambda: jnp.array(2))
         return lax.cond(cape > 1000.0, deep_branch, mid_or_shallow_branch)
 
+    # Activation (ECHAM ``ldcum``): convection is on when a cloud base exists
+    # AND either there is appreciable CAPE *or* a boundary-layer moisture supply
+    # to sustain it. ECHAM triggers on the moisture supply (``zdqpbl``/``ldcum``,
+    # mo_cumastr.f90), not on a CAPE threshold; gating on CAPE>100 alone makes
+    # convection switch fully off the moment a burst consumes CAPE, then back on
+    # as radiation rebuilds it — the on/off cloud-base flicker. Keeping it on
+    # whenever the surface still supplies moisture lets it run continuously at
+    # the (small) evaporation-balancing rate set by the moisture-budget closure.
+    convection_active = jnp.logical_and(
+        has_cloud_base,
+        jnp.logical_or(cape > 100.0, moisture_supply > _MIN_MOISTURE_SUPPLY),
+    )
     conv_type = lax.cond(
-        jnp.logical_and(has_cloud_base, cape > 100.0),
+        convection_active,
         select_active_conv_type,
         lambda: jnp.array(0),  # No convection
     )
@@ -697,11 +737,39 @@ def tiedtke_nordeng_convection(
             lambda: jnp.minimum(cloud_base + cloud_depth, nlev-1-min_top_level)  # Reverse: top = higher index
         )
         
-        # Calculate mass flux using appropriate closure
-        moisture_conv = jnp.array(0.0)  # Would calculate from large-scale fields
-        mass_flux_base = mass_flux_closure(
-            cape, cin, moisture_conv, conv_type, config
+        # --- Cloud-base mass-flux closure -------------------------------------
+        # ECHAM anchors the DEEP cloud-base mass flux to the boundary-layer
+        # MOISTURE SUPPLY, not to instantaneous CAPE (mo_cumastr.f90 ``zmfub`` =
+        # zdqpbl/(g·(q_u−q_e))). At quasi-equilibrium the updraft must export the
+        # column's moisture source, so M_b = E/(q_u−q_e) with E the surface
+        # evaporation [kg/m²/s] (zdqpbl/g). That source is smooth, so the mass
+        # flux is steady. The bare-CAPE closure (``mass_flux_closure``) instead
+        # tracks instantaneous CAPE and flips convection fully on/off each step —
+        # the cloud-base flicker seen in single-column RCE. ``moisture_supply``
+        # is the previous step's surface evaporation (the surface term runs after
+        # convection, so only the carried value is available); when it is absent
+        # (E=0: cold start, or a stack with no surface term) we fall back to the
+        # CAPE closure so behaviour is unchanged there.
+        qsat_cb = saturation_mixing_ratio(pressure[cloud_base], temperature[cloud_base])
+        q_excess = jnp.maximum(qsat_cb - humidity[cloud_base], 1.0e-4)  # kg/kg
+        mass_flux_moisture = jnp.clip(
+            moisture_supply / q_excess, config.cmfcmin, config.cmfcmax
         )
+        mass_flux_cape = mass_flux_closure(
+            cape, cin, jnp.array(0.0), conv_type, config
+        )
+        # Apply to any active convection (deep/shallow/mid), not just deep: the
+        # evaporation-limited flux is small (~E/q_excess ≈ 1e-2 kg/m²/s for a
+        # tropical column) and removes CAPE gradually, so convection stays
+        # *continuously* on at a rate that balances the moisture supply instead
+        # of the CAPE-cap flux that empties CAPE in one step and switches off.
+        # Same meaningful-supply threshold as the activation trigger: a high-CAPE
+        # column with only negligible evaporation (0 < E <= _MIN_MOISTURE_SUPPLY)
+        # must keep the CAPE closure, not be forced onto a clipped ~zero moisture
+        # flux that would stall convection while CAPE accumulates.
+        use_moisture = jnp.logical_and(
+            conv_type >= 1, moisture_supply > _MIN_MOISTURE_SUPPLY)
+        mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
 
         # ECHAM mass-flux CFL cap (``mo_cumastr.f90:582-583``):
         #
@@ -972,16 +1040,42 @@ class TiedtkeConvection(PhysicsTerm):
         # ``zdnoprc`` precip-zone thresholds inside the updraft.
         land_fraction = terrain.fmask.reshape(ncols)
 
+        # Boundary-layer moisture supply for the deep mass-flux closure: the
+        # previous step's grid-box surface evaporation [kg/m²/s]. The surface
+        # term runs *after* convection, so the value carried in the diagnostics
+        # dict is one step old; that is fine — it is a slowly varying anchor and
+        # is exactly how the on/off cloud-base flicker is avoided. Absent (e.g. a
+        # radiative-convective stack with no surface term) it stays zero and the
+        # scheme falls back to the CAPE closure.
+        #
+        # Use the *effective* (implicitly damped) evaporation — the moisture the
+        # surface step actually added to the column (imp_moist·E) — not the raw
+        # surface flux, so the budget closure can never export more water than
+        # was supplied. Fall back to the raw flux for any surface state predating
+        # that field.
+        surface_diag = diagnostics.get("surface")
+        if surface_diag is not None and getattr(
+            surface_diag, "effective_evaporation", None) is not None:
+            moisture_supply = jnp.maximum(
+                jnp.asarray(surface_diag.effective_evaporation).reshape(ncols), 0.0
+            )
+        elif surface_diag is not None and hasattr(surface_diag, "evaporation"):
+            moisture_supply = jnp.maximum(
+                jnp.asarray(surface_diag.evaporation).reshape(ncols), 0.0
+            )
+        else:
+            moisture_supply = jnp.zeros(ncols)
+
         column_fn = jax.vmap(
             tiedtke_nordeng_convection,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
             state.temperature, state.specific_humidity,
             pressure_full, layer_thickness, air_density,
             state.u_wind, state.v_wind, qc, qi,
-            dt, params, land_fraction,
+            dt, params, land_fraction, moisture_supply,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied
@@ -1011,7 +1105,11 @@ class TiedtkeConvection(PhysicsTerm):
         # Mass-flux / cloud-base/top / CAPE diagnostics aren't populated
         # by the wrapper today (the scheme returns the per-column state
         # but we don't reduce or surface it yet) — they stay as zeros
-        # for back-compat with existing xarray field names.
+        # for back-compat with existing xarray field names. The heating /
+        # moistening rates, by contrast, are the *applied* (post-cap)
+        # tendencies returned above, surfaced so downstream analysis (e.g.
+        # an RCE convective-vs-radiative heating balance) reads them straight
+        # off the trajectory instead of re-running the term.
         convection = ConvectionData(
             mass_flux_up=jnp.zeros_like(pressure_full),
             mass_flux_down=jnp.zeros_like(pressure_full),
@@ -1021,6 +1119,8 @@ class TiedtkeConvection(PhysicsTerm):
             precip_conv=tendencies_all.precip_conv,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
+            heating_rate=tendency.temperature,
+            moistening_rate=tendency.specific_humidity,
         )
 
         clouds = diagnostics["clouds"].copy(

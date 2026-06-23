@@ -55,8 +55,11 @@ class SCMPredictions:
     Attributes:
         prescribed_states: Time series of input column states (1-D).
         tracer_states: Time series of evolved tracers (dict of 1-D arrays).
-        relaxed_states: Time series of relaxed prognostic variables (dict;
-            empty when no relaxation is configured).
+        relaxed_states: Time series of *evolved* prognostic variables (dict;
+            empty when neither relaxation nor free-evolution is configured).
+            Holds both nudged (``relaxation_timescales``) and freely evolving
+            (``free_evolve``) variables — e.g. the equilibrium temperature
+            profile of an RCE run is read back here under ``"temperature"``.
         tendencies: Physics tendencies at each step (1-D).
         physics_data: Per-step diagnostics dict from the physics package.
         times: Times in days since the start of the run.
@@ -193,6 +196,19 @@ class SingleColumnModel:
             ``temperature``, ``specific_humidity``) are nudged toward the
             prescribed state with timescale ``tau`` while still receiving
             their physics tendency.
+        free_evolve: Optional tuple of prognostic-variable names that evolve
+            under their physics tendency alone — no nudging toward the
+            prescribed state. This is what turns the SCM into a free-running
+            single-column model: e.g. ``free_evolve=("temperature",)`` lets
+            temperature seek radiative-convective equilibrium. A variable may
+            be in ``free_evolve`` *or* ``relaxation_timescales`` but not both
+            (free evolution is just relaxation with no nudging term).
+        state_closure: Optional ``f(state, forcing) -> state`` applied to the
+            assembled column *each step, before physics*. Use it to re-derive
+            diagnostic fields from the freely evolving prognostics so the
+            terms see a consistent state — e.g. a fixed-relative-humidity
+            closure ``q = rh · qsat(p, T)`` (see :func:`jcm.rce.fixed_rh_closure`).
+            Must be pure / ``jit``-compatible.
 
     """
 
@@ -207,6 +223,8 @@ class SingleColumnModel:
         dt_seconds: float = 1800.0,
         apply_tracer_tendencies: bool = True,
         relaxation_timescales: dict[str, float] | None = None,
+        free_evolve: tuple[str, ...] = (),
+        state_closure: Callable[[PhysicsState, ForcingData], PhysicsState] | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions)."""
         self.physics = physics
@@ -216,6 +234,24 @@ class SingleColumnModel:
         self.dt_seconds = float(dt_seconds)
         self.apply_tracer_tendencies = apply_tracer_tendencies
         self.relaxation_timescales = dict(relaxation_timescales or {})
+        self.free_evolve = tuple(free_evolve)
+        self.state_closure = state_closure
+
+        # Free evolution and relaxation share one integrator (see
+        # ``_make_step_fn``): a freely evolving variable is relaxation with no
+        # nudging term, marked here by ``tau is None``. A variable is therefore
+        # either nudged toward the prescribed target or left free, never both.
+        overlap = set(self.free_evolve) & set(self.relaxation_timescales)
+        if overlap:
+            raise ValueError(
+                f"Variables {sorted(overlap)} appear in both free_evolve and "
+                "relaxation_timescales; a variable is either nudged or free, "
+                "not both."
+            )
+        self._evolving_timescales: dict[str, float | None] = {
+            **{name: None for name in self.free_evolve},
+            **self.relaxation_timescales,
+        }
 
         self.coords = _make_single_column_coords(vertical, lat_deg, lon_deg)
         self.terrain = terrain if terrain is not None else TerrainData.single_column()
@@ -241,20 +277,31 @@ class SingleColumnModel:
         forcing: ForcingData,
         apply_tendencies: bool,
         tracer_names: tuple[str, ...],
-        relaxed_var_params: tuple[tuple[str, float], ...],
+        evolving_var_params: tuple[tuple[str, float | None], ...],
+        state_closure: Callable | None,
     ) -> Callable:
         physics = self.physics
         terrain = self.terrain
         nlev = self.coords.nodal_shape[0]
         dt_seconds = self.dt_seconds
 
-        def step_fn(prescribed_column, tracers, relaxed_vars, physics_data, time_idx):
+        def step_fn(prescribed_column, tracers, evolving_vars, physics_data, time_idx):
             full_state_args = prescribed_column.asdict()
             full_state_args.pop("tracers", None)
-            for name, _ in relaxed_var_params:
-                full_state_args[name] = relaxed_vars[name]
+            for name, _ in evolving_var_params:
+                full_state_args[name] = evolving_vars[name]
             full_state_args["tracers"] = tracers
             column_state = type(prescribed_column)(**full_state_args)
+
+            # Per-step diagnostic closure (e.g. fixed-RH ``q = rh·qsat(p, T)``).
+            # Applied to the freshly assembled column *before* physics so the
+            # terms (radiation, convection) see a thermodynamically consistent
+            # (T, q) pair derived from the current — possibly freely evolving —
+            # temperature. Terms communicate only through tendencies and the
+            # diagnostics dict, so a closure like this cannot be a PhysicsTerm:
+            # it has to overwrite the state the term loop reads.
+            if state_closure is not None:
+                column_state = state_closure(column_state, forcing)
 
             grid_state = _column_state_to_grid(column_state, nlev)
             clamped = verify_state(grid_state)
@@ -275,17 +322,28 @@ class SingleColumnModel:
             else:
                 updated_tracers = tracers
 
-            updated_relaxed_vars = {}
-            for name, tau in relaxed_var_params:
-                current_val = relaxed_vars[name]
-                target_val = getattr(prescribed_column, name)
+            updated_evolving_vars = {}
+            for name, tau in evolving_var_params:
+                current_val = evolving_vars[name]
                 phys_tend = getattr(tendencies, name)
-                nudging_tend = (target_val - current_val) / tau
-                updated_relaxed_vars[name] = (
-                    current_val + dt_seconds * (phys_tend + nudging_tend)
-                )
+                if tau is None:
+                    # Free evolution: physics tendency only, no nudging. This
+                    # is the RCE / free-running path.
+                    nudging_tend = 0.0
+                else:
+                    target_val = getattr(prescribed_column, name)
+                    nudging_tend = (target_val - current_val) / tau
+                updated = current_val + dt_seconds * (phys_tend + nudging_tend)
+                # Keep positive-definite prognostics non-negative in the carry,
+                # mirroring the tracer update above and ``verify_state`` in the
+                # full ``Model`` path: an interactive step whose physics dries a
+                # layer by more than its current humidity over ``dt`` would
+                # otherwise carry a negative ``specific_humidity`` forward.
+                if name == "specific_humidity":
+                    updated = jnp.maximum(updated, 0.0)
+                updated_evolving_vars[name] = updated
 
-            return tendencies, updated_tracers, updated_relaxed_vars, new_physics_data
+            return tendencies, updated_tracers, updated_evolving_vars, new_physics_data
 
         return step_fn
 
@@ -315,8 +373,10 @@ class SingleColumnModel:
                 prescribed state's tracers (or ``{}``).
             initial_physics_data: Optional initial diagnostics dict.
             times: Optional days-since-start array.
-            initial_relaxed_vars: Initial values for relaxed prognostic
-                variables (1-D ``(nlev,)`` per variable).
+            initial_relaxed_vars: Initial values for the evolved prognostic
+                variables — both nudged (``relaxation_timescales``) and freely
+                evolving (``free_evolve``) — 1-D ``(nlev,)`` per variable.
+                Defaults to the first prescribed state's values.
 
         Returns:
             ``SCMPredictions``.
@@ -334,12 +394,16 @@ class SingleColumnModel:
             first_tracers = tree_map(lambda x: x[0], prescribed_states.tracers)
             initial_tracers = first_tracers if first_tracers else {}
 
-        relaxed_var_params = tuple(sorted(self.relaxation_timescales.items()))
+        # Sort by name only — ``tau`` may be ``None`` (free-evolving), which is
+        # not orderable against the float relaxation timescales.
+        evolving_var_params = tuple(
+            sorted(self._evolving_timescales.items(), key=lambda kv: kv[0])
+        )
         if initial_relaxed_vars is None:
             first_state_slice = tree_map(lambda x: x[0], prescribed_states)
             initial_relaxed_vars = {
                 name: getattr(first_state_slice, name)
-                for name, _ in relaxed_var_params
+                for name, _ in evolving_var_params
             }
 
         # Seed the diagnostics-dict carry the same way ``Model`` does:
@@ -371,18 +435,19 @@ class SingleColumnModel:
             forcing=forcing,
             apply_tendencies=self.apply_tracer_tendencies,
             tracer_names=tuple(initial_tracers.keys()),
-            relaxed_var_params=relaxed_var_params,
+            evolving_var_params=evolving_var_params,
+            state_closure=self.state_closure,
         )
 
         def scan_step(carry, time_idx):
-            tracers, relaxed_vars, physics_data = carry
+            tracers, evolving_vars, physics_data = carry
             prescribed_column = tree_map(lambda x: x[time_idx], prescribed_states)
             prescribed_column = prescribed_column.copy(tracers={})
-            tendencies, new_tracers, new_relaxed_vars, new_physics_data = step_fn(
-                prescribed_column, tracers, relaxed_vars, physics_data, time_idx,
+            tendencies, new_tracers, new_evolving_vars, new_physics_data = step_fn(
+                prescribed_column, tracers, evolving_vars, physics_data, time_idx,
             )
-            new_carry = (new_tracers, new_relaxed_vars, new_physics_data)
-            return new_carry, (tendencies, new_tracers, new_relaxed_vars, new_physics_data)
+            new_carry = (new_tracers, new_evolving_vars, new_physics_data)
+            return new_carry, (tendencies, new_tracers, new_evolving_vars, new_physics_data)
 
         initial_carry = (initial_tracers, initial_relaxed_vars, initial_physics_data)
 

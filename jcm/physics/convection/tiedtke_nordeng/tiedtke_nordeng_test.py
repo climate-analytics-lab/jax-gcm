@@ -102,6 +102,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -149,6 +150,84 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     assert jnp.allclose(diagnostics_out["clouds"].qc, expected_qc)
     assert jnp.allclose(diagnostics_out["clouds"].qi, expected_qi)
     assert jnp.allclose(diagnostics_out["convection"].qc_conv, dqc_col[:, None] * dt)
+
+
+def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch):
+    """The convection diagnostic exposes the *applied* (post-cap) T/q rates.
+
+    ``heating_rate`` / ``moistening_rate`` must mirror the tendencies actually
+    handed back to the dynamics — i.e. after the ``_DTDT_MAX`` heating cap — so
+    an RCE convective-vs-radiative balance can be read straight off the saved
+    trajectory. We feed a heating profile that straddles the cap to pin the
+    diagnostic to the capped value rather than the raw scheme output.
+    """
+    nlev, ncols = 4, 2
+    dt = 60.0
+    shape = (nlev, ncols)
+
+    cap = 5.0 / 3600.0  # _DTDT_MAX, K/s
+    # Levels 0/1 exceed the cap (must clip); levels 2/3 sit below it (pass through).
+    dtedt_col = jnp.array([10.0 / 3600.0, -8.0 / 3600.0, 1.0 / 3600.0, 0.0])
+    dqdt_col = jnp.array([1.0e-7, -2.0e-7, 3.0e-7, 0.0])
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=dtedt_col,
+            dqdt=dqdt_col,
+            dudt=zeros,
+            dvdt=zeros,
+            qc_conv=zeros,
+            qi_conv=zeros,
+            precip_conv=jnp.array(0.0),
+            dqc_dt=zeros,
+            dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    clouds = CloudData.zeros((ncols,), nlev).copy(
+        cloud_fraction=jnp.ones(shape) * 0.5,
+    )
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": clouds,
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    convection = diagnostics_out["convection"]
+
+    # The diagnostic is exactly the tendency applied to the dynamics.
+    assert jnp.allclose(convection.heating_rate, tendency.temperature)
+    assert jnp.allclose(convection.moistening_rate, tendency.specific_humidity)
+
+    # ...which is the *capped* heating, not the raw scheme output.
+    expected_dt = jnp.broadcast_to(jnp.clip(dtedt_col, -cap, cap)[:, None], shape)
+    expected_dq = jnp.broadcast_to(dqdt_col[:, None], shape)
+    assert jnp.allclose(convection.heating_rate, expected_dt)
+    assert jnp.allclose(convection.moistening_rate, expected_dq)
+    # Guard the "post-cap" semantics: the raw (uncapped) profile would differ.
+    assert not jnp.allclose(
+        convection.heating_rate, jnp.broadcast_to(dtedt_col[:, None], shape)
+    )
 
 
 class TestMassFluxCFLCap:
