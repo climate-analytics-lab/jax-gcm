@@ -18,24 +18,18 @@ name: Regenerate ECHAM regression reference (manual)
 # GITHUB_TOKEN, which deliberately does not re-trigger CI; validate by pushing a
 # follow-up commit (or re-running the test workflow) on the branch.
 #
-# TRIGGERS: ``workflow_dispatch`` is the intended entry point once this file
-# lives on the default branch (a dispatchable workflow must be on the default
-# branch). Until then — e.g. while still on a feature branch — push a commit
-# whose message contains the ``[regen-ref]`` marker and the job runs; ordinary
-# pushes skip it.
+# TRIGGER: run from the Actions tab via ``workflow_dispatch`` once this file is on
+# the default branch (a dispatchable workflow must live on the default branch).
+# To regenerate from a feature branch before that — as PR #532 did — temporarily
+# add a ``push`` trigger gated on a commit-message marker, then revert it.
 on:
   workflow_dispatch:
-  push:
 
 permissions:
   contents: write
 
 jobs:
   regenerate:
-    # Only run on an explicit dispatch or a marked commit — not every push.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.head_commit.message, '[regen-ref]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
