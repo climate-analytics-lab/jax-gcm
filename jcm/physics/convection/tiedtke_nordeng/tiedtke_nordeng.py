@@ -566,6 +566,22 @@ def cloud_depth_for_target_top(
 # convection while CAPE accumulates.
 _MIN_MOISTURE_SUPPLY = 1.0e-7
 
+# Minimum CAPE [J/kg] for the moisture-supply activation branch — a buoyancy
+# gate standing in for ECHAM's ``ldcum`` (a genuinely buoyant updraft must
+# exist). ``find_cloud_base`` returns the lifting-condensation level, which is
+# present in many *statically stable* columns where a lifted parcel saturates
+# but never becomes buoyant (CAPE == 0, no level of free convection). Without
+# this gate the moisture-supply trigger fired deep convection — at the
+# moisture-closure mass flux, up to the CFL cap — in every column with surface
+# evaporation, including stable subsiding ones. On a T63L47 real-orography
+# spin-up that over-activation dumped latent heat into stable tropical columns
+# and ran the temperature away to NaN within ~4 days (the cloud-base flicker
+# fix #529 regressed whole-model stability). Requiring a small positive CAPE
+# excludes the no-buoyancy columns while staying far below the CAPE that an RCE
+# column maintains while convecting continuously, so the anti-flicker behaviour
+# is preserved. Strong-CAPE columns (CAPE > 100) trigger regardless.
+_MIN_CAPE_FOR_MOISTURE_TRIGGER = 10.0
+
 
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
@@ -670,16 +686,29 @@ def tiedtke_nordeng_convection(
         return lax.cond(cape > 1000.0, deep_branch, mid_or_shallow_branch)
 
     # Activation (ECHAM ``ldcum``): convection is on when a cloud base exists
-    # AND either there is appreciable CAPE *or* a boundary-layer moisture supply
-    # to sustain it. ECHAM triggers on the moisture supply (``zdqpbl``/``ldcum``,
-    # mo_cumastr.f90), not on a CAPE threshold; gating on CAPE>100 alone makes
-    # convection switch fully off the moment a burst consumes CAPE, then back on
-    # as radiation rebuilds it — the on/off cloud-base flicker. Keeping it on
-    # whenever the surface still supplies moisture lets it run continuously at
-    # the (small) evaporation-balancing rate set by the moisture-budget closure.
+    # AND either there is strong CAPE, *or* the column is buoyant (CAPE above a
+    # small floor) and the surface supplies moisture to sustain it. ECHAM keys
+    # activation off the moisture supply plus a buoyant updraft (``zdqpbl`` and
+    # ``ldcum``, mo_cumastr.f90), NOT off a CAPE threshold alone: gating on
+    # CAPE>100 makes convection switch fully off the moment a burst consumes
+    # CAPE, then back on as radiation rebuilds it — the on/off cloud-base
+    # flicker fixed in #529. But the moisture supply alone is not a sufficient
+    # trigger: ``find_cloud_base`` returns the LCL, which exists in many
+    # statically stable columns (CAPE==0, no level of free convection), so
+    # ``moisture_supply > 0`` fired deep convection in stable subsiding columns
+    # and ran the temperature away on a T63L47 real-orography spin-up. The
+    # ``cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER`` floor restores ECHAM's buoyant-
+    # updraft requirement while staying well below an actively-convecting
+    # column's CAPE, so continuous (flicker-free) convection is preserved.
     convection_active = jnp.logical_and(
         has_cloud_base,
-        jnp.logical_or(cape > 100.0, moisture_supply > _MIN_MOISTURE_SUPPLY),
+        jnp.logical_or(
+            cape > 100.0,
+            jnp.logical_and(
+                cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER,
+                moisture_supply > _MIN_MOISTURE_SUPPLY,
+            ),
+        ),
     )
     conv_type = lax.cond(
         convection_active,
@@ -751,24 +780,40 @@ def tiedtke_nordeng_convection(
         # (E=0: cold start, or a stack with no surface term) we fall back to the
         # CAPE closure so behaviour is unchanged there.
         qsat_cb = saturation_mixing_ratio(pressure[cloud_base], temperature[cloud_base])
-        q_excess = jnp.maximum(qsat_cb - humidity[cloud_base], 1.0e-4)  # kg/kg
+        q_excess = qsat_cb - humidity[cloud_base]  # kg/kg, cloud-base saturation deficit
+        # ECHAM ``zlo1`` validity gate (mo_cumastr.f90:268-271): the moisture-
+        # budget closure ``E/(q_u−q_e)`` is only used when the cloud-base
+        # saturation deficit exceeds ``zdqmin = max(0.01·q_env, 1e-10)`` — i.e.
+        # the environment is not already ~saturated there. When the cloud base
+        # is at/over saturation (deficit ≤ zdqmin, or negative under spectral
+        # supersaturation ringing) the denominator collapses and ``E/q_excess``
+        # spikes to the CFL cap, dumping a catastrophic burst of latent heat in
+        # one step — the hot-cell runaway on T63L47 real-orography. ECHAM falls
+        # back to a tiny flux there; we fall back to the bounded CAPE closure,
+        # which keeps convection finite without losing the gentle continuous
+        # moisture-anchored flux in the well-subsaturated columns where the
+        # budget closure is physical.
+        zdqmin = jnp.maximum(0.01 * humidity[cloud_base], 1.0e-10)
+        moisture_valid = jnp.logical_and(
+            q_excess > zdqmin, moisture_supply > _MIN_MOISTURE_SUPPLY
+        )
         mass_flux_moisture = jnp.clip(
-            moisture_supply / q_excess, config.cmfcmin, config.cmfcmax
+            moisture_supply / jnp.maximum(q_excess, zdqmin),
+            config.cmfcmin, config.cmfcmax,
         )
         mass_flux_cape = mass_flux_closure(
             cape, cin, jnp.array(0.0), conv_type, config
         )
-        # Apply to any active convection (deep/shallow/mid), not just deep: the
-        # evaporation-limited flux is small (~E/q_excess ≈ 1e-2 kg/m²/s for a
-        # tropical column) and removes CAPE gradually, so convection stays
-        # *continuously* on at a rate that balances the moisture supply instead
-        # of the CAPE-cap flux that empties CAPE in one step and switches off.
-        # Same meaningful-supply threshold as the activation trigger: a high-CAPE
-        # column with only negligible evaporation (0 < E <= _MIN_MOISTURE_SUPPLY)
-        # must keep the CAPE closure, not be forced onto a clipped ~zero moisture
-        # flux that would stall convection while CAPE accumulates.
-        use_moisture = jnp.logical_and(
-            conv_type >= 1, moisture_supply > _MIN_MOISTURE_SUPPLY)
+        # Apply the moisture-anchored flux to any active convection (deep/
+        # shallow/mid) where the budget closure is valid: with a well-
+        # subsaturated cloud base the flux is a modest steady value
+        # (E/(q_u−q_e)) that removes CAPE gradually, so convection stays
+        # *continuously* on at the evaporation-balancing rate instead of the
+        # CAPE-cap flux that empties CAPE in one step and flickers off. Columns
+        # that fail ``moisture_valid`` (near-saturated cloud base, or negligible
+        # evaporation 0 < E ≤ _MIN_MOISTURE_SUPPLY) keep the bounded CAPE
+        # closure rather than a CFL-saturating or ~zero moisture flux.
+        use_moisture = jnp.logical_and(conv_type >= 1, moisture_valid)
         mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
 
         # ECHAM mass-flux CFL cap (``mo_cumastr.f90:582-583``):
