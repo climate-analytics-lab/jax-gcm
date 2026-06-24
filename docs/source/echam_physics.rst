@@ -443,6 +443,9 @@ Vertical Diffusion
    * - ``cchar``
      - Charnock constant for ocean roughness
      - 0.018
+   * - ``surface_layer_scheme``
+     - Surface-layer exchange-coefficient scheme: ``"echam_louis"`` (faithful ``sfc_exchange_coeff`` port) or ``"businger_dyer"`` (simpler bulk form). Its per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` drive the surface flux **and** damping (see Surface Physics).
+     - ``"echam_louis"``
 
 .. admonition:: Gap vs. ICON-A
 
@@ -462,8 +465,13 @@ Surface Physics
 - **Ocean**: Mixed layer with prescribed SST, Charnock roughness length parameterisation
 - **Sea Ice**: Multi-layer thermodynamics (2 default layers), snow on ice, melting/freezing
 - **Land**: Multi-layer soil model (4 default layers), vegetation temperature, soil moisture
-- **Exchange coefficients**: Monin-Obukhov similarity theory with bulk Richardson number stability correction. Businger-Dyer Φ_m, Φ_h are < 1 under unstable conditions so that the bulk exchange coefficient (κ²/(ln·Φ_m·Φ_h)·U) is *enhanced* — the textbook free-convection result. (See ``jcm.physics.surface.echam.turbulent_fluxes.compute_stability_functions`` and the test ``test_unstable_stability_functions``.)
-- **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (which is easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express.
+- **Exchange coefficients**: The per-tile surface exchange velocities (``CH·|U|``, ``CE·|U|``, ``CM·|U|``, all in m/s) come from a **single** surface-layer scheme, computed in the vertical-diffusion term and threaded into this term via the ``vertical_diffusion`` diagnostics. The same per-tile coefficients drive **both** the bulk-aerodynamic flux (``flux = ρ·C·Δ``) **and** the implicit-damping factor below, so heat, moisture and momentum stay mutually consistent — one surface exchange coefficient, exactly as ECHAM's ``sfc_exchange_coeff`` feeds both the vdiff surface BC and the flux diagnosis. The scheme is selected by ``VDiffParameters.surface_layer_scheme``:
+
+  - ``"echam_louis"`` (**default, faithful**): a port of ECHAM/ICON ``mo_turbulence_diag::sfc_exchange_coeff`` — Louis (1979) functions unstable, Mauritsen (2007) form stable, potential-temperature bulk Richardson with a moisture-buoyancy term, per-tile momentum/heat roughness and surface wetness. Implemented in ``jcm.physics.vertical_diffusion.tte_tke.surface_layer.compute_surface_exchange_coefficients_echam_louis``.
+  - ``"businger_dyer"`` (option): a simpler bulk-Richardson Businger-Dyer form in ``turbulence_coefficients.compute_surface_exchange_coefficients``. Both schemes now return momentum as well as heat/moisture.
+
+  A standalone surface-side bulk-Richardson scheme (``turbulent_fluxes.compute_exchange_coefficients`` / ``compute_stability_functions``) remains in the tree as a tested reference but is **no longer in the default flux path** — ``surface_physics_step`` consumes the upstream exchange coefficients rather than recomputing its own.
+- **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express. ``K`` here is the same per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` (m/s) that sets the flux, so ``K·dt/dz_sfc`` is properly dimensionless. (The momentum factor previously borrowed the interior diffusivity ``Km`` at the lowest level — units m²/s — which made the momentum damping dimensionally inconsistent and over-suppressed the surface stress by ~10×.)
 
 **Configurable parameters** (:py:class:`jcm.physics.surface.SurfaceParameters`):
 

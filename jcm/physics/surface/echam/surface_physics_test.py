@@ -220,6 +220,28 @@ class TestSurfacePhysicsStep:
         assert jnp.allclose(fluxes.sensible_heat_mean, expected_sensible_mean, rtol=0.1)
         assert jnp.allclose(fluxes.latent_heat_mean, expected_latent_mean, rtol=0.1)
 
+    def test_surface_physics_step_uses_passed_exchange_coeffs(self):
+        """The flux is built from the passed-in exchange coefficients.
+
+        Regression for the surface-wiring fix: ``surface_physics_step`` must
+        consume the exchange velocities (CH·|U|, CE·|U|, CM·|U|) computed by the
+        surface-layer scheme upstream (threaded in via ``AtmosphericForcing``),
+        not recompute its own bulk-Richardson scheme. The momentum stress is
+        ``rho * CM*|U| * u`` per tile and has no thermodynamic feedback, so
+        doubling the passed momentum coefficient doubles the grid-box-mean
+        momentum stress exactly.
+        """
+        base, _, _ = surface_physics_step(
+            self.atmospheric_state, self.surface_state, self.dt
+        )
+        doubled = self.atmospheric_state._replace(
+            exchange_coeff_momentum=self.atmospheric_state.exchange_coeff_momentum * 2.0
+        )
+        scaled, _, _ = surface_physics_step(doubled, self.surface_state, self.dt)
+
+        assert jnp.allclose(scaled.momentum_u_mean, 2.0 * base.momentum_u_mean, rtol=1e-5)
+        assert jnp.allclose(scaled.momentum_v_mean, 2.0 * base.momentum_v_mean, rtol=1e-5)
+
 
 class TestCombineSurfaceFluxes:
     """Test surface flux combination."""

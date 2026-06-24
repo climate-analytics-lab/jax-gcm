@@ -33,8 +33,13 @@ class VDiffParameters:
     itop: int           # Top level for turbulence calculation
 
     # Surface-layer scheme selector (int flag — JAX won't trace strings).
-    # 0 = "businger_dyer" (default; preserves original ICON-port behavior)
-    # 1 = "echam_louis"   (faithful port of mo_turbulence_diag)
+    # 1 = "echam_louis"   (DEFAULT; faithful port of mo_turbulence_diag::
+    #                      sfc_exchange_coeff — Louis 1979 / Mauritsen 2007).
+    #                      Its per-tile CH·|U|, CE·|U|, CM·|U| drive both the
+    #                      surface flux and the implicit damping in the
+    #                      ``echam_surface`` term, mirroring ECHAM's single
+    #                      surface exchange coefficient.
+    # 0 = "businger_dyer" (option; simpler bulk-Ri Businger-Dyer form).
     # See ``surface_layer.py`` for both implementations.
     surface_layer_scheme: int
 
@@ -53,7 +58,7 @@ class VDiffParameters:
     def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
                  totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
                  nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
-                 surface_layer_scheme=0,
+                 surface_layer_scheme=1,
                  surface_layer_fsl=0.4,
                  louis_cb=5.0, louis_cc=5.0) -> 'VDiffParameters':
         """Return default vertical diffusion parameters.
@@ -170,9 +175,11 @@ class VDiffDiagnostics(NamedTuple):
     exchange_coeff_heat: jnp.ndarray      # Heat exchange coeff [m²/s] (ncol, nlev)
     exchange_coeff_moisture: jnp.ndarray  # Moisture exchange coeff [m²/s] (ncol, nlev)
     
-    # Surface exchange coefficients
-    surface_exchange_heat: jnp.ndarray    # Surface heat exchange [m²/s] (ncol, nsfc_type)
-    surface_exchange_moisture: jnp.ndarray # Surface moisture exchange [m²/s] (ncol, nsfc_type)
+    # Surface exchange coefficients (exchange velocities CH·|U|, CE·|U|, CM·|U|
+    # in m/s — multiply by air density for a bulk-aerodynamic flux factor).
+    surface_exchange_heat: jnp.ndarray     # Surface heat exchange [m/s] (ncol, nsfc_type)
+    surface_exchange_moisture: jnp.ndarray  # Surface moisture exchange [m/s] (ncol, nsfc_type)
+    surface_exchange_momentum: jnp.ndarray  # Surface momentum exchange [m/s] (ncol, nsfc_type)
     
     # Boundary layer diagnostics
     boundary_layer_height: jnp.ndarray    # PBL height [m] (ncol,)
@@ -184,12 +191,6 @@ class VDiffDiagnostics(NamedTuple):
     
     # Mixing length
     mixing_length: jnp.ndarray           # Mixing length [m] (ncol, nlev)
-    
-    # Surface fluxes
-    surface_momentum_flux_u: jnp.ndarray  # u-momentum flux [N/m²] (ncol,)
-    surface_momentum_flux_v: jnp.ndarray  # v-momentum flux [N/m²] (ncol,)
-    surface_heat_flux: jnp.ndarray        # Sensible heat flux [W/m²] (ncol,)
-    surface_moisture_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncol,)
     
     # Energy dissipation
     kinetic_energy_dissipation: jnp.ndarray  # KE dissipation [W/m²] (ncol,)

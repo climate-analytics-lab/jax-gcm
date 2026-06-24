@@ -10,7 +10,8 @@ from jcm.constants import PhysicalConstants
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
-    compute_boundary_layer_height, compute_friction_velocity
+    compute_boundary_layer_height, compute_friction_velocity,
+    compute_turbulence_diagnostics
 )
 from .matrix_solver import (
     setup_matrix_system, solve_tridiagonal_single, vertical_diffusion_step
@@ -166,6 +167,36 @@ class TestTurbulenceCoefficients:
         assert friction_velocity.shape == (ncol,)
         assert jnp.all(friction_velocity >= 0.01)  # Minimum value
         assert jnp.all(friction_velocity <= 5.0)   # Reasonable maximum
+
+    def test_friction_velocity_from_surface_momentum_exchange(self):
+        """u* is the friction velocity implied by the unified surface momentum
+        exchange coefficient, not a separate bulk solve.
+
+        Regression for the surface-consistency fix: ``compute_turbulence_diagnostics``
+        derives ``friction_velocity`` from the same per-tile CM·|U| that drives
+        the surface stress and the vdiff damping, aggregated to a grid value with
+        the surface-type fractions. So u*² = |U|·⟨CM·|U|⟩ exactly (above the
+        0.01 m/s floor) — this is the u* that aerosol dry deposition and
+        wind-driven dust/sea-salt emission consume.
+        """
+        ncol, nlev = 3, 10
+        state = create_test_atmospheric_state(ncol, nlev)
+        params = VDiffParameters.default()
+        k = jnp.ones((ncol, nlev)) * 0.1  # interior exchange coeffs [m²/s]
+
+        diag = compute_turbulence_diagnostics(state, params, k, k, k)
+
+        wind_speed = jnp.sqrt(state.u[:, -1] ** 2 + state.v[:, -1] ** 2)
+        cm_grid = jnp.sum(
+            state.surface_fraction * diag.surface_exchange_momentum, axis=1
+        )
+        expected = jnp.maximum(jnp.sqrt(wind_speed * cm_grid), 0.01)
+
+        # The momentum exchange is non-trivial here, so u* is set by the
+        # formula, not the floor.
+        assert jnp.all(expected > 0.01)
+        assert diag.friction_velocity.shape == (ncol,)
+        assert jnp.allclose(diag.friction_velocity, expected, rtol=1e-5)
 
 
 class TestMatrixSolver:

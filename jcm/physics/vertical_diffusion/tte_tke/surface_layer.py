@@ -21,9 +21,14 @@ Two schemes live here as peers, selectable via
   boundary forcing (open water / ice are fully saturated; land uses the
   soil-moisture-derived ``cair``-style fraction).
 
-Both schemes return ``(surface_exchange_heat, surface_exchange_moisture)``
-shaped ``(ncol, nsfc_type)`` in m/s — i.e. CH·|U| in the bulk-aerodynamic
-sense, ready to be multiplied by ρ for a flux.
+Both schemes return
+``(surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum)``
+shaped ``(ncol, nsfc_type)`` in m/s — i.e. CH·|U|, CE·|U|, CM·|U| in the
+bulk-aerodynamic sense, ready to be multiplied by ρ for a flux. These per-tile
+exchange velocities are the single source the ``echam_surface`` term uses for
+both the surface-flux magnitude and its implicit-damping factor, so heat,
+moisture and momentum stay mutually consistent (one ECHAM ``sfc_exchange_coeff``,
+not a separate momentum proxy).
 
 The Louis form matches ECHAM/ICON ~order-of-magnitude across the full
 ``Ri`` range; the Businger-Dyer form matches well near neutral but
@@ -50,7 +55,7 @@ def compute_surface_exchange_coefficients_echam_louis(
     wind_speed_surface: jnp.ndarray,
     temperature_surface: jnp.ndarray,
     temperature_air: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM-faithful per-tile surface exchange coefficient.
 
     Mirrors ``mo_turbulence_diag::sfc_exchange_coeff``. Loops over each
@@ -67,8 +72,13 @@ def compute_surface_exchange_coefficients_echam_louis(
          ``state.roughness_length`` and heat roughness
          ``state.roughness_heat``.
 
-    Returns CH·|U| and CM·|U| (= sCH, sCM) in m/s, per tile. Caller
-    multiplies by ρ to get the flux factor.
+    Returns ``(surface_exchange_heat, surface_exchange_moisture,
+    surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
+    (heat and moisture are equal in this scheme). The caller multiplies by ρ to
+    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979) /
+    Mauritsen (2007) drag and is now returned (previously discarded), so the
+    surface momentum stress is built from a real CM·|U| rather than the interior
+    diffusivity.
     """
     # Read shared physical constants by attribute access on the
     # ``jcm.constants`` module so any ``set_constants`` override is
@@ -111,6 +121,7 @@ def compute_surface_exchange_coefficients_echam_louis(
     # --- Per-tile loop -------------------------------------------------
     surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
     surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
+    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
 
     for isfc in range(nsfc_type):
         T_s = temperature_surface[:, isfc]
@@ -202,5 +213,6 @@ def compute_surface_exchange_coefficients_echam_louis(
 
         surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(cfh)
         surface_exchange_moisture = surface_exchange_moisture.at[:, isfc].set(cfh)
+        surface_exchange_momentum = surface_exchange_momentum.at[:, isfc].set(cfm)
 
-    return surface_exchange_heat, surface_exchange_moisture
+    return surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum
