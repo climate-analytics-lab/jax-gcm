@@ -3,16 +3,17 @@
 # Regenerate the composable-physics regression-test reference snapshots
 # (jcm/data/test/composable_physics_regression/*.npz).
 #
-# WHY A SCRIPT (and not just `REGENERATE=1 pytest`): those references are
-# compared with a tight tolerance (rtol=1e-3, atol=1e-4) that absorbs ULP-level
-# reduction-order drift but NOT a change of jax/jaxlib version — a different
-# jaxlib emits different XLA CPU code and the 1-day integration amplifies the
-# difference past the tolerance. So a reference is only valid against CI if it is
-# generated with the SAME jax/jaxlib (and Python) that CI installs. CI runs
-# Python 3.11 and `pip install -r requirements.txt && pip install -e .` on
-# ubuntu-latest (see .github/workflows/run_test.yaml), which currently resolves
-# jaxlib 0.10.2. This script reproduces that environment in a throwaway prefix so
-# the regenerated references match CI.
+# WHAT THIS IS: a convenience wrapper that regenerates the references in a clean,
+# CI-like environment (Python 3.11 + `pip install -r requirements.txt &&
+# pip install -e .` in a throwaway prefix, as in .github/workflows/run_test.yaml).
+#
+# NOTE: the regression test now compares snapshots with a per-field normalized-RMS
+# metric (3% tolerance) that is robust to cross-hardware / cross-jaxlib XLA
+# reduction-order drift (measured <=~0.7% between runner CPU types). A reference is
+# therefore valid regardless of the exact jax/jaxlib it was generated with — a
+# plain `REGENERATE=1 JAX_PLATFORMS=cpu pytest ...` on any reasonable machine works
+# too. This script just keeps regeneration reproducible and isolated from a messy
+# dev env; it is no longer required to bit-match CI.
 #
 # Usage:  ./regenerate_regression_references.sh
 # Then:   git add jcm/data/test/composable_physics_regression/*.npz && commit.
