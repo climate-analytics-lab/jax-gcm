@@ -283,7 +283,37 @@ class TestCloudFraction:
         
         assert jnp.any(cf > 0.5)  # Should have significant clouds
         assert jnp.all(rh > 0.9)   # High relative humidity
-    
+
+    def test_stratospheric_cloud_cutoff(self):
+        """No cloud above the cloud-top pressure (ECHAM ``jks``).
+
+        A supersaturated column reaching into the stratosphere must form
+        cloud in the troposphere but NOT above ``cloud_top_pressure_pa``.
+        The RH closure otherwise fills the cold (qsat→0) stratosphere with
+        spurious cloud (q/qsat ~80× at ~180 K), which inflates total cloud
+        cover and corrupts the radiation cloud field.
+        """
+        config = CloudParameters.default()  # cutoff at 100 hPa
+        pressure = jnp.array([90000.0, 50000.0, 30000.0, 8000.0, 5000.0, 3000.0])
+        temperature = jnp.array([285.0, 250.0, 225.0, 200.0, 190.0, 185.0])
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        specific_humidity = 1.2 * qs  # supersaturated at every level
+        cf, _ = calculate_cloud_fraction(
+            temperature, specific_humidity, pressure, 100000.0, config
+        )
+        below = pressure >= config.cloud_top_pressure_pa
+        above = pressure < config.cloud_top_pressure_pa
+        assert jnp.all(cf[below] > 0.5), "tropospheric cloud should form"
+        assert jnp.all(cf[above] == 0.0), "no cloud above the cutoff"
+
+        # Disabling the cutoff (0 Pa) restores the (spurious) stratospheric
+        # cloud — confirms the cutoff is what suppresses it.
+        cfg_off = CloudParameters.default(cloud_top_pressure_pa=0.0)
+        cf_off, _ = calculate_cloud_fraction(
+            temperature, specific_humidity, pressure, 100000.0, cfg_off
+        )
+        assert jnp.any(cf_off[above] > 0.5)
+
     def test_cloud_fraction_profile(self):
         """Test that critical RH varies with height"""
         config = CloudParameters.default()
