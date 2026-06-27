@@ -619,7 +619,20 @@ def shallow_cloud_scheme(
         temperature, specific_humidity, cloud_water, cloud_ice,
         cloud_fraction, pressure, dt, config
     )
-    
+
+    # Stratospheric cutoff (ECHAM ``jks``): above ``cloud_top_pressure_pa`` the
+    # cloud fraction is forced to zero in ``calculate_cloud_fraction``.
+    # ``condensation_evaporation`` does not consume ``cloud_fraction``, so it
+    # would still condense vapour into qc/qi (and emit T/q tendencies) at those
+    # supposedly cloud-free levels. Gate the condensation here too so a masked
+    # level produces no hidden stratospheric cloud — keeping the standalone
+    # scheme consistent with the zeroed fraction.
+    in_troposphere = pressure >= config.cloud_top_pressure_pa
+    dtedt = jnp.where(in_troposphere, dtedt, 0.0)
+    dqdt = jnp.where(in_troposphere, dqdt, 0.0)
+    dqcdt = jnp.where(in_troposphere, dqcdt, 0.0)
+    dqidt = jnp.where(in_troposphere, dqidt, 0.0)
+
     # Within-timestep condensation: update cloud water/ice with condensation
     # so that microphysics (called next) sees non-zero values.
     # Following ECHAM mo_cloud.f90 where zxlb += zcnd within the same call.
