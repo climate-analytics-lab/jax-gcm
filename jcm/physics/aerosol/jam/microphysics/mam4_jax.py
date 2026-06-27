@@ -24,13 +24,15 @@ timestep, and unpacks the change back into per-tracer tendencies
 Licensing & precision
 ----------------------
 MAM4-JAX is **GPL-3.0**; jcm is Apache-2.0. It is therefore an *optional*
-dependency (``pip install jcm[mam4]``) imported lazily here, so a plain jcm
-import never pulls in GPL code. The core's diffrax SOA-exchange ODE solver
-only converges in **float64** (it diverges in float32), so this term enables
-``jax_enable_x64`` at construction and runs the core in float64, casting
-jcm's float32 tracers to float64 at the boundary and the resulting
-tendencies / ``_jam_state`` back to the model dtype. The dynamical core
-keeps creating float32 arrays and is unaffected.
+dependency (``pip install jcm[mam4]``). It is imported at this module's top, but
+this adapter module is itself loaded only when JAM selects the mam4_jax core
+(lazily, via ``jam_terms``), so a plain jcm import never pulls in GPL code. The condensation is integrated with the
+operator-split ``substep`` / ``astem`` backends (the original adaptive diffrax
+solver is not supported — too expensive), both of which are float32-safe. By
+default the term runs the core in float64 (``MAM4_JAX_ENABLE_X64``), casting
+jcm's float32 tracers to the working precision at the boundary and the
+resulting tendencies / ``_jam_state`` back to the model dtype; with
+``enable_x64=False`` the whole model (this core included) runs float32.
 
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
@@ -44,6 +46,7 @@ Deliberately not coupled yet (follow-ups)
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 
 import jax
@@ -62,6 +65,19 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 )
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
+
+# MAM4-JAX (GPL-3.0) core. Imported at module level — this whole adapter module
+# is itself only imported when JAM selects the mam4_jax core (lazily, via
+# ``jam_terms``), so a plain jcm import never reaches this GPL dependency. The
+# import enables ``jax_enable_x64`` by default; ``__init__`` sets the final
+# precision per-instance (see ``enable_x64``). If the ``jcm[mam4]`` extra isn't
+# installed this raises ``ImportError`` here, which is the right signal.
+import mam4_jax  # noqa: F401
+from mam4_jax import data
+from mam4_jax.processes import amicphys as _amicphys
+from mam4_jax.processes.amicphys import amicphys
+from mam4_jax.processes.calcsize import calcsize
+from mam4_jax.processes.wateruptake import wateruptake
 
 # amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
 # maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.
@@ -83,32 +99,6 @@ _TOKEN_TO_TYPE: dict[str, int] = {
 
 _TINY_VOL = 1.0e-40   # m³/kg — floor for the volume-weighted κ guard.
 
-#: Cached ``(calcsize, wateruptake, amicphys, data)`` from MAM4-JAX. Imported
-#: once, lazily, so plain jcm import never touches the GPL dependency.
-_CORE = None
-
-
-def _core():
-    """Lazily import MAM4-JAX and (re-)enable float64.
-
-    Importing ``mam4_jax`` enables ``jax_enable_x64`` globally. The core only
-    converges in float64 (its implicit diffrax solver diverges otherwise), so
-    we keep it on; because jcm builds arrays with ``dtype=float``, the whole
-    model then runs in float64 while the core is active. The flag is re-asserted
-    on every call (not just the cached first import) because a caller may have
-    toggled it off in between — e.g. test teardown.
-    """
-    global _CORE
-    jax.config.update("jax_enable_x64", True)
-    if _CORE is None:
-        import mam4_jax  # noqa: F401  — also enables jax_enable_x64 on import
-        from mam4_jax import data
-        from mam4_jax.processes.amicphys import amicphys
-        from mam4_jax.processes.calcsize import calcsize
-        from mam4_jax.processes.wateruptake import wateruptake
-        _CORE = (calcsize, wateruptake, amicphys, data)
-    return _CORE
-
 
 def relative_humidity(temperature, specific_humidity, pressure):
     """Ambient relative humidity (0–1) for ``amicphys``'s nucleation path.
@@ -127,11 +117,61 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
     requires: ClassVar[tuple[str, ...]] = ("pressure_full", "height_full")
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
 
-    def __init__(self, spec: ModalAerosolSpec | None = None):
-        """Import the core, enable float64, and precompute the index maps."""
+    def __init__(
+        self,
+        spec: ModalAerosolSpec | None = None,
+        *,
+        condensation_backend: str = "substep",
+        n_substeps: int = 4,
+        enable_x64: bool | None = None,
+    ):
+        """Import the core, set precision, select the condensation backend.
+
+        The original adaptive ``diffrax`` (Kvaerno5) condensation solve is **not
+        supported** here — it is ~40x the cost of the operator-split backends and
+        not worth it for this model. Only the two operator-split backends are
+        offered:
+
+        * ``"substep"`` (default) — analytic H2SO4 + ``n_substeps``
+          frozen-``g_star`` SOA substeps, each the exact closed form of the
+          linear sub-ODE. No adaptive while-loop, so no ``max_steps`` fragility
+          or worst-cell gating; ``n_substeps`` is speed-insensitive (set it for
+          accuracy).
+        * ``"astem"`` — the Fortran-faithful adaptive scheme (upstream
+          semi-implicit step1/step2 SOA with adaptive ``dtcur = alpha/tmpa``,
+          plus the same analytic H2SO4). Use this to match the CAM/E3SM
+          reference exactly.
+
+        Both need a mam4_jax with ``configure_condensation``
+        (reflective-org/MAM4-JAX#59).
+
+        ``enable_x64`` controls model precision. Both backends are float32-safe
+        (the coag ``qv12`` underflow was fixed upstream), so float32 runs the
+        *whole* coupled model in float32 — useful memory headroom (the dynamics +
+        60-tracer spectral transport ~halve their traffic). ``None`` (default)
+        reads the ``MAM4_JAX_ENABLE_X64`` env var (default ``"1"`` → float64,
+        the safe default); ``True`` / ``False`` override it. Applied here, at
+        construction, so the dycore state built afterwards inherits it.
+        """
         if spec is not None:
             self.spec = spec
-        _, _, _, data = _core()
+
+        # Let mam4_jax validate the backend and own its own capability errors.
+        _amicphys.configure_condensation(
+            backend=condensation_backend, n_substeps=n_substeps,
+        )
+        self._condensation_backend = str(condensation_backend)
+        self._n_substeps = int(n_substeps)
+
+        # Precision — applied during construction so the dycore state built
+        # afterwards (in bootstrap/run) inherits it; toggling it later would
+        # leave an f64 state meeting f32 tendencies (mixed-dtype errors).
+        if enable_x64 is None:
+            want_x64 = os.environ.get("MAM4_JAX_ENABLE_X64", "1") != "0"
+        else:
+            want_x64 = bool(enable_x64)
+        jax.config.update("jax_enable_x64", want_x64)
+        self._enable_x64 = want_x64
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
@@ -204,7 +244,6 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         )
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        calcsize, wateruptake, amicphys, _ = _core()
         out_dtype = state.temperature.dtype
         shape = state.temperature.shape
         zeros64 = jnp.zeros(shape, jnp.float64)
@@ -259,15 +298,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # full physics (mdo_gasaerexch=rename=newnuc=coag=1, its defaults).
         #
         # The step is ``vmap``-ed over a flattened cell axis so each (level,
-        # column) point solves its OWN box-model ODE. This is essential, not
-        # cosmetic: amicphys's gas-exchange uses an *implicit* diffrax solver,
-        # and passing the whole grid as one batched state makes that solver
-        # form a Jacobian coupled across every cell — its compile cost grows
-        # with (n_cells)² and explodes (>80 GB at T21). Per-cell vmap keeps the
-        # Jacobian at the single-cell size (the upstream box model only ever
-        # ran one cell), collapsing T21 compile to ~1 GB while giving each cell
-        # its own adaptive timestep — the physically correct box-model
-        # semantics.
+        # column) point integrates its OWN box-model — the upstream MAM4 box
+        # model only ever ran a single cell, and per-cell vmap is the faithful
+        # structure for the operator-split substep / astem integrators.
         n_cells = int(np.prod(shape)) if shape else 1
 
         def to_cells(a):

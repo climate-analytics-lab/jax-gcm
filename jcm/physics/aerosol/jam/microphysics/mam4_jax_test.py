@@ -122,6 +122,89 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_wet) >= np.asarray(aer.r_dry)))
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
+    def _assert_backend_runs_finite(self, backend):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+
+        # A condensation backend must produce finite, physical output through
+        # the full wrapper. Restore the process-global default afterwards so it
+        # can't leak into other tests sharing this process.
+        state, diagnostics = _column_state()
+        try:
+            term = Mam4JaxMicrophysics(
+                condensation_backend=backend, n_substeps=4,
+            )
+            self.assertEqual(_amicphys._COND["backend"], backend)
+            self.assertEqual(term._condensation_backend, backend)
+            tend, diags = term(state, diagnostics, None, None)
+            for v in tend.tracers.values():
+                self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+            aer = diags["_jam_state"]
+            for f in (aer.r_dry, aer.r_wet, aer.rho, aer.kappa):
+                self.assertTrue(np.all(np.isfinite(np.asarray(f))))
+            self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
+            key = mass_name(
+                MAM4_SPEC.modes[0].species[0], MAM4_SPEC.modes[0].short
+            )
+            self.assertIn(key, tend.tracers)
+        finally:
+            _amicphys.configure_condensation(backend="substep")
+
+    def test_substep_backend_runs_finite_and_physical(self):
+        self._assert_backend_runs_finite("substep")
+
+    def test_astem_backend_runs_finite_and_physical(self):
+        self._assert_backend_runs_finite("astem")
+
+    def test_default_backend_is_substep(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+        try:
+            term = Mam4JaxMicrophysics()
+            self.assertEqual(term._condensation_backend, "substep")
+        finally:
+            _amicphys.configure_condensation(backend="substep")
+
+    def test_enable_x64_control(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        if not hasattr(_amicphys, "configure_condensation"):
+            self.skipTest("mam4_jax lacks configure_condensation (PR #59)")
+        # setUp/tearDown restore the process-global x64 flag around this test.
+        try:
+            # Default (None) keeps float64 (current behaviour).
+            self.assertTrue(Mam4JaxMicrophysics()._enable_x64)
+            self.assertTrue(jax.config.read("jax_enable_x64"))
+            # Opt into float32 with a float32-safe backend.
+            term = Mam4JaxMicrophysics(
+                condensation_backend="substep", enable_x64=False,
+            )
+            self.assertFalse(term._enable_x64)
+            self.assertFalse(jax.config.read("jax_enable_x64"))
+            # Backend validation is delegated to mam4_jax: an unknown backend
+            # raises the library's own ValueError (jcm adds no guard of its own).
+            with self.assertRaises(ValueError):
+                Mam4JaxMicrophysics(condensation_backend="not-a-backend")
+        finally:
+            _amicphys.configure_condensation(backend="substep")
+
     def test_grad_through_a_tracer_is_finite(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -148,12 +231,10 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 class Mam4JaxModelTest(unittest.TestCase):
     """End-to-end: the MAM4-JAX core runs inside the full ECHAM GCM.
 
-    Guards the per-cell ``jax.vmap`` of the box-model core. amicphys's
-    gas-exchange uses an implicit diffrax solver; handing it the whole grid as
-    one batched state couples its Jacobian across every cell and the T21
-    compile exceeds 80 GB. With the per-cell vmap the same run compiles in
-    ~1 GB — so a regression here surfaces as an out-of-memory blow-up, not a
-    silent slowdown.
+    Guards the per-cell ``jax.vmap`` of the box-model core: the upstream MAM4
+    box model runs a single cell, so each (level, column) point is integrated
+    independently. A regression that batches the whole grid through the core at
+    once would surface here as a blow-up rather than a silent slowdown.
     """
 
     def setUp(self):
