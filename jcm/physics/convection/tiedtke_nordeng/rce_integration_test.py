@@ -340,6 +340,78 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         )
         self.assertGreater(float(jnp.max(jnp.abs(default_tend.dtedt))), 1e-6)
 
+    def test_stable_column_with_moisture_supply_stays_inactive(self):
+        """A statically stable column must NOT convect on evaporation alone.
+
+        ``find_cloud_base`` returns the LCL, which exists in many stable
+        columns, so triggering convection on the moisture supply alone
+        (activate whenever E>0) fired deep convection in stable, non-buoyant
+        columns (CAPE==0). On a T63L47 real-orography spin-up that
+        over-activation dumped latent heat into stable tropical columns and ran
+        the temperature away to NaN within ~4 days. The buoyancy floor
+        (``cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER``) restores ECHAM's ``ldcum``
+        requirement: no buoyancy ⇒ no convection, no matter how large the
+        moisture supply.
+        """
+        # Stable sounding (small lapse): a surface parcel reaches its LCL (a
+        # cloud base exists, so the old ``moisture_supply > 0`` trigger would
+        # have fired) but is never buoyant, so CAPE is below the floor.
+        T, q, p, dz, rho = _tropical_sounding(
+            surface_T=285.0, surface_rh=0.7, lapse_K_per_km=3.5,
+        )
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        cfg = ConvectionParameters.default()
+        # Even a large moisture supply must not activate convection here.
+        for supply in (1.0e-4, 1.0e-2):
+            tend, state = tiedtke_nordeng_convection(
+                T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
+                moisture_supply=jnp.asarray(supply),
+            )
+            self.assertEqual(
+                int(state.ktype), 0,
+                f"stable column must stay inactive (supply={supply})",
+            )
+            self.assertAlmostEqual(
+                float(jnp.max(jnp.abs(tend.dtedt))), 0.0, places=8,
+            )
+            self.assertAlmostEqual(float(tend.precip_conv), 0.0, places=8)
+
+    def test_near_saturated_cloud_base_falls_back_to_cape_closure(self):
+        """Near-saturated cloud base ⇒ moisture closure bypassed (ECHAM zlo1).
+
+        The moisture-budget flux is ``E/(q_u−q_e)``; as the cloud-base
+        environment approaches saturation the denominator collapses and
+        ``E/q_excess`` spikes to the CFL cap ``layer_mass/dt`` — a catastrophic
+        single-step latent-heat burst that seeded the T63L47 hot-cell runaway.
+        ECHAM only applies the budget closure when the saturation deficit
+        exceeds ``zdqmin`` (mo_cumastr.f90:268-271); below it the scheme falls
+        back. So on a near-saturated (but still conditionally unstable) column
+        the cloud-base mass flux with E>0 equals the bounded CAPE-closure flux
+        (E=0), NOT the CFL-cap burst.
+        """
+        T, q, p, dz, rho = _tropical_sounding(
+            surface_T=302.0, surface_rh=0.997, lapse_K_per_km=7.0,
+        )
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        cfg = ConvectionParameters.default()
+        _, st_supply = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
+            moisture_supply=jnp.asarray(2.0e-4),
+        )
+        _, st_cape = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
+            moisture_supply=jnp.asarray(0.0),
+        )
+        mfu_supply = float(jnp.max(st_supply.mfu))
+        mfu_cape = float(jnp.max(st_cape.mfu))
+        # Convection still fires (unstable column) ...
+        self.assertGreater(mfu_cape, 1.0e-4)
+        # ... but the near-saturated cloud base falls back to the bounded CAPE
+        # closure rather than the CFL-cap burst — identical mass flux to E=0.
+        self.assertAlmostEqual(mfu_supply, mfu_cape, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
