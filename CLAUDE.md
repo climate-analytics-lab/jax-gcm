@@ -14,6 +14,23 @@ Always document these decisions in the comments, and if appropriate in the docum
 
 Comments should always reference the current state of the code, and explain *why* it is doing what it is doing, not how it is different to some previous version of the code (Which can get out of date and confusing)
 
+## Finish the Job — No Half Implementations
+When asked to fix or implement something, deliver the **complete, faithful** solution by
+default — do not ship a partial fix, a band-aid, or a "good enough for now" workaround and
+present it as done. In this codebase "faithful" specifically means matching the reference
+formulation (e.g. the ECHAM/ICON/SPEEDY Fortran), including the parts that are subtle or
+tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
+
+ - If the correct fix turns out to be deeper than expected, do the deeper fix. Don't
+   silently descope to the shallow version.
+ - A workaround/cap/guard is acceptable **only** as an explicitly-labelled stopgap that the
+   user has agreed to — never as a substitute for the real fix.
+ - Validate that the full fix actually works (tests + a representative run where relevant),
+   and verify conservation / physical correctness, before calling it done.
+ - The only time to stop short is a genuine blocking decision that is the user's to make
+   (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
+   reason.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
