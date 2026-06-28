@@ -157,9 +157,32 @@ def test_in_cloud_path_scales_correctly():
     )
 
 
-def test_in_cloud_path_floors_zero_cloud():
-    """Clear cells (f=0) get a finite divisor to avoid NaN."""
-    grid = jnp.array([0.0])
-    f = jnp.array([0.0])
-    out = in_cloud_path(grid, f, eps=1e-3)
+def test_in_cloud_path_zeroes_clear_cells():
+    """Clear cells (f <= 2*eps) get a ZERO in-cloud path.
+
+    Mirrors ECHAM ``mo_psrad_interface.f90:232-237`` which zeros the
+    in-cloud water where ``cld_frc_vr <= 2*EPSILON``. Even with grid-mean
+    condensate present (e.g. decorrelated 1M residue), the in-cloud path
+    must be exactly 0 in a clear cell so a vanishing cloud fraction can
+    never inflate the cloud optical depth.
+    """
+    eps = 1e-3
+    grid = jnp.array([1e-3, 1e-3, 1e-3])      # nonzero grid-mean condensate
+    f = jnp.array([0.0, eps, 5.0 * eps])      # clear, clear, thin-but-real
+    out = in_cloud_path(grid, f, eps=eps)
     assert jnp.isfinite(out).all()
+    # f=0 and f=eps are <= 2*eps -> zeroed.
+    np.testing.assert_array_equal(np.array(out[:2]), np.array([0.0, 0.0]))
+    # f=5*eps is a real (if thin) cloud -> normal grid/f conversion.
+    np.testing.assert_allclose(float(out[2]), 1e-3 / (5.0 * eps), rtol=1e-6)
+
+
+def test_in_cloud_path_no_inflation_for_decorrelated_condensate():
+    """A tiny cloud fraction with large grid-mean condensate must not
+    inflate the in-cloud path (the RRTMGP-NaN failure mode).
+    """
+    eps = 1e-3
+    grid = jnp.array([5e-3])     # large grid-mean condensate (5 g/kg)
+    f = jnp.array([1e-6])        # essentially clear
+    out = in_cloud_path(grid, f, eps=eps)
+    assert float(out[0]) == 0.0
