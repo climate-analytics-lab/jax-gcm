@@ -58,9 +58,10 @@ from .lohmann_2m_params import (
     fact_coll_eff, fact_tke
 )
 
-from .cloud_utils import (eff_ice_crystal_radius, minimum_CDNC,
-                          consistency_number_to_mass, gridbox_frac_falling_hydrometeor, threshold_vert_vel, 
-                          breadth_factor
+from .cloud_utils import (
+    eff_ice_crystal_radius, minimum_CDNC,
+    consistency_number_to_mass, gridbox_frac_falling_hydrometeor,
+    threshold_vert_vel, breadth_factor
 )
 
 # @tree_math.struct
@@ -3101,8 +3102,17 @@ def cloud_microphysics_2m(
     cdnc = qnc * air_density
     icnc = qni * air_density
 
-    # Minimum CDNC from the max-radius floor (uses pxwat = qc).
+    # Minimum cloud-droplet number — the SAME ECHAM ``minimum_CDNC`` the warm
+    # microphysics uses below (the dynamic max-radius floor or the fixed
+    # ``cdnc_min_fixed``, selected by ``ldyn_cdnc_min``; calibratable via the
+    # ``cdnc_min_*`` parameters). The KK2000 autoconversion rate scales as
+    # ``Nc^-1.79``, so without a floor a clean column (Nc -> 0; e.g. when the
+    # MACv2-SP aerosol AOD is ~0) autoconverts essentially all cloud water to
+    # rain instantly, leaving ~no cloud (LWP ~0.2 g/m2 vs the 1M scheme's ~20).
+    # Flooring the droplet number by that same minimum keeps a realistic
+    # cloud-water reservoir.
     cdnc_min = minimum_CDNC(qc)
+    cdnc = jnp.maximum(cdnc, cdnc_min)
 
     # pauloc==1 and pclcstar==cloud_fraction are conservative first-pass
     # approximations — refine in later 5b steps.
@@ -3673,6 +3683,25 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         air_density = diagnostics["air_density"]
         layer_thickness = diagnostics["layer_thickness"]
 
+        # Post-convection thermodynamic state (sequential convection->cloud
+        # coupling): convection has already advanced ``thermo_run`` with its
+        # heating/moistening and forwarded its detrained condensate into
+        # ``clouds.qc/qi``. Doing the saturation balance + clear-sky evaporation
+        # on this post-convection (T, q) — instead of the step-start state — is
+        # what makes the in-step moist-energy balance consistent and the
+        # clear-sky evaporation stable (see
+        # ``.claude/coupled_cloud_operator_design.md``). Tendencies are returned
+        # relative to this state; the host's additive sum with convection's
+        # tendency telescopes back to the correct final state. Falls back to the
+        # step-start state if no upstream term seeded ``thermo_run``.
+        thermo_run = diagnostics.get("thermo_run")
+        if thermo_run is None:
+            temperature_in = state.temperature
+            specific_humidity_in = state.specific_humidity
+        else:
+            temperature_in = thermo_run["temperature"]
+            specific_humidity_in = thermo_run["specific_humidity"]
+
         clouds = diagnostics["clouds"]
         qc_interim = clouds.qc
         qi_interim = clouds.qi
@@ -3723,20 +3752,42 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
             out_axes=(0, 0, 0),
         )(
-            state.temperature, state.specific_humidity, pressure_full,
+            temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
             cloud_fraction, air_density, layer_thickness, tke,
             activated_cdnc, ice_nuclei, ice_nuclei_deposition, dt, params_2m,
         )
 
+        # Grid-mean Sundqvist condensation / evaporation — the implicit
+        # saturation adjustment the 1M column-sweep performs but the 2M
+        # microphysics lacked. Without it the 2M scheme forms almost no
+        # stratiform cloud in saturated cells (an A/B spin-up gave a
+        # radiatively-active LWP ~50x smaller than 1M) and the condensate it
+        # does carry — convective detrainment advected into sub-saturated
+        # cells — accumulates unbounded. This step condenses vapour -> qc/qi
+        # where the post-convection grid box is supersaturated (forming
+        # radiatively-active cloud) and evaporates qc/qi where it is
+        # sub-saturated, capped at the available cloud water, via the
+        # warming-feedback-damped Newton step (so it is stable, unlike the
+        # clear-cell-evaporation bolt-on). ``condensation_evaporation`` is
+        # broadcasting-native, so it runs directly on the (nlev, ncols) state.
+        from .sundqvist import (
+            condensation_evaporation as _sundqvist_cond_evap,
+            CloudParameters as _SundqvistCloudParams,
+        )
+        dtedt_strat, dqdt_strat, dqcdt_strat, dqidt_strat = _sundqvist_cond_evap(
+            temperature_in, specific_humidity_in, qc_interim, qi_interim,
+            cloud_fraction, pressure_full, dt, _SundqvistCloudParams.default(),
+        )
+
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
             v_wind=jnp.zeros_like(state.v_wind),
-            temperature=tend_all.dtedt.T,
-            specific_humidity=tend_all.dqdt.T,
+            temperature=tend_all.dtedt.T + dtedt_strat,
+            specific_humidity=tend_all.dqdt.T + dqdt_strat,
             tracers={
-                "qc": tend_all.dqcdt.T,
-                "qi": tend_all.dqidt.T,
+                "qc": tend_all.dqcdt.T + dqcdt_strat,
+                "qi": tend_all.dqidt.T + dqidt_strat,
                 "qnc": tend_all.dqncdt.T,
                 "qni": tend_all.dqnidt.T,
                 "qr": tend_all.dqrdt.T,
