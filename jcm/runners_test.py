@@ -656,3 +656,31 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
             qmax, 1e-4,
             f"gridpoint q={qmax:.4g} kg/kg too dry; humidity not injected",
         )
+
+
+class TestInjectJwPreservesCloudTracers(unittest.TestCase):
+    """``inject_jw_profile`` must inject only the analytic humidity profile and
+    keep the other prognostic tracers (qc/qi/qnc/qni/qr/qs) the dycore seeded.
+
+    Regression for the CRE ≡ 0 bug: overwriting ``state.tracers`` wholesale
+    dropped the cloud tracers, so radiation saw zero cloud water for the entire
+    JW-initialised run.
+    """
+
+    def test_jw_keeps_2m_cloud_tracers(self):
+        from jcm.runners import inject_jw_profile
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
+        model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
+        model.bootstrap_state()
+        inject_jw_profile(model, rh=0.5)
+
+        keys = set(model._final_dycore_state.tracers.keys())
+        self.assertIn("specific_humidity", keys)
+        self.assertTrue(
+            {"qc", "qi", "qnc", "qni", "qr", "qs"}.issubset(keys),
+            f"inject_jw_profile dropped cloud tracers; tracers present: {keys}",
+        )
