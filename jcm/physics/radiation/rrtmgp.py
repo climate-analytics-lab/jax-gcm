@@ -48,6 +48,13 @@ from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
+# Cap on in-cloud condensate (kg/kg) handed to the cloud optics — the high end
+# of realistic in-cloud water; bounds the cloud optical depth of thin clouds
+# carrying large grid-mean condensate so the two-stream solver can't NaN. The
+# faithful-radiation equivalent of ECHAM's optics inhomogeneity factor + r_eff
+# table clamp. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+_MAX_IN_CLOUD_CONDENSATE = 1.0e-2
+
 
 # ---------------------------------------------------------------------------
 # Module-level RRTMGP instance (created once at import time)
@@ -448,9 +455,24 @@ def radiation_scheme_rrtmgp(
 
     # In-cloud condensate (grid-mean / cf) is what each cloudy
     # sub-column sees; the binary McICA mask then re-imposes a
-    # cloud-or-clear partitioning per g-point.
-    cloud_water_in_cloud = in_cloud_path(cloud_water, cloud_fraction)
-    cloud_ice_in_cloud = in_cloud_path(cloud_ice, cloud_fraction)
+    # cloud-or-clear partitioning per g-point. ``in_cloud_path`` already
+    # zeros the (essentially) clear cells (cf <= 2*eps; ECHAM mo_psrad).
+    #
+    # A *thin* but resolved cloud (cf ~ 0.01-0.05) carrying a lot of grid-mean
+    # condensate still yields a very large in-cloud water (grid_mean / cf), and
+    # the resulting extreme cloud optical depth NaNs the two-stream solver.
+    # ECHAM bounds the radiative effect of such cells via the cloud-optics
+    # sub-grid inhomogeneity factor (``zinhoml = LWP^-p``) and the r_eff table
+    # clamp; we apply the equivalent guard as a direct cap on the in-cloud
+    # condensate handed to the optics. ``_MAX_IN_CLOUD_CONDENSATE`` = 10 g/kg is
+    # the high end of realistic in-cloud water, so genuine clouds are untouched
+    # and only the pathological inflation is clipped.
+    cloud_water_in_cloud = jnp.minimum(
+        in_cloud_path(cloud_water, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE
+    )
+    cloud_ice_in_cloud = jnp.minimum(
+        in_cloud_path(cloud_ice, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE
+    )
 
     icon_state = prepare_radiation_state(
         temperature=temperature,

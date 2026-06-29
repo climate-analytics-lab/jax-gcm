@@ -305,3 +305,28 @@ class TestRRTMGPMcICA:
         # the noise floor should be much smaller than the cloud signal.
         all_minus_clear = float(jnp.abs(diag_a.toa_sw_up - diag_a.toa_sw_up_clear))
         assert toa_diff < max(all_minus_clear * 2, 50.0)
+
+
+class TestRRTMGPThinCloudInflation:
+    """A thin but resolved cloud carrying large grid-mean condensate must not
+    NaN the radiation (the in-cloud-water inflation / cloud-optical-depth
+    runaway that crashed RRTMGP+1M). Guarded by the in-cloud condensate cap
+    (``_MAX_IN_CLOUD_CONDENSATE``).
+    """
+
+    def test_finite_for_thin_cloud_high_condensate(self):
+        inputs = _make_inputs(nlev=10)
+        nlev = inputs["temperature"].shape[0]
+        # cf ~ 0.02 (resolved, not clear) with large grid-mean condensate so
+        # the in-cloud value (grid_mean / cf) is ~0.25-0.5 kg/kg.
+        inputs["cloud_fraction"] = jnp.zeros((nlev,)).at[3:6].set(0.02)
+        inputs["cloud_water"] = jnp.zeros((nlev,)).at[3:6].set(5e-3)
+        inputs["cloud_ice"] = jnp.zeros((nlev,)).at[4:7].set(8e-3)
+        inputs["compute_cre"] = True
+
+        tend, diag = radiation_scheme_rrtmgp(**inputs)
+        assert jnp.all(jnp.isfinite(tend.temperature_tendency))
+        assert jnp.isfinite(diag.toa_sw_up)
+        assert jnp.isfinite(diag.toa_lw_up)
+        # The thin cloud is still radiatively active (not silently dropped).
+        assert float(diag.toa_sw_up) > float(diag.toa_sw_up_clear) - 1e-3
