@@ -1018,6 +1018,7 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
+from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
 class TiedtkeConvection(PhysicsTerm):
@@ -1177,6 +1178,19 @@ class TiedtkeConvection(PhysicsTerm):
                 diagnostics["clouds"].qi + tendency.tracers["qi"] * dt,
                 0.0,
             ),
+        )
+
+        # Advance the running thermodynamic state so the downstream cloud
+        # microphysics sees the post-convection (T, q) — convective detrainment
+        # already updated ``clouds.qc/qi`` above; this completes the
+        # post-convection state the cloud scheme's saturation balance needs
+        # (sequential convection->cloud coupling, see
+        # ``jcm.physics.diagnostics.moist_air_state.advance_thermo_run``).
+        diagnostics = advance_thermo_run(
+            diagnostics,
+            dt,
+            d_temperature=tendency.temperature,
+            d_specific_humidity=tendency.specific_humidity,
         )
 
         return tendency, {

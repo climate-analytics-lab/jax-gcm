@@ -214,7 +214,7 @@ class CloudParams2M: #(NamedTuple):
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
         ldyn_cdnc_min: bool = False,
-        cdnc_min_fixed: float = 10.0,
+        cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
         nic_cirrus: int = 2,
         # resolution-dependent placeholders (ICON defaults)
         crs: float = 0.975,

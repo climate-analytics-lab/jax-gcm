@@ -54,7 +54,61 @@ MOIST_AIR_FIELDS: tuple[str, ...] = (
     "layer_thickness",
     "surface_pressure",
     "relative_humidity",
+    "thermo_run",
 )
+
+
+def advance_thermo_run(
+    diagnostics: dict,
+    dt,
+    d_temperature=None,
+    d_specific_humidity=None,
+) -> dict:
+    """Advance the running ``thermo_run`` state by a term's tendency.
+
+    ``thermo_run`` is a *running thermodynamic view* (temperature, specific
+    humidity) carried through the per-step diagnostics so a term that runs after
+    another can see the upstream term's effect. A term that changes T and/or q
+    before the cloud microphysics (currently only Tiedtke convection; the
+    pattern generalises to any opt-in pre-cloud term) calls this with its own
+    tendency, so the 2M cloud scheme's saturation balance condenses against the
+    post-convection state — the sequential convection->cloud coupling in
+    ``.claude/coupled_cloud_operator_design.md``. ``d_temperature`` /
+    ``d_specific_humidity`` are tendencies (per second) in the same layout as
+    ``thermo_run`` (the term's ``PhysicsState`` shape).
+
+    Tendency ownership — *nothing is zeroed here or by the caller.* This is an
+    operator-split model: every term returns its full tendency, the driver sums
+    all of them, and the dycore applies that single sum to the *step-start*
+    state exactly once. ``thermo_run`` is a parallel diagnostic view, NOT the
+    prognostic state, so the same tendency legitimately plays two roles — it is
+    returned for the op-split sum *and* passed here to advance ``thermo_run`` for
+    downstream terms. Zeroing it in either place would drop that term's
+    contribution from the final state. Because each term's tendency is computed
+    against the running ``thermo_run`` and the sum is applied once, additive
+    accumulation is algebraically identical to applying the terms sequentially
+    (T_final = T0 + dt*(conv_dT + cloud_dT(post-conv)) either way).
+
+    Returns a new diagnostics dict with ``thermo_run`` advanced; a no-op
+    (returns the input unchanged) if ``thermo_run`` is absent, so callers stay
+    backward-safe.
+    """
+    tr = diagnostics.get("thermo_run")
+    if tr is None:
+        return diagnostics
+    temperature = tr["temperature"]
+    specific_humidity = tr["specific_humidity"]
+    if d_temperature is not None:
+        temperature = temperature + d_temperature * dt
+    if d_specific_humidity is not None:
+        specific_humidity = specific_humidity + d_specific_humidity * dt
+    return {
+        **diagnostics,
+        "thermo_run": {
+            "temperature": temperature,
+            "specific_humidity": specific_humidity,
+        },
+    }
 
 
 class MoistAirColumnState(PhysicsTerm):
@@ -163,6 +217,20 @@ class MoistAirColumnState(PhysicsTerm):
         e = q_clip * pressure_full / (0.622 + 0.378 * q_clip)
         relative_humidity = e / jnp.maximum(es, 1e-3)
 
+        # Running thermodynamic state for sequential convection->cloud coupling.
+        # Seeded to the step-start (T, q); terms that change T/q before the cloud
+        # microphysics (radiation, convection) advance it by their tendency*dt so
+        # the cloud scheme sees the post-(radiation+convection) state — emulating
+        # ECHAM's sequential radiation->convection->cloud ordering inside our
+        # additive-splitting framework. Summing the sequentially-computed
+        # tendencies and applying to the step-start state telescopes to the same
+        # result as true sequential operator splitting. See
+        # ``.claude/coupled_cloud_operator_design.md``.
+        thermo_run = {
+            "temperature": state.temperature,
+            "specific_humidity": state.specific_humidity,
+        }
+
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
             **diagnostics,
@@ -174,4 +242,5 @@ class MoistAirColumnState(PhysicsTerm):
             "layer_thickness": layer_thickness,
             "surface_pressure": surface_pressure,
             "relative_humidity": relative_humidity,
+            "thermo_run": thermo_run,
         }
