@@ -586,9 +586,23 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     q_sat = 0.622 * es / jnp.maximum(p - es, 1.0)
     rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
     q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)
+    # Nondimensionalize q exactly as the canonical physics->dynamics bridge does
+    # (``state_bridge.physics_state_to_dynamics_state``:
+    # ``nondimensionalize(specific_humidity * gram/kilogram)``). The dynamics
+    # ``State`` stores the NONDIMENSIONAL tracer; the forward bridge then
+    # re-dimensionalizes with ``dimensionalize(q, gram/kilogram)`` (~x1000)
+    # before handing the gridpoint state to physics. Storing the raw kg/kg
+    # ``q_profile`` skipped this scaling, so physics saw q ~1000x too large
+    # (~5 kg/kg); the cloud saturation adjustment (qs ~ 0.008) read it as hugely
+    # supersaturated and dumped L*dq/cp ~ 7000 K of latent heat in a single step
+    # -> every moist init blew up at step 1. Mirroring the bridge keeps the
+    # gridpoint physics at the intended q and the moist resting state is stable.
+    q_nondim = model.dycore.physics_specs.nondimensionalize(
+        q_profile * units.gram / units.kilogram
+    )
     q_dtype = state.tracers["specific_humidity"].dtype
     q_nodal = jnp.broadcast_to(
-        q_profile[:, None, None], (nlev, nlon, nlat)
+        q_nondim[:, None, None], (nlev, nlon, nlat)
     ).astype(q_dtype)
     state.tracers = {
         "specific_humidity": model.coords.horizontal.to_modal(q_nodal),
