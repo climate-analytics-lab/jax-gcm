@@ -51,13 +51,25 @@ class CloudParameters:
     t_mix_min: float     # Lower bound of mixed phase (K)
     t_mix_max: float     # Upper bound of mixed phase (K)
 
+    # Cloud-top pressure cutoff (ECHAM ``jks`` analogue). ECHAM
+    # ``mo_cover.f90`` zeros cloud cover for all levels above ``jks``
+    # (``DO jk=1,jks-1: paclc=0``) so no cloud forms in the stratosphere.
+    # We express that level cutoff as a pressure threshold (portable across
+    # hybrid grids): cloud fraction is forced to zero wherever the full-level
+    # pressure is below ``cloud_top_pressure_pa``. Without it the RH-based
+    # Sundqvist closure fills the cold (here ~180 K, qsat→0) stratosphere with
+    # spurious cloud — the q/qsat ratio reaches ~80× — saturating cf there.
+    # Set to 0 to disable the cutoff.
+    cloud_top_pressure_pa: float
+
     @classmethod
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
                  csatsc=0.7, cinv=0.25,
                  inversion_z_max=2000.0, inversion_z_min=500.0,
                  ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
-                 t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15) -> 'CloudParameters':
+                 t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
+                 cloud_top_pressure_pa=10000.0) -> 'CloudParameters':
         """Return default cloud parameters.
 
         Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
@@ -82,7 +94,8 @@ class CloudParameters:
             epsilon=jnp.array(epsilon),
             t_ice=jnp.array(t_ice),
             t_mix_min=jnp.array(t_mix_min),
-            t_mix_max=jnp.array(t_mix_max)
+            t_mix_max=jnp.array(t_mix_max),
+            cloud_top_pressure_pa=jnp.array(cloud_top_pressure_pa),
         )
 
 
@@ -352,6 +365,13 @@ def calculate_cloud_fraction(
     # Apply minimum cloud fraction threshold (matches ECHAM convention).
     cloud_fraction = jnp.where(cloud_fraction < 0.01, 0.0, cloud_fraction)
 
+    # Stratospheric cutoff (ECHAM ``jks``, mo_cover.f90:142-144): no cloud
+    # above ``cloud_top_pressure_pa``. The RH-closure otherwise fills the
+    # cold, near-zero-qsat stratosphere with spurious cloud (q/qsat ~80×).
+    cloud_fraction = jnp.where(
+        pressure < config.cloud_top_pressure_pa, 0.0, cloud_fraction
+    )
+
     return cloud_fraction, rel_humidity
 
 
@@ -599,7 +619,20 @@ def shallow_cloud_scheme(
         temperature, specific_humidity, cloud_water, cloud_ice,
         cloud_fraction, pressure, dt, config
     )
-    
+
+    # Stratospheric cutoff (ECHAM ``jks``): above ``cloud_top_pressure_pa`` the
+    # cloud fraction is forced to zero in ``calculate_cloud_fraction``.
+    # ``condensation_evaporation`` does not consume ``cloud_fraction``, so it
+    # would still condense vapour into qc/qi (and emit T/q tendencies) at those
+    # supposedly cloud-free levels. Gate the condensation here too so a masked
+    # level produces no hidden stratospheric cloud — keeping the standalone
+    # scheme consistent with the zeroed fraction.
+    in_troposphere = pressure >= config.cloud_top_pressure_pa
+    dtedt = jnp.where(in_troposphere, dtedt, 0.0)
+    dqdt = jnp.where(in_troposphere, dqdt, 0.0)
+    dqcdt = jnp.where(in_troposphere, dqcdt, 0.0)
+    dqidt = jnp.where(in_troposphere, dqidt, 0.0)
+
     # Within-timestep condensation: update cloud water/ice with condensation
     # so that microphysics (called next) sees non-zero values.
     # Following ECHAM mo_cloud.f90 where zxlb += zcnd within the same call.

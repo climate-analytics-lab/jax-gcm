@@ -283,7 +283,62 @@ class TestCloudFraction:
         
         assert jnp.any(cf > 0.5)  # Should have significant clouds
         assert jnp.all(rh > 0.9)   # High relative humidity
-    
+
+    def test_stratospheric_cloud_cutoff(self):
+        """No cloud above the cloud-top pressure (ECHAM ``jks``).
+
+        A supersaturated column reaching into the stratosphere must form
+        cloud in the troposphere but NOT above ``cloud_top_pressure_pa``.
+        The RH closure otherwise fills the cold (qsat→0) stratosphere with
+        spurious cloud (q/qsat ~80× at ~180 K), which inflates total cloud
+        cover and corrupts the radiation cloud field.
+        """
+        config = CloudParameters.default()  # cutoff at 100 hPa
+        pressure = jnp.array([90000.0, 50000.0, 30000.0, 8000.0, 5000.0, 3000.0])
+        temperature = jnp.array([285.0, 250.0, 225.0, 200.0, 190.0, 185.0])
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        specific_humidity = 1.2 * qs  # supersaturated at every level
+        cf, _ = calculate_cloud_fraction(
+            temperature, specific_humidity, pressure, 100000.0, config
+        )
+        below = pressure >= config.cloud_top_pressure_pa
+        above = pressure < config.cloud_top_pressure_pa
+        assert jnp.all(cf[below] > 0.5), "tropospheric cloud should form"
+        assert jnp.all(cf[above] == 0.0), "no cloud above the cutoff"
+
+        # Disabling the cutoff (0 Pa) restores the (spurious) stratospheric
+        # cloud — confirms the cutoff is what suppresses it.
+        cfg_off = CloudParameters.default(cloud_top_pressure_pa=0.0)
+        cf_off, _ = calculate_cloud_fraction(
+            temperature, specific_humidity, pressure, 100000.0, cfg_off
+        )
+        assert jnp.any(cf_off[above] > 0.5)
+
+    def test_standalone_scheme_gates_condensation_above_cutoff(self):
+        """``shallow_cloud_scheme`` produces no condensate above the cutoff.
+
+        ``condensation_evaporation`` ignores cloud fraction, so zeroing the
+        diagnostic fraction alone would still let the standalone scheme condense
+        vapour into qc/qi (and emit T/q tendencies) in the masked stratosphere.
+        The scheme must gate those tendencies to zero there.
+        """
+        config = CloudParameters.default()  # cutoff at 100 hPa
+        pressure = jnp.array([90000.0, 50000.0, 8000.0, 4000.0])
+        temperature = jnp.array([285.0, 250.0, 195.0, 188.0])
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        q = 1.3 * qs  # supersaturated at every level
+        z = jnp.zeros_like(pressure)
+        tend, state = shallow_cloud_scheme(
+            temperature, q, pressure, z, z, 100000.0, 1800.0, config
+        )
+        above = pressure < config.cloud_top_pressure_pa
+        for field in (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt):
+            assert jnp.all(field[above] == 0.0), "no condensation above cutoff"
+        assert jnp.all(state.cloud_water[above] == 0.0)
+        assert jnp.all(state.cloud_ice[above] == 0.0)
+        # Troposphere still condenses.
+        assert jnp.any(jnp.abs(tend.dqcdt[~above]) + jnp.abs(tend.dqidt[~above]) > 0.0)
+
     def test_cloud_fraction_profile(self):
         """Test that critical RH varies with height"""
         config = CloudParameters.default()
