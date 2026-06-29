@@ -49,11 +49,29 @@ def in_cloud_path(
     """Convert a grid-mean condensate path to its in-cloud value.
 
     Grid-mean ``LWP_grid = f * LWP_in_cloud``, so the in-cloud value is
-    ``LWP_grid / max(f, eps)``. The eps floor avoids division by zero in
-    clear cells; downstream code should multiply by a sub-column mask
-    that vanishes in clear cells anyway, so the eps choice is cosmetic.
+    ``LWP_grid / max(f, eps)`` — but the in-cloud path is **zeroed in
+    (essentially) clear cells** (``cloud_fraction <= 2*eps``).
+
+    This mirrors ECHAM ``mo_psrad_interface.f90:224-237``::
+
+        cld_frc_vr        = MAX(EPSILON, cld_frc)
+        zlwgkg_vr         = xm_liq * 1000 / cld_frc_vr
+        WHERE (cld_frc_vr <= 2*EPSILON) zlwgkg_vr = 0
+
+    Without the zeroing, a vanishing cloud fraction inflates the in-cloud
+    water without bound (grid-mean / eps), which drives a runaway cloud
+    optical depth and, via ``inf * 0`` once the clear sub-columns are
+    masked, NaNs the radiation. ECHAM relies on its cloud routine having
+    already evaporated condensate in clear cells (mirrored here for the 2M
+    scheme by the clear-sky evaporation in ``lohmann_2m``); the zeroing is
+    the radiation-side half of that contract and protects every scheme
+    (1M and 2M) against any residual decorrelated condensate. The upstream
+    Sundqvist diagnostic snaps ``cf < 0.01`` to 0, so this zeros exactly
+    the clear cells and leaves every resolved cloud (``cf >= 0.01``)
+    untouched.
     """
-    return grid_mean_path / jnp.maximum(cloud_fraction, eps)
+    in_cloud = grid_mean_path / jnp.maximum(cloud_fraction, eps)
+    return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
 
 
 def _alpha_from_overlap(
