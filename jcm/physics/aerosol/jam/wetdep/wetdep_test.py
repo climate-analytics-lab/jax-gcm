@@ -125,6 +125,27 @@ class WetDepTermTest(unittest.TestCase):
             self.assertGreaterEqual(float(q_new.min()), -1e-25, nm)
             self.assertLessEqual(float(q_new.max()), float(q0.max()) + 1e-25, nm)
 
+    def test_cloud_fraction_gt_one_stays_finite(self):
+        # The cloud scheme can hand back cloud_fraction > 1 (e.g. where RH > 1).
+        # The below-cloud clear-sky fraction (1 - cf) then goes negative, which
+        # made the scavenging rate negative and the implicit 1-exp(-rate·dt)
+        # removed fraction overflow to +inf, NaN-ing every aerosol tracer.
+        # The clear fraction (and the rate) are clamped to ≥0, so the tendency
+        # must stay finite for cf > 1. Regression guard.
+        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-2)
+        diagnostics = dict(diagnostics)
+        diagnostics["clouds"] = diagnostics["clouds"].copy(
+            cloud_fraction=jnp.full_like(diagnostics["clouds"].cloud_fraction, 1.3)
+        )
+        # coarse wet radius makes the below-cloud rate large in magnitude
+        aer = diagnostics["_jam_state"]
+        diagnostics["_jam_state"] = aer.copy(r_wet=jnp.full_like(aer.r_wet, 5.0e-6))
+        term = WetScavenging()
+        tend, _ = term(state, diagnostics, None, None)
+        for nm, dq in tend.tracers.items():
+            self.assertTrue(np.all(np.isfinite(np.asarray(dq))), nm)
+            self.assertTrue(bool(jnp.all(dq <= 0.0)), nm)  # still a sink, not a source
+
     def test_no_precip_no_removal(self):
         state, diagnostics, spec, mass_name = self._setup(precip=0.0)
         term = WetScavenging()
