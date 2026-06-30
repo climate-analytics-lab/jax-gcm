@@ -144,10 +144,16 @@ class JamOpticsTerm(PhysicsTerm):
                 aod = aod + aod_i
                 scat = scat + ssa * aod_i
                 gscat = gscat + g * ssa * aod_i
+            # Clamp the extinction-/scattering-weighted SSA and asymmetry to
+            # their physical [0, 1] range. With a non-negative per-mode AOD
+            # (number floored at 0 in ``__call__``) these ratios are already
+            # bounded, but a tiny Mie-LUT edge overshoot in ``q_ext``/``ssa``
+            # could still nudge them out of range, and RRTMGP's two-stream
+            # solver NaNs on an SSA outside [0, 1] — so clamp defensively.
             return (
                 aod,
-                scat / jnp.maximum(aod, _TINY),
-                gscat / jnp.maximum(scat, _TINY),
+                jnp.clip(scat / jnp.maximum(aod, _TINY), 0.0, 1.0),
+                jnp.clip(gscat / jnp.maximum(scat, _TINY), 0.0, 1.0),
             )
 
         return jax.vmap(one_band)(lam_all, ri_j)
@@ -159,8 +165,18 @@ class JamOpticsTerm(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         c = self._cache
 
-        # Number per unit area [m^-2] per mode (number is kg^-1).
-        num_per_area = aer.number * (air_density * dz)[jnp.newaxis]
+        # Number per unit area [m^-2] per mode (number is kg^-1). Floor the
+        # modal number at 0 before it enters the optics: spectral advection of
+        # the aerosol-number tracers leaves small NEGATIVE number on the
+        # near-zero cold-start field (Gibbs ringing). A negative number gives a
+        # negative per-mode extinction, which can drive the band AOD ≤ 0 and
+        # then the extinction-weighted SSA (= scat / AOD) and asymmetry to
+        # ±huge — RRTMGP's two-stream solver NaNs on an out-of-range SSA. As the
+        # aerosol burden grows the ringing crosses zero within the first day,
+        # so this is a hard stability requirement, not a cosmetic floor. With
+        # number ≥ 0 every derived optic is physical (AOD ≥ 0 ⇒ SSA, g ∈
+        # [0, 1]); consistent with the AOD-550 diagnostic floor below.
+        num_per_area = jnp.maximum(aer.number, 0.0) * (air_density * dz)[jnp.newaxis]
 
         aod_sw, ssa_sw, asy_sw = self._band_optics(
             state, aer, num_per_area, c.sw_nm, c.ri_sw
