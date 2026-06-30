@@ -99,6 +99,32 @@ class WetDepTermTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
 
+    def test_extreme_rate_stays_bounded(self):
+        # A scavenging rate with rate·dt ≫ 1 (heavy precip + near-clear low qc +
+        # large coarse wet radius) must NOT remove more than the available mass
+        # in one step. The implicit q·exp(-rate·dt) update keeps a forward step
+        # in [0, q]; the old explicit -rate·q overshot into a sign-flipped
+        # runaway (the natural-emission blow-up). Regression guard.
+        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-2)
+        dt = 1800.0
+        diagnostics = dict(diagnostics)
+        diagnostics["_dt_seconds"] = dt
+        aer = diagnostics["_jam_state"]
+        diagnostics["_jam_state"] = aer.copy(
+            r_wet=jnp.full_like(aer.r_wet, 5.0e-6)        # huge below-cloud rate
+        )
+        diagnostics["clouds"] = diagnostics["clouds"].copy(
+            qc=jnp.full_like(diagnostics["clouds"].qc, 1.0e-9)  # huge in-cloud rate
+        )
+        term = WetScavenging()
+        tend, _ = term(state, diagnostics, None, None)
+        for nm, dq in tend.tracers.items():
+            q0 = np.asarray(state.tracers[nm])
+            q_new = q0 + np.asarray(dq) * dt
+            self.assertTrue(np.all(np.isfinite(q_new)), nm)
+            self.assertGreaterEqual(float(q_new.min()), -1e-25, nm)
+            self.assertLessEqual(float(q_new.max()), float(q0.max()) + 1e-25, nm)
+
     def test_no_precip_no_removal(self):
         state, diagnostics, spec, mass_name = self._setup(precip=0.0)
         term = WetScavenging()

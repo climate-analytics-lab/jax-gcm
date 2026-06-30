@@ -123,6 +123,8 @@ class WetScavenging(PhysicsTerm):
         activated_fraction = diagnostics["activated_fraction"]
         air_density = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]
+        # Timestep for the implicit (exponential) scavenging update below.
+        dt = diagnostics.get("_dt_seconds", 1800.0)
 
         clouds = diagnostics["clouds"]
         precip_col = clouds.precip_rain + clouds.precip_snow
@@ -158,7 +160,20 @@ class WetScavenging(PhysicsTerm):
                 q_list.append(state.tracers.get(nm, zeros))
                 rate_list.append(rate)
 
-        dq_stack = -jnp.stack(rate_list) * jnp.stack(q_list)
+        # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).
+        # The first-order-decay rate is unbounded — the in-cloud rate ∝ 1/qc
+        # diverges in near-clear cells and the below-cloud rate ∝ (r_wet/r_ref)²
+        # is large for the coarse mode — so an explicit ``dq = -rate·q`` step
+        # removes far more than the available mass when ``rate·dt ≫ 1`` (observed
+        # ``rate·dt ~ 1e4`` for coarse sea salt over the high-wind Southern
+        # Ocean), overshooting into a sign-flipped runaway that NaNs the model
+        # in a few steps. The analytic exponential of the decay is unconditionally
+        # stable and positivity-preserving for any ``rate ≥ 0`` (HAMMOZ
+        # ``mo_ham_wetdep`` applies the same ``1 - exp(-Λ·Δt)`` removed fraction).
+        # Emitted as a per-second tendency so the operator-split sum + dynamics
+        # apply exactly ``q·(exp(-rate·dt) - 1)`` over the step.
+        removed_frac = -jnp.expm1(-jnp.stack(rate_list) * dt)   # 1 - exp(-rate·dt) ∈ [0, 1]
+        dq_stack = -(removed_frac * jnp.stack(q_list)) / dt
         tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
 
         tendency = PhysicsTendency(
