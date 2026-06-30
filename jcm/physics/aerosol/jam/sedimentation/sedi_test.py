@@ -36,6 +36,18 @@ class StokesVelocityTest(unittest.TestCase):
         )
         self.assertTrue(1e-5 < float(v[0]) < 1e-2)
 
+    def test_wet_radius_capped(self):
+        # HAMMOZ caps the settling diameter at 50 µm (25 µm radius), so a
+        # runaway κ-Köhler wet-growth tail can't inflate the fall speed: the
+        # velocity at 25 µm and 1 mm must be identical (both clamped to 25 µm),
+        # and strictly above a sub-cap radius.
+        t, p, rho = jnp.array([280.0]), jnp.array([9.0e4]), jnp.array([1800.0])
+        v_cap = stokes_velocity(jnp.array([25.0e-6]), rho, t, p)
+        v_huge = stokes_velocity(jnp.array([1.0e-3]), rho, t, p)
+        v_sub = stokes_velocity(jnp.array([10.0e-6]), rho, t, p)
+        np.testing.assert_allclose(float(v_huge[0]), float(v_cap[0]), rtol=1e-6)
+        self.assertGreater(float(v_cap[0]), float(v_sub[0]))
+
 
 class DonorCellTest(unittest.TestCase):
     def test_zero_velocity_no_change(self):
@@ -99,6 +111,7 @@ class SedimentationTermTest(unittest.TestCase):
             "air_density": jnp.full((nlev, ncols), 1.0),
             "layer_thickness": jnp.full((nlev, ncols), 200.0),
             "pressure_full": jnp.full((nlev, ncols), 9.0e4),
+            "_dt_seconds": 720.0,
         }
         return state, diagnostics
 
@@ -113,6 +126,27 @@ class SedimentationTermTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
         # Top layer should be losing aerosol (negative tendency).
         self.assertLessEqual(float(tend.tracers[key][0, 0]), 0.0)
+
+    def test_cfl_cap_keeps_tendency_stable_for_extreme_velocity(self):
+        # Coarse-mode sea-salt-like extreme: huge wet radius + thin layers +
+        # a long step would give a Courant number ≫ 1 and an unstable explicit
+        # donor-cell step (the natural-emission blowup). The CFL cap (v ≤ dz/dt)
+        # must keep a forward Euler step finite and non-negative.
+        state, diagnostics = self._setup(nlev=6, ncols=2)
+        dt = 1800.0
+        diagnostics = dict(diagnostics)
+        diagnostics["_dt_seconds"] = dt
+        diagnostics["layer_thickness"] = jnp.full((6, 2), 20.0)  # thin → easy CFL break
+        aer = diagnostics["_jam_state"]
+        # Inflate every mode's wet radius well past the 25 µm cap.
+        diagnostics["_jam_state"] = aer.copy(r_wet=jnp.full_like(aer.r_wet, 1.0e-4))
+
+        term = StokesSedimentation()
+        tend, _ = term(state, diagnostics, None, None)
+        for nm, dq in tend.tracers.items():
+            q_new = np.asarray(state.tracers[nm]) + np.asarray(dq) * dt
+            self.assertTrue(np.all(np.isfinite(q_new)), nm)
+            self.assertGreaterEqual(float(q_new.min()), -1e-20, nm)
 
     def test_grad_through_velocity_scale_finite(self):
         from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters

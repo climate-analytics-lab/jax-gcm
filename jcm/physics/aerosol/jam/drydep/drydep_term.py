@@ -83,6 +83,7 @@ class SlinnDryDeposition(PhysicsTerm):
         temperature = state.temperature
         nlev, ncols = temperature.shape
 
+        dt = diagnostics.get("_dt_seconds", 1800.0)
         u_star = self._u_star(diagnostics, ncols, params)        # (ncols,)
         t_sfc = temperature[-1]
         p_sfc = pressure[-1]
@@ -102,6 +103,13 @@ class SlinnDryDeposition(PhysicsTerm):
                 z_ref=params.z_ref, z0=params.z0,
             )
             loss_rate = v_dep / dz_sfc  # [1/s] applied to bottom layer
+            # Implicit (exponential) removal over the step, bounded to ≤100% of
+            # the layer's mass: q(t+dt) = q·exp(-loss_rate·dt). An explicit
+            # ``-loss_rate·q`` step overshoots into a sign-flipped runaway when
+            # ``loss_rate·dt > 1`` (large deposition velocity for the coarse mode
+            # over a thin surface layer) — the same instability that NaNs wet
+            # deposition. ``1 - exp(-x)`` is unconditionally stable for any x ≥ 0.
+            removed_frac = -jnp.expm1(-loss_rate * dt)   # ∈ [0, 1]
 
             names = [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
@@ -109,7 +117,7 @@ class SlinnDryDeposition(PhysicsTerm):
             for nm in names:
                 q = state.tracers.get(nm, zeros)
                 tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(
-                    -loss_rate * q[-1]
+                    -(removed_frac * q[-1]) / dt
                 )
 
         tendency = PhysicsTendency(

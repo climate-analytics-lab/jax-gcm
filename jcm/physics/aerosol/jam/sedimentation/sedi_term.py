@@ -44,6 +44,13 @@ def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
     return 1.458e-6 * temperature ** 1.5 / (temperature + 110.4)
 
 
+# Upper bound on the settling radius [m]. HAMMOZ ``mo_ham_sedimentation``
+# (lines 178–191) caps the count/mass median *diameter* at 50 µm before the
+# Stokes velocity so a runaway κ-Köhler wet-growth tail (sea salt at high RH)
+# can't drive an unphysically large fall speed. 50 µm diameter → 25 µm radius.
+_R_WET_MAX = 25.0e-6
+
+
 def stokes_velocity(
     r_wet: jnp.ndarray,
     rho_p: jnp.ndarray,
@@ -53,14 +60,17 @@ def stokes_velocity(
     """Stokes settling velocity [m/s] with Cunningham slip correction.
 
     ``v = (2 g ρ_p r² C_c) / (9 μ)``. Inputs broadcast against each other;
-    ``r_wet``/``rho_p`` may carry a leading mode axis.
+    ``r_wet``/``rho_p`` may carry a leading mode axis. The radius is capped at
+    :data:`_R_WET_MAX` (HAMMOZ 50 µm median-diameter cap) so extreme wet growth
+    can't inflate the velocity.
     """
+    r = jnp.minimum(r_wet, _R_WET_MAX)
     mu = air_viscosity(temperature)
     # Mean free path λ = (μ/p)·√(π R T / (2 M_a)).
     mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
-    kn = mfp / jnp.maximum(r_wet, 1.0e-10)
+    kn = mfp / jnp.maximum(r, 1.0e-10)
     cunningham = 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
-    return (2.0 * _G * rho_p * r_wet ** 2 * cunningham) / (9.0 * mu)
+    return (2.0 * _G * rho_p * r ** 2 * cunningham) / (9.0 * mu)
 
 
 def sediment_column(
@@ -111,6 +121,9 @@ class StokesSedimentation(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         pressure = diagnostics["pressure_full"]
         temperature = state.temperature
+        # Model timestep for the CFL velocity cap below (injected by
+        # ComposablePhysics; default mirrors the SPEEDY fallback elsewhere).
+        dt = diagnostics.get("_dt_seconds", 1800.0)
 
         # Gather every interstitial tracer to settle and the (per-mode)
         # settling velocity that transports it, then run the donor-cell
@@ -128,6 +141,18 @@ class StokesSedimentation(PhysicsTerm):
             v = params.velocity_scale * stokes_velocity(
                 aer.r_wet[i], aer.rho[i], temperature, pressure,
             )
+            # CFL cap: an explicit donor-cell step is only stable for a Courant
+            # number ≤ 1, i.e. a particle may fall at most one layer per step.
+            # Without this, coarse-mode sea salt at high near-surface RH (large
+            # wet radius → large Stokes velocity, worst over the high-wind
+            # Southern Ocean) drives the Courant number past 1 and the explicit
+            # scheme explodes in a single step (33 orders of magnitude),
+            # poisoning the aerosol → activation → cloud → dynamics chain.
+            # Mirrors HAMMOZ ``mo_ham_sedimentation`` L228:
+            # ``zvsedi = MIN(zvsedi, pdz/time_step_len)``. With Courant ≤ 1 the
+            # donor-cell flux out of a layer cannot exceed its content, so the
+            # tracers also stay non-negative (HAMMOZ's L235 flux limiter).
+            v = jnp.minimum(v, dz / dt)
             for nm in [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
             ]:
