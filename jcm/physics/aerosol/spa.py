@@ -51,6 +51,14 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
         `cloud_microphysics_2m`. Zero where ``cloud_fraction == 0``.
 
     """
-    arg = jnp.maximum(Nccn * cloud_fraction, 0.0)
-    nc_min_cm3 = prefactor * arg ** exponent
-    return nc_min_cm3 * _CM3_TO_M3
+    # Lin (2025)'s fit (prefactor 2000, exponent 0.55) is calibrated with
+    # N_ccn in SI **m^-3**, not cm^-3 — applying it to cm^-3 values
+    # overestimates N_c by ~(1e6)^0.45 ≈ 4e2, giving >1e4 cm^-3 (more droplets
+    # than CCN). MACv2-SP supplies N_ccn in cm^-3, so convert to m^-3 first; the
+    # result is then already in m^-3 (no further unit conversion).
+    nccn_m3 = jnp.maximum(Nccn, 0.0) * _CM3_TO_M3
+    arg = jnp.maximum(nccn_m3 * cloud_fraction, 0.0)
+    nc_min_m3 = prefactor * arg ** exponent
+    # Physical bound: cloud droplets cannot exceed the available CCN. The
+    # power-law fit extrapolates above N_ccn only at very low aerosol; cap there.
+    return jnp.minimum(nc_min_m3, nccn_m3)

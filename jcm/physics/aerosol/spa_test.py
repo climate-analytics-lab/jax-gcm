@@ -41,17 +41,29 @@ class TestSpaActivatedCdnc(unittest.TestCase):
     def test_units_returned_in_per_m3(self):
         """The function takes Nccn in cm^-3 and returns Nc in m^-3.
 
-        Pin a single point against the bare formula to catch a units
-        regression.
+        Lin (2025)'s prefactor is calibrated for Nccn in SI m^-3, so the fit is
+        applied to ``Nccn·1e6`` and the result is already in m^-3 (no further
+        ×1e6). Pin a single point against that to catch a units regression.
         """
         prefactor, exponent = _fit()
         Nccn_cm3 = jnp.array(500.0)        # 500 CCN per cc
         cf = jnp.array(1.0)                # full cloud
         nc = float(spa_activated_cdnc(Nccn_cm3, cf, prefactor, exponent))
-        expected_cm3 = LIN2025_PREFACTOR * (500.0) ** LIN2025_EXPONENT
-        expected_m3 = expected_cm3 * 1.0e6
+        expected_m3 = LIN2025_PREFACTOR * (500.0 * 1.0e6) ** LIN2025_EXPONENT
         # float32 precision: ~1e-7 relative, so check ratio not absolute.
         self.assertAlmostEqual(nc / expected_m3, 1.0, places=4)
+
+    def test_nc_is_physical_and_below_ccn(self):
+        """Nc must never exceed the available CCN and must be a physical
+        magnitude (tens–hundreds cm^-3), not the ~1e4 cm^-3 the cm^-3-units
+        bug produced. Regression guard for the m^-3-units fix (#374)."""
+        prefactor, exponent = _fit()
+        for ccn_cm3 in (35.0, 94.0, 200.0, 500.0):
+            nc_m3 = float(spa_activated_cdnc(
+                jnp.array(ccn_cm3), jnp.array(1.0), prefactor, exponent))
+            nc_cm3 = nc_m3 / 1.0e6
+            self.assertLessEqual(nc_cm3, ccn_cm3 + 1e-6)        # Nc ≤ CCN
+            self.assertLess(nc_cm3, 1000.0)                     # physical, not ~1e4
 
     def test_sublinear_in_ccn(self):
         """A 4× increase in CCN should give substantially less than a 4×
