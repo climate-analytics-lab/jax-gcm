@@ -91,9 +91,14 @@ def below_cloud_rate(
     """Below-cloud impaction scavenging rate [1/s], size-dependent (∝ r²)."""
     rain_mmph = precip_col[jnp.newaxis, :] * 3600.0  # kg/m²/s -> mm/h
     efficiency = (r_wet / params.below_radius_ref) ** 2
-    return (
-        params.below_coeff * rain_mmph * (1.0 - cloud_fraction) * efficiency
-    )
+    # Clear-sky (below-cloud) fraction, clipped to [0, 1]. The cloud scheme can
+    # return cloud_fraction > 1 (e.g. where RH > 1), which would make this
+    # fraction — and hence the scavenging rate — NEGATIVE. A negative rate makes
+    # the implicit ``1 - exp(-rate·dt)`` removed fraction overflow to +inf,
+    # NaN-ing every aerosol tracer. Scavenging rates are non-negative by
+    # construction, so clip the clear fraction here.
+    clear_fraction = jnp.clip(1.0 - cloud_fraction, 0.0, 1.0)
+    return params.below_coeff * rain_mmph * clear_fraction * efficiency
 
 
 class WetScavenging(PhysicsTerm):
@@ -172,7 +177,10 @@ class WetScavenging(PhysicsTerm):
         # ``mo_ham_wetdep`` applies the same ``1 - exp(-Λ·Δt)`` removed fraction).
         # Emitted as a per-second tendency so the operator-split sum + dynamics
         # apply exactly ``q·(exp(-rate·dt) - 1)`` over the step.
-        removed_frac = -jnp.expm1(-jnp.stack(rate_list) * dt)   # 1 - exp(-rate·dt) ∈ [0, 1]
+        # Clamp the decay rate to ≥0 so the exponential update is always a
+        # bounded removal (a scavenging rate is non-negative by construction).
+        rate_arr = jnp.maximum(jnp.stack(rate_list), 0.0)
+        removed_frac = -jnp.expm1(-rate_arr * dt)              # 1 - exp(-rate·dt) ∈ [0, 1]
         dq_stack = -(removed_frac * jnp.stack(q_list)) / dt
         tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
 
