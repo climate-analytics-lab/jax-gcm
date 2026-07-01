@@ -163,6 +163,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self._condensation_backend = str(condensation_backend)
         self._n_substeps = int(n_substeps)
 
+        # Disable the core's hard-coded "other-process" H2SO4 production stub
+        # (driver.F90:1248, 1e-16 mol/mol/s). jcm seeds the gas-phase tracers to
+        # zero and does not yet feed prognostic sulfur chemistry into the core,
+        # so that stub is a spurious, non-conservative H2SO4 source that drives
+        # runaway binary nucleation. Zero it here; revisit when jcm couples its
+        # gas-phase sulfur (jam_sulfur_gas_chemistry) into the core's gas slots.
+        # Guarded on the capability so jcm still runs against a mam4_jax build
+        # without configure_gas_netprod (the currently pinned release).
+        if hasattr(_amicphys, "configure_gas_netprod"):
+            _amicphys.configure_gas_netprod(h2so4=0.0)
+
         # Precision — applied during construction so the dycore state built
         # afterwards (in bootstrap/run) inherits it; toggling it later would
         # leave an f64 state meeting f32 tendencies (mixed-dtype errors).
@@ -250,8 +261,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         dt = jnp.asarray(diagnostics["_dt_seconds"], jnp.float64)
 
         def fetch(name):
-            return jnp.asarray(
-                state.tracers.get(name, jnp.zeros(shape)), jnp.float64
+            # Floor gas/aerosol tracers at 0. Spectral advection of the JAM
+            # tracers leaves small NEGATIVE mass/number on the near-zero field
+            # (Gibbs ringing, same root as the optics #543 / ARG #544 floors).
+            # A negative aerosol mass makes wateruptake compute a NEGATIVE wet
+            # density, and coag's coefficient/scatter math then NaNs on it
+            # (single-cell repro: wetdens=-2172 kg/m^3 -> qnum=nan at
+            # _mam_coag_1subarea). The core floors qaer/qnum internally but not
+            # wetdens, so guard at the boundary where the tracers enter.
+            return jnp.maximum(
+                jnp.asarray(state.tracers.get(name, jnp.zeros(shape)), jnp.float64),
+                0.0,
             )
 
         # Pack jcm tracers into the flat MAM4 arrays (water vapour at slot 0).

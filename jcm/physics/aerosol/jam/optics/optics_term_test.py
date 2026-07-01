@@ -87,6 +87,44 @@ class JamOpticsTermTest(unittest.TestCase):
         for arr in (a.asy_sw_per_band, a.asy_lw_per_band):
             self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
 
+    def test_negative_number_ringing_stays_bounded(self):
+        """Negative modal number (spectral Gibbs ringing on the growing aerosol
+        field) must not blow the extinction-weighted SSA/asymmetry out of
+        range. Without flooring the number at 0 the band AOD goes ≤ 0, the SSA
+        (= scat / AOD) and asymmetry diverge to ±huge, and RRTMGP's two-stream
+        solver NaNs — this is the step-10 echam-jam blow-up. Drive some cells
+        negative and assert every per-band optic stays finite and physical.
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        aer = diagnostics["_jam_state"]
+        # Flip the sign of the modal number in a subset of cells (ringing).
+        num = aer.number
+        num = num.at[:, 0, :].set(-jnp.abs(num[:, 0, :]))
+        num = num.at[:, :, 1].set(-1.0e7)
+        diagnostics = {**diagnostics, "_jam_state": aer.copy(number=num)}
+        # And the corresponding number tracers (used for the water volume).
+        tracers = dict(state.tracers)
+        for mode in MAM4_SPEC.modes:
+            nm = number_name(mode.short)
+            t = tracers[nm].at[0, :].set(-1.0e7)
+            tracers[nm] = t.at[:, 1].set(-1.0e7)
+        state = state.copy(tracers=tracers)
+
+        term = self._term(band)
+        _, diag = term(state, diagnostics, None, None)
+        a = diag["aerosol"]
+        for arr in (a.aod_sw_per_band, a.aod_lw_per_band):
+            self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
+            self.assertTrue(bool(jnp.all(arr >= 0.0)))           # AOD floored
+        for arr in (a.ssa_sw_per_band, a.ssa_lw_per_band):
+            self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
+            self.assertTrue(bool(jnp.all((arr >= 0.0) & (arr <= 1.0 + 1e-5))))
+        for arr in (a.asy_sw_per_band, a.asy_lw_per_band):
+            self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
+            # Asymmetry is physically [-1, 1] (negative g = back-scattering).
+            self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
+        self.assertTrue(np.all(np.isfinite(np.asarray(diag["aerosol_optical_depth"]))))
+
     def test_more_aerosol_more_aod(self):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
