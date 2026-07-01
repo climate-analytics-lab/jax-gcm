@@ -56,7 +56,8 @@ class TestSpaActivatedCdnc(unittest.TestCase):
     def test_nc_is_physical_and_below_ccn(self):
         """Nc must never exceed the available CCN and must be a physical
         magnitude (tens–hundreds cm^-3), not the ~1e4 cm^-3 the cm^-3-units
-        bug produced. Regression guard for the m^-3-units fix (#374)."""
+        bug produced. Regression guard for the m^-3-units fix (#374).
+        """
         prefactor, exponent = _fit()
         for ccn_cm3 in (35.0, 94.0, 200.0, 500.0):
             nc_m3 = float(spa_activated_cdnc(
