@@ -108,6 +108,18 @@ class ArgActivationCoreTest(unittest.TestCase):
         self.assertAlmostEqual(n_act, 0.0)
         self.assertAlmostEqual(frac, 0.0)
 
+    def test_negative_number_ringing_stays_bounded(self):
+        """Negative modal number (spectral Gibbs ringing on the growing
+        aerosol field) must not blow the activated fraction. Without flooring
+        the number at 0, ``n_total`` goes negative, ``activated_fraction =
+        n_act / n_total`` diverges to +/-huge, and that garbage fraction feeds
+        wet scavenging. Assert a floored, physical result instead.
+        """
+        n_act, frac, smax = self._run(n_percc=-100.0)
+        self.assertTrue(np.isfinite(n_act) and np.isfinite(frac))
+        self.assertGreaterEqual(n_act, 0.0)          # no negative droplets
+        self.assertTrue(0.0 <= frac <= 1.0)          # not +/-1e35 / -inf
+
     def test_ghosh_variant_runs_and_differs(self):
         _, arg, _ = self._run(variant="arg2000", n_percc=1500.0, w=0.2)
         _, gho, _ = self._run(variant="ghosh2025", n_percc=1500.0, w=0.2)

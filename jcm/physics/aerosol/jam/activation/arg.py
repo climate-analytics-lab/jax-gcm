@@ -115,6 +115,17 @@ def arg_activation(
       * ``activated_fraction`` (nlev, ncols) number-weighted fraction [-]
       * ``s_max`` (nlev, ncols) maximum supersaturation [-]
     """
+    # Floor the modal number at 0: spectral advection of the aerosol-number
+    # tracers leaves small NEGATIVE number on the near-zero cold-start field
+    # (Gibbs ringing). A negative ``number_vol`` makes the number-weighted
+    # ``n_total`` negative, collapsing ``activated_fraction = n_act / n_total``
+    # to a ±huge value (and the per-cell ``activated_cdnc`` negative). The cloud
+    # masks the negative CDNC via the SPA floor and wet deposition clamps the
+    # rate, so the model stays finite — but the activated fraction handed to wet
+    # scavenging is garbage. Flooring here makes every derived quantity physical:
+    # n_act, n_total ≥ 0 ⇒ activated_fraction ∈ [0, 1], activated_cdnc ≥ 0. Same
+    # ringing root cause as the JAM-optics number floor (#543).
+    number_vol = jnp.maximum(number_vol, 0.0)
     t = temperature
     p = pressure
     es = _saturation_vapor_pressure(t)
