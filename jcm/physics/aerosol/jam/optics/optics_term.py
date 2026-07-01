@@ -149,11 +149,14 @@ class JamOpticsTerm(PhysicsTerm):
             # (number floored at 0 in ``__call__``) these ratios are already
             # bounded, but a tiny Mie-LUT edge overshoot in ``q_ext``/``ssa``
             # could still nudge them out of range, and RRTMGP's two-stream
-            # solver NaNs on an SSA outside [0, 1] — so clamp defensively.
+            # solver NaNs on an SSA outside [0, 1] — so clamp defensively. SSA is
+            # physically [0, 1]; the asymmetry parameter is [-1, 1] (negative g =
+            # back-scattering), so keep its lower bound at -1 to preserve valid
+            # back-scattering aerosol rather than only bounding overshoot.
             return (
                 aod,
                 jnp.clip(scat / jnp.maximum(aod, _TINY), 0.0, 1.0),
-                jnp.clip(gscat / jnp.maximum(scat, _TINY), 0.0, 1.0),
+                jnp.clip(gscat / jnp.maximum(scat, _TINY), -1.0, 1.0),
             )
 
         return jax.vmap(one_band)(lam_all, ri_j)

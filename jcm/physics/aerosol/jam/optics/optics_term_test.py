@@ -121,7 +121,8 @@ class JamOpticsTermTest(unittest.TestCase):
             self.assertTrue(bool(jnp.all((arr >= 0.0) & (arr <= 1.0 + 1e-5))))
         for arr in (a.asy_sw_per_band, a.asy_lw_per_band):
             self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
-            self.assertTrue(bool(jnp.all((arr >= 0.0) & (arr <= 1.0 + 1e-5))))
+            # Asymmetry is physically [-1, 1] (negative g = back-scattering).
+            self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
         self.assertTrue(np.all(np.isfinite(np.asarray(diag["aerosol_optical_depth"]))))
 
     def test_more_aerosol_more_aod(self):
