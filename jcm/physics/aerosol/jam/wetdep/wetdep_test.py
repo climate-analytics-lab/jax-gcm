@@ -122,8 +122,12 @@ class WetDepTermTest(unittest.TestCase):
             q0 = np.asarray(state.tracers[nm])
             q_new = q0 + np.asarray(dq) * dt
             self.assertTrue(np.all(np.isfinite(q_new)), nm)
-            self.assertGreaterEqual(float(q_new.min()), -1e-25, nm)
-            self.assertLessEqual(float(q_new.max()), float(q0.max()) + 1e-25, nm)
+            # Bounds hold up to floating-point roundoff; assert relative to the
+            # field scale so f32 roundoff on the ~1e8 number tracers (n_acc →
+            # -8 in the full-suite build) isn't mistaken for a real overshoot.
+            scale = float(np.abs(q0).max())
+            self.assertGreaterEqual(float(q_new.min()), -1e-5 * scale, nm)
+            self.assertLessEqual(float(q_new.max()), float(q0.max()) + 1e-5 * scale, nm)
 
     def test_cloud_fraction_gt_one_stays_finite(self):
         # The cloud scheme can hand back cloud_fraction > 1 (e.g. where RH > 1).

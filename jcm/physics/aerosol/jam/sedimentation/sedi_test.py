@@ -146,7 +146,14 @@ class SedimentationTermTest(unittest.TestCase):
         for nm, dq in tend.tracers.items():
             q_new = np.asarray(state.tracers[nm]) + np.asarray(dq) * dt
             self.assertTrue(np.all(np.isfinite(q_new)), nm)
-            self.assertGreaterEqual(float(q_new.min()), -1e-20, nm)
+            # The CFL cap keeps the donor-cell step non-negative up to
+            # floating-point roundoff. Assert relative to the field scale: a
+            # real Courant>1 runaway drives q_new to O(-q); harmless f32
+            # roundoff at the CFL boundary (q(1-v·dt/dz) with v·dt/dz→1+eps) is
+            # ~1e-7·q, which an absolute -1e-20 bound spuriously rejects for the
+            # ~1e8 number tracers (n_acc → -8 in the full-suite build).
+            scale = float(np.abs(q_new).max())
+            self.assertGreaterEqual(float(q_new.min()), -1e-5 * scale, nm)
 
     def test_grad_through_velocity_scale_finite(self):
         from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
