@@ -66,6 +66,17 @@ class TestSpaActivatedCdnc(unittest.TestCase):
             self.assertLessEqual(nc_cm3, ccn_cm3 + 1e-6)        # Nc ≤ CCN
             self.assertLess(nc_cm3, 1000.0)                     # physical, not ~1e4
 
+    def test_partial_cloud_capped_by_cloudy_ccn(self):
+        """In a partial-cloud clean cell the floor must not exceed the CCN that
+        entered the fit (``Nccn·Cf``), not the full-column ``Nccn``. At very low
+        aerosol the power law overshoots, so the cap is what binds.
+        """
+        prefactor, exponent = _fit()
+        Nccn_cm3, cf = jnp.array(1.0), jnp.array(0.1)   # clean + thin cloud
+        nc_m3 = float(spa_activated_cdnc(Nccn_cm3, cf, prefactor, exponent))
+        # <= cloudy CCN (Nccn*Cf = 0.1 cm^-3), not the full 1 cm^-3.
+        self.assertLessEqual(nc_m3 / 1.0e6, 0.1 + 1e-9)
+
     def test_sublinear_in_ccn(self):
         """A 4× increase in CCN should give substantially less than a 4×
         increase in activated droplets — that's the whole point of the
