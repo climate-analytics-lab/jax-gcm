@@ -59,6 +59,10 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
     nccn_m3 = jnp.maximum(Nccn, 0.0) * _CM3_TO_M3
     arg = jnp.maximum(nccn_m3 * cloud_fraction, 0.0)
     nc_min_m3 = prefactor * arg ** exponent
-    # Physical bound: cloud droplets cannot exceed the available CCN. The
-    # power-law fit extrapolates above N_ccn only at very low aerosol; cap there.
-    return jnp.minimum(nc_min_m3, nccn_m3)
+    # Physical bound: the (grid-mean) droplet floor cannot exceed the cloudy CCN
+    # that actually entered the activation fit — i.e. ``arg = Nccn·cloud_fraction``,
+    # NOT the full-column ``Nccn``. The power-law only overshoots at very low
+    # aerosol; capping at ``arg`` keeps partial-cloud clean cells from
+    # activating more droplets than the CCN in their cloudy area (Cf<1). With
+    # Cf=1 this reduces to the previous ``min(·, Nccn)``.
+    return jnp.minimum(nc_min_m3, arg)
