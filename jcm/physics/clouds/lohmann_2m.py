@@ -1380,8 +1380,20 @@ def het_mxphase_freezing(
     # -------------------------------------------------------------------------
     # 2. Freezing rates (contact and immersion freezing)
     # -------------------------------------------------------------------------
-    # Compute mean volume radius of cloud droplets
-    droplet_radius = (0.75 * cloud_liquid * air_density / (pi * c.rhow * droplet_number)) ** (1.0 / 3.0)
+    # Compute mean volume radius of cloud droplets. Double-where guard on
+    # the cube root: it has an infinite derivative at cloud_liquid == 0 and
+    # the freezing rates below vanish there (and are additionally
+    # where-masked on freezing_condition), so without a safe base the
+    # backward pass multiplies 0 × ∞ = NaN at liquid-free points. Forward
+    # values are unchanged (radius was 0 there, and every consumer scales
+    # by cloud_liquid).
+    has_liquid = cloud_liquid > 0.0
+    droplet_radius_base = jnp.where(
+        has_liquid,
+        0.75 * cloud_liquid * air_density / (pi * c.rhow * droplet_number),
+        1.0,
+    )
+    droplet_radius = jnp.where(has_liquid, droplet_radius_base ** (1.0 / 3.0), 0.0)
 
     # Contact freezing by dust and soot
     contact_freezing_dust = jnp.minimum(1.0, jnp.maximum(0.0, -(0.1014 * (temperature - c.tmelt) + 0.3277)))
