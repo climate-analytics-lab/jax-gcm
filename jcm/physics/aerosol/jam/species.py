@@ -42,8 +42,3 @@ SPECIES: dict[str, AerosolSpecies] = {
     "h2o": AerosolSpecies("h2o", molar_mass=0.018, density=1000.0,
                           hygroscopicity=0.0, long_name="aerosol-water"),
 }
-
-
-def species_tuple(*names: str) -> tuple[AerosolSpecies, ...]:
-    """Return the ``AerosolSpecies`` for the given tokens (order preserved)."""
-    return tuple(SPECIES[n] for n in names)

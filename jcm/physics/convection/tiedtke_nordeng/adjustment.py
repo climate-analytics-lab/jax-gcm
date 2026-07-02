@@ -34,7 +34,6 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import saturation_mixing_ratio
 # Analytic (qs, dqs/dT) for the cuadjtq Newton step; shared with the updraft
 # module via jcm.physics.convection.saturation.
 from jcm.physics.convection.saturation import (
@@ -259,84 +258,3 @@ def convective_adjustment(
     )
     
     return t_adj, q_adj, qc_adj, qi_adj
-
-
-def test_saturation_adjustment():
-    """Test the saturation adjustment"""
-    # Create supersaturated conditions
-    temperature = jnp.array(280.0)  # K
-    pressure = jnp.array(90000.0)    # Pa
-    
-    # Get saturation mixing ratio
-    rs = saturation_mixing_ratio(pressure, temperature)
-    qs = rs / (1 + rs)  # Convert to specific humidity
-    
-    # Create supersaturated state (120% RH)
-    specific_humidity = 1.2 * qs
-    cloud_water = jnp.array(0.0)
-    cloud_ice = jnp.array(0.0)
-    
-    # Perform adjustment
-    t_adj, q_adj, qc_adj, qi_adj = saturation_adjustment(
-        temperature, specific_humidity, pressure,
-        cloud_water, cloud_ice
-    )
-    
-    # Check results
-    print(f"Initial T: {temperature:.2f} K, q: {specific_humidity*1000:.2f} g/kg")
-    print(f"Adjusted T: {t_adj:.2f} K, q: {q_adj*1000:.2f} g/kg")
-    print(f"Cloud water: {qc_adj*1000:.2f} g/kg")
-    print(f"Temperature increase: {t_adj - temperature:.2f} K")
-    
-    # Should have condensation and warming
-    assert t_adj > temperature  # Latent heat release
-    assert q_adj < specific_humidity  # Vapor removed
-    assert qc_adj > cloud_water  # Cloud water increased
-    
-    # Should be approximately saturated after adjustment
-    rs_adj = saturation_mixing_ratio(pressure, t_adj)
-    qs_adj = rs_adj / (1 + rs_adj)
-    rh_adj = q_adj / qs_adj
-    print(f"Final RH: {rh_adj*100:.1f}%")
-    # The adjustment reduces supersaturation significantly
-    assert 0.75 < rh_adj < 1.05  # Should be closer to saturation
-    
-    print("Saturation adjustment test passed!")
-
-
-def test_energy_conservation():
-    """Test energy conservation check"""
-    # Create a simple state change
-    t_old = jnp.array(280.0)
-    q_old = jnp.array(0.010)
-    qc_old = jnp.array(0.001)
-    qi_old = jnp.array(0.0)
-    
-    # Warming and drying (condensation)
-    t_new = jnp.array(281.0)
-    q_new = jnp.array(0.008)
-    qc_new = jnp.array(0.003)
-    qi_new = jnp.array(0.0)
-    
-    precip = jnp.array(0.0)
-    dt = 3600.0
-    
-    imbalance = energy_conservation_check(
-        t_old, q_old, qc_old, qi_old,
-        t_new, q_new, qc_new, qi_new,
-        precip, dt
-    )
-    
-    print(f"Energy imbalance: {imbalance:.2f} W/m²")
-    
-    # The imbalance should be small if energy is conserved
-    # (some imbalance is expected due to approximations)
-    assert jnp.abs(imbalance) < 10.0  # Less than 10 W/m²
-    
-    print("Energy conservation test passed!")
-
-
-if __name__ == "__main__":
-    test_saturation_adjustment()
-    print()
-    test_energy_conservation()

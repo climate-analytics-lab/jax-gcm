@@ -378,37 +378,3 @@ def gas_optical_depth_sw(
     bands = jnp.arange(N_SW_BANDS)
     tau_per_band = jax.vmap(single_band_absorption)(bands)  # (N_SW_BANDS, nlev)
     return tau_per_band.T  # (nlev, N_SW_BANDS)
-
-
-@jax.jit
-def rayleigh_optical_depth(
-    pressure: jnp.ndarray,
-    layer_thickness: jnp.ndarray,
-    wavelength: float = 0.55  # microns
-) -> jnp.ndarray:
-    """Calculate Rayleigh scattering optical depth.
-    
-    Args:
-        pressure: Pressure (Pa) [nlev]
-        layer_thickness: Layer thickness (m) [nlev]
-        wavelength: Wavelength in microns
-        
-    Returns:
-        Rayleigh optical depth [nlev]
-
-    """
-    # Rayleigh scattering coefficient
-    # τ_Ray = 0.008569 * λ^(-4) * (1 + 0.0113 * λ^(-2) + 0.00013 * λ^(-4))
-    
-    lambda_inv4 = wavelength ** (-4)
-    tau_ray_sea_level = 0.008569 * lambda_inv4 * (
-        1.0 + 0.0113 * wavelength**(-2) + 0.00013 * lambda_inv4
-    )
-    
-    # Scale by pressure
-    P_sea_level = 101325.0  # Pa
-    tau = tau_ray_sea_level * (pressure / P_sea_level) * (layer_thickness / 8000.0)
-    
-    return tau
-
-

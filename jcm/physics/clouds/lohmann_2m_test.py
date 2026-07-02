@@ -1,7 +1,7 @@
 """Unit tests for the ICON two-moment cloud microphysics scheme.
 
 Ported from icon-physics-v1-amq; narrowed to the tests that exercise the
-process functions currently wired into ``cloud_microphysics_2m_minimal``
+process functions currently wired into ``cloud_microphysics_2m``
 (CloudUtils, FreezingBelow238K, Autoconversion_2M / precip_formation_warm).
 The remaining 2M test classes from the amq branch (mixed-phase deposition,
 sedimentation, update_tendencies, etc.) will be ported alongside Phase 5b
@@ -13,8 +13,6 @@ import jax.numpy as jnp
 from math import pi
 
 from .cloud_utils import (
-    get_util_var,
-    get_cloud_bounds,
     eff_ice_crystal_radius,
     minimum_CDNC,
 )
@@ -68,63 +66,6 @@ def _full(n: int, v: float) -> jnp.ndarray:
 class TestCloudUtils:
     """Test utility functions for cloud microphysics"""
 
-    def test_get_util_var(self):
-        """Test utility variable calculations."""
-        nproma, nbdim, ntdia, nlev, nlevp1 = 1, 1, 0, 3, 4
-        paphm1 = jnp.array([[700.0, 800.0, 900.0, 1000.0]])  # Pressure at half levels
-        pgeo = jnp.array([[300.0, 200.0, 100.0]])  # Geopotential at full levels
-        papm1 = jnp.array([[750.0, 850.0, 950.0]])  # Pressure at full levels
-        ptm1 = jnp.array([[260.0, 270.0, 280.0]])  # Temperature at full levels
-
-        pgeoh, pdp, pdpg, pdz, paaa, pviscos = get_util_var(
-            nproma, nbdim, ntdia, nlev, nlevp1, paphm1, pgeo, papm1, ptm1
-        )
-
-        # Check geopotential at half levels
-        expected_pgeoh = jnp.array([[350.0, 250.0, 150.0, 0.0]])
-        assert jnp.allclose(pgeoh, expected_pgeoh), f"Expected {expected_pgeoh}, got {pgeoh}"
-
-        # Check pressure differences
-        expected_pdp = jnp.array([[100.0, 100.0, 100.0]])
-        assert jnp.allclose(pdp, expected_pdp), f"Expected {expected_pdp}, got {pdp}"
-
-        # Check height differences
-        expected_pdz = jnp.array([[10.19367991845056, 10.19367991845056, 15.2905199]])
-        assert jnp.allclose(pdz, expected_pdz), f"Expected {expected_pdz}, got {pdz}"
-
-        # Check air density correction
-        expected_paaa = jnp.array([[1.8467386, 1.7793932, 1.7196922]])
-        assert jnp.allclose(paaa, expected_paaa), f"Expected {expected_paaa}, got {paaa}"
-
-        # Check dynamic viscosity
-        expected_pviscos = jnp.array([[1.65162e-05, 1.70362e-05, 1.75562e-05]])
-        assert jnp.allclose(pviscos, expected_pviscos), f"Expected {expected_pviscos}, got {pviscos}"
-
-    def test_get_cloud_bounds(self):
-        """Test the get_cloud_bounds function."""
-        nproma = 1  # Number of columns
-        nbdim = 1   # Number of rows
-        ntdia = 0   # Starting level index
-        nlev = 7    # Number of levels
-
-        # Cloud cover array (paclc)
-        paclc = jnp.array([[0.0, 0.8, 0.6, 0.0, 0.8, 0.6, 0.5]])  # Cloud between levels 1 to 2 and 4 to 6
-
-        # Call the function
-        ktop, kbas, kcl_minustop, kcl_minusbas = get_cloud_bounds(nproma, nbdim, ntdia, nlev, paclc)
-
-        # Expected outputs
-        expected_ktop = jnp.array([[0, 1, 0, 0, 4, 0, 0]])  # Cloud top at level 1 & 4
-        expected_kbas = jnp.array([[0, 0, 2, 0, 0, 0, 6]])  # Cloud base at level 2 & 6
-        expected_kcl_minustop = jnp.array([[0, 0, 1, 0, 0, 4, 4]])  # Cloud levels excluding top
-        expected_kcl_minusbas = jnp.array([[0, 2, 0, 0, 6, 6, 0]])  # Cloud levels excluding base
-
-        # Assertions
-        assert jnp.array_equal(ktop, expected_ktop), f"ktop: Expected {expected_ktop}, got {ktop}"
-        assert jnp.array_equal(kbas, expected_kbas), f"kbas: Expected {expected_kbas}, got {kbas}"
-        assert jnp.array_equal(kcl_minustop, expected_kcl_minustop), f"lcl_minustop: Expected {expected_kcl_minustop}, got {kcl_minustop}"
-        assert jnp.array_equal(kcl_minusbas, expected_kcl_minusbas), f"kcl_minusbas: Expected {expected_kcl_minusbas}, got {kcl_minusbas}"
-    
     def test_eff_ice_crystal_radius(self):
         # Positive, non-degenerate inputs so the eps-guards do not affect the result
         pxice = jnp.array([0.1, 1.0, 10.0], dtype=jnp.float32)   # [g/m^3]

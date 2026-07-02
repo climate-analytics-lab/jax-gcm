@@ -358,24 +358,6 @@ def prepare_icon_data(
 
 
 # ---------------------------------------------------------------------------
-# Core compute function
-# ---------------------------------------------------------------------------
-
-def radiation_scheme_rrtmgp_fn(
-    rrtmgp_input: dict,
-    toa_flux: jnp.ndarray,
-    cos_zenith: jnp.ndarray,
-) -> dict:
-    """Call the global RRTMGP instance with per-column solar parameters."""
-    rrtmgp_instance = _ensure_rrtmgp()
-    zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
-    irrad_val = jnp.maximum(toa_flux, 0.0)
-    return rrtmgp_instance.compute_heating_rate(
-        zenith=zenith_angle, irrad=irrad_val, **rrtmgp_input
-    )
-
-
-# ---------------------------------------------------------------------------
 # Main entry point (ICON-compatible signature)
 # ---------------------------------------------------------------------------
 

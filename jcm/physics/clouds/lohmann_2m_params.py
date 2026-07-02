@@ -1,11 +1,9 @@
 """Contains the tunable parameters for the cloud microphysics.
-Subroutines for intializing these values are also included.
 Based on mo_echam_cloud_params from ECHAM6/ICON.
 """
 
 import math
 
-from jax import jit
 import jax.numpy as jnp
 import numpy as np
 from math import pi
@@ -124,10 +122,8 @@ class CloudParams2M: #(NamedTuple):
     nic_cirrus: int            # cirrus scheme selector
 
     # Resolution-dependent parameters
-    # NOTE : The following parameters are normally initialized in the sucloud
-    # subroutine based on model resolution. Here, default values for ICON
-    # have been used as placeholders. They will be updated by calling
-    # sucloud during model initialization.
+    # TODO: resolution-dependent parameter presets (ECHAM sucloud) are not yet
+    # wired; all resolutions use these defaults (the ICON values).
     crs: float
     crt: float
     cvtfall: float
@@ -139,7 +135,8 @@ class CloudParams2M: #(NamedTuple):
     nex: float
     nadd: float
 
-    # Variables initialized in sucloud
+    # Level/index bounds normally derived from the vertical grid in ECHAM's
+    # sucloud; fixed at the ICON defaults here (see TODO above).
     ncctop: float
     nccbot: float
     jbmin: float
@@ -347,86 +344,6 @@ class CloudParams2M: #(NamedTuple):
             dt_sedi=jnp.array(dt_sedi),
             n_aer_coarse=jnp.array(n_aer_coarse),
         )
-
-@jit
-def sucloud(nlev, vct, nn=None, is_icon=False):
-    """Define highest level where condensation is allowed.
-    Initializes resolution-dependent parameters.
-    # TODO: allow the CloudParams2M to be updated with resolution-dependant sucloud outputs.
-    # For now the default values for ICON have been used as placeholders (see note above in CloudParams2M).
-
-    Args:
-        nlev: Number of vertical levels
-        vct: Vertical coordinate transformation coefficients
-        nn: Truncation (optional, required if is_icon is False)
-        is_icon: Whether the model is ICON (True) or ECHAM (False)
-
-    Returns:
-        Updated cloud parameters (jbmin, jbmax, ncctop, nccbot, crs, crt, cvtfall, csecfrl,
-        clwprat, csatsc, cinv, nex, nadd)
-
-    """
-    global crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv, nex, nadd
-    global ncctop, nccbot, jbmin, jbmax
-
-    if is_icon:
-        # ICON-specific values
-        jbmin, jbmax, ncctop, nccbot = 40, 45, 13, 35
-        crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-        nex, nadd = 2, 0
-    else:
-        # ECHAM-specific calculations
-        za = vct[:nlev + 1]
-        zb = vct[nlev + 1:]
-        zph = za + zb * 101320.0
-
-        zp = (zph[:-1] + zph[1:]) * 0.5
-        zh = (zph[-1] - zp) / (grav * 1.25)
-
-        # Highest inversion level (first full level below 2000 m)
-        jbmin = jnp.argmax(zh < 2000.0)
-
-        # Lowest inversion level (first full level below 500 m)
-        jbmax = jnp.argmax(zh < 500.0)
-
-        # Pressure level cptop (Pa)
-        ncctop = jnp.argmax(zp >= cptop)
-
-        # Pressure level cpbot (Pa)
-        nccbot = jnp.argmax(zp >= cpbot)
-
-        # Resolution-dependent parameters
-        if nn == 31:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.95, 0.85, 3.0, 5e-7, 0.0, 0.1, 0.5
-            nex, nadd = 1, 1
-        elif nn == 63:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.975, 0.75, 2.5, 5e-6, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 127:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        elif nn == 255:
-            crs, crt, cvtfall, csecfrl, clwprat, csatsc, cinv = 0.994, 0.75, 3.0, 1e-5, 4.0, 0.7, 0.25
-            nex, nadd = 2, 0
-        else:
-            raise ValueError("Truncation not supported.")
-
-    # return {
-    #     "jbmin": jbmin,
-    #     "jbmax": jbmax,
-    #     "ncctop": ncctop,
-    #     "nccbot": nccbot,
-    #     "crs": crs,
-    #     "crt": crt,
-    #     "cvtfall": cvtfall,
-    #     "csecfrl": csecfrl,
-    #     "clwprat": clwprat,
-    #     "csatsc": csatsc,
-    #     "cinv": cinv,
-    #     "nex": nex,
-    #     "nadd": nadd,
-    # }
-    pass
 
 # Global instance of physical constants
 cloud_params = CloudParams2M.default()

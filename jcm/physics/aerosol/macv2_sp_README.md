@@ -1,96 +1,46 @@
-# ECHAM Aerosol Physics - Simple Aerosol Scheme
+# MACv2-SP (Simple Plumes) Aerosol Scheme
 
-This module implements the MACv2-SP (Simple Plumes) aerosol scheme for the ECHAM physics package in JAX-GCM.
+JAX implementation of the MACv2-SP simple-plumes aerosol parameterization
+(Stevens et al., 2017, *GMD* 10, 433-452; ICON reference
+`mo_bc_aeropt_splumes.f90`). Nine anthropogenic Gaussian plumes plus a natural
+background provide aerosol optical properties and a Twomey effect without
+prognostic aerosol tracers.
 
-## Overview
+## Entry points
 
-The MACv2-SP scheme represents aerosol distributions using 9 anthropogenic plumes plus natural background aerosol. This implementation provides:
+- **Composable term:** `Macv2SpAerosol` (a `PhysicsTerm` in `macv2_sp.py`),
+  wired into the ECHAM package by the `echam_physics()` factory in
+  `jcm/physics/echam/echam_terms.py`.
+- **Functional core:** `get_simple_aerosol(height_full, lats_deg, lons_deg,
+  aerosol_data, parameters, forcing, sw_band_centers_nm)` returns an updated
+  `AerosolData`. It composes:
+  - `get_plume_spatial_distribution` — Gaussian plume weights per column
+  - `get_anthropogenic_aod` / `get_background_aod` — 550 nm column AOD
+    (time-varying via `forcing.aerosol_year_weight` / `aerosol_ann_cycle`)
+  - `get_vertical_profiles` / `get_background_vertical_profile` — beta-function
+    vertical AOD distribution
+  - `get_optical_properties` — plume-weighted SSA, asymmetry, Angstrom exponent
+  - `per_band_optical_properties` — Angstrom scaling to the active SW bands
+  - `get_CDNC` — Twomey-style CCN from column AOD
+- Parameters live in `macv2_sp_params.py` (`AerosolParameters`, tree_math struct).
 
-- **Vectorized JAX operations** for efficient computation
-- **Full differentiability** for ML applications
-- **Comprehensive test coverage** (>90% coverage)
-- **Proper vertical profiles** using beta function distributions
-- **Spatial distribution** using Gaussian plume models
-- **Optical properties** calculation (AOD, SSA, asymmetry parameter)
-- **Twomey effect** on cloud droplet number concentration
+## Outputs consumed downstream
 
-## Key Features
+- Per-SW-band optics (`aod_sw_per_band`, `ssa_sw_per_band`, ...) → RRTMGP
+  aerosol radiative effects (`jcm/physics/radiation/rrtmgp.py`).
+- `cdnc_factor` → Twomey scaling of droplet number in the 1M microphysics
+  (`jcm/physics/clouds/echam_1m.py`).
+- `Nccn` → SPA activation floor for the 2M scheme (`jcm/physics/aerosol/spa.py`).
 
-### Implemented Functions
+## Tests
 
-1. **`get_simple_aerosol()`** - Main entry point for aerosol scheme
-2. **`get_anthropogenic_aod()`** - Calculates anthropogenic aerosol optical depth
-3. **`get_background_aod()`** - Calculates background aerosol optical depth  
-4. **`get_vertical_profiles()`** - Generates beta function vertical profiles
-5. **`get_plume_spatial_distribution()`** - Calculates Gaussian spatial distributions
-6. **`get_optical_properties()`** - Computes SSA and asymmetry parameters
-7. **`get_CDNC()`** - Calculates cloud droplet number concentration
+- `jcm/physics/aerosol/macv2_sp_test.py`
+- `jcm/physics/aerosol/per_band_optics_test.py`
 
-### Vertical Profiles
+## Current limitations
 
-The implementation uses beta function distributions for realistic vertical aerosol profiles:
-- Each plume has configurable β(a,b) parameters
-- Profiles are normalized to integrate to 1
-- Background aerosol uses exponential decay
-
-### Spatial Distribution
-
-Aerosol plumes are represented as rotated Gaussian distributions:
-- 9 major emission regions (East Asia, Europe, North America, etc.)
-- Each plume has 2 features with different spatial extents
-- Proper longitude wrapping handling
-- Rotation angles for realistic plume shapes
-
-### Optical Properties
-
-- Single scattering albedo (SSA) from 0.85-0.96
-- Asymmetry parameter from 0.60-0.69
-- Wavelength dependence via Angstrom parameter
-- Proper weighted averaging across plumes
-
-## Usage
-
-```python
-from jcm.physics.echam.aerosol.simple_aerosol import get_simple_aerosol
-from jcm.physics.echam.aerosol.aerosol_params import AerosolParameters
-
-# Create parameters
-params = AerosolParameters.default()
-
-# Apply aerosol scheme
-tendencies, updated_physics_data = get_simple_aerosol(
-    state, physics_data, params, boundaries, geometry
-)
-```
-
-## Testing
-
-Comprehensive test suite covers:
-- Parameter validation and ranges
-- Vertical profile properties
-- Spatial distribution calculations
-- AOD calculations
-- Optical property calculations
-- JAX compatibility (JIT, vmap, grad)
-- Conservation properties
-- Integration tests
-
-Run tests with:
-```bash
-pytest jcm/physics/echam/aerosol/test_simple_aerosol.py -v
-```
-
-## Performance
-
-The implementation is fully vectorized and JIT-compiled for performance:
-- ~900x speedup after JIT compilation
-- Supports batch processing with `vmap`
-- Fully differentiable for gradient-based optimization
-
-## Future Enhancements
-
-- Time-dependent emissions (year_weight, ann_cycle)
-- Wavelength-dependent optical properties
-- Integration with radiation scheme
-- Cloud-aerosol interactions
-- Validation against observations
+- The default plume parameters (`AerosolParameters.default()`) are
+  **illustrative placeholders** — representative emission-region values, not
+  the MACv2.0-SP_v1.nc dataset used by ECHAM/ICON.
+- Known fidelity gaps versus the Fortran reference are catalogued in
+  `docs/echam_rrtmgp_physics_review.md` §2.30-2.35.

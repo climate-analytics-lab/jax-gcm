@@ -12,12 +12,35 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     radiation_scheme
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
 from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.forcing import SolarGeometry
+import jcm.constants as c
 import jax_datetime as jdt
 from datetime import datetime
 from jax_solar import OrbitalTime
+
+
+def calculate_air_density(pressure, temperature):
+    """Air density from the ideal gas law, rho = p / (Rd T), in kg/m3.
+
+    Test-local helper (also imported by rrtmgp_test.py and rce_test.py);
+    only used to build synthetic radiation inputs.
+    """
+    return pressure / (c.rd * temperature)
+
+
+def calculate_layer_thickness(pressure_levels, temperature):
+    """Hydrostatic layer thickness dz = dp / (rho g), in metres.
+
+    The top layer reuses the thickness of the layer below it. Test-local
+    helper for building synthetic radiation inputs.
+    """
+    air_density = calculate_air_density(pressure_levels, temperature)
+    dp = jnp.diff(pressure_levels, axis=0)
+    rho_mid = 0.5 * (air_density[1:] + air_density[:-1])
+    dz = jnp.zeros_like(pressure_levels)
+    dz = dz.at[1:].set(dp / (rho_mid * c.grav))
+    return dz.at[0].set(dz[1])
 
 
 def _solar_from_dt(dt):
@@ -140,7 +163,6 @@ def test_prepare_radiation_state():
     cos_zenith = jnp.array(0.5)
 
     # Calculate layer thickness and air density as required by prepare_radiation_state
-    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
 
@@ -197,7 +219,6 @@ def test_radiation_scheme_basic():
     atm = create_test_atmosphere(nlev=8)
     
     # Calculate layer thickness and air density as required by radiation_scheme
-    from jcm.physics.echam.unit_conversions import calculate_air_density, calculate_layer_thickness
     air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
     layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
     
