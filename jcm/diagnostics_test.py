@@ -3,7 +3,6 @@
 import unittest
 
 import numpy as np
-import pytest
 import xarray as xr
 
 from jcm.diagnostics import check_health, print_report
@@ -72,9 +71,3 @@ class TestCheckHealth(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("NaN" in reason for reason in report["reasons"]))
 
-
-# Slow-marked companion — see jcm/runners_test.py for rationale.
-
-@pytest.mark.slow
-class TestCheckHealthSlow(TestCheckHealth):
-    pass

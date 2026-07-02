@@ -46,12 +46,24 @@ class OpticsIntegrationTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(dyn.temperature < 360.0)))
 
         # The column AOD (~550 nm) diagnostic surfaces in the physics output,
-        # finite and non-negative. (Magnitudes are tiny here — cold-start spin-up
-        # has barely any aerosol — but the field must be present and physical.)
+        # finite, non-negative, and STRICTLY positive somewhere: three steps
+        # of surface emissions must reach the optics chain (measured healthy
+        # cold-start max ≈ 1.5e-8 — tiny, but an exact zero means the
+        # emissions→microphysics→optics wiring silently dropped out, which
+        # the old ``aod >= 0`` bound could not distinguish from healthy).
+        # A stronger on/off flux-difference test needs a seeded aerosol
+        # burden (cold-start AOD is radiatively invisible) — deferred.
         aod = predictions.physics["aerosol_optical_depth"]
         aod = np.asarray(aod)
         self.assertTrue(np.all(np.isfinite(aod)))
         self.assertTrue(np.all(aod >= 0.0))
+        self.assertGreater(float(aod.max()), 0.0,
+                           "AOD identically zero — optics chain unwired")
+
+        # And RRTMGP genuinely ran with the optics in the loop: daytime
+        # columns received shortwave at the surface.
+        rad = predictions.physics["radiation"]
+        self.assertGreater(float(np.max(np.asarray(rad.surface_sw_down))), 0.0)
 
 
 if __name__ == "__main__":

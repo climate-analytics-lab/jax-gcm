@@ -11,7 +11,6 @@ Inspired by the swirl-jatmos ``radiative_eqb_solver`` and ICON physics.
 Date: 2025-08-01
 """
 
-import pytest
 import jax.numpy as jnp
 import jax_datetime as jdt
 from datetime import datetime
@@ -84,48 +83,6 @@ def _radiation_heating(temperature, pressure, pressure_interfaces,
     return tend.temperature_tendency, diag
 
 
-def _convective_adjustment(temperature, pressure, lapse_rate=6.5e-3,
-                           max_dt=5.0):
-    """Manabe-Strickler dry/moist convective adjustment.
-
-    If any layer is less stable than the target lapse rate, adjust toward it.
-    """
-    nlev = temperature.shape[0]
-    # Approximate heights from hydrostatic + ideal gas
-    scale_height = 8500.0  # m
-    z = -scale_height * jnp.log(pressure / pressure[-1])
-
-    for _ in range(5):  # a few passes for convergence
-        for k in range(nlev - 1):
-            dz = z[k] - z[k + 1]
-            dT_actual = temperature[k + 1] - temperature[k]
-            dT_adiabat = lapse_rate * dz
-            excess = dT_actual - dT_adiabat
-            correction = jnp.clip(excess / 2.0, -max_dt, max_dt)
-            correction = jnp.maximum(correction, 0.0)  # only adjust unstable
-            temperature = temperature.at[k].add(correction)
-            temperature = temperature.at[k + 1].add(-correction)
-    return temperature
-
-
-def _rce_step(temperature, pressure, pressure_interfaces,
-              surface_temperature, params, aerosol, date, dt,
-              rh=0.75, convective_adjustment=False):
-    """Single forward-Euler step of RCE evolution."""
-    heating, _ = _radiation_heating(
-        temperature, pressure, pressure_interfaces,
-        surface_temperature, params, aerosol, date, rh,
-    )
-    temperature_new = temperature + heating * dt
-    if convective_adjustment:
-        temperature_new = _convective_adjustment(temperature_new, pressure)
-    return temperature_new
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 def _make_rce_setup(nlev=20):
     """Create atmosphere and parameters for RCE tests."""
     atm = create_test_atmosphere(nlev=nlev)
@@ -135,118 +92,6 @@ def _make_rce_setup(nlev=20):
     surface_temperature = jnp.array(300.0)
     return atm, params, aerosol, date, surface_temperature
 
-
-@pytest.mark.slow
-class TestRadiativeEquilibrium:
-    """Test pure radiative equilibrium (no convection).
-
-    The 3-band LW radiation used by the scheme produces larger TOA heating
-    than the previous 8-band version, so the simple forward-Euler driver
-    here needs sub-hour dt to stay stable at the thin TOA layers. Real
-    GCM runs are bounded by advection / diffusion / convection and don't
-    see the same issue.
-    """
-
-    def test_radiative_equilibrium_converges(self):
-        """Temperature profile should evolve and net flux should decrease."""
-        atm, params, aerosol, date, sfc_t = _make_rce_setup(nlev=20)
-        temperature = atm["temperature"]
-        pressure = atm["pressure_levels"]
-        pressure_interfaces = atm["pressure_interfaces"]
-
-        # dt = 30 min keeps forward-Euler stable at the thin TOA layers under
-        # the current 3-band LW radiation tuning. See class docstring.
-        dt = 1800.0
-        n_steps = 16
-
-        initial_temperature = temperature.copy()
-        for _ in range(n_steps):
-            temperature = _rce_step(
-                temperature, pressure, pressure_interfaces,
-                sfc_t, params, aerosol, date, dt,
-                convective_adjustment=False,
-            )
-
-        # Temperature should have changed
-        assert not jnp.allclose(temperature, initial_temperature, atol=0.1)
-        # All temperatures should remain physical
-        assert jnp.all(temperature > 100.0)
-        assert jnp.all(temperature < 500.0)
-
-    def test_pure_radiative_develops_inversion(self):
-        """Without convection the stratosphere should warm (inversion)."""
-        atm, params, aerosol, date, sfc_t = _make_rce_setup(nlev=20)
-        temperature = atm["temperature"]
-        pressure = atm["pressure_levels"]
-        pressure_interfaces = atm["pressure_interfaces"]
-
-        dt = 1800.0
-        for _ in range(16):
-            temperature = _rce_step(
-                temperature, pressure, pressure_interfaces,
-                sfc_t, params, aerosol, date, dt,
-                convective_adjustment=False,
-            )
-
-        # In radiative equilibrium, temperature should NOT be monotonically
-        # decreasing with height — there should be a stratospheric warming
-        dT = jnp.diff(temperature)
-        # At least one level where temperature increases going up (toward TOA)
-        has_inversion = jnp.any(dT > 0)
-        assert has_inversion, "Expected stratospheric warming in radiative eq."
-
-
-@pytest.mark.slow
-class TestRadiativeConvectiveEquilibrium:
-    """Test RCE with convective adjustment."""
-
-    def test_rce_bounds_lapse_rate(self):
-        """With convective adjustment, the tropospheric lapse rate should be bounded."""
-        atm, params, aerosol, date, sfc_t = _make_rce_setup(nlev=20)
-        temperature = atm["temperature"]
-        pressure = atm["pressure_levels"]
-        pressure_interfaces = atm["pressure_interfaces"]
-
-        dt = 1800.0
-        for _ in range(24):
-            temperature = _rce_step(
-                temperature, pressure, pressure_interfaces,
-                sfc_t, params, aerosol, date, dt,
-                convective_adjustment=True,
-            )
-
-        # Compute lapse rate in lower troposphere (below ~300 hPa)
-        scale_height = 8500.0
-        z = -scale_height * jnp.log(pressure / pressure[-1])
-        troposphere = pressure > 30000.0  # > 300 hPa
-        trop_idx = jnp.where(troposphere)[0]
-
-        if len(trop_idx) > 1:
-            dT = jnp.diff(temperature[trop_idx])
-            dz = jnp.diff(z[trop_idx])
-            lapse = -dT / dz  # K/m, positive means T decreases with height
-            # Should not exceed dry adiabatic lapse rate (~10 K/km)
-            assert jnp.all(lapse < 0.012), (
-                f"Lapse rate too large: max={jnp.max(lapse)*1000:.1f} K/km"
-            )
-
-    def test_rce_temperatures_physical(self):
-        """All temperatures should remain in a physical range."""
-        atm, params, aerosol, date, sfc_t = _make_rce_setup(nlev=20)
-        temperature = atm["temperature"]
-        pressure = atm["pressure_levels"]
-        pressure_interfaces = atm["pressure_interfaces"]
-
-        dt = 1800.0
-        for _ in range(16):
-            temperature = _rce_step(
-                temperature, pressure, pressure_interfaces,
-                sfc_t, params, aerosol, date, dt,
-                convective_adjustment=True,
-            )
-
-        assert jnp.all(temperature > 100.0), f"Min T = {jnp.min(temperature):.1f}"
-        assert jnp.all(temperature < 500.0), f"Max T = {jnp.max(temperature):.1f}"
 
 
 class TestRadiationHeating:

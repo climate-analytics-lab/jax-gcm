@@ -60,6 +60,28 @@ class JamIntegrationTest(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(arr)))
             self.assertLess(float(np.max(np.abs(arr))), bound)
 
+        # The docstring's actual claim — activation feeds the 2M scheme —
+        # must hold: the activated-CDNC diagnostic the 2M term consumes is
+        # present and positive somewhere (ARG or its SPA floor), and the
+        # 2M droplet-number tracer has been populated in response. A run
+        # where the coupling silently no-ops passes every finiteness check
+        # above but fails here (measured on a healthy cold-start run:
+        # activated_cdnc max ~66, qnc max ~3e-5 after 3 steps).
+        physics = predictions.physics
+        self.assertIn("activated_cdnc", physics)
+        self.assertGreater(
+            float(np.max(np.asarray(physics["activated_cdnc"]))), 0.0,
+            "activation never produced droplets (ARG + SPA floor both zero)",
+        )
+        self.assertGreater(
+            float(np.max(np.asarray(physics["aerosol"].Nccn))), 0.0,
+            "aerosol term produced no CCN",
+        )
+        self.assertGreater(
+            float(np.max(np.asarray(tracers["qnc"]))), 0.0,
+            "2M droplet-number tracer untouched — activation not coupled",
+        )
+
     def test_ghosh_variant_also_runs(self):
         _, predictions = self._run(jam_arg_variant="ghosh2025")
         self.assertFalse(

@@ -196,7 +196,18 @@ class FactoryWiringTest(unittest.TestCase):
 
 
 class IceNucleationModelTest(unittest.TestCase):
-    """End-to-end: het ice nucleation drives the 2M scheme on a T21 run."""
+    """End-to-end WIRING guards: each het-ice scheme path compiles and runs
+    inside the full ECHAM+JAM+2M model, and the ``ice_nuclei`` coupling
+    diagnostic the 2M scheme consumes is emitted.
+
+    These deliberately do NOT assert nonzero ice nuclei or scheme-dependent
+    output: on a 3-step cold-start T21 aquaplanet the prognostic dust/BC
+    burdens are still ~0, so both schemes measurably produce ``ice_nuclei``
+    ≡ 0 and bitwise-identical ``qni`` (verified) — the scheme *physics*
+    (active fractions, temperature windows, scheme differences) is pinned
+    by the unit tests above on synthetic aerosol inputs. What these guard
+    is the trace/compile/coupling path per scheme flag.
+    """
 
     def _run(self, scheme):
         import numpy as onp
@@ -217,10 +228,18 @@ class IceNucleationModelTest(unittest.TestCase):
         return model.run(save_interval=0.0625, total_time=0.0625)
 
     def _check(self, scheme):
-        dyn = self._run(scheme).dynamics
+        preds = self._run(scheme)
+        dyn = preds.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         for key in ("qi", "qni"):
             self.assertFalse(bool(jnp.any(jnp.isnan(dyn.tracers[key]))))
+        # The coupling contract with the 2M scheme: the term emits the
+        # ``ice_nuclei`` diagnostic (finite, non-negative; zero is expected
+        # at cold start — see class docstring).
+        self.assertIn("ice_nuclei", preds.physics)
+        inp = np.asarray(preds.physics["ice_nuclei"])
+        self.assertTrue(np.all(np.isfinite(inp)))
+        self.assertTrue(np.all(inp >= 0.0))
 
     def test_niemand_runs_finite(self):
         self._check("niemand")

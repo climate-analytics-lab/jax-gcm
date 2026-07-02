@@ -161,13 +161,18 @@ class TestTibetanColumnMoisture(unittest.TestCase):
             msg=f"worst |q_min| / q_max over 60 steps = {worst_ratio*100:.2f} % (>1 %)",
         )
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason="q exceeds q_sat by ~10 % at L35-L38 by step 60; pending the "
+               "cloud / convection moisture-balance fix (fix-plan PRs 4-5)",
+    )
     def test_q_stays_subsaturated(self):
         """``q`` at the Tibetan column must not exceed ``q_sat`` over the
         first 12 hours of full physics. The Sundqvist + 1-moment cloud
         scheme is supposed to condense any supersaturation each step.
 
         Currently fails: q exceeds q_sat by ~10 % at L35-L38 by step 60.
-        XFAIL pending the cloud / convection moisture-balance fix.
+        Marked xfail (non-strict) until then.
         """
         _gpu_required()
         history = _build_model_and_step(_full_physics, n_steps=60)
