@@ -45,6 +45,7 @@ from typing import NamedTuple
 from math import pi
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 
 from .lohmann_2m_params import (
     CloudParams2M,
@@ -407,7 +408,13 @@ def sublimation_snow_and_ice_evaporation_rain(
     # ------------------------------------------------------------------
     ll_snow = jnp.logical_and(snow_flux > cqtmin, precip_mask)
 
-    zclambs_s = zcons3 * (snow_flux / jnp.maximum(zclcpre, eps)) ** (0.25 / 1.16)
+    # Double-where guard: the fractional power has an infinite derivative at
+    # a zero base, and ``snow_sublim`` is where-masked below — masking the
+    # output alone still yields NaN gradients (0 cotangent × ∞ derivative).
+    # A safe base of 1.0 where ll_snow is False keeps forward values
+    # unchanged while keeping the backward pass finite.
+    zclambs_s_base = jnp.where(ll_snow, snow_flux / jnp.maximum(zclcpre, eps), 1.0)
+    zclambs_s = zcons3 * zclambs_s_base ** (0.25 / 1.16)
     zcfac4c_s = 0.78 * zclambs_s**2 + 232.19 * (inv_air_density**0.25) * (zclambs_s**2.625)
     ztmp2_s = zcfac4c_s * zcoeff * dp_over_g
 
@@ -423,7 +430,10 @@ def sublimation_snow_and_ice_evaporation_rain(
     # ------------------------------------------------------------------
     ll_ice = jnp.logical_and(ice_flux > cqtmin, falling_ice_mask)
 
-    zclambs_i = zcons3 * (ice_flux / jnp.maximum(zclcfi, eps)) ** (0.25 / 1.16)
+    # Same double-where guard as snow sublimation above (ice_sublim and
+    # zsubin are where-masked on ll_ice).
+    zclambs_i_base = jnp.where(ll_ice, ice_flux / jnp.maximum(zclcfi, eps), 1.0)
+    zclambs_i = zcons3 * zclambs_i_base ** (0.25 / 1.16)
     zcfac4c_i = 0.78 * zclambs_i**2 + 232.19 * (inv_air_density**0.25) * (zclambs_i**2.625)
     ztmp2_i = zcfac4c_i * zcoeff * dp_over_g
 
@@ -449,11 +459,14 @@ def sublimation_snow_and_ice_evaporation_rain(
     # ------------------------------------------------------------------
     ll_rain = jnp.logical_and(rain_flux > cqtmin, precip_mask)
 
+    # Same double-where guard as snow sublimation above (rain_evap is
+    # where-masked on ll_rain).
+    zrain_pow_base = jnp.where(ll_rain, rain_flux / jnp.maximum(zclcpre, eps), 1.0)
     ztmp2_r = (
         870.0
         * subsat_wrt_water_evap
         * dp_over_g
-        * (rain_flux / jnp.maximum(zclcpre, eps)) ** 0.61
+        * zrain_pow_base ** 0.61
         / (jnp.sqrt(jnp.maximum(air_density, eps)) * jnp.maximum(thermo_term_water, eps))
     )
 
@@ -1252,8 +1265,20 @@ def het_mxphase_freezing(
     # -------------------------------------------------------------------------
     # 2. Freezing rates (contact and immersion freezing)
     # -------------------------------------------------------------------------
-    # Compute mean volume radius of cloud droplets
-    droplet_radius = (0.75 * cloud_liquid * air_density / (pi * c.rhow * droplet_number)) ** (1.0 / 3.0)
+    # Compute mean volume radius of cloud droplets. Double-where guard on
+    # the cube root: it has an infinite derivative at cloud_liquid == 0 and
+    # the freezing rates below vanish there (and are additionally
+    # where-masked on freezing_condition), so without a safe base the
+    # backward pass multiplies 0 × ∞ = NaN at liquid-free points. Forward
+    # values are unchanged (radius was 0 there, and every consumer scales
+    # by cloud_liquid).
+    has_liquid = cloud_liquid > 0.0
+    droplet_radius_base = jnp.where(
+        has_liquid,
+        0.75 * cloud_liquid * air_density / (pi * c.rhow * droplet_number),
+        1.0,
+    )
+    droplet_radius = jnp.where(has_liquid, droplet_radius_base ** (1.0 / 3.0), 0.0)
 
     # Contact freezing by dust and soot
     contact_freezing_dust = jnp.minimum(1.0, jnp.maximum(0.0, -(0.1014 * (temperature - c.tmelt) + 0.3277)))
@@ -1761,8 +1786,16 @@ def precip_formation_cold(
         ),
     )
 
-    # droplet mean radius proxy (zdw)
-    zdw = (6.0 * pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, eps)) ** (1.0 / 3.0)
+    # droplet mean radius proxy (zdw). Double-where guard: the cube root has
+    # an infinite derivative when in_cloud_liquid == 0, and everything
+    # downstream of zdw (zcsacl) is where-masked on ll2 — safe base 1.0 in
+    # the masked region keeps forward values unchanged and gradients finite.
+    zdw_base = jnp.where(
+        ll2,
+        6.0 * pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, eps),
+        1.0,
+    )
+    zdw = zdw_base ** (1.0 / 3.0)
     zdw = jnp.maximum(zdw, 1.0e-6)
 
     zudrop = 1.19e4 * 2500.0 * zdw**2 * (1.3 * inverse_air_density_rcp) ** 0.35
@@ -1803,8 +1836,10 @@ def precip_formation_cold(
     zcsacl = jnp.clip(zcsacl, 0.01, 1.0)
     zcsacl = jnp.where(ll2, zcsacl, 0.0)
 
-    # lambda_snow proxy and collection coefficient
-    zlamsm = cons4 * zxsp ** 0.8125
+    # lambda_snow proxy and collection coefficient. Double-where guard on
+    # the fractional power (zxsp can be 0 where ll2 is False; ztmp2 is
+    # where-masked, so the safe base only changes the masked region).
+    zlamsm = cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
     ztmp2 = pi * cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
     ztmp2 = jnp.where(ll2, ztmp2, 0.0)
 
@@ -1837,7 +1872,9 @@ def precip_formation_cold(
     ll1b = jnp.logical_and(cloud_mask, in_cloud_ice > cqtmin)
     ll2 = jnp.logical_and(ll1b, zxsp > cqtmin)
 
-    zlamsm = cons4 * zxsp ** 0.8125
+    # Double-where guard on the fractional power (zsaci is where-masked on
+    # ll2, so the safe base only changes the masked region).
+    zlamsm = cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
     ztmp1 = pi * cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
     survival = jnp.exp(-dt * ztmp1 * zcolleffi)
     zsaci = in_cloud_ice * (1.0 - survival)
@@ -2260,7 +2297,15 @@ def update_tendencies_and_important_vars(
     # breadth_factor returns dimensionless breadth parameter (Fortran breadth_factor)
     breadth = breadth_factor(cdnc)
     # convert to effective radius (um): 1e6 * breadth * ((3/(4*pi*rhoh2o)) * pxlb * prho / pcdnc)^(1/3)
-    liq_eff_radius = 1.0e6 * breadth * ((3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, eps)) ** (1.0 / 3.0)
+    # Double-where guard on the cube root (infinite derivative when
+    # cloud_liquid_in_cloud == 0; the result is where-masked, so the safe
+    # base only changes the masked region).
+    liq_radius_base = jnp.where(
+        liquid_cloud_flag,
+        (3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, eps),
+        1.0,
+    )
+    liq_eff_radius = 1.0e6 * breadth * liq_radius_base ** (1.0 / 3.0)
     liq_eff_radius = jnp.where(liquid_cloud_flag, liq_eff_radius, 0.0)
 
     # --- 7) ice crystal effective radius [um] (preffi)
@@ -2880,16 +2925,15 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # Mixed-phase deposition and corrections
     # ------------------------------------------------------------------
-    # Saturation vapor pressures (Tetens / Magnus formula, ECHAM conventions).
-    t0_sat = jnp.array(273.15, dtype=qc.dtype)
-    es0 = jnp.array(611.21, dtype=qc.dtype)  # reference esat [Pa]
-    c1_w, c2_w = 17.502, 32.19               # water, T >= 273.15 K
-    c3_i, c4_i = 22.587, -0.7                # water T<273.15 K and pure ice
-
-    es_water_warm = es0 * jnp.exp(c1_w * (temperature - t0_sat) / (temperature - c2_w))
-    es_water_cold = es0 * jnp.exp(c3_i * (temperature - t0_sat) / (temperature - c4_i))
-    es_water = jnp.where(temperature >= t0_sat, es_water_warm, es_water_cold)
-    es_ice = es0 * jnp.exp(c3_i * (temperature - t0_sat) / (temperature - c4_i))
+    # Saturation vapour pressures from the shared ECHAM coefficients
+    # (jcm.physics.thermodynamics). ``es_water`` uses the LIQUID-WATER
+    # coefficients at ALL temperatures — the Bergeron-Findeisen variable
+    # below and the threshold vertical velocity depend on the water/ice
+    # saturation *difference* below freezing, which degenerates to zero
+    # (killing the Bergeron process) if es_water switches to the ice
+    # coefficients below 0 °C.
+    es_water = thermodynamics.saturation_vapor_pressure(temperature, phase="water")
+    es_ice = thermodynamics.saturation_vapor_pressure(temperature, phase="ice")
 
     qsat_water = c.eps * es_water / jnp.maximum(pressure - (1.0 - c.eps) * es_water, params.epsec)
     qsat_ice = c.eps * es_ice / jnp.maximum(pressure - (1.0 - c.eps) * es_ice, params.epsec)

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
@@ -369,9 +370,17 @@ def land_surface_physics_step(
     # Soil evaporation depends on soil moisture
     soil_beta = jnp.minimum(soil_moisture[:, 0] / 0.75, 1.0)  # Evaporation efficiency
     
-    # Simplified surface humidity
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - c.tmelt) /
-                           (surface_temp - c.tmelt + 237.3))
+    # Simplified surface humidity, saturated over LIQUID water at all
+    # temperatures (shared ECHAM coefficients from
+    # jcm.physics.thermodynamics). Kept over-water deliberately: the
+    # latent-heat flux below pairs the resulting evaporation with the
+    # liquid-evaporation latent heat ``alhc`` unconditionally (this
+    # simplified land tile does not model frozen-soil / snow sublimation),
+    # so switching the saturation surface to ice below freezing would make
+    # the qsat/latent-heat pair inconsistent the other way around. If
+    # sublimation over frozen land is added later, both this phase choice
+    # and the ``alhc`` factor must switch together on T < tmelt.
+    e_sat = thermodynamics.saturation_vapor_pressure(surface_temp, phase="water")
     q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
     q_surface = soil_beta * q_sat_surface  # Reduced by soil dryness
     
