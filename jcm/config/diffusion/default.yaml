@@ -12,9 +12,21 @@
 kind: auto
 scale: 1.0
 
-# Optional dycore-side mass-conserving positivity filter on the gridpoint
-# tracers (applied as the spectral core projects to the physics state). Off by
-# default; turn on for prescribed-aerosol-emissions runs, whose sharp sources
-# otherwise ring negative and NaN the microphysics (see issue #521). Opt-in
-# because grid-point dycores don't need it and it slightly alters tracer output.
-tracer_positivity: false
+# Dycore-side mass-conserving positivity filter on the gridpoint tracers
+# (applied as the spectral core projects to the physics state). Prescribed/
+# prognostic aerosol emissions have sharp near-zero sources that ring negative
+# (Gibbs) and NaN the microphysics — most acutely the MAM4 core, where a
+# negative aerosol mass makes wateruptake return a negative wet density and coag
+# NaNs (see issue #521). The filter clips that at the source, mass-conservingly.
+#
+#   ``auto`` (default) — on when the physics advects prognostic aerosol tracers
+#     (``physics.aerosol_module == "jam"``), off otherwise. This keeps
+#     non-aerosol runs bit-identical (the filter differs from the plain
+#     ``verify_state`` clip only where a tracer actually rings negative), while
+#     aerosol-emission runs get the fix without having to remember the flag.
+#   ``true`` / ``false`` — force on/off regardless of the physics.
+#
+# The filter is cheap (a clip + one column-mass rescale per tracer) and a
+# bit-exact no-op wherever tracers are already non-negative, so ``auto`` costs
+# nothing on runs that don't ring.
+tracer_positivity: auto

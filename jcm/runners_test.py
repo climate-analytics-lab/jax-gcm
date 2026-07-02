@@ -21,6 +21,7 @@ from jcm.runners import (
     build_model,
     build_physics,
     build_terrain,
+    build_tracer_filter,
     configure_host_device_count,
     run,
 )
@@ -33,6 +34,34 @@ def _compose(overrides=None):
     overrides = overrides or []
     with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
         return compose(config_name="config", overrides=overrides)
+
+
+class TestTracerPositivityResolution(unittest.TestCase):
+    """``diffusion.tracer_positivity`` resolution in build_tracer_filter.
+
+    ``auto`` (the default) turns the mass-conserving positivity filter on only
+    when the physics advects prognostic aerosol tracers (aerosol_module==jam),
+    so aerosol-emission runs get the ringing fix by default while non-aerosol
+    runs stay bit-identical; explicit true/false always wins.
+    """
+
+    def test_auto_on_for_prognostic_aerosol(self):
+        self.assertIsNotNone(build_tracer_filter(_compose(["physics=echam-jam"])))
+
+    def test_auto_off_for_diagnostic_aerosol(self):
+        # echam term-list preset uses diagnostic MACv2-SP → no advected aerosol.
+        self.assertIsNone(build_tracer_filter(_compose(["physics=echam"])))
+
+    def test_auto_off_without_aerosol(self):
+        self.assertIsNone(build_tracer_filter(_compose(["physics=held_suarez"])))
+
+    def test_explicit_false_overrides_auto(self):
+        self.assertIsNone(build_tracer_filter(
+            _compose(["physics=echam-jam", "diffusion.tracer_positivity=false"])))
+
+    def test_explicit_true_overrides_auto(self):
+        self.assertIsNotNone(build_tracer_filter(
+            _compose(["physics=echam", "diffusion.tracer_positivity=true"])))
 
 
 class TestConfigComposition(unittest.TestCase):
