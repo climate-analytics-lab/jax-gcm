@@ -39,6 +39,17 @@ class TestSaturationVaporPressure(unittest.TestCase):
             float(sat.saturation_vapor_pressure(cold, phase="auto")),
             float(sat.saturation_vapor_pressure(cold, phase="ice")), places=6)
 
+    def test_ice_coefficients_pin(self):
+        # Regression guard for the historical broken ice coefficient
+        # (A_ICE = 35.86, the *water* c4, in place of ECHAM's c3ies =
+        # 21.875): with the correct ECHAM ice pair,
+        # es_ice(253.15 K) ≈ 102.8 Pa (reference tables: ≈ 103.2 Pa). The
+        # broken coefficient gave ≈ 33 Pa here (~3× low), so a tight
+        # window pins the fix.
+        es = sat.saturation_vapor_pressure(jnp.array(253.15), phase="ice")
+        self.assertGreater(float(es), 102.0)
+        self.assertLess(float(es), 103.0)
+
     def test_ice_below_water_below_freezing(self):
         # Below freezing, saturation over ice is below that over water.
         cold = jnp.array(c.tmelt - 20.0)

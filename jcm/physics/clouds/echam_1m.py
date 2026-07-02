@@ -214,9 +214,16 @@ def cloud_droplet_radius(
     # Volume of single droplet
     volume_per_droplet = cloud_water_density / (droplet_density + config.epsilon) / c.rhow  # m³
     
-    # Volume mean radius
-    radius = (3.0 * volume_per_droplet / (4.0 * jnp.pi)) ** (1.0 / 3.0)
-    
+    # Volume mean radius. Double-where guard: the cube root has an infinite
+    # derivative at 0 and the clip below has zero slope there, so without a
+    # safe base the backward pass multiplies 0 × ∞ = NaN at cloud-free
+    # points. Forward values are unchanged (0**(1/3) was 0, then clipped).
+    has_water = volume_per_droplet > 0.0
+    volume_safe = jnp.where(has_water, volume_per_droplet, 1.0)
+    radius = jnp.where(
+        has_water, (3.0 * volume_safe / (4.0 * jnp.pi)) ** (1.0 / 3.0), 0.0,
+    )
+
     # Apply limits
     radius = jnp.clip(radius, config.ceffmin * 1e-6, config.ceffmax * 1e-6)
     
@@ -489,13 +496,23 @@ def snow_accretion(
         temp_factor = jnp.exp(-0.03 * jnp.abs(t_celsius + 15.0))
         efficiency = efficiency * temp_factor
     
-    # Snow fall velocity
+    # Snow fall velocity. Double-where guard on the fractional power:
+    # ``snow_gm3**b`` (b < 1) has an infinite derivative at 0, and although
+    # the *rate* below is proportional to snow**(1+b) (mathematically slope
+    # 0 at snow = 0), autodiff evaluates the product rule as 0 × ∞ = NaN.
+    # A safe base of 1.0 where snow is absent leaves forward values
+    # unchanged (rate is where-masked to 0 there).
     snow_gm3 = snow * air_density * 1000.0  # g/m³
-    vt_snow = config.vt_snow_a * snow_gm3**config.vt_snow_b
-    
+    snow_present = snow_gm3 > 0.0
+    vt_snow = config.vt_snow_a * jnp.where(snow_present, snow_gm3, 1.0)**config.vt_snow_b
+
     # Accretion rate
-    accretion_rate = efficiency * target * snow * vt_snow / (air_density**0.5)
-    
+    accretion_rate = jnp.where(
+        snow_present,
+        efficiency * target * snow * vt_snow / (air_density**0.5),
+        0.0,
+    )
+
     return accretion_rate
 
 
@@ -576,19 +593,24 @@ def evaporation_sublimation(
     # Subsaturation
     subsaturation = jnp.maximum(0.0, (qs - specific_humidity) / qs)
     
-    # Rain evaporation
+    # Rain evaporation. Double-where guard: sqrt has an infinite derivative
+    # at 0, so the base must be replaced by a safe value (1.0) in the
+    # where-masked region or the masked branch's 0 cotangent × ∞ derivative
+    # produces NaN gradients. Forward values are unchanged.
     rain_gm3 = rain * air_density * 1000.0
+    rain_gm3_safe = jnp.where(rain > config.epsilon, rain_gm3, 1.0)
     rain_evap = jnp.where(
         rain > config.epsilon,
-        config.cevaprain * subsaturation * rain_gm3**0.5 / air_density,
+        config.cevaprain * subsaturation * rain_gm3_safe**0.5 / air_density,
         0.0
     )
-    
-    # Snow sublimation
-    snow_gm3 = snow * air_density * 1000.0  
+
+    # Snow sublimation (same double-where guard as rain evaporation).
+    snow_gm3 = snow * air_density * 1000.0
+    snow_gm3_safe = jnp.where(snow > config.epsilon, snow_gm3, 1.0)
     snow_sublim = jnp.where(
         snow > config.epsilon,
-        config.cevapsnow * subsaturation * snow_gm3**0.5 / air_density,
+        config.cevapsnow * subsaturation * snow_gm3_safe**0.5 / air_density,
         0.0
     )
     
@@ -777,12 +799,19 @@ def cloud_microphysics(
     )
     
     # 6. Sedimentation (using simple approach for now)
-    # Calculate terminal velocities
+    # Calculate terminal velocities. Double-where guard on the fractional
+    # powers (see snow_accretion): ``x**b`` with b < 1 has an infinite
+    # derivative at x = 0 and the ``rain * vt_rain`` products below would
+    # backpropagate 0 × ∞ = NaN at precipitation-free points. Safe base 1.0
+    # where the hydrometeor is absent; the sedimentation rates are
+    # where-masked to 0 there, so forward values are unchanged.
     rain_gm3 = rain_water * air_density * 1000.0
-    vt_rain = config.vt_rain_a * rain_gm3**config.vt_rain_b * 1e-3  # m/s
-    
+    rain_present = rain_gm3 > 0.0
+    vt_rain = config.vt_rain_a * jnp.where(rain_present, rain_gm3, 1.0)**config.vt_rain_b * 1e-3  # m/s
+
     snow_gm3 = snow * air_density * 1000.0
-    vt_snow = config.vt_snow_a * snow_gm3**config.vt_snow_b * 1e-3  # m/s
+    snow_present = snow_gm3 > 0.0
+    vt_snow = config.vt_snow_a * jnp.where(snow_present, snow_gm3, 1.0)**config.vt_snow_b * 1e-3  # m/s
     
     # Ice sedimentation: ECHAM mo_cloud.f90 lines 472-491 uses
     # ``zxifall = cvtfall * (rho*xi)^0.16`` (Heymsfield-Donner content-
@@ -805,8 +834,16 @@ def cloud_microphysics(
     zal1_ice = vt_ice * dt / jnp.maximum(layer_thickness, config.epsilon)
     ice_sedi = cloud_ice * (1.0 - jnp.exp(-zal1_ice)) / jnp.maximum(dt, 1e-6)
 
-    rain_sedi = rain_water * vt_rain / (layer_thickness + config.epsilon)
-    snow_sedi = snow * vt_snow / (layer_thickness + config.epsilon)
+    rain_sedi = jnp.where(
+        rain_present,
+        rain_water * vt_rain / (layer_thickness + config.epsilon),
+        0.0,
+    )
+    snow_sedi = jnp.where(
+        snow_present,
+        snow * vt_snow / (layer_thickness + config.epsilon),
+        0.0,
+    )
     
     # Update tendencies
     dqidt = dqidt - ice_sedi
@@ -1119,22 +1156,27 @@ def cloud_microphysics_column_sweep(
         zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
         zqrho_sqrt = jnp.sqrt(jnp.maximum(rho / 1.3, config.epsilon))
         zqrho_sqrt_inv = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
-        zxrp1 = jnp.where(
-            (zrfl > config.epsilon) & (zclcpre > config.epsilon),
-            jnp.power(
-                jnp.maximum(zrfl / zclcpre_safe / (12.45 * zqrho_sqrt), 0.0),
-                8.0 / 9.0,
-            ),
-            0.0,
+        rain_present = (zrfl > config.epsilon) & (zclcpre > config.epsilon)
+        snow_present = (zsfl > config.epsilon) & (zclcpre > config.epsilon)
+        # Double-where guard on the fractional powers: ``x**(8/9)`` (and
+        # ``x**(1/1.16)``) has an infinite derivative at x == 0, and masking
+        # only the *output* with ``where`` still yields NaN in reverse mode
+        # (the masked branch's 0 cotangent multiplies the ∞ derivative).
+        # Substituting a safe base of 1.0 where the flux is absent keeps the
+        # forward values bit-identical (the outer ``where`` already returned
+        # 0 there) while making d(precip)/d(params) finite.
+        zxrp1_base = jnp.where(
+            rain_present,
+            jnp.maximum(zrfl / zclcpre_safe / (12.45 * zqrho_sqrt), 0.0),
+            1.0,
         )
-        zxsp1 = jnp.where(
-            (zsfl > config.epsilon) & (zclcpre > config.epsilon),
-            jnp.power(
-                jnp.maximum(zsfl / zclcpre_safe / config.cvtfall, 0.0),
-                1.0 / 1.16,
-            ),
-            0.0,
+        zxrp1 = jnp.where(rain_present, jnp.power(zxrp1_base, 8.0 / 9.0), 0.0)
+        zxsp1_base = jnp.where(
+            snow_present,
+            jnp.maximum(zsfl / zclcpre_safe / config.cvtfall, 0.0),
+            1.0,
         )
+        zxsp1 = jnp.where(snow_present, jnp.power(zxsp1_base, 1.0 / 1.16), 0.0)
 
         # In-cloud values for the cascade. ECHAM works on ``zxlb`` /
         # ``zxib`` which are in-cloud mixing ratios (qc/cf, qi/cf).
@@ -1231,8 +1273,16 @@ def cloud_microphysics_column_sweep(
         # here, which inverted the density dependence (suppressing
         # rain-evap in low-density layers and amplifying it in dense
         # layers — the opposite of physical).
+        # Same double-where guard as zxrp1 above: ``x**0.61`` at x == 0 has
+        # an infinite derivative, and ``zevp`` is where-masked to 0 below
+        # when no rain is present — the safe base of 1.0 in that masked
+        # region leaves every forward value unchanged but keeps the
+        # backward pass finite.
+        zrfl_in_cf_base = jnp.where(
+            rain_present, jnp.maximum(zrfl_in_cf, 0.0), 1.0,
+        )
         zzepr_rate = (
-            870.0 * zsusatw * jnp.power(jnp.maximum(zrfl_in_cf, 0.0), 0.61)
+            870.0 * zsusatw * jnp.power(zrfl_in_cf_base, 0.61)
             * zqrho_sqrt_inv / jnp.sqrt(1.3) / zthermo
         )
         zevp_unbounded = -zzepr_rate * dt * zclcpre
@@ -1241,9 +1291,7 @@ def cloud_microphysics_column_sweep(
         zevp = jnp.minimum(zevp_unbounded, zevp_max_subsat)
         zevp = jnp.maximum(zevp, 0.0)
         zevp = jnp.minimum(zevp, zevp_max_rain)
-        zevp = jnp.where(
-            (zrfl > config.epsilon) & (zclcpre > config.epsilon), zevp, 0.0,
-        )
+        zevp = jnp.where(rain_present, zevp, 0.0)
         dq_evap = zevp                                                # kg/kg over dt
         dTdt_evap = -zlvdcp * (dq_evap / dt)                          # K/s
         rain_evap_flux = zevp * mref / dt                             # kg/m²/s
