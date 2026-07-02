@@ -144,30 +144,39 @@ def _to_3d_with_filled_halo(
     return arr_3d
 
 
-def _to_3d_with_extrapolated_halo(
-    arr_1d: jnp.ndarray, nlev: int, halo: int = 1
+def _to_3d_pressure_halo(
+    pressure_1d: jnp.ndarray,
+    dp_bottom: jnp.ndarray,
+    dp_top: jnp.ndarray,
+    nlev: int,
+    halo: int = 1,
 ) -> jnp.ndarray:
-    """Convert 1D profile to 3D (1,1,nz+2*halo) with linearly extrapolated halos.
+    """Halo-pad the pressure profile so boundary-layer Δp comes out EXACT.
 
-    Required for PRESSURE: jax-rrtmgp computes layer thickness with the
-    centered difference ``dp[k] = 0.5·(p[k+1] − p[k−1])``, so an edge-FILLED
-    halo (``p[halo] == p[interior]``) halves the effective Δp of the top and
-    bottom layers — exactly 2× the heating rate there. Linear extrapolation
-    (``2·p[0] − p[1]``) preserves the local grid spacing, matching how the
-    library itself extrapolates temperature into its halo.
+    jax-rrtmgp computes layer thickness with the centered difference
+    ``dp[k] = 0.5·|p[k+1] − p[k−1]|``, so the halo values fully determine
+    the Δp the heating rate sees in the top and bottom layers. Rather than
+    approximating them (edge fill halves the Δp of a uniform grid; linear
+    extrapolation ``2p[0] − p[1]`` is exact only for uniform spacing and
+    on the hybrid L47 grid is ~75 % too thick at the surface and goes
+    NEGATIVE at the log-spaced top), set the halo so the centered
+    difference reproduces the model's TRUE half-level layer thickness:
+
+        0.5·|p[k∓1] − halo| = Δp_true  →  halo = p[1] + 2·Δp_bottom
+                                          halo = p[-2] − 2·Δp_top
+
+    with ``Δp_bottom`` / ``Δp_top`` taken from ``pressure_interfaces``
+    (``pressure_1d`` is surface→TOA here, so index 0 is the surface).
+    The tiny positive floor on the top halo only binds if the top layer
+    is thicker than half the distance to the level below — genuinely
+    pathological — and keeps downstream log-pressure interpolation finite.
     """
     nzh = nlev + 2 * halo
-    arr_3d = jnp.zeros((1, 1, nzh), dtype=arr_1d.dtype)
-    arr_3d = arr_3d.at[0, 0, halo : halo + nlev].set(arr_1d)
-    # Floor the extrapolation at a small positive value: on a strongly
-    # stretched grid 2·p_top − p_below can go negative, and downstream
-    # log-pressure interpolation must stay finite. The floor only binds in
-    # that pathological case (where the halo Δp is wrong either way).
-    arr_3d = arr_3d.at[0, 0, 0].set(
-        jnp.maximum(2.0 * arr_1d[0] - arr_1d[1], 1e-3 * arr_1d[0])
-    )
+    arr_3d = jnp.zeros((1, 1, nzh), dtype=pressure_1d.dtype)
+    arr_3d = arr_3d.at[0, 0, halo : halo + nlev].set(pressure_1d)
+    arr_3d = arr_3d.at[0, 0, 0].set(pressure_1d[1] + 2.0 * dp_bottom)
     arr_3d = arr_3d.at[0, 0, -1].set(
-        jnp.maximum(2.0 * arr_1d[-1] - arr_1d[-2], 1e-3 * arr_1d[-1])
+        jnp.maximum(pressure_1d[-2] - 2.0 * dp_top, 1e-3 * pressure_1d[-1])
     )
     return arr_3d
 
@@ -229,6 +238,13 @@ def prepare_rrtmgp_data(
     rho = lax.cond(needs_reversal, flip, identity, rho)
     temperature_1d = lax.cond(needs_reversal, flip, identity, icon_data.temperature)
     pressure_1d = lax.cond(needs_reversal, flip, identity, icon_data.pressure)
+    # Surface-first half-level pressures, for the exact boundary-layer Δp
+    # the pressure halo must encode (see _to_3d_pressure_halo).
+    interfaces_1d = lax.cond(
+        needs_reversal, flip, identity, icon_data.pressure_interfaces,
+    )
+    dp_bottom = interfaces_1d[0] - interfaces_1d[1]
+    dp_top = interfaces_1d[-2] - interfaces_1d[-1]
     cwp_1d = lax.cond(needs_reversal, flip, identity, icon_data.cloud_water_path)
     cip_1d = lax.cond(needs_reversal, flip, identity, icon_data.cloud_ice_path)
 
@@ -276,10 +292,12 @@ def prepare_rrtmgp_data(
         "cloud_r_eff_ice": to3d_fill(cloud_r_eff_ice),
         "temperature": to3d_nan(temperature_1d),
         "sfc_temperature": jnp.reshape(surface_temperature, (1, 1)),
-        # Pressure halo must be extrapolated, not edge-filled — see
-        # _to_3d_with_extrapolated_halo (edge fill → 2× heating in the
-        # boundary layers).
-        "p_ref_xxc": _to_3d_with_extrapolated_halo(pressure_1d, nlev, halo),
+        # Pressure halo encodes the model's exact half-level boundary-layer
+        # thicknesses — see _to_3d_pressure_halo (edge fill / linear
+        # extrapolation both misstate boundary Δp on the hybrid grid).
+        "p_ref_xxc": _to_3d_pressure_halo(
+            pressure_1d, dp_bottom, dp_top, nlev, halo,
+        ),
         "sg_map": sg_map,
         "use_scan": True,
     }

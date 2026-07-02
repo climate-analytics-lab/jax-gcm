@@ -380,21 +380,36 @@ class TestRRTMGPRadiationQuickWins:
             f"(the mu0^2 bug gives ~{expected * mu0:.1f})"
         )
 
-    def test_pressure_halo_linearly_extrapolated(self):
-        from jcm.physics.radiation.rrtmgp import _to_3d_with_extrapolated_halo
-        p = jnp.array([1000.0, 800.0, 650.0])
-        out = _to_3d_with_extrapolated_halo(p, 3, 1)[0, 0]
-        # Halo values continue the local spacing, so the library's centered
-        # difference 0.5*(p[k+1]-p[k-1]) recovers the one-sided Δp at both
-        # boundaries instead of half of it.
-        assert float(out[0]) == pytest.approx(1200.0)
-        assert float(out[-1]) == pytest.approx(500.0)
-        assert float(0.5 * (out[2] - out[0])) == pytest.approx(
-            float(p[1] - p[0])
+    def test_pressure_halo_encodes_true_boundary_thickness(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.radiation.rrtmgp import _to_3d_pressure_halo
+
+        # The production hybrid L47 grid — the case that broke both naive
+        # halo constructions: edge fill halves a uniform-grid boundary Δp,
+        # and linear extrapolation (2p[0]−p[1]) is +75 % at the surface and
+        # NEGATIVE at the log-spaced top.
+        vertical = get_echam_levels(47)
+        ph = jnp.asarray(vertical.a_boundaries) + jnp.asarray(
+            vertical.b_boundaries
+        ) * 101325.0
+        pf = 0.5 * (ph[:-1] + ph[1:])
+        # Surface-first, as prepare_rrtmgp_data hands it to the halo helper.
+        pf_sf, ph_sf = pf[::-1], ph[::-1]
+        dp_bottom = ph_sf[0] - ph_sf[1]
+        dp_top = ph_sf[-2] - ph_sf[-1]
+
+        out = _to_3d_pressure_halo(pf_sf, dp_bottom, dp_top, 47, 1)[0, 0]
+        # The library's centered difference 0.5*(p[k-1]-p[k+1]) must
+        # reproduce the model's TRUE half-level layer thickness at both
+        # boundaries (surface ≈ 780 Pa, top ≈ 1.99 Pa on this grid).
+        assert float(0.5 * (out[0] - out[2])) == pytest.approx(
+            float(dp_bottom), rel=1e-5
         )
-        assert float(0.5 * (out[4] - out[2])) == pytest.approx(
-            float(p[2] - p[1])
+        assert float(0.5 * (out[-3] - out[-1])) == pytest.approx(
+            float(dp_top), rel=1e-5
         )
+        # And the top halo stays strictly positive (log-pressure safety).
+        assert float(out[-1]) > 0.0
 
     def test_surface_albedo_reaches_sw_solver(self):
         dark = self._cloud_free(_make_inputs(nlev=10))
