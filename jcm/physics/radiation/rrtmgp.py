@@ -1,8 +1,8 @@
 """RRTMGP-based radiation scheme for ECHAM physics.
 
 This module integrates jax-rrtmgp with ICON's radiation interface, handling:
-- Location-specific solar geometry via jax_solar (OrbitalTime, radiation_flux,
-  get_solar_sin_altitude)
+- Location-specific solar geometry via jax_solar (OrbitalTime,
+  direct_solar_irradiance, get_solar_sin_altitude)
 - ICON vertical ordering (TOA->surface) vs RRTMGP (surface->TOA) conversion
 - Halo management (temperature NaN-padded for RRTMGP fill; others edge-filled)
 - Stretched grid mapping for non-uniform vertical coordinates
@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
+from jax_solar import OrbitalTime, direct_solar_irradiance, get_solar_sin_altitude
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields
 from jcm.physics.radiation.radiation_types import (
     RadiationParameters,
@@ -144,6 +144,34 @@ def _to_3d_with_filled_halo(
     return arr_3d
 
 
+def _to_3d_with_extrapolated_halo(
+    arr_1d: jnp.ndarray, nlev: int, halo: int = 1
+) -> jnp.ndarray:
+    """Convert 1D profile to 3D (1,1,nz+2*halo) with linearly extrapolated halos.
+
+    Required for PRESSURE: jax-rrtmgp computes layer thickness with the
+    centered difference ``dp[k] = 0.5·(p[k+1] − p[k−1])``, so an edge-FILLED
+    halo (``p[halo] == p[interior]``) halves the effective Δp of the top and
+    bottom layers — exactly 2× the heating rate there. Linear extrapolation
+    (``2·p[0] − p[1]``) preserves the local grid spacing, matching how the
+    library itself extrapolates temperature into its halo.
+    """
+    nzh = nlev + 2 * halo
+    arr_3d = jnp.zeros((1, 1, nzh), dtype=arr_1d.dtype)
+    arr_3d = arr_3d.at[0, 0, halo : halo + nlev].set(arr_1d)
+    # Floor the extrapolation at a small positive value: on a strongly
+    # stretched grid 2·p_top − p_below can go negative, and downstream
+    # log-pressure interpolation must stay finite. The floor only binds in
+    # that pathological case (where the halo Δp is wrong either way).
+    arr_3d = arr_3d.at[0, 0, 0].set(
+        jnp.maximum(2.0 * arr_1d[0] - arr_1d[1], 1e-3 * arr_1d[0])
+    )
+    arr_3d = arr_3d.at[0, 0, -1].set(
+        jnp.maximum(2.0 * arr_1d[-1] - arr_1d[-2], 1e-3 * arr_1d[-1])
+    )
+    return arr_3d
+
+
 def _to_4d_per_gpoint(
     per_gpt_2d: jnp.ndarray, nlev: int, halo: int = 1,
 ) -> jnp.ndarray:
@@ -248,7 +276,10 @@ def prepare_rrtmgp_data(
         "cloud_r_eff_ice": to3d_fill(cloud_r_eff_ice),
         "temperature": to3d_nan(temperature_1d),
         "sfc_temperature": jnp.reshape(surface_temperature, (1, 1)),
-        "p_ref_xxc": to3d_fill(pressure_1d),
+        # Pressure halo must be extrapolated, not edge-filled — see
+        # _to_3d_with_extrapolated_halo (edge fill → 2× heating in the
+        # boundary layers).
+        "p_ref_xxc": _to_3d_with_extrapolated_halo(pressure_1d, nlev, halo),
         "sg_map": sg_map,
         "use_scan": True,
     }
@@ -449,7 +480,16 @@ def radiation_scheme_rrtmgp(
         orbital_phase=solar.orbital_phase,
         synodic_phase=solar.synodic_phase,
     )
-    toa_flux = radiation_flux(orbital_time, longitude, latitude, parameters.solar_constant)
+    # ``irrad`` must be the NORMAL-INCIDENCE (distance-corrected) solar
+    # irradiance: jax-rrtmgp applies the cosine factor itself in the
+    # direct-beam boundary condition (flux_down_direct_bc = irrad · µ0).
+    # ``jax_solar.radiation_flux`` already includes ·µ0 (it returns flux on
+    # a horizontal surface), so passing it here multiplied the cosine in
+    # TWICE — TOA insolation ∝ µ0², a ~110 W/m² global-mean SW deficit
+    # (hemispheric mean S0/6 instead of S0/4).
+    direct_irradiance = direct_solar_irradiance(
+        solar.orbital_phase, parameters.solar_constant
+    )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
 
@@ -556,7 +596,16 @@ def radiation_scheme_rrtmgp(
     # arrays inside the g-point loop, so set them to zero. The clear-
     # sky branch (no per-gpoint args, just q_liq=0/q_ice=0) gives the
     # all-clear fluxes used for CRE.
+    #
+    # q_t must drop the condensate along with q_c: the library derives the
+    # water-vapour VMR as (q_t − q_c)/(1 − q_t), so zeroing q_c while q_t
+    # keeps ``vapor + in-cloud condensate`` makes gas optics absorb on the
+    # condensate as if it were vapour — in every g-point (the cloud is
+    # already represented by the per-gpoint McICA paths) and, worse, in the
+    # clear-sky CRE call. Vapour-only q_t leaves the condensate's radiative
+    # effect entirely to the cloud-optics paths.
     zero_3d = jnp.zeros_like(rrtmgp_input["q_liq"])
+    rrtmgp_input["q_t"] = rrtmgp_input["q_t"] - rrtmgp_input["q_c"]
     rrtmgp_input["q_liq"] = zero_3d
     rrtmgp_input["q_ice"] = zero_3d
     rrtmgp_input["q_c"] = zero_3d
@@ -620,11 +669,25 @@ def radiation_scheme_rrtmgp(
             "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_lw_per_band),
         }
 
+    # Night columns are handled by the zenith clip (µ0 = 0 zeroes the direct
+    # beam); the irradiance itself is strictly positive by construction.
     zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
-    irrad_val = jnp.maximum(toa_flux, 0.0)
+    irrad_val = direct_irradiance
+
+    # Per-column surface boundary condition (jax-rrtmgp >= 0.2.1 hook —
+    # previously the hardcoded AtmosphericStateCfg scalars 0.07/0.98 were
+    # used for every column, severing the ice-albedo feedback and leaving
+    # the column solve inconsistent with the surface scheme's absorbed
+    # SW·(1−albedo_tile)). The library takes one BROADBAND SW albedo, so
+    # blend the surface scheme's vis/nir pair with the ~0.46/0.54 split of
+    # the TOA solar spectrum about 0.7 µm. A true per-band albedo (and the
+    # direct/diffuse distinction ECHAM makes) needs a g-point→band albedo
+    # map in the library — deferred to the cloud/surface optics overhaul.
+    sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
 
     rrtmgp_output = rrtmgp_instance.compute_heating_rate(
         zenith=zenith_angle, irrad=irrad_val,
+        sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
         cloud_path_liq_lw_per_gpt=cpl_lw_4d,
         cloud_path_ice_lw_per_gpt=cpi_lw_4d,
         cloud_path_liq_sw_per_gpt=cpl_sw_4d,
@@ -643,6 +706,7 @@ def radiation_scheme_rrtmgp(
     if compute_cre:
         rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
             zenith=zenith_angle, irrad=irrad_val,
+            sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
             vmr_fields=vmr_fields or None,
             aerosol_optics_sw=aerosol_optics_sw,
             aerosol_optics_lw=aerosol_optics_lw,

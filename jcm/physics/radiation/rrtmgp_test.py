@@ -330,3 +330,140 @@ class TestRRTMGPThinCloudInflation:
         assert jnp.isfinite(diag.toa_lw_up)
         # The thin cloud is still radiatively active (not silently dropped).
         assert float(diag.toa_sw_up) > float(diag.toa_sw_up_clear) - 1e-3
+
+
+class TestRRTMGPRadiationQuickWins:
+    """Regression pins for the radiation-glue fixes (fix-plan PR 3).
+
+    Each test fails on the pre-fix code:
+      - TOA insolation was ∝ µ0² (radiation_flux, already ×µ0, passed as
+        the normal-incidence ``irrad`` which the library multiplies by µ0
+        again) — pinned by ``test_toa_insolation_is_single_cosine`` at a
+        µ0 ≈ 0.5 point where the bug halves the insolation.
+      - The pressure halo was edge-filled, halving the boundary layers'
+        centered-difference Δp (2× heating) — pinned on the halo helper.
+      - The hardcoded ``sfc_alb=0.07`` / ``sfc_emis=0.98`` ignored the
+        surface scheme — pinned by asserting the per-column values shape
+        the SW/LW fluxes.
+      - Condensate rode into gas optics as vapour via ``q_t`` while
+        ``q_c`` was zeroed — pinned by comparing the clear-sky (CRE)
+        fluxes of a cloudy and a cloud-free column.
+    """
+
+    @staticmethod
+    def _cloud_free(inputs):
+        nlev = inputs["temperature"].shape[0]
+        inputs["cloud_water"] = jnp.zeros((nlev,))
+        inputs["cloud_ice"] = jnp.zeros((nlev,))
+        inputs["cloud_fraction"] = jnp.zeros((nlev,))
+        return inputs
+
+    def test_toa_insolation_is_single_cosine(self):
+        from jax_solar import direct_solar_irradiance
+        inputs = self._cloud_free(_make_inputs(nlev=10))
+        # June solstice, local noon at lon 0: subsolar latitude +23.4°, so
+        # -36.6° puts the sun 60° from zenith → µ0 ≈ 0.5, where the old
+        # µ0² insolation is HALF the correct value.
+        inputs["latitude"] = -36.6
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+
+        mu0 = float(jnp.reshape(diag.cos_zenith, (-1,))[0])
+        assert 0.3 < mu0 < 0.7, f"geometry sanity: mu0={mu0}"
+        irrad = float(direct_solar_irradiance(
+            inputs["solar"].orbital_phase,
+            inputs["parameters"].solar_constant,
+        ))
+        expected = irrad * mu0
+        actual = float(diag.toa_sw_down)
+        assert abs(actual - expected) / expected < 0.02, (
+            f"TOA SW down {actual:.1f} vs irrad*mu0 {expected:.1f} "
+            f"(the mu0^2 bug gives ~{expected * mu0:.1f})"
+        )
+
+    def test_pressure_halo_linearly_extrapolated(self):
+        from jcm.physics.radiation.rrtmgp import _to_3d_with_extrapolated_halo
+        p = jnp.array([1000.0, 800.0, 650.0])
+        out = _to_3d_with_extrapolated_halo(p, 3, 1)[0, 0]
+        # Halo values continue the local spacing, so the library's centered
+        # difference 0.5*(p[k+1]-p[k-1]) recovers the one-sided Δp at both
+        # boundaries instead of half of it.
+        assert float(out[0]) == pytest.approx(1200.0)
+        assert float(out[-1]) == pytest.approx(500.0)
+        assert float(0.5 * (out[2] - out[0])) == pytest.approx(
+            float(p[1] - p[0])
+        )
+        assert float(0.5 * (out[4] - out[2])) == pytest.approx(
+            float(p[2] - p[1])
+        )
+
+    def test_surface_albedo_reaches_sw_solver(self):
+        dark = self._cloud_free(_make_inputs(nlev=10))
+        bright = self._cloud_free(_make_inputs(nlev=10))
+        bright["surface_albedo_vis"] = jnp.array(0.7)
+        bright["surface_albedo_nir"] = jnp.array(0.7)
+
+        _, diag_dark = radiation_scheme_rrtmgp(**dark)
+        _, diag_bright = radiation_scheme_rrtmgp(**bright)
+
+        # Reflected SW at the surface matches the prescribed albedo (vis ==
+        # nir here, so the broadband blend is exact).
+        ratio = float(diag_bright.surface_sw_up) / float(
+            diag_bright.surface_sw_down
+        )
+        assert ratio == pytest.approx(0.7, abs=0.02)
+        # And the extra reflection reaches the TOA budget (ice-albedo
+        # feedback pathway). Hardcoded 0.07 gave identical fluxes for both.
+        assert float(diag_bright.toa_sw_up) > 2.0 * float(diag_dark.toa_sw_up)
+
+    def test_surface_emissivity_reaches_lw_solver(self):
+        grey_sfc = self._cloud_free(_make_inputs(nlev=10))
+        black_sfc = self._cloud_free(_make_inputs(nlev=10))
+        grey_sfc["surface_emissivity"] = jnp.array(0.5)
+        black_sfc["surface_emissivity"] = jnp.array(1.0)
+
+        _, diag_grey = radiation_scheme_rrtmgp(**grey_sfc)
+        _, diag_black = radiation_scheme_rrtmgp(**black_sfc)
+
+        # Upwelling surface LW = eps*B(T_s) + (1-eps)*LW_down. Pin the full
+        # linear relation for both emissivities (the hardcoded-0.98 code
+        # gave the same upwelling flux regardless of the passed value; the
+        # margin between the two runs is only ~22 W/m² because this humid
+        # 300 K atmosphere has LW_down close to sigma*T^4).
+        sigma_t4 = 5.670374e-8 * 300.0**4
+        for eps_val, diag in ((0.5, diag_grey), (1.0, diag_black)):
+            expected = (
+                eps_val * sigma_t4
+                + (1.0 - eps_val) * float(diag.surface_lw_down)
+            )
+            assert float(diag.surface_lw_up) == pytest.approx(
+                expected, rel=0.01
+            ), f"eps={eps_val}"
+        assert float(diag_black.surface_lw_up) > float(
+            diag_grey.surface_lw_up
+        )
+
+    def test_clear_sky_cre_sees_vapor_only(self):
+        cloudy = _make_inputs(nlev=10)
+        nlev = cloudy["temperature"].shape[0]
+        cloudy["cloud_water"] = jnp.zeros((nlev,)).at[3:6].set(2e-3)
+        cloudy["cloud_ice"] = jnp.zeros((nlev,)).at[2:4].set(5e-4)
+        cloudy["cloud_fraction"] = jnp.zeros((nlev,)).at[2:6].set(0.5)
+        cloudy["compute_cre"] = True
+
+        clear = self._cloud_free(_make_inputs(nlev=10))
+        clear["compute_cre"] = True
+
+        _, diag_cloudy = radiation_scheme_rrtmgp(**cloudy)
+        _, diag_clear = radiation_scheme_rrtmgp(**clear)
+
+        # The clear-sky (CRE) branch must see the SAME atmosphere for both
+        # columns: vapour only. Before the q_t fix the cloudy column's
+        # condensate was counted as extra water vapour in gas optics, so
+        # its "clear-sky" OLR was biased low relative to the truly clear
+        # column.
+        assert float(diag_cloudy.toa_lw_up_clear) == pytest.approx(
+            float(diag_clear.toa_lw_up_clear), rel=1e-4
+        )
+        assert float(diag_cloudy.toa_sw_up_clear) == pytest.approx(
+            float(diag_clear.toa_sw_up_clear), rel=1e-4
+        )

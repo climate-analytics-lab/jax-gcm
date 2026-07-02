@@ -15,6 +15,7 @@ from jcm.physics.aerosol.macv2_sp import (
     get_background_vertical_profile,
     get_optical_properties,
     get_CDNC,
+    get_dNovrN,
 )
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 
@@ -379,6 +380,33 @@ class TestCDNC:
         assert jnp.all(jnp.isfinite(cdnc1))
         assert jnp.all(jnp.isfinite(cdnc2))
         assert jnp.all(jnp.isfinite(cdnc3))
+
+    def test_dnovrn_stevens2017_magnitude(self):
+        """Twomey factor is the Stevens et al. (2017) RELATIVE enhancement.
+
+        Regression pin for the ~100× Twomey bug: the old
+        ``get_CDNC(aod)/get_CDNC(0)`` divided by 1 and returned an absolute
+        AEROCOM CDNC (≈137 at AOD 0.43) as the dimensionless multiplier.
+        The Stevens formula gives ≈2.0 at that plume maximum (background
+        0.02) and stays within [1, ~3] for any physical AOD.
+        """
+        # No anthropogenic aerosol → exactly no enhancement.
+        assert float(get_dNovrN(jnp.array(0.0), jnp.array(0.02))) == (
+            pytest.approx(1.0)
+        )
+        # East-Asia plume maximum from the review: AOD 0.43 over the 0.02
+        # fine-mode background → ln(451)/ln(21) ≈ 2.01 (old code: 137).
+        factor = float(get_dNovrN(jnp.array(0.43), jnp.array(0.02)))
+        assert factor == pytest.approx(2.01, abs=0.05)
+        # Monotone in anthropogenic AOD and bounded for physical values.
+        aods = jnp.array([0.0, 0.05, 0.1, 0.2, 0.43, 1.0])
+        factors = get_dNovrN(aods, jnp.array(0.02))
+        assert jnp.all(jnp.diff(factors) > 0)
+        assert float(factors[-1]) < 3.0
+        # A larger natural background damps the relative enhancement.
+        assert float(get_dNovrN(jnp.array(0.2), jnp.array(0.1))) < float(
+            get_dNovrN(jnp.array(0.2), jnp.array(0.02))
+        )
 
 
 class TestJAXCompatibility:
