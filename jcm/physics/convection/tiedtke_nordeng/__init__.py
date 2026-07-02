@@ -13,7 +13,6 @@ from .tiedtke_nordeng import (
     TiedtkeConvection,
     tiedtke_nordeng_convection,
 )
-from .tracer_transport import TracerIndices, TracerTransport, initialize_tracers
 from .adjustment import (
     saturation_adjustment,
     convective_adjustment,
@@ -27,9 +26,6 @@ __all__ = [
     "ConvectionState",
     "ConvectionTendencies",
     "TiedtkeConvection",
-    "TracerIndices",
-    "TracerTransport",
-    "initialize_tracers",
     "saturation_adjustment",
     "convective_adjustment",
     "energy_conservation_check"

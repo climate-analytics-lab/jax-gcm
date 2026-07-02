@@ -209,23 +209,6 @@ class ConvectionData:
         )
 
 
-def moist_static_energy(temperature: jnp.ndarray,
-                       height: jnp.ndarray, 
-                       mixing_ratio: jnp.ndarray) -> jnp.ndarray:
-    """Calculate moist static energy
-    
-    Args:
-        temperature: Temperature (K)
-        height: Geopotential height (m)  
-        mixing_ratio: Water vapor mixing ratio (kg/kg)
-        
-    Returns:
-        Moist static energy (J/kg)
-
-    """
-    return c.cpd * temperature + c.grav * height + c.alhc * mixing_ratio
-
-
 def initialize_convection(temperature: jnp.ndarray,
                          humidity: jnp.ndarray,
                          pressure: jnp.ndarray,

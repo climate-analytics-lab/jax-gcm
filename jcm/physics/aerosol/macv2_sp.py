@@ -351,10 +351,6 @@ def get_optical_properties(aod_profile, spatial_dist, parameters):
     # spatial_dist: (nplumes, ncols)
     # parameters.ssa550, parameters.asy550, parameters.angstrom: (nplumes,)
 
-    # Calculate plume contributions to total AOD
-    total_aod = jnp.sum(aod_profile, axis=0, keepdims=True)  # (1, ncols)
-    total_aod = jnp.where(total_aod > 0, total_aod, 1.0)  # Avoid division by zero
-
     # Weight by spatial distribution
     plume_weights = spatial_dist / jnp.sum(spatial_dist, axis=0, keepdims=True)
 

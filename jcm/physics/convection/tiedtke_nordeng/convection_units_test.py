@@ -16,12 +16,6 @@ from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     find_cloud_base,
     calculate_cape_cin
 )
-from jcm.physics.convection.tiedtke_nordeng.tracer_transport import (
-    TracerIndices,
-    initialize_tracers
-)
-
-
 def create_realistic_atmosphere(nlev=20, unstable=True):
     """Create a realistic atmospheric profile for testing"""
     # Physical constants
@@ -358,40 +352,6 @@ class TestJAXCompatibility:
         
         assert gradient > 0, "Gradient should be positive (qs increases with T)"
         assert jnp.isfinite(gradient), "Gradient should be finite"
-
-
-class TestTracerTransport:
-    """Test tracer transport functionality"""
-    
-    def test_tracer_initialization(self):
-        """Test tracer initialization"""
-        nlev = 20
-        
-        # Basic tracers only
-        tracers_basic, indices_basic = initialize_tracers(nlev, include_chemistry=False)
-        assert tracers_basic.shape == (nlev, 3), "Should have 3 basic tracers"
-        
-        # With chemistry
-        tracers_chem, indices_chem = initialize_tracers(nlev, include_chemistry=True)
-        assert tracers_chem.shape[1] > 3, "Should have additional chemical tracers"
-        
-        # Check indices
-        assert indices_basic.iqv == 0, "Water vapor should be index 0"
-        assert indices_basic.iqc == 1, "Cloud water should be index 1"
-        assert indices_basic.iqi == 2, "Cloud ice should be index 2"
-        assert indices_basic.iqt == 3, "Additional tracers should start at index 3"
-    
-    def test_tracer_indices(self):
-        """Test tracer indices structure"""
-        indices = TracerIndices()
-        
-        assert hasattr(indices, 'iqv'), "Should have water vapor index"
-        assert hasattr(indices, 'iqc'), "Should have cloud water index"
-        assert hasattr(indices, 'iqi'), "Should have cloud ice index"
-        assert hasattr(indices, 'iqt'), "Should have additional tracer start index"
-        
-        # Check ordering
-        assert indices.iqv < indices.iqc < indices.iqi < indices.iqt, "Indices should be ordered"
 
 
 class TestConfiguration:

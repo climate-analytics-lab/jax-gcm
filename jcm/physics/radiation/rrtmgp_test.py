@@ -17,13 +17,11 @@ from jcm.physics.radiation.rrtmgp import (
     radiation_scheme_rrtmgp,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.echam.unit_conversions import (
-    calculate_air_density,
-    calculate_layer_thickness,
-)
 from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data,
+    calculate_air_density,
+    calculate_layer_thickness,
 )
 
 

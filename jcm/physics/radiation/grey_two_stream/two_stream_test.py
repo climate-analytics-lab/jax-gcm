@@ -10,7 +10,6 @@ import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.two_stream import (
     two_stream_coefficients,
     layer_reflectance_transmittance,
-    adding_method,
     longwave_fluxes,
     shortwave_fluxes,
     flux_to_heating_rate
@@ -73,27 +72,6 @@ def test_layer_properties_large_tau():
     
     # Large optical depths should have near-zero transmission
     assert T_dif[-1] < 1e-10  # tau=1000 should have virtually no transmission
-
-
-def test_adding_method():
-    """Test adding method for combining layers"""
-    R1 = jnp.array(0.2)
-    T1 = jnp.array(0.7)
-    R2 = jnp.array(0.3)
-    T2 = jnp.array(0.6)
-    
-    R_combined, T_combined = adding_method(R1, T1, R2, T2)
-    
-    # Should have more reflection than either layer alone
-    assert R_combined > R1
-    assert R_combined > R2
-    
-    # Transmission should be reasonable
-    assert 0 <= T_combined <= 1
-    assert T_combined > 0  # Some transmission through both layers
-    
-    # Energy conservation
-    assert R_combined + T_combined <= 1.0
 
 
 def test_heating_rate():

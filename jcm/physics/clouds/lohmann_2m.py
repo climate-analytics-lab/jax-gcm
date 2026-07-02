@@ -41,7 +41,7 @@ Date: 2025-12-15
 
 import jax
 import jax.numpy as jnp
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 from math import pi
 
 import jcm.constants as c
@@ -63,114 +63,6 @@ from .cloud_utils import (
     consistency_number_to_mass, gridbox_frac_falling_hydrometeor,
     threshold_vert_vel, breadth_factor
 )
-
-# @tree_math.struct
-# class MicrophysicsParameters_2M:
-#     """Configuration parameters for cloud microphysics"""
-    
-#     # Autoconversion parameters
-#     ccraut: float        # Critical cloud water for autoconversion (kg/kg)
-#     ccracl: float        # Accretion coefficient (cloud to rain)
-#     cauloc: float        # Cloud droplet dispersion parameter
-#     ceffmin: float       # Minimum cloud droplet radius (microns)
-#     ceffmax: float       # Maximum cloud droplet radius (microns)
-    
-#     # Ice microphysics parameters
-#     cn0s: float          # Snow particle number density (1/m^3)
-#     crhosno: float       # Snow density (kg/m^3)
-#     cvtfall: float       # Terminal velocity factor for ice
-#     cthomi: float        # Homogeneous ice nucleation temperature (K)
-#     csecfrl: float       # Critical ice fraction for Bergeron-Findeisen
-    
-#     # Collection efficiencies
-#     ccollec: float       # Collection efficiency rain/cloud
-#     ccollei: float       # Collection efficiency snow/ice
-    
-#     # Time scale parameters
-#     tau_melt: float      # Melting time scale (s)
-#     tau_freeze: float    # Freezing time scale (s)
-    
-#     # Evaporation/sublimation parameters
-#     cevaprain: float     # Rain evaporation coefficient
-#     cevapsnow: float     # Snow sublimation coefficient
-    
-#     # Sedimentation parameters
-#     vt_ice: float        # Ice crystal fall speed (m/s)
-#     vt_snow_a: float     # Snow fall speed coefficient a
-#     vt_snow_b: float     # Snow fall speed exponent b
-#     vt_rain_a: float     # Rain fall speed coefficient a
-#     vt_rain_b: float     # Rain fall speed exponent b
-    
-#     # Numerical parameters
-#     epsilon: float       # Small number for numerical stability
-#     dt_sedi: float       # Sub-timestep for sedimentation (s)
-
-#     # Exponents for autoconversion
-#     exm1_1: float
-#     exp_1: float
-#     exm1_2: float
-#     exp_2: float
-
-#     @classmethod
-#     def default(cls, ccraut=5.0e-4, ccracl=6.0, cauloc=1.0, ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
-#                  crhosno=100.0, cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
-#                  ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
-#                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
-#                  vt_rain_a=386.0, vt_rain_b=0.67, epsilon=1.0e-12, dt_sedi=10.0, exm1_1 = 2.47 - 1.0,
-#                  exp_1 = -1.0 / exm1_1, exm1_2 = 4.7 - 1.0, exp_2 = -1.0 / exm1_2) -> 'MicrophysicsParameters_2M':
-#         """Return default microphysics parameters for 2-m scheme"""
-#         return cls(
-#             ccraut=jnp.array(ccraut),
-#             ccracl=jnp.array(ccracl),
-#             cauloc=jnp.array(cauloc),
-#             ceffmin=jnp.array(ceffmin),
-#             ceffmax=jnp.array(ceffmax),
-#             cn0s=jnp.array(cn0s),
-#             crhosno=jnp.array(crhosno),
-#             cvtfall=jnp.array(cvtfall),
-#             cthomi=jnp.array(cthomi),
-#             csecfrl=jnp.array(csecfrl),
-#             ccollec=jnp.array(ccollec),
-#             ccollei=jnp.array(ccollei),
-#             tau_melt=jnp.array(tau_melt),
-#             tau_freeze=jnp.array(tau_freeze),
-#             cevaprain=jnp.array(cevaprain),
-#             cevapsnow=jnp.array(cevapsnow),
-#             vt_ice=jnp.array(vt_ice),
-#             vt_snow_a=jnp.array(vt_snow_a),
-#             vt_snow_b=jnp.array(vt_snow_b),
-#             vt_rain_a=jnp.array(vt_rain_a),
-#             vt_rain_b=jnp.array(vt_rain_b),
-#             epsilon=jnp.array(epsilon),
-#             dt_sedi=jnp.array(dt_sedi),
-#             exm1_1=jnp.array(exm1_1),
-#             exp_1=jnp.array(exp_1),
-#             exm1_2=jnp.array(exm1_2),
-#             exp_2=jnp.array(exp_2)
-#         )
-
-class MicrophysicsState_2M(NamedTuple):
-    """Microphysics state variables and diagnostics"""
-    
-    # Precipitation fluxes (kg/m²/s)
-    rain_flux: jnp.ndarray      # Rain flux at each level
-    snow_flux: jnp.ndarray      # Snow flux at each level
-    
-    # In-cloud values
-    qc_in_cloud: jnp.ndarray    # In-cloud liquid water (kg/kg)
-    qi_in_cloud: jnp.ndarray    # In-cloud ice (kg/kg)
-    qnc_in_cloud: jnp.ndarray   # In-cloud liquid droplet number concentration (1/m³)
-    qni_in_cloud: jnp.ndarray   # In-cloud ice crystal number concentration (1/m³)
-    
-    # Process rates (kg/kg/s)
-    autoconv_rate: jnp.ndarray  # Autoconversion rate
-    accretion_rate: jnp.ndarray # Accretion rate
-    melting_rate: jnp.ndarray   # Melting rate
-    freezing_rate: jnp.ndarray  # Freezing rate
-    
-    # Precipitation at surface
-    precip_rain: jnp.ndarray    # Surface rain (kg/m²/s)
-    precip_snow: jnp.ndarray    # Surface snow (kg/m²/s)
 
 class MicrophysicsTendencies_2M(NamedTuple):
     """Tendencies from microphysics processes"""
@@ -212,12 +104,6 @@ def microphysics_dt_constants(dt: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray
     zcons3 = 1.0 / ( pi*crhosno*cn0s*cvtfall**(1.0/1.16) )**0.25
     
     return ztmst, ztmst_rcp, zcons1, zcons2, zcons3
-
-def cloud_micro_interface():
-    """Stub cloud microphysics interface function.
-    Link between microphysics and aerosol scheme via activation TODO
-    """
-    pass
 
 def melting_snow_and_ice(
     melt_mask: jnp.ndarray,
@@ -767,7 +653,6 @@ def sedimentation_ice(
         falling_ice_fraction,
         ice_sedimentation_rate_in_cloud,
     )
-# ...existing code...
 
 def mixed_phase_deposition_and_corrections(
     pressure: jnp.ndarray,               # papp1 [Pa] pressure at full levels (t-1)
@@ -2412,158 +2297,6 @@ def update_tendencies_and_important_vars(
         out_preffi,
     )
 
-def lookup_1d_interp(
-    table: jnp.ndarray,
-    pt: jnp.ndarray,
-    scale: float,
-    i_min: int,
-    i_max: int,
-    overflow_penalty_scale: float = 1e-6
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Differentiable 1D lookup via linear interpolation.
-    Returns (value, overflow_penalty).
-    - table indexed with integer indices [i_min..i_max]
-    - continuous index = pt * scale
-
-    Notes:
-    Intended as differentiable approximation to replace set_lookup_index_1d from ECHAM.
-    Compute a continuous index, clip it to table bounds (no hard error), and return a linearly-interpolated 
-    value (or soft-weighted sum) that keeps gradients w.r.t. pt.
-
-    """
-    idx_raw = pt * scale
-    # detect overflow BEFORE clipping (differentiable boolean -> float penalty)
-    overflow_low = jnp.maximum(0.0, (i_min - idx_raw))
-    overflow_high = jnp.maximum(0.0, (idx_raw - i_max))
-    overflow_penalty = overflow_penalty_scale * (overflow_low**2 + overflow_high**2)
-
-    # clip into safe continuous range that allows interpolation between i and i+1
-    idx = jnp.clip(idx_raw, i_min, jnp.maximum(i_min, i_max - 1e-6))
-
-    i0 = jnp.floor(idx).astype(int)
-    w = idx - jnp.floor(idx)
-    v0 = jnp.take(table, i0, axis=0)
-    v1 = jnp.take(table, jnp.clip(i0 + 1, 0, table.shape[0] - 1), axis=0)
-    value = (1.0 - w) * v0 + w * v1
-
-    return value, overflow_penalty
-
-
-def lookup_2d_interp(
-    table: jnp.ndarray,
-    pt1: jnp.ndarray,
-    pt2: jnp.ndarray,
-    scale1: float,
-    scale2: float,
-    i1_min: int,
-    i1_max: int,
-    i2_min: int,
-    i2_max: int,
-    overflow_penalty_scale: float = 1e-6
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Differentiable 2D lookup via bilinear interpolation.
-    table shape: [N1, N2]; pt1, pt2 shapes broadcastable to each other.
-    Returns (value, overflow_penalty).
-
-    Notes:
-    Intended as differentiable approximation to replace set_lookup_index_2d from ECHAM.
-    Compute a continuous index, clip it to table bounds (no hard error), and return a linearly-interpolated 
-    value (or soft-weighted sum) that keeps gradients w.r.t. pt. 
-
-    """
-    idx1_raw = pt1 * scale1
-    idx2_raw = pt2 * scale2
-
-    # overflow penalties
-    ol1 = jnp.maximum(0.0, (i1_min - idx1_raw))
-    oh1 = jnp.maximum(0.0, (idx1_raw - i1_max))
-    ol2 = jnp.maximum(0.0, (i2_min - idx2_raw))
-    oh2 = jnp.maximum(0.0, (idx2_raw - i2_max))
-    overflow_penalty = overflow_penalty_scale * (ol1**2 + oh1**2 + ol2**2 + oh2**2)
-
-    # clip to safe continuous ranges
-    idx1 = jnp.clip(idx1_raw, i1_min, jnp.maximum(i1_min, i1_max - 1e-6))
-    idx2 = jnp.clip(idx2_raw, i2_min, jnp.maximum(i2_min, i2_max - 1e-6))
-
-    i1 = jnp.floor(idx1).astype(int)
-    i2 = jnp.floor(idx2).astype(int)
-    w1 = idx1 - jnp.floor(idx1)
-    w2 = idx2 - jnp.floor(idx2)
-
-    i1p = jnp.clip(i1 + 1, 0, table.shape[0] - 1)
-    i2p = jnp.clip(i2 + 1, 0, table.shape[1] - 1)
-
-    # gather four corners
-    v00 = table[i1, i2]
-    v10 = table[i1p, i2]
-    v01 = table[i1, i2p]
-    v11 = table[i1p, i2p]
-
-    # bilinear interpolation
-    value = (1 - w1) * (1 - w2) * v00 + w1 * (1 - w2) * v10 + (1 - w1) * w2 * v01 + w1 * w2 * v11
-
-    return value, overflow_penalty
-
-def sat_spec_hum(
-    pressure: jnp.ndarray,         # Original: pap
-    es_rd_over_rv: jnp.ndarray,    # Original: ptlucu  (lookup value e_s * Rd/Rv)
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Saturation vapour pressure / correction factor / saturation specific humidity.
-
-    Overview
-    --------
-    Compute:
-      - pes : non-dimensional ratio (e_s * Rd/Rv) / p  (Fortran `pes`),
-              clipped to 0.5 to avoid pathological values from lookup tables;
-      - pcor: thermodynamic correction factor (Fortran `pcor`) = 1 / (1 - vtmpc1 * pes);
-      - saturation_specific_humidity  : saturation specific humidity (Fortran `pq`) = pes * pcor.
-
-    Steps
-    -----
-    1. pes = es_rd_over_rv / pressure
-    2. Clip pes to a maximum of 0.5 (Fortran: MIN(pes, 0.5_dp))
-    3. pcor = 1.0 / (1.0 - vtmpc1 * pes) with a small safety floor on the denominator
-    4. pq = pes * pcor
-
-    Parameters
-    ----------
-    pressure : jnp.ndarray
-        Full-level pressure (Fortran: pap) [Pa]. Can be 1D or 2D (or higher) as long as
-        shapes match es_rd_over_rv.
-    es_rd_over_rv : jnp.ndarray
-        Lookup-table value (Fortran: ptlucu) equal to e_s * Rd/Rv at the lookup temperature.
-        Same shape as pressure.
-
-    Returns
-    -------
-    pes : jnp.ndarray
-        Scaled saturation vapour pressure (ECHAM: pes) (dimensionless, clipped <= 0.5).
-    pcor : jnp.ndarray
-        Correction factor (ECHAM: pcor) = 1 / (1 - vtmpc1 * pes).
-    saturation_specific_humidity : jnp.ndarray
-        Saturation specific humidity (ECHAM: pq) [kg/kg].
-
-    Notes
-    -----
-    - This single function replaces the 1D/2D ECHAM variants by operating elementwise
-      on arrays of arbitrary compatible shape.
-    - A safety floor (eps) is used when forming the denominator to avoid division-by-zero.
-    - ECHAM names: pap -> pressure, ptlucu -> es_rd_over_rv, pes/pcor/pq preserved.
-
-    """
-    # pes = ptlucu / pap
-    pes = es_rd_over_rv / pressure
-    pes = jnp.minimum(pes, 0.5)
-
-    # pcor = 1 / (1 - vtmpc1 * pes)  (protect denominator)
-    from .lohmann_2m_params import eps as _eps  # local small number from params
-    denom = jnp.maximum(1.0 - c.vtmpc1 * pes, _eps)
-    pcor = 1.0 / denom
-
-    # pq = pes * pcor
-    saturation_specific_humidity = pes * pcor
-
-    return pes, pcor, saturation_specific_humidity
 
 def update_in_cloud_water(
     pressure: jnp.ndarray,               # Original: pap
@@ -2883,17 +2616,6 @@ def diagnostics(
     eff_radius_liq_acc = eff_radius_liq_acc + zdtime * eff_radius_liq
 
     # 3) cloud-top liquid diagnostics (complex mask ll1)
-    # ll1 = (
-    #     jnp.logical_and.reduce(
-    #         (
-    #             liquid_cloud_flag,
-    #             ktop == level_index,
-    #             temp_tmp > tmelt,
-    #             eff_radius_ct_m < 4.0,
-    #             eff_radius_liq >= 4.0,
-    #         )
-    #     )
-    # )
     ll1 = jnp.logical_and.reduce(
     jnp.stack(
         (
@@ -3584,10 +3306,6 @@ def cloud_microphysics_2m(
         dqsdt=dqsdt,
     )
     return tendencies, surface_rain_flux, surface_snow_flux
-
-
-# Back-compat alias while the Phase 5a callers are migrated.
-cloud_microphysics_2m_minimal = cloud_microphysics_2m
 
 
 # ---------------------------------------------------------------------------
