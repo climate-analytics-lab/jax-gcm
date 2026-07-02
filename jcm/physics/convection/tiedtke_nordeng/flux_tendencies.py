@@ -11,6 +11,7 @@ Based on ICON mo_cufluxdts.f90
 Date: 2025-01-09
 """
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from typing import Tuple
@@ -56,6 +57,132 @@ def calculate_precipitation_rate(
 
     """
     return jnp.sum(updraft_state.pdmfup)
+
+
+def convective_precip_fluxes(
+    temperature: jnp.ndarray,
+    humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
+    dp_lev: jnp.ndarray,
+    kbase: int,
+    pdmfup: jnp.ndarray,
+    pdmfdp: jnp.ndarray,
+    dt: float,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
+
+    Walks the column top→bottom three times, exactly as the Fortran:
+
+    1. Partition newly generated precip (``pdmfup + pdmfdp``) into rain or
+       snow by the full-level environment temperature; melt falling snow
+       where ``T > tmelt + 2`` at the rate the layer's heat content allows
+       (``zcons1`` form), recording the per-layer melt ``pdpmel`` whose
+       ``−alf·pdpmel`` heat sink cudtdq applies.
+    2. Below cloud base, evaporate the total precip flux with ECHAM's
+       Kessler chain: the square root of the per-cover rain intensity is
+       depleted linearly by ``cevapcu(k)·Δp·(qs−q)`` and squared back,
+       capped so the layer is not moistened beyond 80 % of saturation in
+       one step. The evaporated amount is charged (negative) into
+       ``pdmfup`` so the same cudtdq ledger cools/moistens the layer.
+       ``cevapcu`` is ECHAM's level-dependent profile (iniphy.f90:87-89),
+       NOT a linear rate coefficient.
+    3. Deplete the surface rain/snow fluxes proportionally by the total
+       sub-cloud evaporation.
+
+    Args:
+        temperature: Full-level environment temperature [K] (TOA-first).
+        humidity: Environment specific humidity [kg/kg].
+        pressure: Full-level pressure [Pa].
+        dp_lev: Per-layer pressure thickness [Pa] (positive).
+        kbase: Cloud-base level index.
+        pdmfup: Per-layer updraft precip generation [kg/m²/s] (≥ 0).
+        pdmfdp: Per-layer downdraft precip sink [kg/m²/s] (≤ 0).
+        dt: Time step [s].
+
+    Returns:
+        ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj)`` — surface rain
+        and snow fluxes, the production-only diagnostic ``prain``, the
+        per-layer snow melt, and ``pdmfup`` including the (negative)
+        sub-cloud evaporation increments.
+
+    """
+    nlev = len(temperature)
+    zcons1 = c.cpd / (c.alhf * c.grav * dt)
+    zcons2 = 1.0 / (c.grav * dt)
+    ztmelp2 = c.tmelt + 2.0
+    zcucov = 0.05  # fractional precip cover (cuflx line 419)
+
+    from .tiedtke_nordeng import saturation_mixing_ratio
+    qs_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
+
+    # ECHAM cevapcu(jk) profile (iniphy.f90:87-89) with eta ≈ p/p_surface.
+    eta = pressure / jnp.maximum(pressure[-1], 1.0)
+    cevapcu = (
+        1.93e-6 * 261.0
+        * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
+        * 0.5 / c.grav
+    )
+
+    # --- pass 1: rain/snow partition + melting (cuflx 296-313) ------------
+    def partition_step(carry, xs):
+        zrfl, zsfl = carry
+        gen, T_k, q_k, dp_k = xs
+        warm = T_k > c.tmelt
+        zrfl = jnp.where(warm, zrfl + gen, zrfl)
+        zsfl = jnp.where(warm, zsfl, zsfl + gen)
+        zfac = zcons1 * (1.0 + c.vtmpc2 * q_k) * dp_k
+        zsnmlt = jnp.where(
+            warm & (zsfl > 0.0),
+            jnp.minimum(zsfl, zfac * jnp.maximum(T_k - ztmelp2, 0.0)),
+            0.0,
+        )
+        zsfl = zsfl - zsnmlt
+        zrfl = zrfl + zsnmlt
+        return (zrfl, zsfl), zsnmlt
+
+    gen = pdmfup + pdmfdp
+    (prfl, psfl), pdpmel = lax.scan(
+        partition_step, (jnp.zeros(()), jnp.zeros(())),
+        (gen, temperature, humidity, dp_lev),
+    )
+    prfl = jnp.maximum(prfl, 0.0)
+    psfl = jnp.maximum(psfl, 0.0)
+    prain = jnp.sum(jnp.maximum(pdmfup, 0.0))
+
+    # --- pass 2: sub-cloud Kessler evaporation (cuflx 411-440) ------------
+    k_idx = jnp.arange(nlev)
+
+    def evap_step(zpsubcl, xs):
+        k, qs_k, q_k, dp_k, cevap_k = xs
+        active = (k >= kbase) & (zpsubcl > 1e-20)
+        zrfl = zpsubcl
+        zrnew = (
+            jnp.maximum(
+                0.0,
+                jnp.sqrt(jnp.maximum(zrfl, 0.0) / zcucov)
+                - cevap_k * dp_k * jnp.maximum(qs_k - q_k, 0.0),
+            ) ** 2
+        ) * zcucov
+        zrmin = zrfl - zcucov * jnp.maximum(0.8 * qs_k - q_k, 0.0) * zcons2 * dp_k
+        zrnew = jnp.maximum(zrnew, zrmin)
+        zrfln = jnp.maximum(zrnew, 0.0)
+        zdrfl = jnp.where(active, jnp.minimum(0.0, zrfln - zrfl), 0.0)
+        zpsubcl_new = jnp.where(active, zrfln, zpsubcl)
+        return zpsubcl_new, zdrfl
+
+    zpsubcl_final, zdrfl_per_level = lax.scan(
+        evap_step, prfl + psfl, (k_idx, qs_env, humidity, dp_lev, cevapcu),
+    )
+    pdmfup_adj = pdmfup + zdrfl_per_level  # negative increments (cuflx 437)
+
+    # --- pass 3: proportional depletion (cuflx 486-491) -------------------
+    zrsum = prfl + psfl
+    zdpevap_tot = zpsubcl_final - zrsum  # ≤ 0
+    inv = 1.0 / jnp.maximum(zrsum, 1e-20)
+    rain_sfc = jnp.maximum(prfl + zdpevap_tot * prfl * inv, 0.0)
+    snow_sfc = jnp.maximum(psfl + zdpevap_tot * psfl * inv, 0.0)
+
+    return rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj
 
 
 def calculate_cloud_water_ice(
@@ -188,9 +315,13 @@ def calculate_tendencies(
         + (downdraft_state.qd - humidity) * downdraft_state.mfd,
         axis=0,
     )
-    # Latent-heat source from condensation flux divergence. The same
-    # signed-dp / signed-diff convention applies.
-    lh_source = c.alhc * jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
+    # Condensate flux divergence (ECHAM pmful = mfu·lu). In cudtdq the
+    # T-ledger carries −Δ(L·pmful): moving condensate UP through a layer
+    # boundary removes the latent heat that was released making it — the
+    # previous code had this term with the OPPOSITE sign (+L·Δ(lu·mfu)),
+    # cooling the layers where condensate was produced and heating where
+    # it evaporated (review finding 0.1/PR-1.1).
+    pmful_div = jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
 
     # Layer mass per unit area for the flux divergence. NOTE on staggering: the
     # convective fluxes above are evaluated at FULL levels, so ``diff(flux)``
@@ -205,59 +336,102 @@ def calculate_tendencies(
     # sign is carried so the heating comes out positive regardless of ordering.
     layer_mass_per_area = dp_signed / c.grav  # kg/m² (signed), shape (nlev-1)
 
-    dtedt_k_levels = (dse_flux_div + lh_source) / (c.cpd * layer_mass_per_area)
-    dqdt_k_levels = q_flux_div / layer_mass_per_area
+    # Flux-divergence parts of the cudtdq ledger (mo_cufluxdts.f90:649-662):
+    #   zdtdt ∝ Δpmfus + Δpmfds − Δ(L·pmful)  (+ per-level sources below)
+    #   zdqdt ∝ Δpmfuq + Δpmfdq + Δpmful      (− per-level sinks below)
+    dtedt_k_levels = (dse_flux_div - c.alhc * pmful_div) / (
+        c.cpd * layer_mass_per_area
+    )
+    dqdt_k_levels = (q_flux_div + pmful_div) / layer_mass_per_area
 
-    # Mass flux divergences needed for momentum transport
-    diff_updraft = jnp.diff(updraft_state.mfu, axis=0)
-    diff_downdraft = jnp.diff(downdraft_state.mfd, axis=0)
-    mass_flux_div = diff_updraft + diff_downdraft
+    # Per-level layer mass for the source/sink terms (positive, kg/m²).
+    # Centered full-level spacing as the layer-thickness proxy — self-
+    # consistent with the dual-grid flux divergence above (the half-level
+    # restagger is tracked separately, #530). What matters for conservation
+    # is that the SAME mass converts each per-level flux to a tendency and
+    # back — the column budget then closes identically.
+    dp_abs = jnp.abs(dp_signed)
+    # Use the SAME dual-grid spacing the divergence terms are divided by
+    # (extended to the last level with its edge value): with one common
+    # mass convention the column integral of the divergence terms
+    # telescopes exactly and the per-level source/sink terms cancel their
+    # own conversions, so the water and enthalpy budgets close identically
+    # regardless of grid stretching. Mixing the dual spacing (divergences)
+    # with a centred spacing (sources) opened the enthalpy budget by ~25 %
+    # on a stretched tropical sounding.
+    dp_lev = jnp.concatenate([dp_abs, dp_abs[-1:]])
+    mass_lev = dp_lev / c.grav  # kg/m², (nlev,)
+
+    # ECHAM cuflx precipitation budget: rain/snow partition, snow melt
+    # (pdpmel), sub-cloud Kessler evaporation charged back into pdmfup.
+    rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj = convective_precip_fluxes(
+        temperature, humidity, pressure, dp_lev, kbase,
+        updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
+    )
+    plude = updraft_state.plude
+
+    # Per-level source/sink terms of the ledger (cudtdq lines 649-662):
+    #   T: +L·(plude + pdmfup + pdmfdp) − alf·pdpmel
+    #   q: −(plude + pdmfup + pdmfdp)
+    # Heating where precip is generated / condensate detrained (both were
+    # condensed inside the plume, and the vapour that made them must be
+    # debited from the column — the missing sinks that previously created
+    # water at the precipitation rate, review finding 0.1). Negative
+    # pdmfup increments (sub-cloud evaporation) and pdmfdp (downdraft
+    # evaporation) flip both signs locally: cooling + re-moistening.
+    ledger_src = plude + pdmfup_adj + downdraft_state.pdmfdp
+    # ECHAM keys the ledger latent heat ``zalv`` to the FULL-LEVEL
+    # environment temperature: sublimation heat below the melting point
+    # (mo_cufluxdts.f90 — the palvsh/zalv pair), condensation heat above.
+    zalv = jnp.where(temperature > c.tmelt, c.alhc, c.alhs)
+    dtedt_lev = (zalv * ledger_src - c.alhf * pdpmel) / (c.cpd * mass_lev)
+    dqdt_lev = -ledger_src / mass_lev
+
+    # Detrained condensate feeds the stratiform cloud tracers (ECHAM
+    # zxtec = g/Δp·plude → pxtecl/pxteci split by the full-level
+    # temperature), NOT the vapour budget.
+    liquid_frac = jnp.where(temperature > c.tmelt, 1.0, 0.0)
+    dqc_dt_plude = liquid_frac * plude / mass_lev
+    dqi_dt_plude = (1.0 - liquid_frac) * plude / mass_lev
 
     # Normalization factor for tendencies (1 / signed layer_mass) — same
     # ordering-agnostic convention as for the temperature/moisture
     # tendency above.
     factor = 1.0 / layer_mass_per_area
 
-    # Downdraft momentum transport (assumes downdraft winds ~ environmental winds)
-    u_downdraft_flux = jnp.diff(u_wind * downdraft_state.mfd, axis=0)
-    v_downdraft_flux = jnp.diff(v_wind * downdraft_state.mfd, axis=0)
-
-    # Enhanced momentum tendencies
     def calculate_momentum_transport():
-        # Simplified momentum transport using environmental winds
-        # Updrafts and downdrafts carry momentum similar to their source levels
+        # ECHAM cududv (mo_cufluxdts.f90:874-960) deviation-flux form: the
+        # tendency is the divergence of ``M·(u_plume − ū_upstream)`` with
+        # the environment wind taken one level ABOVE the interface (the
+        # deliberate ik = jk−1 upstream offset). The port does not carry a
+        # prognostic plume wind (ECHAM builds puu/pvu in cubase/cuasc), so
+        # the plume wind is approximated by the cloud-base environment wind
+        # — the leading-order cududv behaviour (plume momentum is dominated
+        # by its sub-cloud source). The previous invented "PGF relaxation"
+        # term (0.3 efficiency toward cloud-base wind) had no ECHAM
+        # counterpart and is removed.
+        u_cloud_base = u_wind[kbase]
+        v_cloud_base = v_wind[kbase]
+        u_up = jnp.roll(u_wind, 1)  # upstream (jk−1) environment wind
+        v_up = jnp.roll(v_wind, 1)
+        net_mf = updraft_state.mfu + downdraft_state.mfd
+        zmfu_u = net_mf * (u_cloud_base - u_up)
+        zmfu_v = net_mf * (v_cloud_base - v_up)
+        dudt_transport = jnp.diff(zmfu_u, axis=0) * factor
+        dvdt_transport = jnp.diff(zmfu_v, axis=0) * factor
+        return dudt_transport, dvdt_transport
 
-        # Updraft momentum transport (assumes updraft winds ~ cloud base winds)
-        u_cloud_base = u_wind[kbase, None]
-        v_cloud_base = v_wind[kbase, None]
-        u_updraft_flux = diff_updraft * u_cloud_base
-        v_updraft_flux = diff_updraft * v_cloud_base
-        
-        # Total momentum flux divergence
-        u_total_flux = u_updraft_flux + u_downdraft_flux
-        v_total_flux = v_updraft_flux + v_downdraft_flux
-        
-        # Momentum tendency from mass flux transport
-        dudt_transport = u_total_flux * factor
-        dvdt_transport = v_total_flux * factor
-
-        # Add pressure gradient force effect (simplified)
-        # Vertical momentum mixing tends to accelerate flow toward cloud base winds
-        pgf_efficiency = 0.3  # Moderate coupling strength
-        dudt_pgf = pgf_efficiency * (u_cloud_base - u_wind[:-1]) * mass_flux_div * factor
-        dvdt_pgf = pgf_efficiency * (v_cloud_base - v_wind[:-1]) * mass_flux_div * factor
-
-        return dudt_transport + dudt_pgf, dvdt_transport + dvdt_pgf
-    
     dudt_k_levels, dvdt_k_levels = lax.cond(
-        config.cmfctop > 0,
+        config.lmfdudv,
         calculate_momentum_transport,
         lambda: (jnp.zeros(nlev-1), jnp.zeros(nlev-1)),
     )
     
-    # Make tendency arrays
-    dtedt = jnp.zeros(nlev).at[:-1].set(dtedt_k_levels)
-    dqdt = jnp.zeros(nlev).at[:-1].set(dqdt_k_levels)
+    # Make tendency arrays: flux-divergence parts live on the dual grid
+    # (assigned to [:-1] as before), the per-level ledger sources/sinks
+    # (plude, pdmfup, pdmfdp, pdpmel) apply at their own level.
+    dtedt = jnp.zeros(nlev).at[:-1].set(dtedt_k_levels) + dtedt_lev
+    dqdt = jnp.zeros(nlev).at[:-1].set(dqdt_k_levels) + dqdt_lev
     dudt = jnp.zeros(nlev).at[:-1].set(dudt_k_levels)
     dvdt = jnp.zeros(nlev).at[:-1].set(dvdt_k_levels)
 
@@ -278,34 +452,21 @@ def calculate_tendencies(
     dudt = jnp.where(conv_mask, dudt, 0.0)
     dvdt = jnp.where(conv_mask, dvdt, 0.0)
 
-    # Calculate precipitation rate
-    precip_rate = calculate_precipitation_rate(
-        updraft_state, kbase, dt, config
-    )
-    
-    # Partition cloud condensate
-    qc_conv, qi_conv = calculate_cloud_water_ice(
-        temperature, updraft_state.lu, 
-        updraft_state.mfu, downdraft_state.mfd
-    )
-    
-    # ``dtedt_k_levels`` and ``dqdt_k_levels`` already have units K/s and
-    # kg/kg/s respectively — the divergence math
-    # ``(dse_flux_div + lh_source) / (cp * layer_mass_per_area)`` gives
-    # tendency in 1/s units already (W/m² · 1/(J/(kg·K)) · 1/(kg/m²) =
-    # K/s). The previous code divided by ``dt`` here, converting them
-    # to K/s² and producing convective heating roughly ``dt`` times too
-    # small (1500× too small for dt=1800 s — see harness comparison).
-    # Same applies to dudt / dvdt.
-    nlev = len(temperature)
-    # Calculate fixed qc/qi tendencies (simplified approach). qc_conv /
-    # qi_conv are mass mixing ratios (kg/kg), so dividing by dt gives
-    # the right units for these stub tendencies.
-    dqc_dt = jnp.zeros(nlev)
-    dqi_dt = jnp.zeros(nlev)
-    conv_levels = (jnp.arange(nlev) >= kbase) & (jnp.arange(nlev) <= ktop)
-    dqc_dt = jnp.where(conv_levels, qc_conv * 0.1 / dt, 0.0)
-    dqi_dt = jnp.where(conv_levels, qi_conv * 0.1 / dt, 0.0)
+    # Surface precipitation = rain + snow after the full cuflx budget
+    # (generation − downdraft consumption − sub-cloud evaporation, with the
+    # snow phase carried through melting). Replaces sum(pdmfup), which
+    # exported precip the column never paid for (review finding 0.1).
+    precip_rate = rain_sfc + snow_sfc
+
+    # In-plume condensate diagnostic (kg/kg where the updraft is active).
+    qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu, 0.0)
+    qi_conv = jnp.zeros_like(qc_conv)
+
+    # Detrained-condensate tendencies (ECHAM zxtec = g/Δp·plude split by
+    # full-level temperature into pxtecl/pxteci). Replaces the previous
+    # dimensionless ``lu·0.1/dt`` stubs.
+    dqc_dt = dqc_dt_plude
+    dqi_dt = dqi_dt_plude
     
     return ConvectionTendencies(
         dtedt=dtedt,

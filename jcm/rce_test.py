@@ -428,12 +428,16 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         ).reshape(len(preds.times), -1)[:, 0]
         self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
 
-        # The high-frequency convective flicker is bounded. The cloud-base
-        # mass-flux closure fix (anchoring to the surface moisture supply +
-        # keeping convection active while it is supplied) roughly halves the
-        # per-level temporal scatter of the total heating (≈14 → ≈7 K/day);
-        # the bare-CAPE on/off closure exceeds this bound. (A residual flicker
-        # remains pending the half-level flux re-stagger — see the class
-        # docstring — so this is an upper bound, not a "smooth" assertion.)
+        # The high-frequency convective flicker is bounded. History of this
+        # pin: the bare-CAPE on/off closure gave ≈14 K/day per-level
+        # temporal scatter; the moisture-supply closure fix halved it to
+        # ≈7; the faithful cuflx/cudtdq ledger raises it to ≈12.3 — the
+        # per-level L·pdmfup/plude heating is genuinely localized where the
+        # removed grid-mean saturation adjustment used to smear it. The
+        # on/off closure pathology this bound originally guarded is now
+        # pinned directly by the closure dt-invariance test
+        # (rce_integration_test), so the bound tracks the measured faithful
+        # value + margin. It should tighten again once the half-level flux
+        # re-stagger (#530) lands.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
-        self.assertLess(max_temporal_std, 10.0)  # K/day
+        self.assertLess(max_temporal_std, 14.0)  # K/day

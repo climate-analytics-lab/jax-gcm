@@ -524,10 +524,14 @@ class TestDowndraftLFS:
     """Test downdraft level of free sinking criteria."""
 
     def test_cmfdeps_parameter_exists(self):
-        """Verify cmfdeps parameter exists with default value ~0.33."""
+        """Verify cmfdeps carries the ECHAM 6.3 value.
+
+        0.3 per mo_echam_conv_constants.f90:113 (the earlier 0.33 was an
+        approximation from before the Fortran parameter block was checked).
+        """
         config = ConvectionParameters.default()
         assert hasattr(config, 'cmfdeps'), "Should have cmfdeps parameter"
-        assert float(config.cmfdeps) == pytest.approx(0.33)
+        assert float(config.cmfdeps) == pytest.approx(0.3)
 
     def test_cmfdeps_used_in_lfs_threshold(self):
         """LFS threshold should use cmfdeps (not cmfcmin) times base mass flux.
@@ -539,9 +543,9 @@ class TestDowndraftLFS:
         config = ConvectionParameters.default()
         base_mf = 0.1  # Typical cloud base mass flux (kg/m²/s)
 
-        # Correct threshold using cmfdeps
+        # Correct threshold using cmfdeps (ECHAM value 0.3)
         threshold_correct = float(config.cmfdeps) * base_mf
-        assert threshold_correct == pytest.approx(0.033, rel=0.01)
+        assert threshold_correct == pytest.approx(0.03, rel=0.01)
 
         # Old (wrong) threshold using cmfcmin would be negligible
         threshold_wrong = float(config.cmfcmin) * base_mf

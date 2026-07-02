@@ -35,6 +35,11 @@ class UpdatedraftState(NamedTuple):
     detr: jnp.ndarray    # Detrainment rate (1/m)
     buoy: jnp.ndarray    # Buoyancy (m/s²)
     pdmfup: jnp.ndarray  # Precip generated per layer (kg/m²/s) — ECHAM ``pdmfup``
+    plude: jnp.ndarray   # Condensate DETRAINED per layer (kg/m²/s) — ECHAM ``plude``.
+                         # Feeds the stratiform cloud tracers (ECHAM pxtecl/pxteci
+                         # via zxtec = g/Δp·plude) and the cudtdq latent-heat
+                         # ledger; includes the cloud-top dump of the remaining
+                         # plume condensate when the updraft terminates.
 
 
 def saturation_adjustment(
@@ -74,10 +79,14 @@ def saturation_adjustment(
         and ``vapour ≈ qs(T_adj)`` to within a fraction of a percent.
 
     """
-    L_cp = c.alhc / c.cpd
+    def _lcp(T):
+        # Phase-consistent latent heat: L_s pairs with the ice saturation
+        # branch below tmelt (review finding 2.7).
+        return jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
 
     def _first_pass(T, q_vap, liq):
         """Condensation-only Newton step (kcall=1)."""
+        L_cp = _lcp(T)
         qs, dqs_dT = _saturation_mixing_ratio_and_derivative(T, pressure)
         cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
         cond = jnp.maximum(cond, 0.0)
@@ -88,6 +97,7 @@ def saturation_adjustment(
         overshoot, but only while there's liquid available to re-evaporate.
         """
         T, q_vap, liq = carry
+        L_cp = _lcp(T)
         qs, dqs_dT = _saturation_mixing_ratio_and_derivative(T, pressure)
         cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
         # Don't evaporate more than available liquid
@@ -156,6 +166,7 @@ def calculate_updraft(
     detr_init = jnp.zeros(nlev)
     buoy_init = jnp.zeros(nlev)
     pdmfup_init = jnp.zeros(nlev)
+    plude_init = jnp.zeros(nlev)
 
     # Set cloud base values. The parcel arriving at the LCL has the
     # surface mixing ratio (q is conserved during dry-adiabatic ascent).
@@ -181,6 +192,11 @@ def calculate_updraft(
 
     tu_init = tu_init.at[kbase].set(tu_cb)
     qu_init = qu_init.at[kbase].set(qu_cb)
+    # The condensate produced by the cloud-base saturation adjustment stays
+    # in the plume (ECHAM cubase, mo_cuinitialize.f90:314:
+    # ``plu = plu + zqold - pqu``) — it was previously discarded, silently
+    # deleting water the T ledger had already released latent heat for.
+    lu_init = lu_init.at[kbase].set(excess)
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
 
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
@@ -190,6 +206,7 @@ def calculate_updraft(
         mfu=mfu_init, entr=entr_init, detr=detr_init,
         buoy=buoy_init,
         pdmfup=pdmfup_init,
+        plude=plude_init,
     )
     # Carry = (updraft_state, integrated_buoyancy). The integrated
     # buoyancy drives Nordeng (1994) organized entrainment and is kept
@@ -258,8 +275,10 @@ def calculate_updraft(
             )
             entr = jnp.clip(entr_turb + entr_org, 0.0, 0.01)
 
-            # Turbulent detrainment: fraction of entrainment
-            detr_turb = 0.5 * entr
+            # Turbulent detrainment equals turbulent entrainment (ECHAM
+            # cuentr: zdmfde = zdmfen for the turbulent part — δ = ε; the
+            # previous 0.5·ε under-detrained and over-deepened the plume).
+            detr_turb = entr_turb
 
             # Organized detrainment for deep convection (Fortran tan() profile).
             # The ICON cuentr subroutine uses a tan-based profile that produces
@@ -366,6 +385,14 @@ def calculate_updraft(
             )
             lu_new = lu_after_precip
 
+            # Detrained condensate (ECHAM ``plude = zdmfde·plu``,
+            # mo_cuascent.f90): the mass detrained in this layer carries the
+            # condensate the plume brought into it. This is the source the
+            # cudtdq ledger heats with (+L·plude) and the stratiform cloud
+            # tracers receive (g/Δp·plude → dqc/dqi) — previously never
+            # computed, so detrained condensate simply vanished.
+            plude_layer = carry.lu[next_level] * dmf_detr
+
             # Calculate buoyancy
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
@@ -382,6 +409,16 @@ def calculate_updraft(
                 above_cloud_base,
                 jnp.logical_or(buoy_new < 0.0, mfu_too_small),
             )
+            # Cloud-top condensate dump (ECHAM's cloud-top block detrains the
+            # remaining plume condensate as plude — ``plude(kctop-1)`` from
+            # ``pmful``): when the updraft terminates here, everything the
+            # plume still carries detrains into this layer instead of
+            # disappearing with the zeroed mass flux.
+            plude_layer = jnp.where(
+                terminate,
+                plude_layer + lu_new * mfu_new,
+                plude_layer,
+            )
             mfu_new = jnp.where(terminate, 0.0, mfu_new)
 
             # Update state
@@ -394,6 +431,7 @@ def calculate_updraft(
                 detr=carry.detr.at[k].set(detr),
                 buoy=carry.buoy.at[k].set(buoy_new),
                 pdmfup=carry.pdmfup.at[k].set(pdmfup),
+                plude=carry.plude.at[k].set(plude_layer),
             )
             # Accumulate integrated positive buoyancy for the next step's
             # organized-entrainment denominator (matches ECHAM `zbuoy`).

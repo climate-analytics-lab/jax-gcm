@@ -215,10 +215,22 @@ class TestRCEConvection(unittest.TestCase):
             f"min dqdt = {float(jnp.min(tendencies.dqdt)):.3e}",
         )
 
-    def test_saturation_adjustment_leaves_no_supersaturation(self):
-        """After the scheme runs (including the post-convection adjustment
-        we wired up), applying the tendencies should leave the column at
-        or below saturation everywhere.
+    def test_column_water_budget_closes(self):
+        """The scheme's tendencies conserve column water against precip.
+
+        ECHAM applies NO grid-mean saturation adjustment after cudtdq
+        (verified against mo_cumastr.f90) — residual grid-mean
+        supersaturation is the stratiform scheme's job, so the previous
+        assertion here (post-tendency column at/below saturation) encoded
+        the removed non-ECHAM adjustment. What the faithful ledger DOES
+        guarantee — and what the removed adjustment silently broke — is
+        the water budget: every kg of exported precipitation is debited
+        from the column,
+
+            Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g + P  =  0,
+
+        using the scheme's own per-level layer-mass convention (edge Δp at
+        the boundaries, centred spacing inside).
         """
         T, q, p, dz, rho = _tropical_sounding(surface_T=302.0, surface_rh=0.85)
         nlev = T.shape[0]
@@ -230,17 +242,88 @@ class TestRCEConvection(unittest.TestCase):
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             dt, cfg,
+            moisture_supply=jnp.array(5e-5),
         )
-        T_new = T + tendencies.dtedt * dt
-        q_new = q + tendencies.dqdt * dt
-        qs_new = saturation_mixing_ratio(p, T_new)
-        supersaturation = jnp.maximum(q_new - qs_new, 0.0)
-        max_super = float(jnp.max(supersaturation))
+        import numpy as np
+        import jcm.constants as c
+        dpa = np.abs(np.diff(np.asarray(p)))
+        # The scheme's own layer-mass convention: the dual-grid spacing the
+        # divergence terms use, extended to the last level.
+        dp_lev = np.concatenate([dpa, dpa[-1:]])
+        mass = dp_lev / c.grav
+        dwater = np.asarray(
+            tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt
+        )
+        precip = float(tendencies.precip_conv)
+        residual = float(np.sum(dwater * mass) + precip)
+        self.assertGreater(precip, 0.0, "test column did not precipitate")
         self.assertLess(
-            max_super, 1e-4,
-            f"Post-tendency state still supersaturated by "
-            f"{max_super*1000:.3f} g/kg; the post-convection saturation "
-            f"adjustment is not working",
+            abs(residual), max(1e-3 * precip, 1e-9),
+            f"column water budget open by {residual:.3e} kg/m2/s "
+            f"against precip {precip:.3e}",
+        )
+
+    def test_column_energy_budget_closes(self):
+        """Column enthalpy change balances the latent-heat exchange.
+
+        The cudtdq ledger guarantees (with the deviation DSE fluxes
+        telescoping over the column):
+
+            cp·Σ dT/dt·Δp/g  =  Σ zalv·(plude+pdmfup+pdmfdp)·… − alhf·Σ pdpmel
+                              =  −Σ zalv·(dq/dt)·Δp/g − alhf·Σ pdpmel
+
+        i.e. the column warms by exactly the latent heat of the vapour it
+        loses (phase-keyed zalv), minus the melt sink. Momentum terms carry
+        no enthalpy here. Verified on the same column as the water budget;
+        the pre-rewrite scheme failed this at the 300 W/m² level (heating
+        454 W/m² vs L·P = 140 W/m², review finding 0.1).
+        """
+        T, q, p, dz, rho = _tropical_sounding(surface_T=302.0, surface_rh=0.85)
+        nlev = T.shape[0]
+        cfg = ConvectionParameters.default()
+        dt = 1800.0
+
+        tendencies, _ = tiedtke_nordeng_convection(
+            T, q, p, dz, rho,
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            dt, cfg,
+            moisture_supply=jnp.array(5e-5),
+        )
+        import numpy as np
+        import jcm.constants as c
+        dpa = np.abs(np.diff(np.asarray(p)))
+        # The scheme's own layer-mass convention: the dual-grid spacing the
+        # divergence terms use, extended to the last level.
+        dp_lev = np.concatenate([dpa, dpa[-1:]])
+        mass = dp_lev / c.grav
+        zalv = np.where(np.asarray(T) > c.tmelt, c.alhc, c.alhs)
+        cp_int = c.cpd * float(np.sum(np.asarray(tendencies.dtedt) * mass))
+        # Every kg of vapour the column loses was condensed somewhere in
+        # the plume and released its latent heat — whether it left as
+        # precipitation or as detrained condensate (the qc/qi tendencies
+        # carry ALREADY-condensed water whose heat the ledger banked via
+        # +zalv·plude). So the enthalpy identity pairs cp∫dT with the
+        # phase-keyed latent heat of the VAPOUR loss alone:
+        #     cp·Σ dT·Δp/g  ≈  −Σ zalv·dq·Δp/g  −  alhf·Σ pdpmel
+        # (the DSE deviation fluxes telescope to zero over the column —
+        # verified numerically). Two bounded openings are inherent to the
+        # REFERENCE ledger itself: (a) vapour is removed where it is
+        # entrained (warm levels, Lv-keyed zalv) but its heat is released
+        # where the plume condenses/precipitates (cold levels, Ls-keyed) —
+        # an (Ls−Lv)/Lv ≈ 13 % spread on the cold-source share (ECHAM's
+        # 'fusion debt' of ice condensate); (b) the −alhf·pdpmel melt sink
+        # is not exposed on the tendencies struct. Together they bound the
+        # residual at ~15 %; the measured value here is ~9 %. The
+        # pre-rewrite scheme failed this identity by ~220 % (heating
+        # 454 W/m² vs L·P = 140, review finding 0.1).
+        lat_int = float(np.sum(zalv * np.asarray(tendencies.dqdt) * mass))
+        scale = max(abs(cp_int), abs(lat_int), 1.0)
+        self.assertLess(
+            abs(cp_int + lat_int) / scale, 0.15,
+            f"column enthalpy vs latent exchange open by "
+            f"{cp_int + lat_int:.1f} W/m2 (cp∫dT={cp_int:.1f}, "
+            f"zalv∫dq={lat_int:.1f})",
         )
 
 
@@ -286,8 +369,14 @@ class TestMoistureSupplyClosure(unittest.TestCase):
 
         # Anchored: essentially dt-invariant.
         self.assertLess(anch_short / anch_long, 1.25)
-        # Bare CAPE: grows as dt shrinks (CFL-cap dependence → flicker).
-        self.assertGreater(cape_short / cape_long, 1.25)
+        # The CAPE fallback is now Nordeng's zcape/(zheat·cmftau) — a
+        # physical timescale closure with no dt in it — so it is ALSO
+        # ~dt-invariant. The previous control assertion here pinned the
+        # PATHOLOGY (the naive CAPE/(g·τ) fallback rode the layer-mass/dt
+        # CFL cap, so its burst grew as dt shrank — the flicker mechanism);
+        # with the fallback replaced, both branches are cured and the
+        # assertion flips to pin that.
+        self.assertLess(cape_short / cape_long, 1.25)
 
     def test_moisture_anchored_flux_is_smaller_and_bounded(self):
         """The evaporation-limited flux is far gentler than the CAPE-cap burst.
