@@ -3122,7 +3122,14 @@ def cloud_microphysics_2m(
     # rain instantly, leaving ~no cloud (LWP ~0.2 g/m2 vs the 1M scheme's ~20).
     # Flooring the droplet number by that same minimum keeps a realistic
     # cloud-water reservoir.
-    cdnc_min = minimum_CDNC(qc)
+    # minimum_CDNC expects the in-cloud water content in kg/m³ (only
+    # consumed when ldyn_cdnc_min=True); passing grid-mean kg/kg fed the
+    # dynamic branch values ~ρ·cf too small (review finding 2.24).
+    inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params.epsec)
+    qc_in_cloud_kgm3 = jnp.where(
+        cloud_fraction > params.epsec, qc * inv_cf_min * air_density, 0.0,
+    )
+    cdnc_min = minimum_CDNC(qc_in_cloud_kgm3)
     cdnc = jnp.maximum(cdnc, cdnc_min)
 
     # pauloc==1 and pclcstar==cloud_fraction are conservative first-pass
@@ -3135,7 +3142,16 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     warm_precip_mask = (temperature > params.tmelt) & (qc > params.ccwmin)
 
-    cdnc_warm, qc_after_warm, _autoconv_in_cloud, _autoconv_rate, _dcdnc_removal = (
+    # ECHAM runs the KK2000 warm-rain chain on the IN-CLOUD liquid (zxlb)
+    # and area-weights the products; feeding grid-mean qc underestimated
+    # the qc^2.47 autoconversion by ~cf^1.47 (review finding 2.22). Convert
+    # at the boundary: in-cloud in, grid-mean bookkeeping out.
+    qc_ic_warm = jnp.where(
+        cloud_fraction > params.epsec,
+        qc / jnp.maximum(cloud_fraction, params.epsec),
+        0.0,
+    )
+    cdnc_warm, qc_ic_after_warm, _autoconv_in_cloud, _autoconv_rate, _dcdnc_removal = (
         precip_formation_warm(
             warm_precip_mask,
             autoconv_factor,
@@ -3145,11 +3161,16 @@ def cloud_microphysics_2m(
             qr,
             cdnc_min,
             cdnc,
-            qc,
+            qc_ic_warm,
             dt,
         )
     )
-    qr_gain_warm = qc - qc_after_warm  # mass moved from qc to qr (kg/kg)
+    qc_after_warm = jnp.where(
+        cloud_fraction > params.epsec,
+        qc_ic_after_warm * cloud_fraction,
+        qc,
+    )
+    qr_gain_warm = qc - qc_after_warm  # grid-mean mass moved qc → rain (kg/kg)
 
     # ------------------------------------------------------------------
     # Derived quantities used across multiple process steps
