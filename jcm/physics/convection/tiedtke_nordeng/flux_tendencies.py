@@ -427,30 +427,27 @@ def calculate_tendencies(
         lambda: (jnp.zeros(nlev-1), jnp.zeros(nlev-1)),
     )
     
-    # Make tendency arrays: flux-divergence parts live on the dual grid
-    # (assigned to [:-1] as before), the per-level ledger sources/sinks
-    # (plude, pdmfup, pdmfdp, pdpmel) apply at their own level.
-    dtedt = jnp.zeros(nlev).at[:-1].set(dtedt_k_levels) + dtedt_lev
-    dqdt = jnp.zeros(nlev).at[:-1].set(dqdt_k_levels) + dqdt_lev
-    dudt = jnp.zeros(nlev).at[:-1].set(dudt_k_levels)
-    dvdt = jnp.zeros(nlev).at[:-1].set(dvdt_k_levels)
-
-    # CRITICAL: Mask tendencies to only apply where convection is active (between ktop and kbase)
-    # ICON does: IF(ldcum(jl).AND.jk.GE.kctop(jl)-1)
-    # This prevents tendencies from leaking into stratosphere or below cloud base
+    # Mask ONLY the flux-divergence parts to the cloud column (ECHAM's
+    # ``IF(ldcum .AND. jk.GE.kctop-1)`` guard — its cudtdq loop then runs
+    # all the way DOWN TO THE SURFACE, jk = ktopm2..klev, never truncating
+    # at cloud base). The per-level ledger terms (plude, pdmfup, pdmfdp,
+    # pdpmel) are already zero wherever the physics is inactive and MUST
+    # flow through below cloud base: the sub-cloud Kessler evaporation
+    # writes negative pdmfup there, and zeroing its cooling/moistening
+    # while the surface precip is still depleted opens the water/energy
+    # budgets and dries sub-cloud layers (Codex review on #550).
     k_indices = jnp.arange(nlev)
-    # Cloud extends from kbase (cloud base, lower altitude, higher pressure, higher index in pressure-increasing arrays)
-    # to ktop (cloud top, higher altitude, lower pressure, lower index)
-    # But we need to account for flexible ordering - use min/max to be safe
-    cloud_bottom = jnp.maximum(ktop, kbase)  # Higher index (could be surface or TOA depending on ordering)
-    cloud_top = jnp.minimum(ktop, kbase)     # Lower index
-    # Include one level above cloud top for flux divergence calculation (ktop-1 in ICON)
+    cloud_bottom = jnp.maximum(ktop, kbase)
+    cloud_top = jnp.minimum(ktop, kbase)
+    # Include one level above cloud top for flux divergence (ktop-1 in ECHAM)
     conv_mask = (k_indices >= cloud_top - 1) & (k_indices <= cloud_bottom)
 
-    dtedt = jnp.where(conv_mask, dtedt, 0.0)
-    dqdt = jnp.where(conv_mask, dqdt, 0.0)
-    dudt = jnp.where(conv_mask, dudt, 0.0)
-    dvdt = jnp.where(conv_mask, dvdt, 0.0)
+    div_dt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dtedt_k_levels), 0.0)
+    div_dq = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dqdt_k_levels), 0.0)
+    dtedt = div_dt + dtedt_lev
+    dqdt = div_dq + dqdt_lev
+    dudt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dudt_k_levels), 0.0)
+    dvdt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dvdt_k_levels), 0.0)
 
     # Surface precipitation = rain + snow after the full cuflx budget
     # (generation − downdraft consumption − sub-cloud evaporation, with the
