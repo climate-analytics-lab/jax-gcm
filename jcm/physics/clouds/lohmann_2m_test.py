@@ -1233,7 +1233,10 @@ class TestIcon2MPipeline:
 
         physics = echam_physics(cloud_scheme="2m")
         names = {spec.name for spec in physics.required_tracers()}
-        assert names == {"qc", "qi", "qnc", "qni", "qr", "qs"}
+        # qr/qs are no longer prognostic: ECHAM's 2M carries precipitation
+        # exclusively in the within-step prfl/psfl fluxes; the tracers
+        # double-booked that mass (review finding 2.18).
+        assert names == {"qc", "qi", "qnc", "qni"}
         nondim_flags = {
             spec.name: spec.nondimensionalize
             for spec in physics.required_tracers()
@@ -1254,7 +1257,8 @@ class TestIcon2MPipeline:
 
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))
         assert jnp.all(jnp.isfinite(preds.dynamics.specific_humidity))
-        # Initial state should have seeded all six required tracers.
+        # Initial state should have seeded the four prognostic tracers
+        # (qr/qs dropped — precipitation is flux-form, finding 2.18).
         assert set(model._final_dycore_state.tracers.keys()) >= {
-            "specific_humidity", "qc", "qi", "qnc", "qni", "qr", "qs",
+            "specific_humidity", "qc", "qi", "qnc", "qni",
         }

@@ -3386,10 +3386,9 @@ def cloud_microphysics_2m(
     )
 
     # Convert in-cloud → grid-mean for tendency computation.
-    qc_after_cold = in_cloud_liquid_cold * cloud_fraction
     qi_after_cold = in_cloud_ice_cold * cloud_fraction
-    qc_to_snow = qc_after_warm - qc_after_cold
-    qi_to_snow = qi - qi_after_cold
+    # (qc_to_snow / qi_to_snow state differences removed with the qr/qs
+    # ledger — see the dqrdt/dqsdt note below.)
 
     # ------------------------------------------------------------------
     # Flux-coupled column sweep (top-down lax.scan)
@@ -3441,7 +3440,7 @@ def cloud_microphysics_2m(
     def _flux_coupled_step(carry, level_in):
         """Process one level: sedi → melt → sublim/evap → update_precip."""
         (rain_flux, snow_flux, ice_flux, ice_flux_n,
-         falling_ice_frac, precip_cover, snow_melt) = carry
+         falling_ice_frac, precip_cover) = carry
         (cf_k, adc_k, dp_k, rho_k, inv_rho_k, qi_k, icnc_k, cdnc_k,
          t_k, melt_k,
          q_k, dpg_k, subice_k, subwat_k, qsi_k, qsw_k, thermo_k,
@@ -3461,11 +3460,17 @@ def cloud_microphysics_2m(
             dt,
         )
 
-        # --- Melting ---
+        # --- Melting --- (per-level pimlt/psmlt/pximlt are KEPT: the
+        # in-cloud melt mass goes to cloud liquid, the falling-ice melt to
+        # cloud liquid, the snow melt to rain — all with per-level fusion
+        # cooling in update_tendencies. The previous scan discarded all
+        # three (melted in-cloud ice VANISHED from the mass ledger, only
+        # the ICNC→CDNC number transfer survived) and broadcast a
+        # column-accumulated snow_melt to every level (finding 2.23).
         (
             icnc_post_melt, _qmel, cdnc_post_melt,
             rain_flux, snow_flux, ice_flux, ice_flux_n,
-            _ice_tend, _pimlt, _psmlt, _pximlt,
+            _ice_tend, pimlt_k, psmlt_k, pximlt_k,
         ) = melting_snow_and_ice(
             melt_k, t_k, qi_k, dp_k,
             icnc_post_sedi, lsdcp, lvdcp,
@@ -3513,14 +3518,19 @@ def cloud_microphysics_2m(
             # cirrus flux into snow once per level below it — ~nlev× snow
             # (review finding 2.17).
             jnp.where(is_bottom_k, ice_flux, 0.0),
-            precip_cover, rain_flux, snow_flux, snow_melt,
+            # Per-level melt bookkeeping (ECHAM zeroes zsmlt each jk):
+            # feed 0 in and take the routine's output as this level's
+            # increment, added to the melting-subroutine psmlt below.
+            precip_cover, rain_flux, snow_flux, jnp.array(0.0),
             dt,
         )
+        psmlt_level = psmlt_k + snow_melt
 
         carry_out = (rain_flux, snow_flux, ice_flux, ice_flux_n,
-                     falling_ice_frac, precip_cover, snow_melt)
+                     falling_ice_frac, precip_cover)
         level_out = (qi_post_sedi, icnc_post_melt, cdnc_post_melt,
-                     snow_sublim_k, rain_evap_k)
+                     snow_sublim_k, rain_evap_k,
+                     psmlt_level, pimlt_k, pximlt_k)
         return carry_out, level_out
 
     # Stack per-level inputs: shape (nlev,) each → scanned along axis 0.
@@ -3538,26 +3548,26 @@ def cloud_microphysics_2m(
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
     init_carry = (zero_scalar, zero_scalar, zero_scalar,
-                  zero_scalar, zero_scalar, zero_scalar, zero_scalar)
+                  zero_scalar, zero_scalar, zero_scalar)
 
     _final_carry, scan_outs = jax.lax.scan(
         _flux_coupled_step, init_carry, scan_inputs,
     )
     (qi_after_scan, icnc_after_scan, cdnc_after_scan,
-     snow_sublim, rain_evap) = scan_outs
+     snow_sublim, rain_evap,
+     psmlt_per_level, pimlt_per_level, pximlt_per_level) = scan_outs
 
     # Extract carry state at the bottom of the column. The first two
     # elements are the surface rain and snow flux (kg/m^2/s) — these are
     # the large-scale precipitation diagnostics that callers need.
     (
         surface_rain_flux, surface_snow_flux,
-        _, _, _, _, snow_melt_final,
+        _, _, _, _,
     ) = _final_carry
 
     # ------------------------------------------------------------------
     # update_tendencies_and_important_vars: full ECHAM6 accounting step
     # ------------------------------------------------------------------
-    inv_dt = 1.0 / dt
     liquid_cloud_flag = temperature > params.tmelt
     ice_cloud_flag = temperature <= params.tmelt
 
@@ -3588,7 +3598,7 @@ def cloud_microphysics_2m(
         freezing_rate=_freezing_rate,
         tompkins_ice=zero,
         tompkins_liq=zero,
-        incloud_ice_melt=zero,       # not extracted from scan (minor correction)
+        incloud_ice_melt=pimlt_per_level,
         lsdcp=lsdcp,
         lvdcp=lvdcp,
         air_density=air_density,
@@ -3597,7 +3607,7 @@ def cloud_microphysics_2m(
         snow_accretion=psacl,
         snow_formation=snow_formation_gridmean,
         cloud_ice_evap=zero,         # not extracted from scan
-        ice_flux_melt=zero,          # not extracted from scan
+        ice_flux_melt=pximlt_per_level,
         pxitec=zero,
         # pxlevap is the clear-cell CLOUD-liquid evaporation (ECHAM
         # zxlevap), not rain evaporation — passing rain_evap here as well
@@ -3607,7 +3617,7 @@ def cloud_microphysics_2m(
         pxltec=zero,
         pxisub=zero,
         snow_sublimation_mmr=snow_sublim,
-        snow_melt=snow_melt_final,
+        snow_melt=psmlt_per_level,
         cloud_ice_in_cloud=in_cloud_ice_cold,
         cloud_liquid_in_cloud=in_cloud_liquid_cold,
         temp_tmp=temperature,
@@ -3626,9 +3636,16 @@ def cloud_microphysics_2m(
     )
 
     # Mass tendencies: warm qc→qr, cold qi→qs + qc→qs, sedi+melt loss
-    qi_sedi_melt_loss = qi_after_cold - qi_after_scan
-    dqrdt = (qr_gain_warm - rain_evap) * inv_dt
-    dqsdt = (qc_to_snow + qi_to_snow + qi_sedi_melt_loss - snow_sublim) * inv_dt
+    # ECHAM carries NO rain/snow mixing-ratio tracers: precipitation
+    # leaves each level exclusively through the prfl/psfl fluxes assembled
+    # in update_precip_fluxes, and the surface fluxes are the outputs. The
+    # previous state-difference dqrdt/dqsdt double-booked the same mass
+    # (once in prognostic qr/qs, once in the scan fluxes), went negative
+    # whenever qi_after_cold gained from WBF/het/deposition, and was then
+    # silently clipped by the non-negative-tracer guard — hidden mass
+    # destruction (review finding 2.18).
+    dqrdt = jnp.zeros_like(qc)
+    dqsdt = jnp.zeros_like(qc)
 
     # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
     # of-air per second once we pass qnc/qni (per-kg) as the tm1 tracers
@@ -3727,8 +3744,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             TracerSpec("qi", units="kg/kg"),
             TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
             TracerSpec("qni", units="kg^-1", nondimensionalize=False),
-            TracerSpec("qr", units="kg/kg"),
-            TracerSpec("qs", units="kg/kg"),
+            # NOTE: rain/snow are NOT prognostic tracers in ECHAM's 2M —
+            # precipitation lives entirely in the within-step prfl/psfl
+            # fluxes (finding 2.18). The former qr/qs tracers double-booked
+            # that mass.
         )
 
     def __call__(
@@ -3854,8 +3873,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                 "qi": tend_all.dqidt.T + dqidt_strat,
                 "qnc": tend_all.dqncdt.T,
                 "qni": tend_all.dqnidt.T,
-                "qr": tend_all.dqrdt.T,
-                "qs": tend_all.dqsdt.T,
             },
         )
 
