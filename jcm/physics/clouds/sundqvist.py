@@ -795,21 +795,24 @@ class SundqvistCloudFraction(PhysicsTerm):
         # with ``b0 = (RH - RH_crit) / (1 - RH_crit)``. Vmap over columns
         # so :func:`calculate_cloud_fraction` works on (nlev,) slices.
         # ECHAM guards on the stratocumulus enhancement (mo_cover.f90:
-        # 179-185): ocean columns (pfrw > 0.5) with no sea ice and no
-        # active convection. Land fraction comes from the terrain mask;
-        # convective state (ktype) from the convection diagnostics when a
-        # convection term ran earlier in the step. NOTE: a sea-ice
-        # fraction is not yet plumbed through ForcingData — that leg of
-        # the guard activates when it is (spurious enhancement remains
-        # possible over polar-ocean inversions until then).
+        # 179-185): ocean columns (pfrw > 0.5) with no sea ice
+        # (pfri < 1e-12, from forcing.sice_am) and no active convection
+        # (ktype from the convection diagnostics when a convection term
+        # ran earlier in the step).
         is_ocean = jnp.reshape(terrain.fmask, (-1,)) < 0.5
+        sice = getattr(forcing, "sice_am", None)
+        no_sea_ice = (
+            jnp.reshape(jnp.asarray(sice), (-1,)) < 1e-12
+            if sice is not None
+            else jnp.ones_like(is_ocean, dtype=bool)
+        )
         conv = diagnostics.get("convection")
         no_convection = (
             jnp.reshape(conv.ktype, (-1,)) == 0
             if conv is not None and hasattr(conv, "ktype")
             else jnp.ones_like(is_ocean, dtype=bool)
         )
-        enhance_allowed = is_ocean & no_convection
+        enhance_allowed = is_ocean & no_sea_ice & no_convection
 
         cf_T, rh_T = jax.vmap(
             calculate_cloud_fraction,

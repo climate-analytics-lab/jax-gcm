@@ -1262,3 +1262,55 @@ class TestIcon2MPipeline:
         assert set(model._final_dycore_state.tracers.keys()) >= {
             "specific_humidity", "qc", "qi", "qnc", "qni",
         }
+
+
+class TestColumnWaterConservation2M:
+    """The 2M flux-form ledger conserves column water against surface precip.
+
+    With rain/snow carried exclusively as within-step fluxes (the qr/qs
+    tracers double-booked mass and their negative state-difference
+    tendencies were silently clipped — review finding 2.18), every kg the
+    column loses must leave as surface precipitation:
+
+        Σ (dq + dqc + dqi)/dt · ρ·dz  +  rain_sfc + snow_sfc  ≈  0.
+
+    Verified against the gross internal water movement so the bound is
+    meaningful even when the column barely precipitates.
+    """
+
+    def test_water_budget_closes_against_surface_fluxes(self):
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(230.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[10:16].set(1e-3)
+        qi = jnp.zeros(nlev).at[4:8].set(2e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)
+        qni = jnp.where(qi > 0, 1e4, 0.0)
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        mref = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert gross > 0.0, "column did nothing — test is vacuous"
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"2M water budget open by {residual:.3e} kg/m2/s "
+            f"(gross movement {gross:.3e}, precip {P:.3e})"
+        )
