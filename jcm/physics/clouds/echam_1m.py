@@ -300,7 +300,7 @@ def autoconversion_kk2000(
 
     Explicit-rate form:
 
-        P_aut = 1350 * qc^2.47 * (Nc·1e-6)^(-1.79)   [g/m³/s]
+        P_aut = 1350 * qc^2.47 * Nc_cm3^(-1.79)   [kg/kg/s, qc in kg/kg]
 
     Activates above the ``ccraut`` threshold. KK2000 was the original
     1M default and remains a good fit for 2M microphysics where the
@@ -330,15 +330,16 @@ def autoconversion_kk2000(
         0.0,
     )
 
-    qc_gm3 = qc_in_cloud * air_density * 1000.0      # g/m³
     nc_cm3 = droplet_number * air_density * 1e-6     # 1/cm³
 
-    # KK2000 rate. The 1e-3 converts g/m³/s → kg/m³/s, then divide
-    # by air density to recover the kg/kg/s mixing-ratio tendency.
+    # KK2000 eq. 29 is a MIXING-RATIO rate: dqr/dt = 1350·qc^2.47·Nc^−1.79
+    # with qc in kg/kg and Nc in cm⁻³, yielding kg/kg/s directly. The
+    # previous code fed qc in g/m³ (×ρ×1000 ≈ ×1200) into the 2.47 power
+    # and then applied a spurious g/m³→kg/kg back-conversion — a net
+    # ~2.6e4× overestimate (review finding 1.5; non-default branch).
     autoconv_rate = jnp.where(
         qc_in_cloud > config.ccraut,
-        1350.0 * qc_gm3 ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79)
-        * 1e-3 / air_density,
+        1350.0 * qc_in_cloud ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79),
         0.0,
     )
 
@@ -1419,6 +1420,22 @@ class Echam1MMicrophysics(PhysicsTerm):
         layer_thickness = diagnostics["layer_thickness"]
         clouds = diagnostics["clouds"]
 
+        # Post-convection thermodynamic state (sequential convection→cloud
+        # coupling, same pattern as the 2M term / PR #539): convection has
+        # already advanced ``thermo_run`` with its heating/moistening and
+        # forwarded its detrained condensate into ``clouds.qc/qi``. The
+        # sweep's saturation balance and rain evaporation must see THAT
+        # (T, q) — using the step-start state let the same supersaturation
+        # be condensed by both convection and microphysics, and computed
+        # evaporation against a stale qsat (review finding 2.15).
+        thermo_run = diagnostics.get("thermo_run")
+        if thermo_run is None:
+            temperature_in = state.temperature
+            specific_humidity_in = state.specific_humidity
+        else:
+            temperature_in = thermo_run["temperature"]
+            specific_humidity_in = thermo_run["specific_humidity"]
+
         qc_interim = clouds.qc
         qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
@@ -1450,7 +1467,7 @@ class Echam1MMicrophysics(PhysicsTerm):
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
             out_axes=(0, 0),
         )(
-            state.temperature, state.specific_humidity, pressure_full,
+            temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, cloud_fraction,
             air_density, layer_thickness,
             droplet_number_per_kg, dt, params,
