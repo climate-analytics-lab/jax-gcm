@@ -31,6 +31,9 @@ class MicrophysicsParameters:
     
     # Autoconversion parameters
     ccraut: float        # Critical cloud water for autoconversion (kg/kg)
+    smooth_ccraut: float # Sigmoid width of the KK2000 qc threshold (kg/kg);
+                         # only read in KK2000 mode — Beheng uses ccraut as
+                         # a rate coefficient (already smooth)
     ccracl: float        # Accretion coefficient (cloud to rain)
     cauloc: float        # ECHAM ``zrac2`` local-rain accretion enhancement.
                          # 0.0 is the ECHAM6.3 default (zrac2 disabled); raise to
@@ -103,7 +106,8 @@ class MicrophysicsParameters:
     SCHEME_KK2000 = 1
 
     @classmethod
-    def default(cls, ccraut=15.0, ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
+    def default(cls, ccraut=15.0, smooth_ccraut=5e-5,
+                ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
                  cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
@@ -128,6 +132,7 @@ class MicrophysicsParameters:
 
         return cls(
             ccraut=jnp.array(ccraut),
+            smooth_ccraut=jnp.array(smooth_ccraut),
             ccracl=jnp.array(ccracl),
             cauloc=jnp.array(cauloc),
             clmin=jnp.array(clmin),
@@ -351,9 +356,21 @@ def autoconversion_kk2000(
     # previous code fed qc in g/m³ (×ρ×1000 ≈ ×1200) into the 2.47 power
     # and then applied a spurious g/m³→kg/kg back-conversion — a net
     # ~2.6e4× overestimate (review finding 1.5; non-default branch).
+    # Smooth threshold (maintainability review B.2.5): with the hard
+    # ``where(qc > ccraut, rate, 0)`` the threshold appears only in the
+    # inequality, so d(rate)/d(ccraut) is identically zero — ccraut was
+    # calibratable only in Beheng mode. The sigmoid ramp puts it in the
+    # value; width -> 0 recovers the hard gate. The qc power base is
+    # double-where-guarded so the ramp's sub-threshold tail cannot
+    # differentiate a negative/zero base (0**x cotangent class).
+    has_qc = qc_in_cloud > 0.0
+    qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
+    ramp = jax.nn.sigmoid(
+        (qc_in_cloud - config.ccraut) / config.smooth_ccraut
+    )
     autoconv_rate = jnp.where(
-        qc_in_cloud > config.ccraut,
-        1350.0 * qc_in_cloud ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79),
+        has_qc,
+        ramp * 1350.0 * qc_safe ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79),
         0.0,
     )
 

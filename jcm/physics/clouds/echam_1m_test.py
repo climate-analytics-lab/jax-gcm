@@ -121,16 +121,36 @@ class TestAutoconversion:
 class TestKK2000Autoconversion:
     """KK2000 explicit-rate autoconversion + dispatcher tests."""
 
-    def test_below_threshold_zero(self):
+    def test_below_threshold_negligible(self):
+        """Sub-threshold autoconversion is negligible, not exactly zero.
+
+        The ccraut gate is a sigmoid ramp now (maintainability review
+        B.2.5) so the threshold is calibratable; several widths below
+        it the residual rate must be a vanishing fraction of the
+        above-threshold rate, and at exactly zero cloud water the rate
+        (and its gradient path) must be exactly zero.
+        """
         config = MicrophysicsParameters.default(
-            ccraut=1e-5, autoconversion_scheme="kk2000",
+            ccraut=1e-3, autoconversion_scheme="kk2000",
         )
-        rate = autoconversion_kk2000(
-            jnp.array(1e-6),               # below ccraut threshold
+        # qc/cf = 2e-6 in-cloud, ~20 widths below the 1e-3 threshold.
+        rate_below = autoconversion_kk2000(
+            jnp.array(1e-6),
             jnp.array(0.5), jnp.array(1.0),
             jnp.array(100e6), 1800.0, config,
         )
-        assert float(rate) == 0.0
+        rate_above = autoconversion_kk2000(
+            jnp.array(1e-3),               # in-cloud 2e-3, above threshold
+            jnp.array(0.5), jnp.array(1.0),
+            jnp.array(100e6), 1800.0, config,
+        )
+        assert float(rate_below) < 1e-6 * float(rate_above)
+        # Exactly-zero cloud water stays exactly zero (double-where guard).
+        rate_zero = autoconversion_kk2000(
+            jnp.array(0.0), jnp.array(0.5), jnp.array(1.0),
+            jnp.array(100e6), 1800.0, config,
+        )
+        assert float(rate_zero) == 0.0
 
     def test_dependencies(self):
         """KK2000: rate ∝ qc^2.47, ∝ Nc^-1.79 — same monotonicity as Beheng."""

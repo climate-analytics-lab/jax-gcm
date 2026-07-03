@@ -1568,12 +1568,23 @@ def precip_formation_warm(
 
     # The expression below is a time-integrated sink form used in the Fortran.
     # It is constructed so that zraut is bounded by cloud_water (after MIN).
-    ztmp1 = cloud_water * (
-        1.0
-        - (
+    # Double-where the power base: in partially-cloudy columns the
+    # in-cloud cloud_water can be exactly 0 (or transiently negative
+    # from upstream arithmetic), and x**1.47 / the outer **(-0.68)
+    # then NaN the parameter cotangents even though the warm mask
+    # discards the value (0*NaN in reverse mode).
+    has_lw = cloud_water > 0.0
+    lw_safe = jnp.where(has_lw, cloud_water, 1.0)
+    ztmp1 = jnp.where(
+        has_lw,
+        lw_safe * (
             1.0
-            + dt * params.exm1_1 * ztmp1 * cloud_water ** params.exm1_1
-        ) ** params.exp_1
+            - (
+                1.0
+                + dt * params.exm1_1 * ztmp1 * lw_safe ** params.exm1_1
+            ) ** params.exp_1
+        ),
+        0.0,
     )
 
     # Ensure autoconversion cannot remove more liquid than exists.
