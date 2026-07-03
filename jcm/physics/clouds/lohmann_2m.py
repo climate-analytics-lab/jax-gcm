@@ -3275,7 +3275,7 @@ def cloud_microphysics_2m(
 
         (
             ice_flux, ice_flux_n,
-            _ice_sublim, snow_sublim_k, rain_evap_k,
+            ice_sublim_k, snow_sublim_k, rain_evap_k,
         ) = sublimation_snow_and_ice_evaporation_rain(
             precip_mask, falling_ice_mask_k,
             q_k, t_k,
@@ -3316,7 +3316,7 @@ def cloud_microphysics_2m(
         carry_out = (rain_flux, snow_flux, ice_flux, ice_flux_n,
                      falling_ice_frac, precip_cover)
         level_out = (qi_post_sedi, icnc_post_melt, cdnc_post_melt,
-                     snow_sublim_k, rain_evap_k,
+                     ice_sublim_k, snow_sublim_k, rain_evap_k,
                      psmlt_level, pimlt_k, pximlt_k)
         return carry_out, level_out
 
@@ -3341,7 +3341,7 @@ def cloud_microphysics_2m(
         _flux_coupled_step, init_carry, scan_inputs,
     )
     (qi_after_scan, icnc_after_scan, cdnc_after_scan,
-     snow_sublim, rain_evap,
+     ice_sublim, snow_sublim, rain_evap,
      psmlt_per_level, pimlt_per_level, pximlt_per_level) = scan_outs
 
     # Extract carry state at the bottom of the column. The first two
@@ -3402,7 +3402,12 @@ def cloud_microphysics_2m(
         # the water from both qc and the rain flux (review finding 2.21).
         pxlevap=zero,
         pxltec=zero,
-        pxisub=zero,
+        # Falling-ice sublimation (ECHAM zxisub): the sublimation routine
+        # deducts this mass from the falling ice flux, so it must re-enter
+        # the column as vapor here — feeding zero destroyed water at the
+        # sublimation rate (only visible in cold columns where sedimenting
+        # ice crosses subsaturated layers).
+        pxisub=ice_sublim,
         snow_sublimation_mmr=snow_sublim,
         snow_melt=psmlt_per_level,
         cloud_ice_in_cloud=in_cloud_ice_cold,
@@ -3413,7 +3418,13 @@ def cloud_microphysics_2m(
         cloud_fraction=cloud_fraction_uicw,
         specific_humidity_tendency=zero,
         temp_tendency=dtedt_wbf,     # seed with WBF contribution
-        ice_tendency=zero,
+        # ECHAM folds ice sedimentation into pxite BEFORE this ledger
+        # (mo_cloud_micro_2m.f90 section 4: pxite = ztmst_rcp·(zxip1 −
+        # pxim1) after sedimentation_ice) — seeding zero here emitted the
+        # bottom-reaching ice flux as surface snow with no qi debit,
+        # opening the flux-form budget by exactly that flux (Codex review
+        # on #554).
+        ice_tendency=(qi_after_scan - qi_after_cold) / dt,
         liq_tendency=zero,
         tracer_tendency_cdnc=zero,
         tracer_tendency_icnc=zero,

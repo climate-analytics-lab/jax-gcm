@@ -758,7 +758,7 @@ def cloud_microphysics(
         cloud_water, cloud_fraction, air_density, droplet_number, dt, config
     )
     qi_auto = ice_autoconversion(
-        cloud_ice, temperature, cloud_fraction, dt, config
+        cloud_ice, temperature, cloud_fraction, dt, config, air_density=air_density,
     )
     
     # 2. Accretion processes

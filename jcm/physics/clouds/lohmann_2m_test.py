@@ -1255,3 +1255,60 @@ class TestColumnWaterConservation2M:
             f"2M water budget open by {residual:.3e} kg/m2/s "
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
+
+    def test_water_budget_closes_with_ice_reaching_the_surface(self):
+        """Polar-cirrus column: sedimenting ice exits as surface snow.
+
+        Pins two coupled sedimentation ledger entries (Codex review on
+        #554): the pxite seed carrying the scan's net qi change (fallout
+        loss above, exponential-integral re-deposit below cloud base) and
+        the pxisub vapor credit for falling ice sublimating in
+        subsaturated cloud-free air. The two omissions cancel in TOTAL
+        column water (the negative-in-cloud-ice correction refunds the
+        missing debit to vapor), so closure alone cannot pin them — the
+        below-cloud re-deposit assertion breaks the degeneracy: with the
+        seed absent, dqidt is exactly zero below the source cloud.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(210.0, 262.0, nlev)   # never above freezing
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.9 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.zeros(nlev).at[6:12].set(5e-4)
+        qc = jnp.zeros(nlev)
+        cf = jnp.where(qi > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        # Few, large crystals → fast fallout to the surface.
+        qni = jnp.where(qi > 0, 2e3, 0.0)
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, jnp.zeros(nlev), qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        mref = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        assert float(snow_sfc) > 0.0, "no surface snow — fallout never reached the ground"
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"budget open by {residual:.3e} with surface-reaching ice "
+            f"(snow_sfc {float(snow_sfc):.3e}, gross {gross:.3e})"
+        )
+        # The ice source cloud occupies levels 6..11; level 12 is clear
+        # (cf = 0, no in-cloud deposition), so any qi gain there can only
+        # be sedimenting ice re-depositing out of the falling flux — the
+        # part of the pxite seed that total-water closure cannot see.
+        assert float(tend.dqidt[12]) > 0.0, (
+            "no below-cloud-base qi gain from the sedimenting flux — the "
+            "scan's net ice change is not entering the pxite ledger"
+        )
