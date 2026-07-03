@@ -1253,6 +1253,53 @@ class TestColumnWaterConservation2M:
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
 
+    def test_supercooled_stratus_rains(self):
+        """Warm-rain coalescence must drain supercooled liquid decks.
+
+        ECHAM ll_prcp_warm (mo_cloud_micro_2m.f90:1662) has NO
+        temperature condition — autoconversion/accretion act on any
+        cloud liquid. A (T > tmelt) gate left polar/storm-track
+        supercooled stratus (238-273 K) without a liquid sink: qc built
+        up ~50x over a month of coupled T63L47 integration and NaN'd
+        the run radiatively. This column is a -5 C stratus deck with
+        drizzle-ready qc; the scheme must produce surface rain (the
+        deck is warmer than the snow path's effective range, so rain is
+        the expected exit).
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 12
+        T = jnp.linspace(258.0, 269.0, nlev)   # all supercooled
+        p = jnp.linspace(6e4, 1.0e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[6:].set(8e-4)   # thick low liquid deck
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.9, 0.0)
+        dz = jnp.full(nlev, 400.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)       # 50/mg — modest CDNC
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        total_precip = float(rain_sfc + snow_sfc)
+        assert total_precip > 1e-7, (
+            f"supercooled deck produced no precipitation "
+            f"(rain {float(rain_sfc):.3e}, snow {float(snow_sfc):.3e}) — "
+            f"the warm-rain mask is temperature-gated again"
+        )
+        # And the deck must actually lose liquid.
+        dqc_col = float(jnp.sum(tend.dqcdt * rho * dz))
+        assert dqc_col < 0.0
+
     def test_water_budget_closes_with_ice_reaching_the_surface(self):
         """Polar-cirrus column: sedimenting ice exits as surface snow.
 
