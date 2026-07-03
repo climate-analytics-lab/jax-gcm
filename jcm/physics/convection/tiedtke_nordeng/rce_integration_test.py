@@ -263,6 +263,63 @@ class TestRCEConvection(unittest.TestCase):
             f"against precip {precip:.3e}",
         )
 
+    def test_water_budget_closes_with_subcloud_evaporation(self):
+        """Sub-cloud rain evaporation must cool/moisten, not just eat precip.
+
+        With an elevated cloud base over a dry sub-cloud layer, the cuflx
+        Kessler chain evaporates falling rain below cloud base (negative
+        ``pdmfup`` increments). The Codex review on #550 caught that the
+        original conv_mask truncated the per-level ledger at cloud base:
+        the surface precip was depleted by the evaporation while its
+        cooling/moistening was zeroed — silently drying the column. ECHAM's
+        cudtdq loop runs to the SURFACE; the mask now applies only to the
+        in-cloud flux-divergence terms, and this test pins both the closed
+        budget and the sub-cloud moistening on exactly that configuration.
+        """
+        import numpy as np
+        import jcm.constants as c
+        # Moderate surface RH lifts the LCL to ~850 hPa, so the cloud base
+        # is elevated and the (subsaturated) layers beneath it evaporate
+        # the falling rain — the configuration the truncated mask broke.
+        T, q, p, dz, rho = _tropical_sounding(surface_T=303.0, surface_rh=0.55)
+        nlev = T.shape[0]
+        cfg = ConvectionParameters.default()
+
+        tendencies, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho,
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, cfg,
+            moisture_supply=jnp.array(5e-5),
+        )
+        precip = float(tendencies.precip_conv)
+        self.assertGreater(precip, 0.0, "test column did not precipitate")
+
+        dpa = np.abs(np.diff(np.asarray(p)))
+        dp_lev = np.concatenate([dpa, dpa[-1:]])
+        mass = dp_lev / c.grav
+        dwater = np.asarray(
+            tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt
+        )
+        residual = float(np.sum(dwater * mass) + precip)
+        self.assertLess(
+            abs(residual), max(1e-3 * precip, 1e-9),
+            f"water budget open by {residual:.3e} with sub-cloud "
+            f"evaporation active (precip {precip:.3e}) — the evaporation's "
+            f"moistening is being masked out",
+        )
+        # And the evaporation genuinely moistens below cloud base somewhere
+        # (the pre-fix mask zeroed exactly these levels).
+        kbase = int(state.kbase)
+        below = np.arange(nlev) > kbase
+        if below.any():
+            dq_below = np.asarray(tendencies.dqdt)[below]
+            self.assertGreater(
+                float(dq_below.max()), 0.0,
+                "no sub-cloud moistening despite rain falling through a "
+                "dry layer",
+            )
+
     def test_column_energy_budget_closes(self):
         """Column enthalpy change balances the latent-heat exchange.
 
