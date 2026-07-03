@@ -47,17 +47,7 @@ from math import pi
 import jcm.constants as c
 from jcm.physics import thermodynamics
 
-from .lohmann_2m_params import (
-    CloudParams2M,
-    cqtmin, cvtfall, crhosno, cn0s, ccwmin,
-    cthomi,  ccraut, ceffmin, ceffmax, crhoi, ccsaut, epsec, xsec, eps, mi,
-    ri_vol_mean_1, ri_vol_mean_2,
-    alfased_1, alfased_2, alfased_3,
-    betased_1, betased_2, betased_3,
-    icemin,
-    mi0_rcp, fall, rhoice, clc_min, exm1_1, exp_1, pirho_rcp, cons4, nic_cirrus,
-    fact_coll_eff, fact_tke
-)
+from .lohmann_2m_params import CloudParams2M
 
 from .cloud_utils import (
     eff_ice_crystal_radius, minimum_CDNC,
@@ -86,13 +76,13 @@ class MicrophysicsTendencies_2M(NamedTuple):
 # ldyn_cdnc_min = True  # Set to True for dynamic CDNC, False for static CDNC
 # cdnc_min_fixed = 100.0  # Example value in cm^-3
 
-def microphysics_dt_constants(dt: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+def microphysics_dt_constants(dt: jnp.ndarray, params: CloudParams2M) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Constants that depend on the microphysics timestep. Here for consistency with ECHAM6,
     where they cannot be parameters.
     Constants are defined locally in each subroutine where needed.
     """
     ztmst = dt
-    ztmst_rcp = 1.0 / jnp.maximum(ztmst, eps)
+    ztmst_rcp = 1.0 / jnp.maximum(ztmst, params.eps)
     zcons1 = c.cpd*c.vtmpc2
     # Match the ECHAM Fortran (mo_cloud_micro_2m.f90 line 535):
     # ``zcons2 = ztmst_rcp * rgrav = 1 / (dt * g)``. The earlier port had
@@ -102,7 +92,7 @@ def microphysics_dt_constants(dt: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray
     # dt=12 min) too large, and the latent heat in melt/sub paths was
     # similarly mis-scaled.
     zcons2 = ztmst_rcp * c.rgrav
-    zcons3 = 1.0 / ( pi*crhosno*cn0s*cvtfall**(1.0/1.16) )**0.25
+    zcons3 = 1.0 / ( pi*params.crhosno*params.cn0s*params.cvtfall**(1.0/1.16) )**0.25
     
     return ztmst, ztmst_rcp, zcons1, zcons2, zcons3
 
@@ -123,6 +113,7 @@ def melting_snow_and_ice(
     ice_flux_n: jnp.ndarray,
     ice_tendency: jnp.ndarray,
     dt: jnp.ndarray,
+    params: CloudParams2M,
 ) -> tuple:
     """Simulate the melting of snow and ice in a cloud microphysics model. This function is a JAX implementation
     of the ECHAM6 `melting_snow_and_ice` routine. It calculates the energy-limited melting capacity based on 
@@ -193,7 +184,7 @@ def melting_snow_and_ice(
 
     """
     # Microphysics timestep constants
-    ztmst, ztmst_rcp, _, zcons2, _ = microphysics_dt_constants(dt)
+    ztmst, ztmst_rcp, _, zcons2, _ = microphysics_dt_constants(dt, params)
     
     # ------------------------------------------------------------
     # 1) Energy-limited melt capacity (per layer) from T - tmelt
@@ -203,28 +194,28 @@ def melting_snow_and_ice(
         zcons2
         * ztdif
         * pressure_thickness
-        / jnp.maximum(lsdcp - lvdcp, eps)
+        / jnp.maximum(lsdcp - lvdcp, params.eps)
     )
 
     # ------------------------------------------------------------
     # 2) Melt snow flux -> rain flux
     # ------------------------------------------------------------
-    snow_melt_flux = jnp.minimum(xsec * snow_flux, melt_capacity)  # ztmp2
+    snow_melt_flux = jnp.minimum(params.xsec * snow_flux, melt_capacity)  # ztmp2
     rain_flux = rain_flux + snow_melt_flux
     snow_flux = snow_flux - snow_melt_flux
 
     # Diagnostic melting in mmr units (as in Fortran): psmlt = dt*grav*melt_flux / pdp
-    psmlt = ztmst * c.grav * snow_melt_flux / jnp.maximum(pressure_thickness, eps)
+    psmlt = ztmst * c.grav * snow_melt_flux / jnp.maximum(pressure_thickness, params.eps)
 
     # ------------------------------------------------------------
     # 3) Melt ice-crystal mass flux from above -> (implicitly) rain water
     # ------------------------------------------------------------
-    ice_melt_flux = jnp.minimum(xsec * ice_flux, melt_capacity)
+    ice_melt_flux = jnp.minimum(params.xsec * ice_flux, melt_capacity)
 
-    has_ice_flux = ice_flux > epsec
+    has_ice_flux = ice_flux > params.epsec
     ice_melt_flux_n = jnp.where(
         has_ice_flux,
-        ice_flux_n * ice_melt_flux / jnp.maximum(ice_flux, epsec),
+        ice_flux_n * ice_melt_flux / jnp.maximum(ice_flux, params.epsec),
         0.0,
     )
 
@@ -233,9 +224,9 @@ def melting_snow_and_ice(
 
     # Keep number flux consistent with remaining mass flux
     # Expect this helper to exist in the module (or be imported).
-    ice_flux_n = consistency_number_to_mass(pthreshold=epsec, pmass=ice_flux, pnumber=ice_flux_n)
+    ice_flux_n = consistency_number_to_mass(pthreshold=params.epsec, pmass=ice_flux, pnumber=ice_flux_n)
 
-    pximlt = ztmst * c.grav * ice_melt_flux / jnp.maximum(pressure_thickness, eps)
+    pximlt = ztmst * c.grav * ice_melt_flux / jnp.maximum(pressure_thickness, params.eps)
 
     # ------------------------------------------------------------
     # 4) Melt in-cloud ice mass when melt_mask is True
@@ -248,7 +239,7 @@ def melting_snow_and_ice(
     # 5) If T > tmelt: melt all ice crystals (number) -> cloud droplets
     # ------------------------------------------------------------
     add_to_cdnc = jnp.where(melt_mask, icncq, 0.0)
-    icnc = jnp.where(melt_mask, icemin, icnc)
+    icnc = jnp.where(melt_mask, params.icemin, icnc)
     cdnc = cdnc + add_to_cdnc
     qmel = qmel + ztmst * add_to_cdnc
 
@@ -289,6 +280,7 @@ def sublimation_snow_and_ice_evaporation_rain(
     ice_flux: jnp.ndarray,                    # pxiflux (INOUT) [kg/m^2/s]
     ice_flux_n: jnp.ndarray,                  # pxifluxn (INOUT) [1/m^2/s]
     dt: jnp.ndarray,                          # ztmst [s]
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray,  # ice_flux (updated) [kg/m^2/s]
     jnp.ndarray,  # ice_flux_n (updated) [1/m^2/s]
@@ -390,14 +382,14 @@ def sublimation_snow_and_ice_evaporation_rain(
 
     """
      # Microphysics timestep constants
-    ztmst, _, _, zcons2, zcons3 = microphysics_dt_constants(dt)
+    ztmst, _, _, zcons2, zcons3 = microphysics_dt_constants(dt, params)
 
     # ------------------------------------------------------------------
     # Common diffusion/ventilation coefficient for ice-phase sublimation
     # ------------------------------------------------------------------
-    denom = (1.0 / (2.43e-2 * c.rv)) * (lsdcp**2) / jnp.maximum(temperature_prev**2, eps)
-    denom = denom + (1.0 / 0.211e-4) * inv_air_density_rcp / jnp.maximum(qsat_ice, eps)
-    zcoeff = 3.0e6 * 2.0 * pi * subsat_wrt_ice * inv_air_density_rcp / jnp.maximum(denom, eps)
+    denom = (1.0 / (2.43e-2 * c.rv)) * (lsdcp**2) / jnp.maximum(temperature_prev**2, params.eps)
+    denom = denom + (1.0 / 0.211e-4) * inv_air_density_rcp / jnp.maximum(qsat_ice, params.eps)
+    zcoeff = 3.0e6 * 2.0 * pi * subsat_wrt_ice * inv_air_density_rcp / jnp.maximum(denom, params.eps)
 
     # Avoid division by zero for area fractions: MERGE(frac, 1, mask)
     zclcpre = jnp.where(precip_mask, precip_fraction, 1.0)
@@ -406,74 +398,74 @@ def sublimation_snow_and_ice_evaporation_rain(
     # ------------------------------------------------------------------
     # Snow sublimation (snow_sublim)
     # ------------------------------------------------------------------
-    ll_snow = jnp.logical_and(snow_flux > cqtmin, precip_mask)
+    ll_snow = jnp.logical_and(snow_flux > params.cqtmin, precip_mask)
 
     # Double-where guard: the fractional power has an infinite derivative at
     # a zero base, and ``snow_sublim`` is where-masked below — masking the
     # output alone still yields NaN gradients (0 cotangent × ∞ derivative).
     # A safe base of 1.0 where ll_snow is False keeps forward values
     # unchanged while keeping the backward pass finite.
-    zclambs_s_base = jnp.where(ll_snow, snow_flux / jnp.maximum(zclcpre, eps), 1.0)
+    zclambs_s_base = jnp.where(ll_snow, snow_flux / jnp.maximum(zclcpre, params.eps), 1.0)
     zclambs_s = zcons3 * zclambs_s_base ** (0.25 / 1.16)
     zcfac4c_s = 0.78 * zclambs_s**2 + 232.19 * (inv_air_density**0.25) * (zclambs_s**2.625)
     ztmp2_s = zcfac4c_s * zcoeff * dp_over_g
 
-    zzeps_s = jnp.maximum(-xsec * snow_flux / jnp.maximum(zclcpre, eps), ztmp2_s)
-    ztmp3_s = -ztmst * zzeps_s / jnp.maximum(dp_over_g, eps) * zclcpre
+    zzeps_s = jnp.maximum(-params.xsec * snow_flux / jnp.maximum(zclcpre, params.eps), ztmp2_s)
+    ztmp3_s = -ztmst * zzeps_s / jnp.maximum(dp_over_g, params.eps) * zclcpre
 
-    ztmp4_s = jnp.maximum(xsec * (qsat_ice - specific_humidity_prev), 0.0)
+    ztmp4_s = jnp.maximum(params.xsec * (qsat_ice - specific_humidity_prev), 0.0)
     ztmp3_s = jnp.clip(ztmp3_s, 0.0, ztmp4_s)
     snow_sublim = jnp.where(ll_snow, ztmp3_s, 0.0)
 
     # ------------------------------------------------------------------
     # Falling ice sublimation (ice_sublim) and update ice_flux, ice_flux_n
     # ------------------------------------------------------------------
-    ll_ice = jnp.logical_and(ice_flux > cqtmin, falling_ice_mask)
+    ll_ice = jnp.logical_and(ice_flux > params.cqtmin, falling_ice_mask)
 
     # Same double-where guard as snow sublimation above (ice_sublim and
     # zsubin are where-masked on ll_ice).
-    zclambs_i_base = jnp.where(ll_ice, ice_flux / jnp.maximum(zclcfi, eps), 1.0)
+    zclambs_i_base = jnp.where(ll_ice, ice_flux / jnp.maximum(zclcfi, params.eps), 1.0)
     zclambs_i = zcons3 * zclambs_i_base ** (0.25 / 1.16)
     zcfac4c_i = 0.78 * zclambs_i**2 + 232.19 * (inv_air_density**0.25) * (zclambs_i**2.625)
     ztmp2_i = zcfac4c_i * zcoeff * dp_over_g
 
-    zzeps_i = jnp.maximum(-xsec * ice_flux / jnp.maximum(zclcfi, eps), ztmp2_i)
-    ztmp3_i = -ztmst * zzeps_i / jnp.maximum(dp_over_g, eps) * zclcfi
+    zzeps_i = jnp.maximum(-params.xsec * ice_flux / jnp.maximum(zclcfi, params.eps), ztmp2_i)
+    ztmp3_i = -ztmst * zzeps_i / jnp.maximum(dp_over_g, params.eps) * zclcfi
 
-    ztmp4_i = jnp.maximum(xsec * (qsat_ice - specific_humidity_prev), 0.0)
+    ztmp4_i = jnp.maximum(params.xsec * (qsat_ice - specific_humidity_prev), 0.0)
     ztmp3_i = jnp.clip(ztmp3_i, 0.0, ztmp4_i)
     ice_sublim = jnp.where(ll_ice, ztmp3_i, 0.0)
 
     # number flux reduction due to sublimated mass
-    zsubin = ice_sublim * ice_flux_n / jnp.maximum(ice_flux, cqtmin)
+    zsubin = ice_sublim * ice_flux_n / jnp.maximum(ice_flux, params.cqtmin)
     zsubin = zcons2 * zsubin * pressure_thickness
     zsubin = jnp.where(ll_ice, zsubin, 0.0)
 
     ice_flux_n = ice_flux_n - zsubin
     ice_flux = ice_flux - zcons2 * ice_sublim * pressure_thickness
 
-    ice_flux_n = consistency_number_to_mass(pthreshold=epsec, pmass=ice_flux, pnumber=ice_flux_n)
+    ice_flux_n = consistency_number_to_mass(pthreshold=params.epsec, pmass=ice_flux, pnumber=ice_flux_n)
 
     # ------------------------------------------------------------------
     # Rain evaporation (rain_evap)
     # ------------------------------------------------------------------
-    ll_rain = jnp.logical_and(rain_flux > cqtmin, precip_mask)
+    ll_rain = jnp.logical_and(rain_flux > params.cqtmin, precip_mask)
 
     # Same double-where guard as snow sublimation above (rain_evap is
     # where-masked on ll_rain).
-    zrain_pow_base = jnp.where(ll_rain, rain_flux / jnp.maximum(zclcpre, eps), 1.0)
+    zrain_pow_base = jnp.where(ll_rain, rain_flux / jnp.maximum(zclcpre, params.eps), 1.0)
     ztmp2_r = (
         870.0
         * subsat_wrt_water_evap
         * dp_over_g
         * zrain_pow_base ** 0.61
-        / (jnp.sqrt(jnp.maximum(air_density, eps)) * jnp.maximum(thermo_term_water, eps))
+        / (jnp.sqrt(jnp.maximum(air_density, params.eps)) * jnp.maximum(thermo_term_water, params.eps))
     )
 
-    zzeps_r = jnp.maximum(-xsec * rain_flux / jnp.maximum(zclcpre, eps), ztmp2_r)
-    ztmp3_r = -ztmst * zzeps_r * zclcpre / jnp.maximum(dp_over_g, eps)
+    zzeps_r = jnp.maximum(-params.xsec * rain_flux / jnp.maximum(zclcpre, params.eps), ztmp2_r)
+    ztmp3_r = -ztmst * zzeps_r * zclcpre / jnp.maximum(dp_over_g, params.eps)
 
-    ztmp4_r = jnp.maximum(xsec * (qsat_water_prev - specific_humidity_prev), 0.0)
+    ztmp4_r = jnp.maximum(params.xsec * (qsat_water_prev - specific_humidity_prev), 0.0)
     ztmp3_r = jnp.clip(ztmp3_r, 0.0, ztmp4_r)
     rain_evap = jnp.where(ll_rain, ztmp3_r, 0.0)
 
@@ -491,6 +483,7 @@ def sedimentation_ice(
     ice_flux_n: jnp.ndarray,              # pxifluxn (INOUT) ice-crystal number flux into layer from above [1/m^2/s]
     falling_ice_fraction: jnp.ndarray,    # pclcfi (INOUT) fraction of grid box covered by sedimenting/falling ice [0..1]
     dt: jnp.ndarray,                      # ztmst [s]
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray,  # ice_mmr_gridmean (updated) [kg/kg]
     jnp.ndarray,  # icnc_in_cloud (updated) [1/m^3]
@@ -563,46 +556,46 @@ def sedimentation_ice(
 
     """
     # Fortran uses ztmst and zcons2 ( = ztmst * rgrav ) from common timestep constants.
-    ztmst, _, _, zcons2, _ = microphysics_dt_constants(dt)
+    ztmst, _, _, zcons2, _ = microphysics_dt_constants(dt, params)
 
     # --- Keep a copy of grid-mean ice before sedimentation
     zxi_bf_sed = ice_mmr_gridmean
 
     # --- Convert ICNC to grid-mean and enforce minimum
     zicnc_gridmean = icnc_in_cloud * cloud_fraction
-    zicnc_gridmean = jnp.maximum(zicnc_gridmean, icemin)
+    zicnc_gridmean = jnp.maximum(zicnc_gridmean, params.icemin)
     zicnc_gridmean_bf_sed = zicnc_gridmean
 
     # --- Mean mass per crystal proxy
-    zmmean = air_density * ice_mmr_gridmean / jnp.maximum(zicnc_gridmean, eps)
-    zmmean = jnp.maximum(zmmean, mi)
+    zmmean = air_density * ice_mmr_gridmean / jnp.maximum(zicnc_gridmean, params.eps)
+    zmmean = jnp.maximum(zmmean, params.mi)
 
     # --- Regime selection for sedimentation parameters
-    ll_small = zmmean < ri_vol_mean_1
-    ll_mid = jnp.logical_and(~ll_small, zmmean < ri_vol_mean_2)
+    ll_small = zmmean < params.ri_vol_mean_1
+    ll_mid = jnp.logical_and(~ll_small, zmmean < params.ri_vol_mean_2)
 
-    zalfased = jnp.where(ll_small, alfased_1, alfased_2)
-    zalfased = jnp.where(ll_mid, alfased_3, zalfased)
+    zalfased = jnp.where(ll_small, params.alfased_1, params.alfased_2)
+    zalfased = jnp.where(ll_mid, params.alfased_3, zalfased)
 
-    zbetased = jnp.where(ll_small, betased_1, betased_2)
-    zbetased = jnp.where(ll_mid, betased_3, zbetased)
+    zbetased = jnp.where(ll_small, params.betased_1, params.betased_2)
+    zbetased = jnp.where(ll_mid, params.betased_3, zbetased)
 
     # --- Fall speed (mass and number use same here), limited as in Fortran
-    zxifallmc = fall * zalfased * (zmmean ** zbetased) * air_density_correction
+    zxifallmc = params.fall * zalfased * (zmmean ** zbetased) * air_density_correction
     zxifallmc = jnp.clip(zxifallmc, 0.001, 2.0)
     zxifallnc = zxifallmc
 
     # --- Exponential coefficients
-    zal1 = ztmst * c.grav * zxifallmc * air_density / jnp.maximum(pressure_thickness, eps)
-    zal3 = c.grav * ztmst * zxifallnc * air_density / jnp.maximum(pressure_thickness, eps)
+    zal1 = ztmst * c.grav * zxifallmc * air_density / jnp.maximum(pressure_thickness, params.eps)
+    zal3 = c.grav * ztmst * zxifallnc * air_density / jnp.maximum(pressure_thickness, params.eps)
 
     # --- Incoming-flux "equilibria" (MERGE to 0 if fall speed is too small)
-    ll_mass = zxifallmc > eps
-    zal2_raw = ice_flux * inv_air_density_rcp / jnp.maximum(zxifallmc, eps)
+    ll_mass = zxifallmc > params.eps
+    zal2_raw = ice_flux * inv_air_density_rcp / jnp.maximum(zxifallmc, params.eps)
     zal2 = jnp.where(ll_mass, zal2_raw, 0.0)
 
-    ll_num = zxifallnc > eps
-    zal4_raw = ice_flux_n / jnp.maximum(zxifallnc, eps)
+    ll_num = zxifallnc > params.eps
+    zal4_raw = ice_flux_n / jnp.maximum(zxifallnc, params.eps)
     zal4 = jnp.where(ll_num, zal4_raw, 0.0)
 
     # --- Update grid-mean ice mmr and grid-mean ICNC via relaxation form
@@ -613,8 +606,8 @@ def sedimentation_ice(
     zicnc_gridmean = zicnc_gridmean * exp3 + zal4 * (1.0 - exp3)
 
     # --- Convert back to in-cloud ICNC where cloud fraction is meaningful
-    has_cloud = cloud_fraction > clc_min
-    icnc_in_cloud_candidate = zicnc_gridmean / jnp.maximum(cloud_fraction, clc_min)
+    has_cloud = cloud_fraction > params.clc_min
+    icnc_in_cloud_candidate = zicnc_gridmean / jnp.maximum(cloud_fraction, params.clc_min)
     icnc_in_cloud = jnp.where(has_cloud, icnc_in_cloud_candidate, zicnc_gridmean)
 
     # --- Sedimented grid-mean amount
@@ -630,7 +623,7 @@ def sedimentation_ice(
 
     # --- In-cloud sedimentation diagnostic (pmrateps in Fortran)
     # Only meaningful as a positive rate; clamp to zero for the absorption case.
-    pmrateps_in_cloud = zxi_delta / jnp.maximum(cloud_fraction, clc_min)
+    pmrateps_in_cloud = zxi_delta / jnp.maximum(cloud_fraction, params.clc_min)
     ice_sedimentation_rate_in_cloud = jnp.where(has_cloud, pmrateps_in_cloud, zxi_delta)
     ice_sedimentation_rate_in_cloud = jnp.maximum(ice_sedimentation_rate_in_cloud, 0.0)
 
@@ -641,6 +634,7 @@ def sedimentation_ice(
         precip_frac_from_above=falling_ice_fraction,
         precip_flux_from_level=jnp.maximum(zxiflx_from_level, 0.0),  # only positive contribution
         precip_frac_from_level=cloud_fraction,
+        params=params,
     )
 
     # --- Update mass flux
@@ -656,7 +650,7 @@ def sedimentation_ice(
     ice_flux_n = jnp.maximum(ice_flux_n + delta_n, 0.0)
 
     # --- Enforce mass/number consistency
-    ice_flux_n = consistency_number_to_mass(pthreshold=epsec, pmass=ice_flux, pnumber=ice_flux_n)
+    ice_flux_n = consistency_number_to_mass(pthreshold=params.epsec, pmass=ice_flux, pnumber=ice_flux_n)
 
     return (
         ice_mmr_gridmean,
@@ -689,6 +683,7 @@ def mixed_phase_deposition_and_corrections(
     condensation_rate: jnp.ndarray,      # pcnd [kg/kg] (INOUT) condensation rate
     deposition_rate: jnp.ndarray,        # pdep [kg/kg] (INOUT) deposition rate
     dt: jnp.ndarray,                     # ztmst [s]
+    params: CloudParams2M,               # threaded scheme parameters
     ll_het: bool = True,                 # heterogeneous nucleation flag (module-level in Fortran)
 ) -> tuple[
     jnp.ndarray,  # condensation_rate (updated pcnd) [kg/kg]
@@ -829,9 +824,9 @@ def mixed_phase_deposition_and_corrections(
     # 3. Effective ice crystal radius → volume-mean radius (Schumann 2011)
     #    Convert: grid-mean kg/kg → in-cloud g/m^3
     # -------------------------------------------------------------------------
-    ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, clc_min)
-    zrieff = eff_ice_crystal_radius(ice_gm3, icnc)           # [µm]
-    zrieff = jnp.clip(zrieff, ceffmin, ceffmax)
+    ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, params.clc_min)
+    zrieff = eff_ice_crystal_radius(ice_gm3, icnc, params)   # [µm]
+    zrieff = jnp.clip(zrieff, params.ceffmin, params.ceffmax)
 
     # Schumann et al. (2011) parameterisation: r_vol from r_eff
     # zrih = -2261 + sqrt(5113188 + 2809*zrieff^3); zrice = 1e-6 * zrih^(1/3)
@@ -847,6 +842,7 @@ def mixed_phase_deposition_and_corrections(
         icnc=icnc,
         ice_radius=zrice,
         eta=bergeron_variable,
+        params=params,
     )
 
     # -------------------------------------------------------------------------
@@ -854,7 +850,7 @@ def mixed_phase_deposition_and_corrections(
     #    lo2 = (T_tmp < cthomi) OR (T_tmp < tmelt AND 0.01*pvervx < zvervmax)
     # -------------------------------------------------------------------------
     lo2 = jnp.logical_or(
-        temperature_tmp < cthomi,
+        temperature_tmp < params.cthomi,
         jnp.logical_and(
             temperature_tmp < c.tmelt,
             0.01 * updraft_velocity < zvervmax,
@@ -894,16 +890,16 @@ def mixed_phase_deposition_and_corrections(
 
     # zcor: correction factor d(q_s)/d(e_s) * p / (p - e_s)^2  (used in zlcdqsdt)
     # In ECHAM: zcor = 1 / (1 - vtmpc1 * q_s)
-    zcor = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp, eps)
-    zcorw = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp_water, eps)  # noqa: F841 — used in Phase 5b
+    zcor = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp, params.eps)
+    zcorw = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp_water, params.eps)  # noqa: F841 — used in Phase 5b
 
     # -------------------------------------------------------------------------
     # 7. Saturation specific humidity at (t+1) for zdqsdt
     #    In Fortran: zqst1 uses tlucuap1 (lookup at it+1), approximated here
     #    by evaluating at (T_tmp + 1 K) and taking finite difference.
     # -------------------------------------------------------------------------
-    ztmp_ice_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
-    ztmp_water_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
+    ztmp_ice_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, params.eps), 700.0)
+    ztmp_water_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, params.eps), 700.0)
 
     zes_p1 = jnp.where(lo2, c.p0s1_bg * jnp.exp(ztmp_ice_p1), c.p0s1_bg * jnp.exp(ztmp_water_p1))
     zqst1 = zes_p1 / pressure
@@ -928,8 +924,8 @@ def mixed_phase_deposition_and_corrections(
     # zlucub equivalent: (Lc/Rv) / T^2  (Clausius-Clapeyron derivative of ln e_s)
     zlucub = jnp.where(
         lo2,
-        c.alhs / (c.rv * jnp.maximum(temperature_tmp**2, eps)),  # ice
-        c.alhc / (c.rv * jnp.maximum(temperature_tmp**2, eps)),  # water
+        c.alhs / (c.rv * jnp.maximum(temperature_tmp**2, params.eps)),  # ice
+        c.alhc / (c.rv * jnp.maximum(temperature_tmp**2, params.eps)),  # water
     )
 
     ztmp1_zlcd = zlc * zdqsdt
@@ -945,7 +941,7 @@ def mixed_phase_deposition_and_corrections(
     zoversatw = 0.01 * qsat_tmp_water    # 1% supersaturation over water
 
     # zrhtest: RH-limited threshold humidity for final correction
-    zrhtest = jnp.minimum(specific_humidity_prev / jnp.maximum(qsat_prev, eps), 1.0) * qsat_tmp
+    zrhtest = jnp.minimum(specific_humidity_prev / jnp.maximum(qsat_prev, params.eps), 1.0) * qsat_tmp
 
     # Heterogeneous onset humidity (only relevant in ice phase)
     zqsp1tmphet_candidate = jnp.minimum(qsat_tmp_water + zoversatw, qsat_tmp * 1.3)
@@ -961,12 +957,12 @@ def mixed_phase_deposition_and_corrections(
     # -------------------------------------------------------------------------
     # 11. Supersaturation condition flags
     # -------------------------------------------------------------------------
-    ll1_circ = jnp.array(nic_cirrus == 1)  # constant (not per-point)
+    ll1_circ = jnp.array(params.nic_cirrus == 1)  # constant (not per-point)
 
     ll2 = specific_humidity_tmp > (qsat_tmp + zoversat)
     ll3 = specific_humidity_tmp > (qsat_tmp_water + zoversatw)
     ll4 = specific_humidity_tmp > zqsp1tmphet
-    ll5 = temperature_tmp >= cthomi  # True = mixed-phase (not homogeneous)
+    ll5 = temperature_tmp >= params.cthomi  # True = mixed-phase (not homogeneous)
 
     # -------------------------------------------------------------------------
     # 12. Deposition increment (ice cloud cases, lo2=True)
@@ -1175,7 +1171,8 @@ def het_mxphase_freezing(
     cloud_ice: jnp.ndarray,           # Original: pxib (INOUT)
     cloud_liquid: jnp.ndarray,        # Original: pxlb (INOUT)
     timestep: float,                  # Original: ztmst
-    min_liquid_threshold: float       # Original: cqtmin
+    min_liquid_threshold: float,      # Original: cqtmin
+    params: CloudParams2M,            # threaded scheme parameters
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Heterogeneous mixed-phase freezing for cloud microphysics.
 
@@ -1299,7 +1296,7 @@ def het_mxphase_freezing(
 
     freezing_rate_immersion = -(
         (immersion_freezing_dust + immersion_freezing_bc) * air_density / c.rhow
-        * jnp.exp(c.tmelt - temperature) * jnp.minimum(vertical_velocity - fact_tke * jnp.sqrt(tke) * air_density * c.grav, 0.0)
+        * jnp.exp(c.tmelt - temperature) * jnp.minimum(vertical_velocity - params.fact_tke * jnp.sqrt(tke) * air_density * c.grav, 0.0)
     )
 
     freezing_rate_contact = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_contact / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
@@ -1356,7 +1353,8 @@ def WBF_process(
     cloud_liquid_tendency: jnp.ndarray,    # Original: pxlte   (INOUT) liquid tendency [kg/kg/s]
     cloud_ice_tendency: jnp.ndarray,       # Original: pxite   (INOUT) ice tendency [kg/kg/s]
     temp_tendency: jnp.ndarray,            # Original: ptte    (INOUT) temperature tendency [K/s]
-    dt: jnp.ndarray                        # Microphysics timestep (used to form ztmst_rcp)
+    dt: jnp.ndarray,                       # Microphysics timestep (used to form ztmst_rcp)
+    params: CloudParams2M,                 # threaded scheme parameters
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Warm-bridge/freeze (WBF) process: transfer of in-cloud liquid to ice under WBF conditions.
 
@@ -1425,14 +1423,14 @@ def WBF_process(
 
     Notes
     -----
-    - ztmst_rcp (Fortran ztmst_rcp) is obtained from microphysics_dt_constants(dt).
+    - ztmst_rcp (Fortran ztmst_rcp) is obtained from microphysics_dt_constants(dt, params).
     - All operations are vectorised and preserve input shapes; values are only changed
       where wbf_mask is True.
     - cqtmin is used as the minimum CDNC (Fortran constant cqtmin).
 
     """
     # get reciprocal timestep constant (ztmst_rcp = 1 / ztmst)
-    _, ztmst_rcp, *_ = microphysics_dt_constants(dt)
+    _, ztmst_rcp, *_ = microphysics_dt_constants(dt, params)
 
     # ztmp1 = ztmst_rcp * pxlb * paclc  (evap / WBF proxy)
     ztmp1 = ztmst_rcp * cloud_liquid_in_cloud * cloud_fraction
@@ -1447,7 +1445,7 @@ def WBF_process(
     temp_tendency = jnp.where(wbf_mask, temp_tendency + (lsdcp - lvdcp) * ztmp1, temp_tendency)
 
     # cdnc <- MERGE(cqtmin, pcdnc, ld_WBF)  (set to minimum where WBF occurs)
-    cdnc = jnp.where(wbf_mask, cqtmin, cdnc)
+    cdnc = jnp.where(wbf_mask, params.cqtmin, cdnc)
 
     # pxib <- MERGE(pxib + pxlb, pxib, ld_WBF)  (transfer liquid mass to ice)
     cloud_ice_in_cloud = jnp.where(wbf_mask, cloud_ice_in_cloud + cloud_liquid_in_cloud, cloud_ice_in_cloud)
@@ -1475,6 +1473,7 @@ def precip_formation_warm(
     droplet_number: jnp.ndarray,
     cloud_water: jnp.ndarray,
     dt: jnp.ndarray,
+    params: CloudParams2M,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Warm-rain precipitation formation for the 2-moment microphysics scheme.
 
@@ -1561,7 +1560,7 @@ def precip_formation_warm(
     # -------------------------------------------------------------------------
 
     # Here, `droplet_number` is pcdnc and `cloud_water` is pxlb.
-    ztmp1 = ccraut * 1350.0 * (1e-6 * droplet_number) ** (-1.79)
+    ztmp1 = params.ccraut * 1350.0 * (1e-6 * droplet_number) ** (-1.79)
 
     # The expression below is a time-integrated sink form used in the Fortran.
     # It is constructed so that zraut is bounded by cloud_water (after MIN).
@@ -1569,8 +1568,8 @@ def precip_formation_warm(
         1.0
         - (
             1.0
-            + dt * exm1_1 * ztmp1 * cloud_water ** exm1_1
-        ) ** exp_1
+            + dt * params.exm1_1 * ztmp1 * cloud_water ** params.exm1_1
+        ) ** params.exp_1
     )
 
     # Ensure autoconversion cannot remove more liquid than exists.
@@ -1627,12 +1626,12 @@ def precip_formation_warm(
     # -------------------------------------------------------------------------
     droplet_number_removal_rate = jnp.where(
         warm_precip_mask,
-        (zraut + zrac1 + zrac2) / (cloud_water_before + eps),
+        (zraut + zrac1 + zrac2) / (cloud_water_before + params.eps),
         0.0,
     )
 
     # Only limit droplet number when cloud water is still meaningful (> cqtmin).
-    ll1 = jnp.logical_and(warm_precip_mask, cloud_water > cqtmin)
+    ll1 = jnp.logical_and(warm_precip_mask, cloud_water > params.cqtmin)
 
     # Enforce a minimum allowed droplet number (pcdnc_min) only when ll1 is true.
     min_allowed = jnp.where(ll1, minimum_droplet_number, 0.0)
@@ -1647,7 +1646,7 @@ def precip_formation_warm(
     droplet_number_removal_rate = jnp.where(warm_precip_mask, jnp.minimum(available, requested), 0.0)
 
     # Update droplet number concentration, keep >= cqtmin
-    droplet_number_new = jnp.maximum(droplet_number - droplet_number_removal_rate, cqtmin)
+    droplet_number_new = jnp.maximum(droplet_number - droplet_number_removal_rate, params.cqtmin)
     droplet_number = jnp.where(warm_precip_mask, droplet_number_new, droplet_number)
 
     return droplet_number, cloud_water, autoconversion_rate_in_cloud, autoconversion_rate, droplet_number_removal_rate
@@ -1670,6 +1669,7 @@ def precip_formation_cold(
     in_cloud_ice: jnp.ndarray,                     # pxib [kg/kg] (INOUT)
     in_cloud_liquid: jnp.ndarray,                  # pxlb [kg/kg] (INOUT)
     dt: jnp.ndarray,                               # ztmst [s]
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray,  # ice_number
     jnp.ndarray,  # droplet_number
@@ -1711,7 +1711,7 @@ def precip_formation_cold(
     psacln = jnp.zeros_like(in_cloud_ice)   # snow-droplet accretion number [1/m^3]
 
     # Local variables
-    zxibold = jnp.maximum(in_cloud_ice, eps)  # noqa: F841 — store pxib with security for later use (Phase 5b)
+    zxibold = jnp.maximum(in_cloud_ice, params.eps)  # noqa: F841 — store pxib with security for later use (Phase 5b)
     zsaut = jnp.zeros_like(in_cloud_ice)      # aggregation mass [kg/kg]
     zxsp2 = jnp.zeros_like(in_cloud_ice)      # snow formed inside box (mass conc proxy) [??]
     zsaclin = jnp.zeros_like(in_cloud_ice)    # in-cloud droplet mass accreted by snow [kg/kg]
@@ -1721,7 +1721,7 @@ def precip_formation_cold(
     # ---------------------------------------------------------------------
     # 0) Early mask: only proceed where there is cloud and enough ice
     # ---------------------------------------------------------------------
-    ll1 = jnp.logical_and(cloud_mask, in_cloud_ice > cqtmin)
+    ll1 = jnp.logical_and(cloud_mask, in_cloud_ice > params.cqtmin)
 
     # If ll1 is false everywhere, Fortran returns early. In JAX we just mask.
     # (no-op if all masked)
@@ -1733,10 +1733,10 @@ def precip_formation_cold(
 
     # eff_ice_crystal_radius expects (ice_gm3, icnc). If you already have such a helper,
     # call it; otherwise this will need to be implemented.
-    zrieff = eff_ice_crystal_radius(ice_gm3, ice_number)  # [micron] typically (scheme-dependent)
+    zrieff = eff_ice_crystal_radius(ice_gm3, ice_number, params)  # [micron] typically (scheme-dependent)
 
     # Clip effective radius bounds
-    zrieff = jnp.minimum(jnp.maximum(zrieff, ceffmin), ceffmax)
+    zrieff = jnp.minimum(jnp.maximum(zrieff, params.ceffmin), params.ceffmax)
 
     # Compute zrih then zris = 1e-6 * zrih**(1/3)
     zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
@@ -1748,17 +1748,17 @@ def precip_formation_cold(
     # ---------------------------------------------------------------------
     # 2) Temperature-dependent collision efficiency for aggregation
     # ---------------------------------------------------------------------
-    zcolleffi = jnp.exp(fact_coll_eff * (temperature - c.tmelt))
+    zcolleffi = jnp.exp(params.fact_coll_eff * (temperature - c.tmelt))
     zcolleffi = jnp.where(ll1, zcolleffi, 0.0)
 
     # ---------------------------------------------------------------------
     # 3) Aggregation of ice crystals to snow (zsaut)
     # ---------------------------------------------------------------------
-    zc1 = 17.5 / crhoi * air_density * (inverse_air_density ** 0.33)
+    zc1 = 17.5 / params.crhoi * air_density * (inverse_air_density ** 0.33)
 
     # zdt2 = -6/zc1 * log10(1e4*zris); then ztmp1 = ccsaut / zdt2
-    zdt2 = (-6.0 / jnp.maximum(zc1, eps)) * jnp.log10(1.0e4 * jnp.maximum(zris, eps))
-    ztmp1 = ccsaut / jnp.maximum(zdt2, eps)
+    zdt2 = (-6.0 / jnp.maximum(zc1, params.eps)) * jnp.log10(1.0e4 * jnp.maximum(zris, params.eps))
+    ztmp1 = params.ccsaut / jnp.maximum(zdt2, params.eps)
     ztmp1 = jnp.where(ll1, ztmp1, 0.0)
 
     # zsaut = pxib*(1 - 1/(1+ ztmp1*dt*pxib))
@@ -1781,8 +1781,8 @@ def precip_formation_cold(
     ll2 = jnp.logical_and(
         ll1,
         jnp.logical_and(
-            zxsp > cqtmin,
-            jnp.logical_and(in_cloud_liquid > cqtmin, droplet_number >= minimum_droplet_number),
+            zxsp > params.cqtmin,
+            jnp.logical_and(in_cloud_liquid > params.cqtmin, droplet_number >= minimum_droplet_number),
         ),
     )
 
@@ -1792,7 +1792,7 @@ def precip_formation_cold(
     # the masked region keeps forward values unchanged and gradients finite.
     zdw_base = jnp.where(
         ll2,
-        6.0 * pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, eps),
+        6.0 * params.pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, params.eps),
         1.0,
     )
     zdw = zdw_base ** (1.0 / 3.0)
@@ -1806,10 +1806,10 @@ def precip_formation_cold(
     zusnow = 2.34 * (100.0 * zdplanar) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
 
     zstokes = 2.0 * c.rgrav * (zusnow - zudrop) * zudrop / zdplanar
-    zstokes = jnp.maximum(zstokes, cqtmin)
+    zstokes = jnp.maximum(zstokes, params.cqtmin)
 
-    zrey = air_density * zdplanar * zusnow / jnp.maximum(dynamic_viscosity, eps)
-    zrey = jnp.maximum(zrey, cqtmin)
+    zrey = air_density * zdplanar * zusnow / jnp.maximum(dynamic_viscosity, params.eps)
+    zrey = jnp.maximum(zrey, params.cqtmin)
 
     ll3 = zrey <= 5.0
     ll4 = jnp.logical_and(zrey > 5.0, zrey < 40.0)
@@ -1820,7 +1820,7 @@ def precip_formation_cold(
     zstcrit = jnp.where(ll4, 1.53 * zrey ** (-0.325), zstcrit)
 
     zcsacl = 0.2 * (jnp.log10(zstokes) - jnp.log10(zstcrit) - 2.236) ** 2
-    zcsacl = jnp.minimum(zcsacl, 1.0 - cqtmin)
+    zcsacl = jnp.minimum(zcsacl, 1.0 - params.cqtmin)
     zcsacl = jnp.maximum(zcsacl, 0.0)
     zcsacl = jnp.sqrt(1.0 - zcsacl)
 
@@ -1839,8 +1839,8 @@ def precip_formation_cold(
     # lambda_snow proxy and collection coefficient. Double-where guard on
     # the fractional power (zxsp can be 0 where ll2 is False; ztmp2 is
     # where-masked, so the safe base only changes the masked region).
-    zlamsm = cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
-    ztmp2 = pi * cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
+    zlamsm = params.cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
+    ztmp2 = pi * params.cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
     ztmp2 = jnp.where(ll2, ztmp2, 0.0)
 
     # integrated riming sink on liquid water
@@ -1856,8 +1856,8 @@ def precip_formation_cold(
     psacl = jnp.where(ll2, cloud_fraction * zsaclin, 0.0)
 
     # number accretion (droplet number loss), only if liquid remains meaningful
-    ll2b = in_cloud_liquid > cqtmin
-    psacln_raw = droplet_number * zsaclin / (pxlb_before + eps)
+    ll2b = in_cloud_liquid > params.cqtmin
+    psacln_raw = droplet_number * zsaclin / (pxlb_before + params.eps)
     psacln_raw = jnp.minimum(psacln_raw, droplet_number - minimum_droplet_number)
     psacln_raw = jnp.maximum(psacln_raw, 0.0)
     psacln = jnp.where(ll2b, psacln_raw, 0.0)
@@ -1869,13 +1869,13 @@ def precip_formation_cold(
     # ---------------------------------------------------------------------
     # 5) Accretion of snow with ice crystals (zsaci)
     # ---------------------------------------------------------------------
-    ll1b = jnp.logical_and(cloud_mask, in_cloud_ice > cqtmin)
-    ll2 = jnp.logical_and(ll1b, zxsp > cqtmin)
+    ll1b = jnp.logical_and(cloud_mask, in_cloud_ice > params.cqtmin)
+    ll2 = jnp.logical_and(ll1b, zxsp > params.cqtmin)
 
     # Double-where guard on the fractional power (zsaci is where-masked on
     # ll2, so the safe base only changes the masked region).
-    zlamsm = cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
-    ztmp1 = pi * cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
+    zlamsm = params.cons4 * jnp.where(ll2, zxsp, 1.0) ** 0.8125
+    ztmp1 = pi * params.cn0s * 3.078 * zlamsm * (inverse_air_density ** 0.5)
     survival = jnp.exp(-dt * ztmp1 * zcolleffi)
     zsaci = in_cloud_ice * (1.0 - survival)
     zsaci = jnp.where(ll2, zsaci, 0.0)
@@ -1894,19 +1894,19 @@ def precip_formation_cold(
     # ---------------------------------------------------------------------
     ll_ice_num = jnp.logical_and(
         cloud_mask,
-        jnp.logical_and(in_cloud_ice > epsec, ice_number >= icemin),
+        jnp.logical_and(in_cloud_ice > params.epsec, ice_number >= params.icemin),
     )
 
     zxibold_sec = jnp.maximum(zxibold2, 0.0)  # Fortran zxibold used here
-    zsprn1 = ice_number * (zsaci + zsaut) / (zxibold_sec + eps)
+    zsprn1 = ice_number * (zsaci + zsaut) / (zxibold_sec + params.eps)
     zself = 0.5 * dt * zc1 * ice_number * in_cloud_ice
-    zsecprodn = mi0_rcp * air_density * zsecprod
+    zsecprodn = params.mi0_rcp * air_density * zsecprod
 
     psprn_val = zsprn1 + zself - zsecprodn
     psprn_val = jnp.minimum(psprn_val, ice_number)
     psprn = jnp.where(ll_ice_num, psprn_val, 0.0)
 
-    ice_number_new = jnp.maximum(ice_number - psprn, cqtmin)
+    ice_number_new = jnp.maximum(ice_number - psprn, params.cqtmin)
     ice_number = jnp.where(ll_ice_num, ice_number_new, ice_number)
 
     return (
@@ -1939,6 +1939,7 @@ def update_precip_fluxes(
     snow_flux: jnp.ndarray,                 # Original: psfl (INOUT) [kg/m2/s]
     snow_melt: jnp.ndarray,                 # Original: psmlt (INOUT) [kg/kg]
     dt: jnp.ndarray,                        # microphysics timestep used to form zcons2
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,  # updated inout: precip_cover, rain_flux, snow_flux, snow_melt
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray   # out: pfevapr, pfrain, pfsnow, pfsubls
@@ -2010,7 +2011,7 @@ def update_precip_fluxes(
     """
     # 1) Rain & Snow Production (autoconversion / accretion / aggregation)
     # timestep-dependent constant (zcons2 = dt * rgrav) and small guards
-    _, _, _, zcons2, _ = microphysics_dt_constants(dt)
+    _, _, _, zcons2, _ = microphysics_dt_constants(dt, params)
 
     # Precipitation produced in this level (mass flux units [kg/m2/s])
     zzdrr = zcons2 * pressure_thickness * rain_formation
@@ -2025,15 +2026,15 @@ def update_precip_fluxes(
 
     # 2) Top-level Melting of Incoming Ice into Rain
     # melting capacity (per area) limited by available energy
-    melt_capacity = zcons2 * pressure_thickness / jnp.maximum(lsdcp - lvdcp, eps) * jnp.maximum(0.0, (temp_tmp - c.tmelt))
+    melt_capacity = zcons2 * pressure_thickness / jnp.maximum(lsdcp - lvdcp, params.eps) * jnp.maximum(0.0, (temp_tmp - c.tmelt))
     # limit melting to a fraction xsec*zzdrs (same heuristic as Fortran)
-    ztmp2 = jnp.minimum(xsec * zzdrs, melt_capacity)
+    ztmp2 = jnp.minimum(params.xsec * zzdrs, melt_capacity)
     # apply melting where incoming ice exists and melting capacity>0
     melt_applied = jnp.where(has_incoming_ice, ztmp2, 0.0)
     zzdrr = zzdrr + melt_applied
     zzdrs = zzdrs - melt_applied
     # psmlt accumulates melting mass in kg/kg units (Fortran: psmlt += ztmp2/(zcons2*pdp))
-    snow_melt = snow_melt + melt_applied / jnp.maximum(zcons2 * pressure_thickness, eps)
+    snow_melt = snow_melt + melt_applied / jnp.maximum(zcons2 * pressure_thickness, params.eps)
 
     # 3) Update Precip-covered Fraction due to Falling Hydrometeors
     # Total precip from above (existing fluxes) and produced here (zpredel)
@@ -2048,21 +2049,22 @@ def update_precip_fluxes(
         precip_frac_from_above=precip_cover,
         precip_flux_from_level=zpredel,
         precip_frac_from_level=cloud_fraction,
+        params=params,
     )
 
     # 4) In-cloud Rain/Snow Fluxes and Area-integrated Evaporation/Sublimation
     # in-cloud (area-averaged) rain/snow fluxes before evaporation/sublimation
-    ll1 = precip_cover > epsec
+    ll1 = precip_cover > params.epsec
 
-    ztmp1 = (rain_flux + zzdrr) / jnp.maximum(precip_cover, epsec)
-    ztmp2 = (snow_flux + zzdrs) / jnp.maximum(precip_cover, epsec)
+    ztmp1 = (rain_flux + zzdrr) / jnp.maximum(precip_cover, params.epsec)
+    ztmp2 = (snow_flux + zzdrs) / jnp.maximum(precip_cover, params.epsec)
 
     pfrain = jnp.where(ll1, ztmp1, 0.0)
     pfsnow = jnp.where(ll1, ztmp2, 0.0)
 
     # evaporation / sublimation area-integrated (kg/m2/s)
-    ztmp3 = (zcons2 * pressure_thickness * rain_evap_mmr) / jnp.maximum(precip_cover, epsec)
-    ztmp4 = (zcons2 * pressure_thickness * snow_sublimation_mmr) / jnp.maximum(precip_cover, epsec)
+    ztmp3 = (zcons2 * pressure_thickness * rain_evap_mmr) / jnp.maximum(precip_cover, params.epsec)
+    ztmp4 = (zcons2 * pressure_thickness * snow_sublimation_mmr) / jnp.maximum(precip_cover, params.epsec)
 
     pfevapr = jnp.where(ll1, ztmp3, 0.0)
     pfsubls = jnp.where(ll1, ztmp4, 0.0)
@@ -2130,6 +2132,7 @@ def update_tendencies_and_important_vars(
     incloud_ice_before_snow: jnp.ndarray,    # pmiwc (INOUT)
     # time constant
     dt: jnp.ndarray,
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
@@ -2213,14 +2216,14 @@ def update_tendencies_and_important_vars(
 
     Notes
     -----
-    - Timestep constants are obtained via microphysics_dt_constants(dt).
+    - Timestep constants are obtained via microphysics_dt_constants(dt, params).
     - Correction thresholds use module constants (ccwmin, clc_min, eps, etc.).
     - Breadth and ice-radius helpers (breadth_factor, eff_ice_crystal_radius)
       are used to compute effective radii. Cirrus branch applied when nic_cirrus==1.
 
     """
     # timestep constants
-    ztmst, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt)
+    ztmst, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt, params)
 
     # --- 1) temperature & humidity tendencies accumulated from microphysical sources
     specific_humidity_tendency = specific_humidity_tendency + ztmst_rcp * (
@@ -2253,7 +2256,7 @@ def update_tendencies_and_important_vars(
 
     # --- 5) Corrections to avoid negative in-cloud mass (merge logic)
     # liquid
-    ll_liq_neg = liq_mmr_next < ccwmin
+    ll_liq_neg = liq_mmr_next < params.ccwmin
     zdxlcor = jnp.where(ll_liq_neg, -ztmst_rcp * liq_mmr_next, 0.0)
     liq_tendency = liq_tendency + zdxlcor
 
@@ -2265,7 +2268,7 @@ def update_tendencies_and_important_vars(
     )
 
     # ice
-    ll_ice_neg = ice_mmr_next < ccwmin
+    ll_ice_neg = ice_mmr_next < params.ccwmin
     zdxicor = jnp.where(ll_ice_neg, -ztmst_rcp * ice_mmr_next, 0.0)
     ice_tendency = ice_tendency + zdxicor
 
@@ -2279,7 +2282,7 @@ def update_tendencies_and_important_vars(
     cloud_fraction = jnp.where(jnp.logical_and(ll_liq_neg, ll_ice_neg), 0.0, cloud_fraction)
 
     # clamp small cloud fraction values to zero (Fortran MERGE with clc_min)
-    ll_small_clc = cloud_fraction < clc_min
+    ll_small_clc = cloud_fraction < params.clc_min
     cloud_fraction = jnp.where(ll_small_clc, 0.0, cloud_fraction)
 
     # zero tiny in-cloud accumulators (Fortran used 1e-20 checks)
@@ -2302,7 +2305,7 @@ def update_tendencies_and_important_vars(
     # base only changes the masked region).
     liq_radius_base = jnp.where(
         liquid_cloud_flag,
-        (3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, eps),
+        (3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, params.eps),
         1.0,
     )
     liq_eff_radius = 1.0e6 * breadth * liq_radius_base ** (1.0 / 3.0)
@@ -2311,17 +2314,17 @@ def update_tendencies_and_important_vars(
     # --- 7) ice crystal effective radius [um] (preffi)
     # convert in-cloud ice kg/kg -> g/m^3: 1000 * pxib * prho
     ice_gm3 = 1000.0 * cloud_ice_in_cloud * air_density
-    ice_eff_rad = eff_ice_crystal_radius(ice_gm3, icnc)  # returns microns (as in module helpers)
+    ice_eff_rad = eff_ice_crystal_radius(ice_gm3, icnc, params)  # returns microns (as in module helpers)
 
     # cirrus correction branch as in Fortran when nic_cirrus==1 and cold
-    if int(nic_cirrus) == 1:
-        is_cold = temp_tmp < cthomi
-        ztmp2 = 83.8 * (1e3 * jnp.maximum(cloud_ice_in_cloud, eps) * air_density) ** 0.216
+    if int(params.nic_cirrus) == 1:
+        is_cold = temp_tmp < params.cthomi
+        ztmp2 = 83.8 * (1e3 * jnp.maximum(cloud_ice_in_cloud, params.eps) * air_density) ** 0.216
         ice_eff_rad = jnp.where(is_cold, ztmp2, ice_eff_rad)
 
     # clip bounds
-    ice_eff_rad = jnp.maximum(ice_eff_rad, ceffmin)
-    ice_eff_rad = jnp.minimum(ice_eff_rad, ceffmax)
+    ice_eff_rad = jnp.maximum(ice_eff_rad, params.ceffmin)
+    ice_eff_rad = jnp.minimum(ice_eff_rad, params.ceffmax)
     ice_eff_rad = jnp.where(ice_cloud_flag, ice_eff_rad, 0.0)
 
     # --- finalize returns (match Fortran order)
@@ -2363,7 +2366,8 @@ def update_in_cloud_water(
     cloud_fraction: jnp.ndarray,         # Original: paclc (INOUT)
     cloud_ice_in_cloud: jnp.ndarray,     # Original: pxib (INOUT)
     cloud_liquid_in_cloud: jnp.ndarray,  # Original: pxlb (INOUT)
-    dt: jnp.ndarray                       # Microphysics timestep (used for pqnuc accumulation)
+    dt: jnp.ndarray,                      # Microphysics timestep (used for pqnuc accumulation)
+    params: CloudParams2M,
 ) -> tuple[
     jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
 ]:
@@ -2418,7 +2422,7 @@ def update_in_cloud_water(
     """
     # safety eps already imported as eps; other constants available (clc_min, cqtmin, icemin, nic_cirrus, rhoice)
     # 1) relative humidity
-    relhum = specific_humidity_tmp / jnp.maximum(sat_spec_humidity_tmp, eps)
+    relhum = specific_humidity_tmp / jnp.maximum(sat_spec_humidity_tmp, params.eps)
 
     # positive deposition / condensation sources (limit negative contributions)
     src_dep = jnp.maximum(deposition_rate + tompkins_genti, 0.0)
@@ -2426,11 +2430,11 @@ def update_in_cloud_water(
 
     # 2) update in-cloud ice/liquid where cloud already exists:
     # pxib_new = pxib + pdep / max(paclc, clc_min)
-    pxib_candidate = cloud_ice_in_cloud + src_dep / jnp.maximum(cloud_fraction, clc_min)
+    pxib_candidate = cloud_ice_in_cloud + src_dep / jnp.maximum(cloud_fraction, params.clc_min)
     pxib_candidate = jnp.maximum(pxib_candidate, 0.0)
     cloud_ice_in_cloud = jnp.where(cloud_flag, pxib_candidate, cloud_ice_in_cloud)
 
-    pxlb_candidate = cloud_liquid_in_cloud + src_cnd / jnp.maximum(cloud_fraction, clc_min)
+    pxlb_candidate = cloud_liquid_in_cloud + src_cnd / jnp.maximum(cloud_fraction, params.clc_min)
     pxlb_candidate = jnp.maximum(pxlb_candidate, 0.0)
     cloud_liquid_in_cloud = jnp.where(cloud_flag, pxlb_candidate, cloud_liquid_in_cloud)
 
@@ -2441,24 +2445,24 @@ def update_in_cloud_water(
     paclc_from_rh = jnp.clip(relhum, 0.01, 1.0)
     cloud_fraction = jnp.where(make_cloud_mask, paclc_from_rh, cloud_fraction)
 
-    pxib_from_src = src_dep / jnp.maximum(cloud_fraction, clc_min)
+    pxib_from_src = src_dep / jnp.maximum(cloud_fraction, params.clc_min)
     pxib_from_src = jnp.maximum(pxib_from_src, 0.0)
     cloud_ice_in_cloud = jnp.where(make_cloud_mask, pxib_from_src, cloud_ice_in_cloud)
 
-    pxlb_from_src = src_cnd / jnp.maximum(cloud_fraction, clc_min)
+    pxlb_from_src = src_cnd / jnp.maximum(cloud_fraction, params.clc_min)
     pxlb_from_src = jnp.maximum(pxlb_from_src, 0.0)
     cloud_liquid_in_cloud = jnp.where(make_cloud_mask, pxlb_from_src, cloud_liquid_in_cloud)
 
     # 4) compute minimum CDNC from in-cloud liquid mass density (kg/kg * rho -> kg/m^3)
     liquid_mass_density = cloud_liquid_in_cloud * air_density  # [kg/m^3]
-    pcdnc_min = minimum_CDNC(liquid_mass_density)
+    pcdnc_min = minimum_CDNC(liquid_mass_density, params)
 
     # 5) redefine cloud flag
     cloud_flag = cloud_fraction > 0.0
 
     # 6) activation / nucleation: only where cloud exists and liquid > cqtmin
-    ll1 = jnp.logical_and(cloud_flag, cloud_liquid_in_cloud > cqtmin)
-    ll2 = jnp.logical_and(ll1, jnp.logical_and(droplet_number <= pcdnc_min, temp_prev > cthomi))
+    ll1 = jnp.logical_and(cloud_flag, cloud_liquid_in_cloud > params.cqtmin)
+    ll2 = jnp.logical_and(ll1, jnp.logical_and(droplet_number <= pcdnc_min, temp_prev > params.cthomi))
 
     # desired additional droplets
     delta_cdnc = jnp.maximum(activated_cdnc - droplet_number, 0.0)
@@ -2474,17 +2478,17 @@ def update_in_cloud_water(
     # ztmp1 = max(pcdnc, pcdnc_min)
     tmp_cdnc_max = jnp.maximum(droplet_number, pcdnc_min)
     # Fortran: pcdnc = MERGE( ztmp1, cqtmin, ll1 ) -> if ll1 True -> tmp_cdnc_max else -> cqtmin
-    droplet_number = jnp.where(ll1, tmp_cdnc_max, cqtmin)
+    droplet_number = jnp.where(ll1, tmp_cdnc_max, params.cqtmin)
 
     # 8) update ICNC similarly
-    ll1_ic = jnp.logical_and(cloud_flag, cloud_ice_in_cloud > cqtmin)
-    ll2_ic = jnp.logical_and(ll1_ic, ice_crystal_number <= icemin)
+    ll1_ic = jnp.logical_and(cloud_flag, cloud_ice_in_cloud > params.cqtmin)
+    ll2_ic = jnp.logical_and(ll1_ic, ice_crystal_number <= params.icemin)
 
     # compute candidate ICNC depending on nic_cirrus
-    if int(nic_cirrus) == 1:
+    if int(params.nic_cirrus) == 1:
         # 0.75 / (pi * rhoice) * prho * pxib / prid^3  (note units)
-        icnc_candidate = 0.75 / (pi * rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, eps)
-    elif int(nic_cirrus) == 2:
+        icnc_candidate = 0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, params.eps)
+    elif int(params.nic_cirrus) == 2:
         # min(pnicex, pap*1e6)
         icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)
     else:
@@ -2494,8 +2498,8 @@ def update_in_cloud_water(
     ice_crystal_number = jnp.where(ll2_ic, icnc_candidate, ice_crystal_number)
 
     # enforce minimum icnc or set to cqtmin where no cloud-ice
-    tmp_icnc_max = jnp.maximum(ice_crystal_number, icemin)
-    ice_crystal_number = jnp.where(ll1_ic, tmp_icnc_max, cqtmin)
+    tmp_icnc_max = jnp.maximum(ice_crystal_number, params.icemin)
+    ice_crystal_number = jnp.where(ll1_ic, tmp_icnc_max, params.cqtmin)
 
     return (
         cloud_flag,
@@ -2555,6 +2559,7 @@ def diagnostics(
     ktop: jnp.ndarray,                    # ktop (integer flags per column top)
     level_index: int,                     # kk (current level index)
     dt: jnp.ndarray,                      # microphysics timestep (s) -> used as zdt / zdtime
+    params: CloudParams2M,
 ) -> tuple:
     """Diagnostics accumulator updates.
 
@@ -2702,7 +2707,7 @@ def diagnostics(
     ll2 = jnp.logical_and(ice_cloud_flag, jnp.logical_not(ll1))
 
     ztmp3 = 1000.0 * incloud_ice * cloud_fraction * dp_over_g  # IWP [g/m2]
-    ztmp4 = tau1i + 1.9787 * ztmp3 * jnp.maximum(eff_radius_ice, ceffmin) ** (-1.0365)
+    ztmp4 = tau1i + 1.9787 * ztmp3 * jnp.maximum(eff_radius_ice, params.ceffmin) ** (-1.0365)
     tau1i = jnp.where(ll2, ztmp4, tau1i)
 
     # 6) selection for TOVS sampling
@@ -2878,7 +2883,7 @@ def cloud_microphysics_2m(
     # rain instantly, leaving ~no cloud (LWP ~0.2 g/m2 vs the 1M scheme's ~20).
     # Flooring the droplet number by that same minimum keeps a realistic
     # cloud-water reservoir.
-    cdnc_min = minimum_CDNC(qc)
+    cdnc_min = minimum_CDNC(qc, params)
     cdnc = jnp.maximum(cdnc, cdnc_min)
 
     # pauloc==1 and pclcstar==cloud_fraction are conservative first-pass
@@ -2903,6 +2908,7 @@ def cloud_microphysics_2m(
             cdnc,
             qc,
             dt,
+            params,
         )
     )
     qr_gain_warm = qc - qc_after_warm  # mass moved from qc to qr (kg/kg)
@@ -2970,6 +2976,7 @@ def cloud_microphysics_2m(
         zero,               # condensation_rate (INOUT, start at 0)
         zero,               # deposition_rate (INOUT, start at 0)
         dt,
+        params,
     )
 
     # ------------------------------------------------------------------
@@ -2978,7 +2985,7 @@ def cloud_microphysics_2m(
     cloud_flag = cloud_fraction > 0.0
 
     # Mean ice crystal radius for ICNC nucleation path.
-    ice_radius = eff_ice_crystal_radius(qi * air_density, icnc)
+    ice_radius = eff_ice_crystal_radius(qi * air_density, icnc, params)
 
     (
         cloud_flag, icnc_uicw, _nucleation_rate, cdnc_uicw,
@@ -3005,6 +3012,7 @@ def cloud_microphysics_2m(
         in_cloud_ice,
         in_cloud_liquid,
         dt,
+        params,
     )
 
     # ------------------------------------------------------------------
@@ -3025,7 +3033,7 @@ def cloud_microphysics_2m(
         in_cloud_ice_uicw,
         in_cloud_liquid_uicw,
         dt,
-        cqtmin,
+        params.cqtmin,
     )
 
     # ------------------------------------------------------------------
@@ -3060,7 +3068,7 @@ def cloud_microphysics_2m(
     in_cloud_ice_het = in_cloud_ice_frz + frozen_mass
     in_cloud_liquid_het = in_cloud_liquid_frz - frozen_mass
     cdnc_het = jnp.where(
-        het_condition, jnp.maximum(cdnc_frz - new_crystals, cqtmin), cdnc_frz,
+        het_condition, jnp.maximum(cdnc_frz - new_crystals, params.cqtmin), cdnc_frz,
     )
 
     # ------------------------------------------------------------------
@@ -3085,6 +3093,7 @@ def cloud_microphysics_2m(
         zero,             # cloud_ice_tendency accumulator
         zero,             # temp_tendency accumulator
         dt,
+        params,
     )
 
     # ------------------------------------------------------------------
@@ -3123,6 +3132,7 @@ def cloud_microphysics_2m(
         in_cloud_ice_wbf,
         in_cloud_liquid_wbf,
         dt,
+        params,
     )
 
     # Convert in-cloud → grid-mean for tendency computation.
@@ -3173,6 +3183,7 @@ def cloud_microphysics_2m(
             qi_k, icnc_k,
             ice_flux, ice_flux_n, falling_ice_frac,
             dt,
+            params,
         )
 
         # --- Melting ---
@@ -3189,11 +3200,12 @@ def cloud_microphysics_2m(
             rain_flux, snow_flux, ice_flux, ice_flux_n,
             jnp.array(0.0),  # ice_tendency
             dt,
+            params,
         )
 
         # --- Sublimation / evaporation ---
-        precip_mask = (rain_flux > cqtmin) | (snow_flux > cqtmin)
-        falling_ice_mask_k = ice_flux > cqtmin
+        precip_mask = (rain_flux > params.cqtmin) | (snow_flux > params.cqtmin)
+        falling_ice_mask_k = ice_flux > params.cqtmin
 
         (
             ice_flux, ice_flux_n,
@@ -3210,6 +3222,7 @@ def cloud_microphysics_2m(
             falling_ice_frac,
             ice_flux, ice_flux_n,
             dt,
+            params,
         )
 
         # --- Update precipitation fluxes ---
@@ -3224,6 +3237,7 @@ def cloud_microphysics_2m(
             ice_flux,
             precip_cover, rain_flux, snow_flux, snow_melt,
             dt,
+            params,
         )
 
         carry_out = (rain_flux, snow_flux, ice_flux, ice_flux_n,
@@ -3325,6 +3339,7 @@ def cloud_microphysics_2m(
         incloud_liq_before_rain=in_cloud_liquid,  # before warm step
         incloud_ice_before_snow=in_cloud_ice_uicw, # before cold step
         dt=dt,
+        params=params,
     )
 
     # Mass tendencies: warm qc→qr, cold qi→qs + qc→qs, sedi+melt loss

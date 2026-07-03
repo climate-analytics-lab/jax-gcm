@@ -32,27 +32,14 @@ from .lohmann_2m import (
     update_tendencies_and_important_vars,
     microphysics_dt_constants,
 )
-from .lohmann_2m_params import (
-    cqtmin,
-    ldyn_cdnc_min,
-    rcd_vol_max,
-    cdnc_min_fixed,
-    cdnc_min_lower,
-    cdnc_min_upper,
-    fact_PK,
-    pow_PK,
-    tmelt,
-    icemin,
-    eps,
-    clc_min,
-)
+from .lohmann_2m_params import CloudParams2M
 from jcm.constants import rhow, alhs, alhc, rv
 
-# The constants refactor renamed ``t0`` -> ``tmelt`` and ``rhoh2o`` -> ``rhow``
-# in jcm.constants. ``tmelt`` (273.15 K) is already imported above from
-# lohmann_2m_params with the identical value, so the former ``t0`` uses below
-# reference that import rather than re-importing ``tmelt`` from jcm.constants
-# (which would shadow the params import).
+# Parameters are no longer module-level exports of lohmann_2m_params: the
+# scheme reads everything from a threaded ``CloudParams2M`` struct. Tests
+# read the identical default values from this instance (``_P.tmelt`` is the
+# same 273.15 K the former module-level ``tmelt``/``t0`` provided).
+_P = CloudParams2M.default()
 
 
 def _zeros(n: int) -> jnp.ndarray:
@@ -71,29 +58,29 @@ class TestCloudUtils:
         pxice = jnp.array([0.1, 1.0, 10.0], dtype=jnp.float32)   # [g/m^3]
         picnc = jnp.array([1e5, 1e6, 1e7], dtype=jnp.float32)    # [1/m^3]
 
-        got = eff_ice_crystal_radius(pxice, picnc)
-        expected = 0.5e4 * (pxice / (fact_PK * picnc)) ** (1.0 / pow_PK)
+        got = eff_ice_crystal_radius(pxice, picnc, _P)
+        expected = 0.5e4 * (pxice / (_P.fact_PK * picnc)) ** (1.0 / _P.pow_PK)
 
         assert got.shape == expected.shape
         assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
     
     def test_minimum_CDNC(self):
         pxwat = jnp.array([0.0, 1e-6, 1e-4, 1e-2], dtype=jnp.float32)  # [kg/m^3]
-        got = minimum_CDNC(pxwat)
+        got = minimum_CDNC(pxwat, _P)
 
-        if ldyn_cdnc_min:
-            expected = rcd_vol_max ** (-3.0) * (3.0 / (4.0 * pi * rhow)) * pxwat
-            expected = jnp.clip(expected, cdnc_min_lower, cdnc_min_upper)
+        if _P.ldyn_cdnc_min:
+            expected = _P.rcd_vol_max ** (-3.0) * (3.0 / (4.0 * pi * rhow)) * pxwat
+            expected = jnp.clip(expected, _P.cdnc_min_lower, _P.cdnc_min_upper)
         else:
-            expected = jnp.full_like(pxwat, cdnc_min_fixed * 1.0e6)  # cm^-3 -> m^-3
+            expected = jnp.full_like(pxwat, _P.cdnc_min_fixed * 1.0e6)  # cm^-3 -> m^-3
 
         assert got.shape == pxwat.shape
         assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
 
         # extra invariant: dynamic branch must be within clip bounds
-        if ldyn_cdnc_min:
-            assert jnp.all(got >= cdnc_min_lower)
-            assert jnp.all(got <= cdnc_min_upper)
+        if _P.ldyn_cdnc_min:
+            assert jnp.all(got >= _P.cdnc_min_lower)
+            assert jnp.all(got <= _P.cdnc_min_upper)
 
 
 class TestFreezingBelow238K:
@@ -112,7 +99,7 @@ class TestFreezingBelow238K:
             cloud_ice=jnp.full((n,), 0.001),  # Cloud ice mixing ratio [kg/kg]
             cloud_liquid=jnp.full((n,), 0.002),  # Cloud liquid water mixing ratio [kg/kg]
             timestep=60.0,  # Time step [s]
-            min_liquid_threshold=cqtmin,  # Minimum liquid water threshold [kg/kg]
+            min_liquid_threshold=_P.cqtmin,  # Minimum liquid water threshold [kg/kg]
         )
 
     def test_freezing_updates_correctly(self):
@@ -126,7 +113,7 @@ class TestFreezingBelow238K:
         # Check that freezing occurred where the condition is True
         assert jnp.all(cloud_liquid[inputs["freezing_condition"]] == 0.0)  # Liquid water should be zero where freezing occurs
         assert jnp.all(cloud_ice[inputs["freezing_condition"]] > inputs["cloud_ice"][inputs["freezing_condition"]])  # Ice should increase
-        assert jnp.all(droplet_number[inputs["freezing_condition"]] == cqtmin)  # Droplet number should be reduced to the minimum threshold
+        assert jnp.all(droplet_number[inputs["freezing_condition"]] == _P.cqtmin)  # Droplet number should be reduced to the minimum threshold
 
         # Check that no changes occurred where the condition is False
         assert jnp.all(cloud_liquid[~inputs["freezing_condition"]] == inputs["cloud_liquid"][~inputs["freezing_condition"]])
@@ -161,7 +148,7 @@ class TestFreezingBelow238K:
 
         # Check that droplet number is reduced to the minimum threshold where freezing occurs
         droplet_number = outputs[2]
-        assert jnp.all(droplet_number[inputs["freezing_condition"]] == cqtmin)
+        assert jnp.all(droplet_number[inputs["freezing_condition"]] == _P.cqtmin)
         assert jnp.all(droplet_number[~inputs["freezing_condition"]] == inputs["droplet_number"][~inputs["freezing_condition"]])
 
     def test_freezing_rate_accumulation(self):
@@ -226,7 +213,8 @@ class TestAutoconversion_2M:
             minimum_droplet_number=minimum_droplet_number,
             droplet_number=droplet_number_in,
             cloud_water=cloud_water_in,
-            dt=dt
+            dt=dt,
+            params=_P,
         )
 
         assert jnp.allclose(droplet_number, droplet_number_in)
@@ -264,8 +252,8 @@ class TestAutoconversion_2M:
             minimum_droplet_number=minimum_droplet_number,
             droplet_number=droplet_number_in,
             cloud_water=cloud_water_in,
-            dt=dt
-            # config=config,
+            dt=dt,
+            params=_P,
         )
 
         # Cloud water is reduced by autoconversion and accretion terms; should not increase.
@@ -306,8 +294,8 @@ class TestAutoconversion_2M:
             minimum_droplet_number=minimum_droplet_number,
             droplet_number=droplet_number_in,
             cloud_water=cloud_water_in,
-            dt=dt
-            # config=config,
+            dt=dt,
+            params=_P,
         )
 
         false_idx = jnp.where(~warm_precip_mask)[0]
@@ -379,6 +367,7 @@ class TestAutoconversion_2M:
             in_cloud_ice=in_cloud_ice,
             in_cloud_liquid=in_cloud_liquid,
             dt=dt,
+            params=_P,
         )
 
         assert len(outs) == 10
@@ -402,7 +391,7 @@ class TestAutoconversion_2M:
         # Invariants / basic physical bounds
         assert jnp.all(in_cloud_ice_o >= 0.0)
         assert jnp.all(in_cloud_liquid_o >= 0.0)
-        assert jnp.all(droplet_number_o >= cqtmin)
+        assert jnp.all(droplet_number_o >= _P.cqtmin)
         assert jnp.all(ice_number_o >= 0.0)
 
         # Formation/accretion diagnostics should never be negative
@@ -425,8 +414,8 @@ class TestMeltingSnowIce_2M:
     def test_melting_snow_and_ice(self):
         dt = jnp.array(60.0, dtype=jnp.float32)
 
-        temperature_previous = jnp.array([tmelt + 1.0, tmelt - 1.0], dtype=jnp.float32)
-        melt_mask = temperature_previous > tmelt
+        temperature_previous = jnp.array([_P.tmelt + 1.0, _P.tmelt - 1.0], dtype=jnp.float32)
+        melt_mask = temperature_previous > _P.tmelt
 
         pressure_thickness = jnp.array([1.0e4, 1.0e4], dtype=jnp.float32)
         lsdcp = jnp.array([2.8e3, 2.8e3], dtype=jnp.float32)
@@ -460,7 +449,7 @@ class TestMeltingSnowIce_2M:
             icnc=icnc, qmel=qmel, cdnc=cdnc,
             rain_flux=rain_flux, snow_flux=snow_flux,
             ice_flux=ice_flux, ice_flux_n=ice_flux_n,
-            ice_tendency=ice_tendency, dt=dt,
+            ice_tendency=ice_tendency, dt=dt, params=_P,
         )
 
         assert icnc_o.shape == (2,)
@@ -469,7 +458,7 @@ class TestMeltingSnowIce_2M:
         assert jnp.all(jnp.isfinite(snow_flux_o))
 
         # Melt point: ICNC -> icemin, transferred number into CDNC
-        assert float(icnc_o[0]) == float(icemin)
+        assert float(icnc_o[0]) == float(_P.icemin)
         assert float(cdnc_o[0]) == float(cdnc[0] + icncq[0])
         assert float(qmel_o[0]) == float(qmel[0] + dt * icncq[0])
 
@@ -491,6 +480,7 @@ class TestSublimationSnowIceEvapRain_2M:
         dt = jnp.array(60.0, dtype=jnp.float32)
         return dict(
             dt=dt,
+            params=_P,
             specific_humidity_prev=_full(n, 1.0e-3),
             temperature_prev=_full(n, 260.0),
             precip_fraction=_full(n, 0.5),
@@ -624,7 +614,7 @@ class TestSedimentationIce_2M:
         dt = jnp.asarray(60.0, dtype=jnp.float32)
 
         ice_mmr_o, icnc_o, ice_flux_o, ice_flux_n_o, falling_ice_frac_o, pmrateps_o = (
-            sedimentation_ice(**x, dt=dt)
+            sedimentation_ice(**x, dt=dt, params=_P)
         )
 
         for arr in (ice_mmr_o, icnc_o, ice_flux_o, ice_flux_n_o, falling_ice_frac_o, pmrateps_o):
@@ -637,7 +627,7 @@ class TestSedimentationIce_2M:
         assert jnp.all(falling_ice_frac_o >= 0.0)
         assert jnp.all(falling_ice_frac_o <= 1.0)
 
-        cloudy = x["cloud_fraction"] > clc_min
+        cloudy = x["cloud_fraction"] > _P.clc_min
         assert jnp.all(ice_mmr_o[cloudy] <= x["ice_mmr_gridmean"][cloudy] + 1e-12)
         # No-cloud point (idx 2): unchanged
         assert jnp.allclose(ice_mmr_o[2], x["ice_mmr_gridmean"][2], atol=1e-10)
@@ -653,7 +643,7 @@ class TestSedimentationIce_2M:
         x["ice_flux_n"] = jnp.zeros(n, dtype=jnp.float32)
 
         ice_mmr_o, icnc_o, ice_flux_o, ice_flux_n_o, _, pmrateps_o = (
-            sedimentation_ice(**x, dt=dt)
+            sedimentation_ice(**x, dt=dt, params=_P)
         )
 
         assert jnp.allclose(ice_mmr_o, 0.0, atol=1e-12)
@@ -668,8 +658,8 @@ class TestMixedPhaseDepositionAndCorrections2M:
         p = jnp.full((n,), 40000.0, dtype=jnp.float32)
         rho = jnp.full((n,), 0.45, dtype=jnp.float32)
         T_val = 240.0
-        ztmp_ice = (alhs / rv) * (1.0 / tmelt - 1.0 / T_val)
-        ztmp_water = (alhc / rv) * (1.0 / tmelt - 1.0 / T_val)
+        ztmp_ice = (alhs / rv) * (1.0 / _P.tmelt - 1.0 / T_val)
+        ztmp_water = (alhc / rv) * (1.0 / _P.tmelt - 1.0 / T_val)
         esi_correct = 611 * jnp.exp(ztmp_ice)
         esw_correct = 611 * jnp.exp(ztmp_water)
         esi = jnp.full((n,), esi_correct, dtype=jnp.float32)
@@ -698,6 +688,7 @@ class TestMixedPhaseDepositionAndCorrections2M:
             condensation_rate=jnp.zeros((n,), dtype=jnp.float32),
             deposition_rate=jnp.zeros((n,), dtype=jnp.float32),
             dt=jnp.asarray(60.0, dtype=jnp.float32),
+            params=_P,
         )
 
     def _warm_inputs(self, n: int = 4):
@@ -820,7 +811,8 @@ class TestHetMxphaseFreezing:
             cloud_ice=jnp.full((n,), 0.001),
             cloud_liquid=jnp.full((n,), 0.002),
             timestep=60.0,
-            min_liquid_threshold=cqtmin,
+            min_liquid_threshold=_P.cqtmin,
+            params=_P,
         )
 
     def test_mxphase_no_freezing_when_condition_false(self):
@@ -838,7 +830,7 @@ class TestHetMxphaseFreezing:
         inputs["droplet_number"] = jnp.array([1e7, 5e5, 2e6, 1e6])
         outputs = het_mxphase_freezing(**inputs)
         droplet_number = outputs[1]
-        assert jnp.all(droplet_number[inputs["freezing_condition"]] >= cqtmin)
+        assert jnp.all(droplet_number[inputs["freezing_condition"]] >= _P.cqtmin)
         assert jnp.all(
             droplet_number[~inputs["freezing_condition"]]
             == inputs["droplet_number"][~inputs["freezing_condition"]]
@@ -859,12 +851,13 @@ class TestWBFProcess:
             cloud_ice_tendency=jnp.array([0.0, 0.0, 0.0, 0.0], dtype=jnp.float32),
             temp_tendency=jnp.array([0.0, 1e-7, 2e-7, 3e-7], dtype=jnp.float32),
             dt=jnp.array(60.0, dtype=jnp.float32),
+            params=_P,
         )
 
     def test_wbf_applies_transfer_and_tendencies(self):
         inputs = self._base_inputs()
         cdnc_o, ql_o, qi_o, qlt_o, qit_o, t_o = WBF_process(**inputs)
-        ztmst_rcp = 1.0 / jnp.maximum(inputs["dt"], eps)
+        ztmst_rcp = 1.0 / jnp.maximum(inputs["dt"], _P.eps)
         ztmp1 = ztmst_rcp * inputs["cloud_liquid_in_cloud"] * inputs["cloud_fraction"]
         mask = inputs["wbf_mask"]
         assert jnp.all(ql_o[mask] == 0.0)
@@ -883,7 +876,7 @@ class TestWBFProcess:
         inputs["cdnc"] = jnp.array([1e8, 1e8, 1e5, 1e8], dtype=jnp.float32)
         cdnc_o, *_ = WBF_process(**inputs)
         mask = inputs["wbf_mask"]
-        assert jnp.all(cdnc_o[mask] == cqtmin)
+        assert jnp.all(cdnc_o[mask] == _P.cqtmin)
         assert jnp.all(cdnc_o[~mask] == inputs["cdnc"][~mask])
 
     def test_wbf_noop_when_mask_false_everywhere(self):
@@ -924,6 +917,7 @@ class TestUpdatePrecipFluxes_2M:
             snow_flux=_zeros(n),
             snow_melt=_zeros(n),
             dt=dt,
+            params=_P,
         )
 
     def test_no_sources_leaves_fluxes_unchanged(self):
@@ -944,7 +938,7 @@ class TestUpdatePrecipFluxes_2M:
             "rain_evap_mmr": jnp.array([1e-4, 0.0, 5e-5], dtype=jnp.float32),
         })
         _, _, _, _, pfevapr, _, _, _ = update_precip_fluxes(**inp)
-        _, _, _, zcons2, _ = microphysics_dt_constants(inp["dt"])
+        _, _, _, zcons2, _ = microphysics_dt_constants(inp["dt"], _P)
         expected_evap = (zcons2 * inp["pressure_thickness"] * inp["rain_evap_mmr"]).astype(pfevapr.dtype)
         precip_mask = pfevapr > 0.0
         assert jnp.allclose(pfevapr[precip_mask], expected_evap[precip_mask], atol=1e-6)
@@ -955,7 +949,7 @@ class TestUpdatePrecipFluxes_2M:
         inp = self._base_inputs(n)
         inp.update({
             "cloud_fraction": _full(n, 0.8),
-            "temp_tmp": jnp.full((n,), float(tmelt) + 2.0, dtype=jnp.float32),
+            "temp_tmp": jnp.full((n,), float(_P.tmelt) + 2.0, dtype=jnp.float32),
             "ice_flux_from_above": jnp.array([1e-5, 0.0], dtype=jnp.float32),
         })
         _, rain_flux_o, _, snow_melt_o, *_ = update_precip_fluxes(**inp)
@@ -992,6 +986,7 @@ class TestUpdateInCloudWater_2M:
             cloud_ice_in_cloud=_zeros(n),
             cloud_liquid_in_cloud=_full(n, 1e-4),
             dt=dt,
+            params=_P,
         )
 
     def test_shapes_and_finite(self):
@@ -1038,22 +1033,21 @@ class TestUpdateInCloudWater_2M:
         inputs["ice_crystal_number"] = jnp.array([0.0, 0.0, 0.0, 1.0], dtype=jnp.float32)
         inputs["newly_formed_ice"] = jnp.full((n,), 1e8, dtype=jnp.float32)
         cloud_flag_o, icnc_o, _, _, _, pxib_o, _, _ = update_in_cloud_water(**inputs)
-        mask = jnp.logical_and(cloud_flag_o, pxib_o > cqtmin)
-        assert jnp.all(icnc_o[mask] >= icemin)
-        assert jnp.all(icnc_o[~mask] == cqtmin)
+        mask = jnp.logical_and(cloud_flag_o, pxib_o > _P.cqtmin)
+        assert jnp.all(icnc_o[mask] >= _P.icemin)
+        assert jnp.all(icnc_o[~mask] == _P.cqtmin)
         assert jnp.all(jnp.isfinite(icnc_o))
 
 
 class TestUpdateTendencies_2M:
     def test_tracer_tendencies_and_shapes(self):
-        from .lohmann_2m_params import ccwmin
         n = 4
         dt = jnp.array(60.0, dtype=jnp.float32)
         air_density = _full(n, 1.2)
 
         out = update_tendencies_and_important_vars(
             icnc=_full(n, 5e4), cdnc=_full(n, 1e8),
-            ice_mmr_prev=_full(n, ccwmin * 1.1), liq_mmr_prev=_zeros(n),
+            ice_mmr_prev=_full(n, _P.ccwmin * 1.1), liq_mmr_prev=_zeros(n),
             tracer_tm1_cdnc=_zeros(n), tracer_tm1_icnc=_zeros(n),
             condensation_rate=_full(n, 1e-6), deposition_rate=_zeros(n),
             rain_evap_mmr=_zeros(n), freezing_rate=_zeros(n),
@@ -1077,6 +1071,7 @@ class TestUpdateTendencies_2M:
             incloud_liq_before_rain=_full(n, 1e-4),
             incloud_ice_before_snow=_full(n, 1e-4),
             dt=dt,
+            params=_P,
         )
 
         assert len(out) == 11
@@ -1084,7 +1079,7 @@ class TestUpdateTendencies_2M:
             assert a.shape == (n,)
             assert jnp.all(jnp.isfinite(a))
 
-        _, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt)
+        _, ztmst_rcp, _, _, _ = microphysics_dt_constants(dt, _P)
         expected_tte_cdnc = ztmst_rcp * (_full(n, 1e8) * (1.0 / air_density) - _zeros(n))
         expected_tte_icnc = ztmst_rcp * (_full(n, 5e4) * (1.0 / air_density) - _zeros(n))
         assert jnp.allclose(out[5], expected_tte_cdnc)
@@ -1122,6 +1117,7 @@ class TestUpdateTendencies_2M:
             incloud_liq_before_rain=_full(n, 1e-21),
             incloud_ice_before_snow=_full(n, 1e-21),
             dt=dt,
+            params=_P,
         )
 
         assert jnp.all(out[0] == 0.0)   # cloud_fraction
@@ -1160,6 +1156,7 @@ class TestUpdateTendencies_2M:
             incloud_liq_before_rain=_zeros(n),
             incloud_ice_before_snow=_zeros(n),
             dt=dt,
+            params=_P,
         )
 
         assert jnp.all(out[9] == 0.0)   # liq_eff_radius
