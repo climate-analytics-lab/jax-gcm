@@ -806,13 +806,13 @@ class TestMixedPhaseDepositionAndCorrections2M:
 
     def test_temperature_thermodynamic_consistency_ice(self):
         x = self._base_inputs()
-        pcnd_o, pdep_o, T_o, _, _ = mixed_phase_deposition_and_corrections(**x)
+        pcnd_o, pdep_o, T_o, _, _, _ = mixed_phase_deposition_and_corrections(**x)
         T_expected = x["temperature"] + x["lsdcp"] * pdep_o + x["lvdcp"] * pcnd_o
         assert jnp.allclose(T_o, T_expected, atol=1e-4)
 
     def test_moisture_conservation_ice(self):
         x = self._base_inputs()
-        pcnd_o, pdep_o, _, q_o, _ = mixed_phase_deposition_and_corrections(**x)
+        pcnd_o, pdep_o, _, q_o, _, _ = mixed_phase_deposition_and_corrections(**x)
         q_expected = x["specific_humidity"] - pcnd_o - pdep_o
         assert jnp.allclose(q_o, q_expected, atol=1e-9)
 

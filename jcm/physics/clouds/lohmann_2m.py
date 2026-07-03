@@ -1162,6 +1162,7 @@ def mixed_phase_deposition_and_corrections(
         temperature_tmp,
         specific_humidity_tmp,
         qsat_tmp,
+        zvervmax,
     )
 
 def freezing_below_238K(
@@ -3194,6 +3195,7 @@ def cloud_microphysics_2m(
     (
         condensation_rate, deposition_rate,
         temp_tmp, q_tmp, qsat_tmp,
+        zvervmax_wbf,
     ) = mixed_phase_deposition_and_corrections(
         pressure,
         icnc,
@@ -3310,10 +3312,24 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # WBF (Wegener-Bergeron-Findeisen): liquid → ice in mixed-phase
     # ------------------------------------------------------------------
+    # ECHAM ll_WBF (mo_cloud_micro_2m.f90:1590-1594): the Bergeron
+    # conversion fires only in the mixed-phase window (cthomi < T < tmelt;
+    # below cthomi freezing_below_238K already emptied the liquid), with
+    # active deposition (zdep > 0), enough droplets (cdnc ≥ floor), AND —
+    # the criterion the port dropped — a weak updraft:
+    # 0.01·zvervx < zvervmax, the Korolev/Mazin threshold velocity below
+    # which ice grows at the liquid's expense. Without it every
+    # mixed-phase cloud glaciated in one step and no supercooled liquid
+    # survived (review finding 2.19). zvervmax comes from the deposition
+    # block (ECHAM recomputes it from post-freezing zxib — a second-order
+    # refinement over reusing the deposition-stage value).
     wbf_mask = (
         (temperature < params.tmelt)
+        & (temperature > params.cthomi)
         & (in_cloud_liquid_het > params.epsec)
         & (in_cloud_ice_het > params.epsec)
+        & (deposition_rate > 0.0)
+        & (0.01 * updraft_velocity < zvervmax_wbf)
     )
     (
         cdnc_wbf, in_cloud_liquid_wbf, in_cloud_ice_wbf,
@@ -3390,12 +3406,37 @@ def cloud_microphysics_2m(
     melt_mask = temperature > params.tmelt
 
     # Pre-compute sublimation/evaporation quantities for the scan.
+    # ECHAM conventions (mo_cloud_micro_2m): the subsaturations are the
+    # NEGATIVE relative deficits ``min(q/qs − 1, 0)`` — the sublimation/
+    # evaporation chain needs the sign to produce a sink (zzeps =
+    # max(−…, coeff·subsat) with a final clip at 0). The previous
+    # positive-definite ``max(qs − q, 0)`` inverted the chain so the clip
+    # floored rain evaporation and snow sublimation at exactly zero —
+    # both processes were dead code (survey finding; §2.12-2M analog).
     dp_over_g = pressure_thickness * c.rgrav
-    subsat_wrt_ice = jnp.maximum(qsat_ice - specific_humidity, 0.0)
-    subsat_wrt_water = jnp.maximum(qsat_water - specific_humidity, 0.0)
-    thermo_term_water = 1.0 + (c.alhc ** 2 * qsat_water) / (
-        c.rv * c.cpd * jnp.maximum(temperature ** 2, params.epsec)
+    subsat_wrt_ice = jnp.minimum(
+        specific_humidity / jnp.maximum(qsat_ice, params.epsec) - 1.0, 0.0,
     )
+    subsat_wrt_water = jnp.minimum(
+        specific_humidity / jnp.maximum(qsat_water, params.epsec) - 1.0, 0.0,
+    )
+    # Rotstayn thermodynamic + vapour-diffusion factor (ECHAM zastbstw =
+    # zast + zbst), the same chain the 1M rain evaporation uses:
+    #   zast = Lv·(Lv/(Rv·T) − 1)/(T·0.024),  zbst = Rv·T/(Dv·esw),
+    # with Dv = 2.21/p. The previous value was the psychrometric factor
+    # 1 + L²qs/(Rv·cp·T²) (~2-5) — ~6 orders of magnitude smaller than
+    # zast+zbst, which would have made the (revived) evaporation ~1e6×
+    # too strong.
+    esw_orch = qsat_water * pressure / jnp.maximum(
+        c.eps + (1.0 - c.eps) * qsat_water, params.epsec,
+    )
+    zdv_orch = 2.21 / jnp.maximum(pressure, params.epsec)
+    zast_orch = (
+        c.alhc * (c.alhc / (c.rv * jnp.maximum(temperature, 1.0)) - 1.0)
+        / jnp.maximum(temperature, 1.0) / 0.024
+    )
+    zbst_orch = c.rv * temperature / jnp.maximum(zdv_orch * esw_orch, params.epsec)
+    thermo_term_water = zast_orch + zbst_orch
 
     def _flux_coupled_step(carry, level_in):
         """Process one level: sedi → melt → sublim/evap → update_precip."""
