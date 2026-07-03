@@ -1,609 +1,407 @@
-"""Unit tests for simple_aerosol module
+"""Tests for the MACv2-SP (Simple Plumes) aerosol scheme.
 
-Tests the MACv2-SP (Simple Plumes) aerosol scheme implementation
-with proper JAX compatibility and vectorization.
+Anchored to the v1 reference (mo_simple_plumes_v1.f90 + MACv2.0-SP_v1.nc,
+Stevens et al. 2017 GMD supplement): real plume parameters, dz-weighted
+orography-truncated vertical profiles, per-feature time weighting inside
+the spatial sum, anthropogenic-AOD-weighted per-band optics with the
+ssa→1 / asy→0 zero-AOD limits, and a column-scalar natural background
+that feeds only dNovrN/Nccn.
 """
 
-import jax.numpy as jnp
 import jax
-import pytest
+import jax.numpy as jnp
+import numpy as np
+
+from jcm.forcing import ForcingData
+from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.physics.aerosol.macv2_sp import (
-    get_plume_spatial_distribution,
-    get_anthropogenic_aod,
-    get_background_aod,
-    get_vertical_profiles,
-    get_background_vertical_profile,
-    get_optical_properties,
+    _per_feature_plume_gaussians,
     get_CDNC,
     get_dNovrN,
+    get_plume_column_weights,
+    get_plume_spatial_distribution,
+    get_simple_aerosol,
+    get_vertical_profiles,
 )
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 
+NPLUMES, NFEATURES = 9, 2
+
+
+def _column_grid(nlev=30, ncols=4, oro=None):
+    """Uniform-dz test columns, level 0 = model top (jcm convention)."""
+    z = jnp.linspace(250.0, 14750.0, nlev)[::-1]
+    height = jnp.broadcast_to(z[:, None], (nlev, ncols))
+    dz = jnp.full((nlev, ncols), 500.0)
+    if oro is None:
+        oro = jnp.zeros(ncols)
+    return height, dz, oro
+
+
+def _forcing_ones():
+    class _F:
+        aerosol_year_weight = jnp.ones(NPLUMES)
+        aerosol_ann_cycle = jnp.ones((NFEATURES, NPLUMES))
+    return _F()
+
+
+def _run_scheme(lats, lons, oro=None, nlev=30,
+                bands=jnp.asarray([550.0]), forcing=None):
+    ncols = lats.shape[0]
+    height, dz, oro = _column_grid(nlev, ncols, oro)
+    data = AerosolData.zeros((ncols,), nlev, n_bnd_sw=bands.shape[0],
+                             n_bnd_lw=1)
+    return get_simple_aerosol(
+        height, dz, oro, lats, lons, data,
+        AerosolParameters.default(), forcing or _forcing_ones(), bands,
+    )
+
 
 class TestAerosolParameters:
-    """Test AerosolParameters class"""
-    
-    def test_default_parameters(self):
-        """Test default parameter creation"""
-        params = AerosolParameters.default()
-        
-        assert params.nplumes == 9
-        assert params.nfeatures == 2
-        assert params.plume_lat.shape == (9,)
-        assert params.plume_lon.shape == (9,)
-        assert params.beta_a.shape == (9,)
-        assert params.beta_b.shape == (9,)
-        assert params.aod_spmx.shape == (9,)
-        assert params.aod_fmbg.shape == (9,)
-        assert params.asy550.shape == (9,)
-        assert params.ssa550.shape == (9,)
-        assert params.angstrom.shape == (9,)
-        assert params.sig_lon_E.shape == (2, 9)
-        assert params.sig_lon_W.shape == (2, 9)
-        assert params.sig_lat_E.shape == (2, 9)
-        assert params.sig_lat_W.shape == (2, 9)
-        assert params.theta.shape == (2, 9)
-        assert params.ftr_weight.shape == (2, 9)
-        assert jnp.isscalar(params.background_aod)
-    
+    """The defaults are the real MACv2.0-SP_v1.nc values."""
+
+    def test_reference_values(self):
+        """Spot-check hard values transcribed from the v1 parameter file."""
+        p = AerosolParameters.default()
+        assert p.nplumes == 9 and p.nfeatures == 2
+        # Plume 1 is Europe (the 260-degree wrap case), plume 3 East Asia.
+        np.testing.assert_allclose(p.plume_lat[0], 49.4)
+        np.testing.assert_allclose(p.plume_lon[0], 20.6)
+        np.testing.assert_allclose(p.plume_lon[2], 114.0)
+        np.testing.assert_allclose(p.aod_spmx[2], 0.636)
+        # Biomass plumes 5-8 share the darker ssa550.
+        np.testing.assert_allclose(p.ssa550[4:8], 0.87)
+        np.testing.assert_allclose(p.asy550, 0.63)
+        np.testing.assert_allclose(p.angstrom, 2.0)
+        # ftr_weight sums to 1 per plume in the file.
+        np.testing.assert_allclose(jnp.sum(p.ftr_weight, axis=0), 1.0,
+                                   rtol=1e-5)
+
     def test_parameter_ranges(self):
-        """Test parameter values are in reasonable ranges"""
-        params = AerosolParameters.default()
-        
-        # Latitude should be in [-90, 90]
-        assert jnp.all(params.plume_lat >= -90)
-        assert jnp.all(params.plume_lat <= 90)
-        
-        # Longitude should be in [-180, 180]
-        assert jnp.all(params.plume_lon >= -180)
-        assert jnp.all(params.plume_lon <= 180)
-        
-        # Beta parameters should be positive
-        assert jnp.all(params.beta_a > 0)
-        assert jnp.all(params.beta_b > 0)
-        
-        # AOD values should be positive
-        assert jnp.all(params.aod_spmx > 0)
-        assert jnp.all(params.aod_fmbg > 0)
-        assert params.background_aod > 0
-        
-        # SSA should be in [0, 1]
-        assert jnp.all(params.ssa550 >= 0)
-        assert jnp.all(params.ssa550 <= 1)
-        
-        # Asymmetry parameter should be in [-1, 1]
-        assert jnp.all(params.asy550 >= -1)
-        assert jnp.all(params.asy550 <= 1)
-        
-        # Spatial extents should be positive
-        assert jnp.all(params.sig_lon_E > 0)
-        assert jnp.all(params.sig_lon_W > 0)
-        assert jnp.all(params.sig_lat_E > 0)
-        assert jnp.all(params.sig_lat_W > 0)
-        
-        # Feature weights should be positive and sum to 1 for each plume
-        assert jnp.all(params.ftr_weight > 0)
-        weight_sums = jnp.sum(params.ftr_weight, axis=0)
-        assert jnp.allclose(weight_sums, 1.0, rtol=1e-10)
+        """Physical ranges; longitudes use the file's 0-360 convention."""
+        p = AerosolParameters.default()
+        assert jnp.all(p.plume_lon >= 0.0) and jnp.all(p.plume_lon < 360.0)
+        assert jnp.all(p.plume_lat >= -90.0) and jnp.all(p.plume_lat <= 90.0)
+        assert jnp.all(p.ssa550 > 0.0) and jnp.all(p.ssa550 <= 1.0)
+        assert jnp.all(p.asy550 > 0.0) and jnp.all(p.asy550 < 1.0)
+        assert jnp.all(p.beta_a > 0.0) and jnp.all(p.beta_b > 0.0)
+        assert jnp.all(p.aod_spmx > 0.0) and jnp.all(p.aod_fmbg > 0.0)
 
 
 class TestVerticalProfiles:
-    """Test vertical profile calculations"""
-    
-    def test_vertical_profiles_shape(self):
-        """Test vertical profile output shapes"""
-        params = AerosolParameters.default()
-        nlev, ncols = 20, 100
-        
-        # Create test height array
-        height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
-        height_full = jnp.repeat(height_full, ncols, axis=1)
-        
-        profiles = get_vertical_profiles(height_full, params)
-        
-        assert profiles.shape == (params.nplumes, nlev, ncols)
-        
-        # Check normalization - each profile should integrate to 1
-        profile_integrals = jnp.sum(profiles, axis=1)
-        assert jnp.allclose(profile_integrals, 1.0, rtol=1e-6)
-    
-    def test_background_vertical_profile(self):
-        """Test background vertical profile"""
-        nlev, ncols = 20, 100
-        
-        # Create test height array
-        height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
-        height_full = jnp.repeat(height_full, ncols, axis=1)
-        
-        profile = get_background_vertical_profile(height_full)
-        
-        assert profile.shape == (nlev,)
-        assert jnp.allclose(jnp.sum(profile), 1.0, rtol=1e-6)
-        
-        # Should be monotonically decreasing with height
-        assert jnp.all(jnp.diff(profile) <= 0)
-    
-    def test_beta_function_properties(self):
-        """Test beta function vertical profiles have correct properties"""
-        params = AerosolParameters.default()
-        nlev = 50
-        ncols = 10
-        
-        # Create test height array
-        height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
-        height_full = jnp.repeat(height_full, ncols, axis=1)
-        
-        profiles = get_vertical_profiles(height_full, params)
-        
-        # Check that profiles are non-negative
-        assert jnp.all(profiles >= 0)
-        
-        # Check that profiles have maximum somewhere in the middle
-        # (not at boundaries for beta > 1)
-        for i in range(params.nplumes):
-            if params.beta_a[i] > 1 and params.beta_b[i] > 1:
-                profile = profiles[i, :, 0]
-                max_idx = jnp.argmax(profile)
-                assert max_idx > 0 and max_idx < nlev - 1
+    """dz-weighted, orography-truncated beta profiles (findings 2.29/2.33c)."""
+
+    def test_shape_and_sea_level_normalization(self):
+        height, dz, oro = _column_grid()
+        prof = get_vertical_profiles(height, dz, oro,
+                                     AerosolParameters.default())
+        assert prof.shape == (NPLUMES, 30, 4)
+        # Sea-level columns: mask is a no-op, level sums are exactly 1.
+        np.testing.assert_allclose(jnp.sum(prof, axis=1), 1.0, rtol=1e-5)
+
+    def test_aod_split_invariant_to_level_refinement(self):
+        """The below-3km AOD share must not depend on the vertical grid.
+
+        The reference weights the beta density by dz before normalizing;
+        the pre-fix port normalized the density alone, so refining or
+        stretching the grid moved column AOD between layers (54% vs 28%
+        below 3 km in the review's probe). Compare the below-3km mass on
+        a uniform grid against a 2x-stretched grid.
+        """
+        p = AerosolParameters.default()
+
+        def below_3km_share(z_edges):
+            z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])[::-1]      # top-down
+            dz = jnp.diff(z_edges)[::-1]
+            prof = get_vertical_profiles(
+                z_mid[:, None], dz[:, None], jnp.zeros(1), p,
+            )
+            return jnp.sum(jnp.where(z_mid[None, :, None] < 3000.0, prof, 0.0),
+                           axis=1)[:, 0]
+
+        uniform = below_3km_share(jnp.linspace(0.0, 15000.0, 31))
+        # Geometrically stretched edges (fine near the surface).
+        r = jnp.cumsum(1.12 ** jnp.arange(30))
+        stretched = below_3km_share(15000.0 * jnp.concatenate([jnp.zeros(1), r]) / r[-1])
+        np.testing.assert_allclose(uniform, stretched, atol=0.02)
+
+    def test_orography_truncation(self):
+        """Levels below the surface carry zero AOD; the mass is removed.
+
+        Fortran applies the z >= oro mask AFTER normalization (line 300)
+        — over elevated terrain the column sum is < 1, not renormalized.
+        """
+        height, dz, _ = _column_grid(ncols=2)
+        oro = jnp.array([0.0, 4000.0])
+        prof = get_vertical_profiles(height, dz, oro,
+                                     AerosolParameters.default())
+        below = height < oro[None, :]
+        assert jnp.all(jnp.where(below[None], prof, 0.0) == 0.0)
+        sums = jnp.sum(prof, axis=1)
+        np.testing.assert_allclose(sums[:, 0], 1.0, rtol=1e-5)
+        assert jnp.all(sums[:, 1] < 1.0)
+        # Above-ground levels keep their sea-level values (mask does not
+        # redistribute mass): compare both columns under the mountain
+        # column's own mask.
+        above_mtn = ~below[:, 1]
+        np.testing.assert_allclose(
+            jnp.where(above_mtn[None, :], prof[:, :, 1], 0.0),
+            jnp.where(above_mtn[None, :], prof[:, :, 0], 0.0), rtol=1e-5,
+        )
 
 
 class TestSpatialDistribution:
-    """Test spatial distribution calculations"""
-    
-    def test_spatial_distribution_shape(self):
-        """Test spatial distribution output shape"""
-        params = AerosolParameters.default()
-        ncols = 1000
-        
-        # Create test coordinates
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        
-        assert spatial_dist.shape == (params.nplumes, ncols)
-        assert jnp.all(spatial_dist >= 0)
-        assert jnp.all(spatial_dist <= 1)
-    
+    """Rotated anisotropic Gaussians with the Europe wrap case."""
+
     def test_plume_centers_maximum(self):
-        """Test that plumes have maximum at their centers"""
-        params = AerosolParameters.default()
-        
-        # Test each plume center
-        for i in range(params.nplumes):
-            center_lat = params.plume_lat[i]
-            center_lon = params.plume_lon[i]
-            
-            # Create small grid around center
-            dlat = jnp.linspace(-5, 5, 21)
-            dlon = jnp.linspace(-5, 5, 21)
-            
-            lats = center_lat + dlat
-            lons = center_lon + dlon
-            
-            spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-            
-            # Maximum should be at or near center
-            max_idx = jnp.argmax(spatial_dist[i, :])
-            assert max_idx >= 8 and max_idx <= 12  # Around center index (10)
-    
-    def test_longitude_wrapping(self):
-        """Test longitude wrapping is handled correctly"""
-        params = AerosolParameters.default()
-        ncols = 100
-        
-        # Test with wrapped longitudes
-        lats = jnp.zeros(ncols)
-        lons = jnp.linspace(170, 190, ncols)  # Crosses 180° meridian
-        
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        
-        # Should not have NaN or infinite values
-        assert jnp.all(jnp.isfinite(spatial_dist))
-        assert jnp.all(spatial_dist >= 0)
+        p = AerosolParameters.default()
+        gauss = _per_feature_plume_gaussians(p.plume_lat, p.plume_lon, p)
+        # At its own center every feature Gaussian is exactly 1.
+        for ip in range(NPLUMES):
+            np.testing.assert_allclose(gauss[:, ip, ip], 1.0, rtol=1e-6)
+
+    def test_europe_wrap_continuity_across_greenwich(self):
+        """The 260-degree wrap keeps Europe's tail continuous across 0 E.
+
+        With the real parameters (Europe at 20.6 E, feature-2 westward
+        sigma 35 degrees) the trans-Atlantic tail crosses the 0/360 seam;
+        the plume-1 wrap threshold prevents a jump there.
+        """
+        p = AerosolParameters.default()
+        lats = jnp.full(4, 49.4)
+        # Two 0.2-degree steps: one across the 0/360 seam, one just west
+        # of it. Without the plume-1 wrap the across-seam step jumps
+        # (delta_lon flips from -20.5 to +339.3); with it, both steps
+        # show only the smooth 0.2-degree Gaussian gradient.
+        lons = jnp.array([359.9, 0.1, 359.5, 359.7])
+        gauss = _per_feature_plume_gaussians(lats, lons, p)
+        seam_step = jnp.abs(gauss[:, 0, 1] - gauss[:, 0, 0])
+        off_step = jnp.abs(gauss[:, 0, 3] - gauss[:, 0, 2])
+        assert jnp.all(seam_step < 3.0 * off_step + 1e-6)
+        assert float(gauss[1, 0, 0]) > 0.3   # tail is genuinely alive there
+
+    def test_collapsed_distribution_bounded(self):
+        p = AerosolParameters.default()
+        lats = jnp.linspace(-90, 90, 50)
+        lons = jnp.linspace(0, 360, 50)
+        dist = get_plume_spatial_distribution(lats, lons, p)
+        assert dist.shape == (NPLUMES, 50)
+        assert jnp.all(dist >= 0.0) and jnp.all(dist <= 1.0)
 
 
-class TestAODCalculations:
-    """Test AOD calculation functions"""
-    
-    def test_anthropogenic_aod_shape(self):
-        """Test anthropogenic AOD calculation shape"""
-        params = AerosolParameters.default()
-        ncols = 500
+class TestColumnWeights:
+    """Per-feature time weighting inside the spatial sum (finding 2.31)."""
 
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
+    def test_feature_cycles_do_not_commute(self):
+        """Features with different ann_cycle and different Gaussians must
+        be combined per feature — the collapsed [avg cycle]x[summed
+        Gaussian] product is measurably wrong wherever the two feature
+        Gaussians differ (the pre-fix behavior).
+        """
+        p = AerosolParameters.default()
+        # A point where plume-6 feature Gaussians differ strongly.
+        lats, lons = jnp.array([-15.0]), jnp.array([290.0])
+        gauss = _per_feature_plume_gaussians(lats, lons, p)
+        yw = jnp.ones(NPLUMES)
+        # Feature-asymmetric cycle for plume 6 (index 5).
+        ann = jnp.ones((NFEATURES, NPLUMES))
+        ann = ann.at[0, 5].set(0.1).at[1, 5].set(1.0)
+        cw_an, _ = get_plume_column_weights(p, yw, ann, gauss)
+        # Reference: sum_f (yw*ann_f*fw_f*g_f) * aod_spmx
+        fw = p.ftr_weight
+        expected = p.aod_spmx[5] * (
+            ann[0, 5] * fw[0, 5] * gauss[0, 5, 0]
+            + ann[1, 5] * fw[1, 5] * gauss[1, 5, 0]
+        )
+        np.testing.assert_allclose(cw_an[5, 0], expected, rtol=1e-6)
+        # The collapsed (pre-fix) combination differs at this point.
+        collapsed = (
+            p.aod_spmx[5]
+            * float(jnp.sum(fw[:, 5] * ann[:, 5]) / jnp.sum(fw[:, 5]))
+            * float(jnp.sum(fw[:, 5] * gauss[:, 5, 0]))
+        )
+        assert not np.isclose(float(cw_an[5, 0]), collapsed, rtol=1e-3)
 
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        aod_anth = get_anthropogenic_aod(
-            params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
+    def test_background_omits_year_weight(self):
+        """cw_bg uses the annual cycle only (Fortran time_weight_bg)."""
+        p = AerosolParameters.default()
+        lats, lons = jnp.array([49.4]), jnp.array([20.6])
+        gauss = _per_feature_plume_gaussians(lats, lons, p)
+        ann = jnp.ones((NFEATURES, NPLUMES))
+        _, bg_at_0 = get_plume_column_weights(p, jnp.zeros(NPLUMES), ann, gauss)
+        _, bg_at_1 = get_plume_column_weights(p, jnp.ones(NPLUMES), ann, gauss)
+        np.testing.assert_allclose(bg_at_0, bg_at_1)
+        an_at_0, _ = get_plume_column_weights(p, jnp.zeros(NPLUMES), ann, gauss)
+        assert jnp.all(an_at_0 == 0.0)
+
+
+class TestFullScheme:
+    """End-to-end reference behavior of get_simple_aerosol."""
+
+    def test_column_aod_at_plume_center(self):
+        """Sea-level column AOD at a plume center ~ aod_spmx (+ tails).
+
+        Pins the removal of the double-Gaussian defect: the pre-fix path
+        multiplied the plume-summed column AOD by each plume's Gaussian
+        again, so the value at the East-Asia center was far from
+        aod_spmx.
+        """
+        out = _run_scheme(jnp.array([30.0]), jnp.array([114.0]))
+        aod = float(out.aod_total[0])
+        assert 0.6 < aod < 0.75, aod    # 0.636 + neighboring-plume tails
+
+    def test_remote_ocean_is_clean_and_finite(self):
+        """Mid-Pacific: near-zero AOD, no NaN (finding 2.33e), reference
+        zero-AOD optics limits from the completing division.
+        """
+        out = _run_scheme(jnp.array([0.0]), jnp.array([180.0]))
+        assert float(out.aod_total[0]) < 1e-3
+        assert jnp.all(jnp.isfinite(out.ssa_profile))
+        assert jnp.all(jnp.isfinite(out.asy_profile))
+        assert float(out.cdnc_factor[0]) < 1.01
+        # dNovrN -> 1 and background -> 0.02 far from every plume.
+        np.testing.assert_allclose(out.aod_background[0], 0.02, atol=1e-3)
+
+    def test_zero_aod_optics_limits(self):
+        """Ssa -> 1 and asy -> 0 where plume AOD vanishes (Fortran 366-367)."""
+        out = _run_scheme(jnp.array([0.0]), jnp.array([180.0]),
+                          oro=jnp.array([8000.0]))
+        # Levels below the 8 km surface have exactly zero AOD.
+        assert float(jnp.min(out.aod_profile)) == 0.0
+        zero = out.aod_profile == 0.0
+        assert jnp.all(jnp.where(zero, out.ssa_profile, 1.0) == 1.0)
+        assert jnp.all(jnp.where(zero, out.asy_profile, 0.0) == 0.0)
+
+    def test_biomass_optics_are_darker(self):
+        """Columns under a biomass plume inherit ssa550 = 0.87 by AOD
+        weighting (not the spatial-Gaussian blend of finding 2.32).
+        """
+        out = _run_scheme(jnp.array([-3.5]), jnp.array([16.0]))
+        k = int(jnp.argmax(out.aod_profile[:, 0]))
+        np.testing.assert_allclose(out.ssa_profile[k, 0], 0.87, atol=0.005)
+
+    def test_background_never_enters_radiative_aod(self):
+        """aod_total is anthropogenic-only: zero year_weight -> zero AOD
+        even though the fine-mode background AOD stays finite.
+        """
+        class _F:
+            aerosol_year_weight = jnp.zeros(NPLUMES)
+            aerosol_ann_cycle = jnp.ones((NFEATURES, NPLUMES))
+        out = _run_scheme(jnp.array([49.4]), jnp.array([20.6]), forcing=_F())
+        assert float(jnp.max(jnp.abs(out.aod_profile))) == 0.0
+        assert float(out.aod_total[0]) == 0.0
+        assert float(out.aod_background[0]) > 0.05   # plume-shaped fm bg
+        np.testing.assert_allclose(out.cdnc_factor[0], 1.0, rtol=1e-6)
+
+    def test_mountain_column_loses_aod(self):
+        """Orography truncation removes below-ground plume AOD."""
+        lats = jnp.array([30.0, 30.0])
+        lons = jnp.array([114.0, 114.0])
+        out = _run_scheme(lats, lons, oro=jnp.array([0.0, 4000.0]))
+        assert float(out.aod_total[1]) < float(out.aod_total[0])
+
+    def test_per_band_scaling(self):
+        """Angstrom scaling: AOD falls with wavelength; 550 nm band
+        reproduces the 550 nm diagnostic profile.
+        """
+        bands = jnp.asarray([442.0, 550.0, 1020.0])
+        out = _run_scheme(jnp.array([30.0]), jnp.array([114.0]), bands=bands)
+        col = jnp.sum(out.aod_sw_per_band[:, :, 0], axis=1)
+        assert float(col[0]) > float(col[1]) > float(col[2])
+        np.testing.assert_allclose(
+            out.aod_sw_per_band[1], out.aod_profile, rtol=1e-5,
+        )
+        np.testing.assert_allclose(
+            out.ssa_sw_per_band[1], out.ssa_profile, rtol=1e-5,
         )
 
-        assert aod_anth.shape == (ncols,)
-        assert jnp.all(aod_anth >= 0)
-
-    def test_background_aod_shape(self):
-        """Test background AOD calculation shape"""
-        params = AerosolParameters.default()
-        ncols = 500
-
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        aod_bg = get_background_aod(params, jnp.ones(params.nplumes), spatial_dist)
-
-        assert aod_bg.shape == (ncols,)
-        assert jnp.all(aod_bg >= 0)
-
-    def test_aod_plume_regions(self):
-        """Test that AOD is higher in plume regions"""
-        params = AerosolParameters.default()
-
-        # Test coordinates at plume centers vs remote regions
-        plume_lats = params.plume_lat[:3]  # First 3 plumes
-        plume_lons = params.plume_lon[:3]
-
-        # Remote regions (ocean)
-        remote_lats = jnp.array([0.0, 0.0, 0.0])
-        remote_lons = jnp.array([0.0, 90.0, 180.0])
-
-        year_weight = jnp.ones(params.nplumes)
-        ann_cycle = jnp.ones(params.nplumes)
-        plume_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
-        remote_dist = get_plume_spatial_distribution(remote_lats, remote_lons, params)
-        aod_plume = get_anthropogenic_aod(params, year_weight, ann_cycle, plume_dist)
-        aod_remote = get_anthropogenic_aod(params, year_weight, ann_cycle, remote_dist)
-
-        # AOD should be higher at plume centers
-        assert jnp.all(aod_plume > aod_remote)
-
-    def test_anthropogenic_aod_accepts_2d_ann_cycle(self):
-        """`ann_cycle` arriving as (nfeatures, nplumes) should reduce to the
-        same result the legacy 1-D placeholder produced when both features
-        carry equal weight (i.e. an all-ones placeholder under any feature
-        weighting). This pins the backward-compat collapse path of the
-        feature-axis fix (#437).
+    def test_dnovrn_magnitude(self):
+        """DNovrN in the Stevens 2017 range: ~1 remote, 1.3-1.7 at the
+        East-Asia 2005 maximum, largest where background is clean.
         """
-        params = AerosolParameters.default()
-        plume_lats = params.plume_lat[:3]
-        plume_lons = params.plume_lon[:3]
-        spatial_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
-
-        year_weight = jnp.ones(params.nplumes)
-        ann_cycle_1d = jnp.ones(params.nplumes)
-        ann_cycle_2d = jnp.ones((params.nfeatures, params.nplumes))
-
-        aod_1d = get_anthropogenic_aod(params, year_weight, ann_cycle_1d, spatial_dist)
-        aod_2d = get_anthropogenic_aod(params, year_weight, ann_cycle_2d, spatial_dist)
-
-        assert jnp.allclose(aod_1d, aod_2d, atol=1e-6)
-
-    def test_anthropogenic_aod_responds_to_per_feature_ann_cycle(self):
-        """A 2-D `ann_cycle` with one feature zeroed should produce a
-        smaller AOD than the all-ones case, demonstrating that the new
-        feature-axis path actually reads the feature dimension.
-        """
-        params = AerosolParameters.default()
-        plume_lats = params.plume_lat[:3]
-        plume_lons = params.plume_lon[:3]
-        spatial_dist = get_plume_spatial_distribution(plume_lats, plume_lons, params)
-
-        year_weight = jnp.ones(params.nplumes)
-        full = jnp.ones((params.nfeatures, params.nplumes))
-        half = full.at[1, :].set(0.0)  # zero out the second feature
-
-        aod_full = get_anthropogenic_aod(params, year_weight, full, spatial_dist)
-        aod_half = get_anthropogenic_aod(params, year_weight, half, spatial_dist)
-
-        assert jnp.all(aod_half < aod_full)
-
-
-class TestOpticalProperties:
-    """Test optical property calculations"""
-    
-    def test_optical_properties_shape(self):
-        """Test optical properties output shapes"""
-        params = AerosolParameters.default()
-        nlev, ncols = 30, 200
-        
-        # Create test data
-        aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        spatial_dist = jnp.ones((params.nplumes, ncols)) / params.nplumes
-        
-        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
-        
-        assert ssa_profile.shape == (nlev, ncols)
-        assert asy_profile.shape == (nlev, ncols)
-        
-        # Check value ranges
-        assert jnp.all(ssa_profile >= 0)
-        assert jnp.all(ssa_profile <= 1)
-        assert jnp.all(asy_profile >= -1)
-        assert jnp.all(asy_profile <= 1)
-    
-    def test_optical_properties_weighted_average(self):
-        """Test that optical properties are proper weighted averages"""
-        params = AerosolParameters.default()
-        nlev, ncols = 10, 50
-        
-        # Create test data with single plume dominating
-        aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        spatial_dist = jnp.zeros((params.nplumes, ncols))
-        spatial_dist = spatial_dist.at[0, :].set(1.0)  # Only first plume
-        
-        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
-        
-        # Should match first plume properties
-        expected_ssa = params.ssa550[0]
-        expected_asy = params.asy550[0]
-        
-        assert jnp.allclose(ssa_profile, expected_ssa, rtol=1e-6)
-        assert jnp.allclose(asy_profile, expected_asy, rtol=1e-6)
+        out = _run_scheme(jnp.array([30.0, 0.0]), jnp.array([114.0, 180.0]))
+        assert 1.2 < float(out.cdnc_factor[0]) < 1.8
+        assert abs(float(out.cdnc_factor[1]) - 1.0) < 0.01
 
 
 class TestCDNC:
-    """Test CDNC calculation"""
-    
-    def test_cdnc_function(self):
-        """Test CDNC calculation function"""
-        aod_values = jnp.array([0.0, 0.1, 0.2, 0.5, 1.0])
-        
-        cdnc = get_CDNC(aod_values)
-        
-        assert cdnc.shape == aod_values.shape
-        assert jnp.all(cdnc >= 0)
-        
-        # Should be monotonically increasing
-        assert jnp.all(jnp.diff(cdnc) >= 0)
-        
-        # Should be one when AOD is zero
-        assert cdnc[0] == 1.0
-    
-    def test_cdnc_parameters(self):
-        """Test CDNC with different parameters"""
-        aod = jnp.array([0.1, 0.2, 0.3])
-        
-        # Test different parameter sets
-        cdnc1 = get_CDNC(aod, A=60, B=20)
-        cdnc2 = get_CDNC(aod, A=410, B=5)
-        cdnc3 = get_CDNC(aod, A=16, B=1000)
-        
-        assert cdnc1.shape == aod.shape
-        assert cdnc2.shape == aod.shape
-        assert cdnc3.shape == aod.shape
-        
-        # All should be positive and finite
-        assert jnp.all(cdnc1 > 0)
-        assert jnp.all(cdnc2 > 0)
-        assert jnp.all(cdnc3 > 0)
-        assert jnp.all(jnp.isfinite(cdnc1))
-        assert jnp.all(jnp.isfinite(cdnc2))
-        assert jnp.all(jnp.isfinite(cdnc3))
+    """Twomey-factor and absolute-CCN helpers."""
 
-    def test_dnovrn_stevens2017_magnitude(self):
-        """Twomey factor is the Stevens et al. (2017) RELATIVE enhancement.
+    def test_dnovrn_formula(self):
+        aod_sp, aod_bg = jnp.array([0.2]), jnp.array([0.05])
+        expected = np.log(1000.0 * 0.25 + 1.0) / np.log(1000.0 * 0.05 + 1.0)
+        np.testing.assert_allclose(get_dNovrN(aod_sp, aod_bg)[0], expected,
+                                   rtol=1e-6)
 
-        Regression pin for the ~100× Twomey bug: the old
-        ``get_CDNC(aod)/get_CDNC(0)`` divided by 1 and returned an absolute
-        AEROCOM CDNC (≈137 at AOD 0.43) as the dimensionless multiplier.
-        The Stevens formula gives ≈2.0 at that plume maximum (background
-        0.02) and stays within [1, ~3] for any physical AOD.
-        """
-        # No anthropogenic aerosol → exactly no enhancement.
-        assert float(get_dNovrN(jnp.array(0.0), jnp.array(0.02))) == (
-            pytest.approx(1.0)
+    def test_dnovrn_no_anthropogenic(self):
+        np.testing.assert_allclose(
+            get_dNovrN(jnp.zeros(3), jnp.full(3, 0.02)), 1.0, rtol=1e-6,
         )
-        # East-Asia plume maximum from the review: AOD 0.43 over the 0.02
-        # fine-mode background → ln(451)/ln(21) ≈ 2.01 (old code: 137).
-        factor = float(get_dNovrN(jnp.array(0.43), jnp.array(0.02)))
-        assert factor == pytest.approx(2.01, abs=0.05)
-        # Monotone in anthropogenic AOD and bounded for physical values.
-        aods = jnp.array([0.0, 0.05, 0.1, 0.2, 0.43, 1.0])
-        factors = get_dNovrN(aods, jnp.array(0.02))
-        assert jnp.all(jnp.diff(factors) > 0)
-        assert float(factors[-1]) < 3.0
-        # A larger natural background damps the relative enhancement.
-        assert float(get_dNovrN(jnp.array(0.2), jnp.array(0.1))) < float(
-            get_dNovrN(jnp.array(0.2), jnp.array(0.02))
-        )
+
+    def test_cdnc_monotone(self):
+        aods = jnp.array([0.0, 0.1, 0.5, 1.0])
+        cdnc = get_CDNC(aods)
+        assert float(cdnc[0]) == 1.0
+        assert jnp.all(jnp.diff(cdnc) > 0.0)
 
 
 class TestJAXCompatibility:
-    """Test JAX compatibility and transformations"""
-    
-    def test_jit_compilation(self):
-        """Test that functions can be JIT compiled"""
-        params = AerosolParameters.default()
-        
-        # JIT compile the spatial distribution function
-        jit_spatial = jax.jit(get_plume_spatial_distribution)
-        
-        ncols = 100
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        
-        result = jit_spatial(lats, lons, params)
-        
-        assert result.shape == (params.nplumes, ncols)
-        assert jnp.all(jnp.isfinite(result))
-    
-    def test_vmap_compatibility(self):
-        """Test vectorization with vmap"""
-        params = AerosolParameters.default()
-        
-        # Create batch of coordinates
-        batch_size = 10
-        ncols = 50
-        
-        lats_batch = jnp.stack([jnp.linspace(-90, 90, ncols) for _ in range(batch_size)])
-        lons_batch = jnp.stack([jnp.linspace(-180, 180, ncols) for _ in range(batch_size)])
-        
-        # Vectorize over batch dimension
-        vmap_spatial = jax.vmap(get_plume_spatial_distribution, in_axes=(0, 0, None))
-        
-        result = vmap_spatial(lats_batch, lons_batch, params)
-        
-        assert result.shape == (batch_size, params.nplumes, ncols)
-        assert jnp.all(jnp.isfinite(result))
-    
-    def test_gradient_computation(self):
-        """Test gradient computation through functions"""
-        params = AerosolParameters.default()
-        
-        def aod_sum(lats, lons):
-            spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-            return jnp.sum(get_anthropogenic_aod(
-                params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
-            ))
+    """jit / grad through the full scheme."""
 
-        ncols = 20
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
+    def test_jit_full_scheme(self):
+        height, dz, oro = _column_grid(ncols=2)
+        lats, lons = jnp.array([30.0, 0.0]), jnp.array([114.0, 180.0])
+        data = AerosolData.zeros((2,), 30, n_bnd_sw=1, n_bnd_lw=1)
+        p = AerosolParameters.default()
+        f = ForcingData.ones((1, 2))
 
-        # Compute gradients
-        grad_fn = jax.grad(aod_sum, argnums=(0, 1))
-        grads = grad_fn(lats, lons)
+        @jax.jit
+        def run(height, lats, lons):
+            return get_simple_aerosol(
+                height, dz, oro, lats, lons, data, p, f,
+                jnp.asarray([550.0]),
+            ).aod_total
 
-        assert len(grads) == 2
-        assert grads[0].shape == (ncols,)
-        assert grads[1].shape == (ncols,)
-        assert jnp.all(jnp.isfinite(grads[0]))
-        assert jnp.all(jnp.isfinite(grads[1]))
+        out = run(height, lats, lons)
+        assert out.shape == (2,) and jnp.all(jnp.isfinite(out))
 
+    def test_gradient_wrt_plume_amplitude(self):
+        """d(column AOD)/d(aod_spmx) is finite and positive — the
+        calibration path the parameter threading exists for.
+        """
+        height, dz, oro = _column_grid(ncols=1)
+        lats, lons = jnp.array([30.0]), jnp.array([114.0])
+        data = AerosolData.zeros((1,), 30, n_bnd_sw=1, n_bnd_lw=1)
+        f = _forcing_ones()
 
-class TestIntegration:
-    """Integration tests for the full aerosol scheme"""
-    
-    def test_simple_integration(self):
-        """Test basic integration of aerosol functions"""
-        params = AerosolParameters.default()
-        nlev, ncols = 8, 100
-        
-        # Create test coordinates
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        
-        # Create test height array
-        height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
-        height_full = jnp.repeat(height_full, ncols, axis=1)
-        
-        # Test spatial distribution (needed by AOD calculations)
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        assert spatial_dist.shape == (params.nplumes, ncols)
+        def total_aod(aod_spmx):
+            p = AerosolParameters.default()
+            p = type(p)(**{**{k: getattr(p, k) for k in (
+                'nplumes', 'nfeatures', 'plume_lat', 'plume_lon', 'beta_a',
+                'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
+                'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
+                'ftr_weight', 'background_aod', 'spa_prefactor',
+                'spa_exponent')}, 'aod_spmx': aod_spmx})
+            out = get_simple_aerosol(height, dz, oro, lats, lons, data, p,
+                                     f, jnp.asarray([550.0]))
+            return jnp.sum(out.aod_total)
 
-        # Test individual functions work together
-        aod_anth = get_anthropogenic_aod(
-            params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
-        )
-        aod_bg = get_background_aod(params, jnp.ones(params.nplumes), spatial_dist)
+        g = jax.grad(total_aod)(AerosolParameters.default().aod_spmx)
+        assert g.shape == (NPLUMES,)
+        assert jnp.all(jnp.isfinite(g))
+        assert float(g[2]) > 0.9   # East-Asia column sits on plume 3
 
-        assert aod_anth.shape == (ncols,)
-        assert aod_bg.shape == (ncols,)
-        assert jnp.all(aod_anth >= 0)
-        assert jnp.all(aod_bg >= 0)
+    def test_gradient_wrt_coordinates(self):
+        p = AerosolParameters.default()
 
-        # Test vertical profiles
-        profiles = get_vertical_profiles(height_full, params)
-        assert profiles.shape == (params.nplumes, nlev, ncols)
-        
-        # Test optical properties
-        aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
-        
-        assert ssa_profile.shape == (nlev, ncols)
-        assert asy_profile.shape == (nlev, ncols)
-        assert jnp.all(ssa_profile >= 0)
-        assert jnp.all(ssa_profile <= 1)
-        assert jnp.all(asy_profile >= -1)
-        assert jnp.all(asy_profile <= 1)
-    
-    def test_jit_compilation(self):
-        """Test that individual functions can be JIT compiled"""
-        params = AerosolParameters.default()
-        ncols = 50
+        def total(lats, lons):
+            gauss = _per_feature_plume_gaussians(lats, lons, p)
+            cw_an, _ = get_plume_column_weights(
+                p, jnp.ones(NPLUMES), jnp.ones((NFEATURES, NPLUMES)), gauss,
+            )
+            return jnp.sum(cw_an)
 
-        # Test JIT compilation of each function
-        jit_spatial = jax.jit(get_plume_spatial_distribution)
-        jit_aod_anth = jax.jit(get_anthropogenic_aod)
-        jit_aod_bg = jax.jit(get_background_aod)
-
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        year_weight = jnp.ones(params.nplumes)
-        ann_cycle = jnp.ones(params.nplumes)
-
-        # All should compile and run without errors
-        spatial_dist = jit_spatial(lats, lons, params)
-        aod_anth = jit_aod_anth(params, year_weight, ann_cycle, spatial_dist)
-        aod_bg = jit_aod_bg(params, ann_cycle, spatial_dist)
-
-        assert spatial_dist.shape == (params.nplumes, ncols)
-        assert aod_anth.shape == (ncols,)
-        assert aod_bg.shape == (ncols,)
-        assert jnp.all(jnp.isfinite(spatial_dist))
-        assert jnp.all(jnp.isfinite(aod_anth))
-        assert jnp.all(jnp.isfinite(aod_bg))
-
-    def test_gradient_computation(self):
-        """Test gradient computation for differentiability"""
-        params = AerosolParameters.default()
-
-        def total_aod(lats, lons):
-            spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-            return jnp.sum(get_anthropogenic_aod(
-                params, jnp.ones(params.nplumes), jnp.ones(params.nplumes), spatial_dist
-            ))
-        
-        ncols = 20
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        
-        # Should be able to compute gradients
-        grad_fn = jax.grad(total_aod, argnums=(0, 1))
-        grads = grad_fn(lats, lons)
-        
-        assert len(grads) == 2
-        assert grads[0].shape == (ncols,)
-        assert grads[1].shape == (ncols,)
-        assert jnp.all(jnp.isfinite(grads[0]))
-        assert jnp.all(jnp.isfinite(grads[1]))
-    
-    def test_conservation_properties(self):
-        """Test conservation properties of individual functions"""
-        params = AerosolParameters.default()
-        nlev, ncols = 8, 100
-        
-        # Create test height array
-        height_full = jnp.linspace(0, 15000, nlev)[:, jnp.newaxis]
-        height_full = jnp.repeat(height_full, ncols, axis=1)
-        
-        # Test that vertical profiles integrate to 1
-        profiles = get_vertical_profiles(height_full, params)
-        profile_integrals = jnp.sum(profiles, axis=1)
-        
-        assert jnp.allclose(profile_integrals, 1.0, rtol=1e-6)
-        
-        # Test background profile integrates to 1
-        bg_profile = get_background_vertical_profile(height_full)
-        bg_integral = jnp.sum(bg_profile)
-        
-        assert jnp.allclose(bg_integral, 1.0, rtol=1e-6)
-        
-        # Test that optical properties are reasonable weighted averages
-        lats = jnp.linspace(-90, 90, ncols)
-        lons = jnp.linspace(-180, 180, ncols)
-        spatial_dist = get_plume_spatial_distribution(lats, lons, params)
-        
-        aod_profile = jnp.ones((nlev, ncols)) * 0.1
-        ssa_profile, asy_profile, angstrom = get_optical_properties(aod_profile, spatial_dist, params)
-        
-        # Should be within range of parameter values
-        assert jnp.all(ssa_profile >= jnp.min(params.ssa550))
-        assert jnp.all(ssa_profile <= jnp.max(params.ssa550))
-        assert jnp.all(asy_profile >= jnp.min(params.asy550))
-        assert jnp.all(asy_profile <= jnp.max(params.asy550))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+        lats = jnp.linspace(-80, 80, 20)
+        lons = jnp.linspace(0, 350, 20)
+        gl, gn = jax.grad(total, argnums=(0, 1))(lats, lons)
+        assert jnp.all(jnp.isfinite(gl)) and jnp.all(jnp.isfinite(gn))

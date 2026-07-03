@@ -218,9 +218,14 @@ class ForcingData:
     # back silently to its ``vmr_global_means.json`` value.
     n2o_vmr: jnp.ndarray
 
-    # Aerosol temporal forcing (MACv2-SP plume weights). Today these are
-    # placeholder 1-D `(nplumes,)` arrays; the multi-axis version will land
-    # in the MACv2-SP fix PR (#437).
+    # Aerosol temporal forcing (MACv2-SP plume weights): year_weight is
+    # `(nplumes,)` (CEDS amplitude relative to 2005 for the current year),
+    # ann_cycle is `(nfeatures, nplumes)` (per-feature weekly cycle for the
+    # current date). The all-ones defaults mean "perpetual year-2005
+    # amplitude, no seasonal cycle" — a documented convenience, NOT the
+    # historical forcing; real time series come from MACv2.0-SP_v1.nc via
+    # the notebook-06 TimeSeries recipe (piecewise-constant per year /
+    # per 1/52-year bin, mind the _FillValue masking beyond 2016).
     aerosol_year_weight: jnp.ndarray
     aerosol_ann_cycle: jnp.ndarray
 
@@ -295,7 +300,7 @@ class ForcingData:
             ch4_vmr=ch4_vmr if ch4_vmr is not None else jnp.array(DEFAULT_CH4_VMR_PPMV),
             n2o_vmr=n2o_vmr if n2o_vmr is not None else jnp.array(DEFAULT_N2O_VMR_PPMV),
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
-            aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
+            aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones((2, nplumes)),
             solar=solar if solar is not None else SolarGeometry.zero(),
             ozone_climatology=(
                 ozone_climatology if ozone_climatology is not None
@@ -325,7 +330,7 @@ class ForcingData:
             ch4_vmr=ch4_vmr if ch4_vmr is not None else jnp.array(DEFAULT_CH4_VMR_PPMV),
             n2o_vmr=n2o_vmr if n2o_vmr is not None else jnp.array(DEFAULT_N2O_VMR_PPMV),
             aerosol_year_weight=aerosol_year_weight if aerosol_year_weight is not None else jnp.ones(nplumes),
-            aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones(nplumes),
+            aerosol_ann_cycle=aerosol_ann_cycle if aerosol_ann_cycle is not None else jnp.ones((2, nplumes)),
             solar=solar if solar is not None else SolarGeometry.zero(),
             ozone_climatology=(
                 ozone_climatology if ozone_climatology is not None

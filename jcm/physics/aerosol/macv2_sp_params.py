@@ -63,130 +63,85 @@ class AerosolParameters:
     @classmethod
     def default(cls, background_aod=0.02,
                 spa_prefactor=2000.0, spa_exponent=0.55) -> 'AerosolParameters':
-        """Create default MACv2-SP aerosol parameters
-        
-        These values are representative of the MACv2-SP climatology
-        for demonstration purposes. In a full implementation, these
-        would be read from netCDF files.
+        """Create the MACv2-SP v1 reference parameters.
+
+        Static plume geometry/optics transcribed verbatim from
+        ``MACv2.0-SP_v1.nc`` (Stevens et al. 2017 GMD supplement). Plume
+        order follows the file: 1 Europe, 2 North America, 3 East Asia,
+        4 South Asia, 5 North Africa (biomass), 6 South America (biomass),
+        7 Maritime Continent (biomass), 8 South-Central Africa (biomass),
+        9 Australia. The order is load-bearing: the 260-degree
+        longitudinal-wrap special case in the spatial kernel is keyed to
+        plume index 0 (Europe, whose trans-Atlantic tail crosses 0 E).
+        Longitudes use the file's 0-360 convention, matching the
+        dinosaur-derived column longitudes cached by the term.
         """
         nplumes = 9
         nfeatures = 2
-        
-        # Simplified plume centers (representative major emission regions)
-        plume_lat = jnp.array([
-            25.0,   # East Asia  
-            50.0,   # Europe
-            35.0,   # North America East
-            40.0,   # North America West
-            -10.0,  # Biomass burning Africa
-            -20.0,  # South America
-            20.0,   # India
-            15.0,   # Southeast Asia
-            30.0    # Middle East
-        ])
-        
-        plume_lon = jnp.array([
-            120.0,  # East Asia
-            10.0,   # Europe  
-            -80.0,  # North America East
-            -120.0, # North America West
-            20.0,   # Biomass burning Africa
-            -60.0,  # South America
-            75.0,   # India
-            110.0,  # Southeast Asia
-            45.0    # Middle East
-        ])
-        
-        # Vertical distribution parameters (beta function)
-        # Lower values = more surface-concentrated
-        beta_a = jnp.array([1.5, 1.8, 1.6, 1.7, 2.0, 1.9, 1.4, 1.6, 1.5])
-        beta_b = jnp.array([3.0, 4.0, 3.5, 3.8, 2.5, 3.2, 4.5, 3.5, 3.8])
-        
-        # AOD values at 550nm
-        aod_spmx = jnp.array([0.30, 0.15, 0.12, 0.08, 0.25, 0.20, 0.35, 0.28, 0.10])
-        aod_fmbg = jnp.array([0.02, 0.02, 0.01, 0.01, 0.03, 0.02, 0.04, 0.03, 0.02])
-        
-        # Optical properties at 550nm
-        asy550 = jnp.array([0.65, 0.68, 0.66, 0.67, 0.60, 0.62, 0.63, 0.61, 0.69])
-        ssa550 = jnp.array([0.92, 0.95, 0.94, 0.93, 0.85, 0.88, 0.89, 0.86, 0.96])
-        angstrom = jnp.array([1.8, 1.5, 1.6, 1.7, 1.2, 1.4, 2.0, 1.9, 1.3])
-        
-        # Spatial extent parameters [degrees]
-        # Feature 1 (primary), Feature 2 (secondary)
-        sig_lon_E = jnp.array([
-            [15.0, 20.0],  # East Asia
-            [12.0, 18.0],  # Europe
-            [10.0, 15.0],  # North America East
-            [12.0, 20.0],  # North America West
-            [20.0, 30.0],  # Biomass burning Africa
-            [15.0, 25.0],  # South America
-            [8.0, 12.0],   # India
-            [12.0, 18.0],  # Southeast Asia
-            [10.0, 15.0]   # Middle East
-        ]).T
-        
-        sig_lon_W = jnp.array([
-            [12.0, 15.0],  # East Asia
-            [10.0, 15.0],  # Europe
-            [8.0, 12.0],   # North America East
-            [10.0, 18.0],  # North America West
-            [18.0, 25.0],  # Biomass burning Africa
-            [12.0, 20.0],  # South America
-            [6.0, 10.0],   # India
-            [10.0, 15.0],  # Southeast Asia
-            [8.0, 12.0]    # Middle East
-        ]).T
-        
-        sig_lat_E = jnp.array([
-            [8.0, 12.0],   # East Asia
-            [10.0, 15.0],  # Europe
-            [6.0, 10.0],   # North America East
-            [8.0, 12.0],   # North America West
-            [15.0, 20.0],  # Biomass burning Africa
-            [10.0, 15.0],  # South America
-            [5.0, 8.0],    # India
-            [8.0, 12.0],   # Southeast Asia
-            [6.0, 10.0]    # Middle East
-        ]).T
-        
+
+        # Plume centers [degrees N / degrees E, 0-360].
+        plume_lat = jnp.array(
+            [49.4, 40.1, 30.0, 23.3, 3.5, -10.3, -1.0, -3.5, -20.0])
+        plume_lon = jnp.array(
+            [20.6, 277.5, 114.0, 88.0, 22.5, 298.0, 106.0, 16.0, 135.0])
+
+        # Beta-function vertical-profile shape parameters.
+        beta_a = jnp.array([1.5, 1.7, 1.3, 1.3, 7.0, 1.2, 2.3, 2.4, 1.4])
+        beta_b = jnp.array([17.0, 17.0, 13.0, 8.0, 35.0, 9.0, 23.0, 14.0, 11.0])
+
+        # 550 nm AOD at the plume source (anthropogenic max and fine-mode
+        # background), single-scattering albedo, asymmetry, Angstrom.
+        aod_spmx = jnp.array(
+            [0.148, 0.094, 0.636, 0.259, 0.211, 0.351, 0.257, 0.372, 0.075])
+        aod_fmbg = jnp.array([0.1, 0.1, 0.1, 0.1, 0.6, 0.6, 0.6, 0.6, 0.1])
+        ssa550 = jnp.array(
+            [0.93, 0.93, 0.93, 0.93, 0.87, 0.87, 0.87, 0.87, 0.93])
+        asy550 = jnp.full(9, 0.63)
+        angstrom = jnp.full(9, 2.0)
+
+        # Anisotropic Gaussian extents [degrees], (nplumes, 2 features)
+        # in the file; transposed to the struct's (nfeatures, nplumes).
         sig_lat_W = jnp.array([
-            [6.0, 10.0],   # East Asia
-            [8.0, 12.0],   # Europe
-            [5.0, 8.0],    # North America East
-            [6.0, 10.0],   # North America West
-            [12.0, 18.0],  # Biomass burning Africa
-            [8.0, 12.0],   # South America
-            [4.0, 6.0],    # India
-            [6.0, 10.0],   # Southeast Asia
-            [5.0, 8.0]     # Middle East
+            [6., 10.], [7., 25.], [6., 13.], [9., 15.], [6., 1.],
+            [6., 6.], [8., 4.], [9., 5.], [6., 12.],
         ]).T
-        
-        # Rotation angles [radians] 
+        sig_lat_E = jnp.array([
+            [6., 10.], [7., 8.], [6., 13.], [8., 17.], [6., 1.],
+            [6., 6.], [8., 4.], [9., 5.], [6., 12.],
+        ]).T
+        sig_lon_W = jnp.array([
+            [7., 35.], [20., 8.], [9., 15.], [15., 40.], [32., 3.],
+            [10., 8.], [12., 4.], [23., 7.], [10., 20.],
+        ]).T
+        sig_lon_E = jnp.array([
+            [13., 80.], [35., 11.], [8., 40.], [10., 15.], [6., 3.],
+            [10., 8.], [10., 6.], [14., 6.], [4., 20.],
+        ]).T
+
+        # Feature rotation angles [radians, clockwise] and weights.
         theta = jnp.array([
-            [0.0, 0.2],    # East Asia
-            [0.1, 0.0],    # Europe
-            [0.0, 0.1],    # North America East
-            [0.2, 0.0],    # North America West
-            [0.1, 0.3],    # Biomass burning Africa
-            [0.0, 0.1],    # South America
-            [0.3, 0.1],    # India
-            [0.1, 0.2],    # Southeast Asia
-            [0.0, 0.1]     # Middle East
+            [0.0, 0.174533],
+            [0.261799, 2.268928],
+            [0.698132, 0.261799],
+            [0.0, 0.261799],
+            [0.0, 0.0],
+            [-0.523599, -0.523599],
+            [0.174533, 0.0],
+            [-0.261799, -0.261799],
+            [0.0, -0.523599],
         ]).T
-        
-        # Feature weights (relative importance of each feature)
         ftr_weight = jnp.array([
-            [0.7, 0.3],    # East Asia
-            [0.8, 0.2],    # Europe
-            [0.75, 0.25],  # North America East
-            [0.6, 0.4],    # North America West
-            [0.5, 0.5],    # Biomass burning Africa
-            [0.7, 0.3],    # South America
-            [0.9, 0.1],    # India
-            [0.6, 0.4],    # Southeast Asia
-            [0.8, 0.2]     # Middle East
+            [0.4, 0.6],
+            [0.6, 0.4],
+            [0.857143, 0.142857],
+            [0.6, 0.4],
+            [0.8, 0.2],
+            [0.125, 0.875],
+            [0.4, 0.6],
+            [0.7, 0.3],
+            [0.8, 0.2],
         ]).T
-        
+
         return cls(
             nplumes=nplumes,
             nfeatures=nfeatures,
@@ -209,7 +164,44 @@ class AerosolParameters:
             spa_prefactor=jnp.array(spa_prefactor),
             spa_exponent=jnp.array(spa_exponent),
         )
-    
+
+    @classmethod
+    def from_dataset(cls, ds, background_aod=0.02,
+                     spa_prefactor=2000.0, spa_exponent=0.55) -> 'AerosolParameters':
+        """Build parameters from an opened ``MACv2.0-SP_v1.nc`` dataset.
+
+        Owns the (plume, feature) -> (feature, plume) transposes and the
+        jcm-specific extension fields, so callers (notebook 06) cannot
+        hit the missing-field TypeError again. The time-varying
+        ``year_weight`` / ``ann_cycle`` are forcing data, not parameters
+        — load those with the TimeSeries recipe in notebook 06 (mind the
+        _FillValue masking of year_weight beyond 2016).
+        """
+        as_arr = lambda name: jnp.asarray(ds[name].values)
+        as_arr_T = lambda name: jnp.asarray(ds[name].values.T)
+        return cls(
+            nplumes=int(ds.sizes["plume_number"]),
+            nfeatures=int(ds.sizes["plume_feature"]),
+            plume_lat=as_arr("plume_lat"),
+            plume_lon=as_arr("plume_lon"),
+            beta_a=as_arr("beta_a"),
+            beta_b=as_arr("beta_b"),
+            aod_spmx=as_arr("aod_spmx"),
+            aod_fmbg=as_arr("aod_fmbg"),
+            asy550=as_arr("asy550"),
+            ssa550=as_arr("ssa550"),
+            angstrom=as_arr("angstrom"),
+            sig_lon_E=as_arr_T("sig_lon_E"),
+            sig_lon_W=as_arr_T("sig_lon_W"),
+            sig_lat_E=as_arr_T("sig_lat_E"),
+            sig_lat_W=as_arr_T("sig_lat_W"),
+            theta=as_arr_T("theta"),
+            ftr_weight=as_arr_T("ftr_weight"),
+            background_aod=jnp.array(background_aod),
+            spa_prefactor=jnp.array(spa_prefactor),
+            spa_exponent=jnp.array(spa_exponent),
+        )
+
     def isnan(self):
         """Check for NaN values in parameters"""
         return tree_util.tree_map(jnp.isnan, self)
