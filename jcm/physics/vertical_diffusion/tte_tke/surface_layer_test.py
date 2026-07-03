@@ -2,7 +2,8 @@
 
 Cross-checks the JAX port against analytical limits and expected behaviour.
 The Fortran-against-Fortran agreement for the same column lives in
-``fortran_harness/compare_vdiff.py`` — that's the more rigorous test, but
+``fortran_harness/compare_vdiff.py`` (on the ``origin/fortran-harness-vdiff``
+branch, not in this tree) — that's the more rigorous test, but
 these are the fast unit tests for CI.
 """
 import jax.numpy as jnp

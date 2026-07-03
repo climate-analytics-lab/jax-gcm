@@ -1,8 +1,10 @@
 """Unit tests for the Lott-Miller (1997) SSO drag port.
 
 The bit-exact Fortran-comparison harness lives in
-``fortran_harness/compare_ssodrag.py`` and depends on a local Fortran
-build that is intentionally not shipped with the repository. These tests
+``fortran_harness/compare_ssodrag.py`` (on the
+``origin/fortran-harness-vdiff`` branch, not in this tree) and depends
+on a local Fortran build that is intentionally not shipped with the
+repository. These tests
 are sanity checks that run as part of the regular ``pytest`` suite.
 """
 import os

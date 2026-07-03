@@ -1,17 +1,18 @@
-"""Shallow cloud scheme for ECHAM physics
+"""Sundqvist diagnostic cloud scheme for ECHAM physics.
 
-This module implements a simplified cloud scheme focusing on:
+This module implements:
 - Cloud fraction diagnosis based on relative humidity
-- Cloud water and ice content
-- Basic condensation/evaporation processes
+  (:func:`calculate_cloud_fraction`, wrapped by the composable
+  :class:`SundqvistCloudFraction` term)
+- The linearised-Newton condensation/evaporation step
+  (:func:`condensation_evaporation`), consumed by the 2M cloud scheme
 
-Based on the Lohmann and Roeckner (1996) scheme used in ICON/ECHAM.
-
-Date: 2025-01-10
+Based on the Sundqvist (1989) / Lohmann and Roeckner (1996) scheme used
+in ICON/ECHAM (``mo_cover.f90`` / ``mo_cloud.f90``).
 """
 
 import jax.numpy as jnp
-from typing import NamedTuple, Tuple, Optional
+from typing import Tuple
 import tree_math
 
 import jcm.constants as c
@@ -19,7 +20,7 @@ import jcm.constants as c
 
 @tree_math.struct
 class CloudParameters:
-    """Configuration parameters for shallow cloud scheme"""
+    """Configuration parameters for the Sundqvist cloud scheme"""
 
     # Cloud fraction parameters
     crt: float           # Critical relative humidity aloft
@@ -115,30 +116,6 @@ def critical_relative_humidity(
     return config.crt + (config.crs - config.crt) * jnp.exp(
         1.0 - (surface_pressure_safe / pressure_safe) ** config.nex
     )
-
-
-class CloudState(NamedTuple):
-    """Cloud state variables"""
-    
-    cloud_fraction: jnp.ndarray     # Cloud fraction [0-1]
-    cloud_water: jnp.ndarray        # Cloud liquid water content (kg/kg)
-    cloud_ice: jnp.ndarray          # Cloud ice content (kg/kg)
-    rel_humidity: jnp.ndarray       # Relative humidity [0-1]
-    
-    # Diagnostics
-    total_cloud_cover: jnp.ndarray  # Column total cloud cover
-    
-    
-class CloudTendencies(NamedTuple):
-    """Tendencies from cloud condensation processes.
-
-    Precipitation is handled by cloud_microphysics, not here.
-    """
-
-    dtedt: jnp.ndarray         # Temperature tendency (K/s)
-    dqdt: jnp.ndarray          # Specific humidity tendency (kg/kg/s)
-    dqcdt: jnp.ndarray         # Cloud water tendency (kg/kg/s)
-    dqidt: jnp.ndarray         # Cloud ice tendency (kg/kg/s)
 
 
 def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -418,37 +395,6 @@ def calculate_cloud_fraction(
     return cloud_fraction, rel_humidity
 
 
-def partition_cloud_phase(
-    temperature: jnp.ndarray,
-    total_cloud_water: jnp.ndarray,
-    config: CloudParameters
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Partition cloud water between liquid and ice phases
-    
-    Args:
-        temperature: Temperature (K)
-        total_cloud_water: Total cloud condensate (kg/kg)
-        config: Cloud configuration
-        
-    Returns:
-        Tuple of (cloud_liquid, cloud_ice)
-
-    """
-    # Calculate ice fraction based on temperature
-    # All ice below t_ice, all liquid above tmelt
-    # Linear transition in between
-    ice_frac = jnp.clip(
-        (config.t_mix_max - temperature) / (config.t_mix_max - config.t_mix_min),
-        0.0, 1.0
-    )
-    
-    # Partition cloud water
-    cloud_ice = ice_frac * total_cloud_water
-    cloud_liquid = (1.0 - ice_frac) * total_cloud_water
-    
-    return cloud_liquid, cloud_ice
-
-
 def _qs_and_dqs_dt(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
@@ -614,94 +560,6 @@ def condensation_evaporation(
     dtedt = L_for_dT * cond_total / (c.cpd * dt)
 
     return dtedt, dqdt, dqcdt, dqidt
-
-
-def shallow_cloud_scheme(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    cloud_water: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-    surface_pressure: float,
-    dt: float,
-    config: Optional[CloudParameters] = None
-) -> Tuple[CloudTendencies, CloudState]:
-    """Run shallow cloud scheme
-
-    Args:
-        temperature: Temperature (K) [nlev] or scalar
-        specific_humidity: Specific humidity (kg/kg) [nlev] or scalar
-        pressure: Pressure (Pa) [nlev] or scalar
-        cloud_water: Cloud liquid water (kg/kg) [nlev] or scalar
-        cloud_ice: Cloud ice (kg/kg) [nlev] or scalar
-        surface_pressure: Surface pressure (Pa)
-        dt: Time step (s)
-        config: Cloud configuration
-
-    Returns:
-        Tuple of (tendencies, cloud_state)
-
-    """
-    if config is None:
-        config = CloudParameters.default()
-    
-    # Ensure all inputs are arrays
-    temperature = jnp.atleast_1d(temperature)
-    specific_humidity = jnp.atleast_1d(specific_humidity)
-    pressure = jnp.atleast_1d(pressure)
-    cloud_water = jnp.atleast_1d(cloud_water)
-    cloud_ice = jnp.atleast_1d(cloud_ice)
-        
-    # Calculate cloud fraction and relative humidity
-    cloud_fraction, rel_humidity = calculate_cloud_fraction(
-        temperature, specific_humidity, pressure, surface_pressure, config
-    )
-    
-    # Calculate condensation/evaporation
-    dtedt, dqdt, dqcdt, dqidt = condensation_evaporation(
-        temperature, specific_humidity, cloud_water, cloud_ice,
-        cloud_fraction, pressure, dt, config
-    )
-
-    # Stratospheric cutoff (ECHAM ``jks``): above ``cloud_top_pressure_pa`` the
-    # cloud fraction is forced to zero in ``calculate_cloud_fraction``.
-    # ``condensation_evaporation`` does not consume ``cloud_fraction``, so it
-    # would still condense vapour into qc/qi (and emit T/q tendencies) at those
-    # supposedly cloud-free levels. Gate the condensation here too so a masked
-    # level produces no hidden stratospheric cloud — keeping the standalone
-    # scheme consistent with the zeroed fraction.
-    in_troposphere = pressure >= config.cloud_top_pressure_pa
-    dtedt = jnp.where(in_troposphere, dtedt, 0.0)
-    dqdt = jnp.where(in_troposphere, dqdt, 0.0)
-    dqcdt = jnp.where(in_troposphere, dqcdt, 0.0)
-    dqidt = jnp.where(in_troposphere, dqidt, 0.0)
-
-    # Within-timestep condensation: update cloud water/ice with condensation
-    # so that microphysics (called next) sees non-zero values.
-    # Following ECHAM mo_cloud.f90 where zxlb += zcnd within the same call.
-    updated_cloud_water = jnp.maximum(cloud_water + dqcdt * dt, 0.0)
-    updated_cloud_ice = jnp.maximum(cloud_ice + dqidt * dt, 0.0)
-
-    # Total cloud cover (maximum overlap assumption)
-    total_cloud_cover = jnp.max(cloud_fraction)
-    
-    # Create output structures
-    tendencies = CloudTendencies(
-        dtedt=dtedt,
-        dqdt=dqdt,
-        dqcdt=dqcdt,
-        dqidt=dqidt,
-    )
-
-    state = CloudState(
-        cloud_fraction=cloud_fraction,
-        cloud_water=updated_cloud_water,
-        cloud_ice=updated_cloud_ice,
-        rel_humidity=rel_humidity,
-        total_cloud_cover=jnp.array(total_cloud_cover)
-    )
-
-    return tendencies, state
 
 
 # ---------------------------------------------------------------------------

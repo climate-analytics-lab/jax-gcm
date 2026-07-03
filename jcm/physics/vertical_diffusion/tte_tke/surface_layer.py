@@ -34,7 +34,8 @@ The Louis form matches ECHAM/ICON ~order-of-magnitude across the full
 ``Ri`` range; the Businger-Dyer form matches well near neutral but
 diverges a few× in strongly unstable conditions (``(1−16Ri)^(1/2)``
 grows linearly in |Ri| while Louis asymptotes). See
-``fortran_harness/PLAN.md`` for harness numbers.
+``fortran_harness/PLAN.md`` (on the ``origin/fortran-harness-vdiff``
+branch, not in this tree) for harness numbers.
 """
 from __future__ import annotations
 
