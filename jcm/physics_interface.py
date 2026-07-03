@@ -358,8 +358,24 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
 
     """
     def _cap_negative_tend(value, tend):
+        # Straight-through estimator (maintainability review B.1 cross-
+        # cutting): the primal keeps the hard non-negativity cap, but the
+        # cotangent passes through to the producing tendency unchanged.
+        # The bare where() rerouted gradients from the physics that
+        # produced the tendency onto the STATE whenever it fired — and it
+        # fires routinely wherever precip/evaporation drives q toward 0,
+        # silently detaching those cells from any parameter being
+        # calibrated. Positivity in the forward pass is unaffected.
         next_value = value + time_step * tend
-        return jnp.where(next_value < 0, -value / time_step, tend)
+        capped = jnp.where(next_value < 0, -value / time_step, tend)
+        # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
+        # tend)) is bitwise ``capped`` in the forward pass (the tend
+        # terms cancel exactly), unlike tend + stop_grad(capped - tend)
+        # whose re-association can undershoot the exact drain by an ulp
+        # and produce q < 0.
+        return jax.lax.stop_gradient(capped) + (
+            tend - jax.lax.stop_gradient(tend)
+        )
 
     clipped_dqdt = _cap_negative_tend(
         state.specific_humidity, tendencies.specific_humidity,

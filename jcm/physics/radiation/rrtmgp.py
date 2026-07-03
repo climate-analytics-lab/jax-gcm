@@ -534,9 +534,17 @@ def radiation_scheme_rrtmgp(
     n_gpt_lw = rrtmgp_instance.optics_lib.n_gpt_lw
     n_gpt_sw = rrtmgp_instance.optics_lib.n_gpt_sw
 
+    # Frozen-step option for calibration: with mcica_freeze_step != 0
+    # the mask key stops depending on the model step (see
+    # RadiationParameters.mcica_freeze_step).
+    model_step_eff = jnp.where(
+        parameters.mcica_freeze_step != 0.0,
+        jnp.zeros_like(model_step),
+        model_step,
+    )
     col_key = column_key(
         jax.random.PRNGKey(base_seed),
-        model_step=model_step, column_index=column_index,
+        model_step=model_step_eff, column_index=column_index,
     )
     key_lw, key_sw = jax.random.split(col_key)
     overlap_str = cloud_overlap_name(int(parameters.cloud_overlap))

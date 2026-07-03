@@ -61,6 +61,13 @@ class RadiationParameters:
     # struct stores the int code so it is JAX-traceable.
     cloud_overlap: int
     cloud_decorrelation_km: float  # decorrelation length for overlap=2
+    # Calibration aid (maintainability review B.2.7): when nonzero, the
+    # McICA sub-column key ignores the model step, so the stochastic
+    # cloud masks are a FIXED function of the column — the discrete
+    # per-gpoint draws stop injecting fresh gradient noise into every
+    # optimization step. Physics runs keep 0.0 (step-varying masks;
+    # correct time-mean radiative statistics).
+    mcica_freeze_step: float
 
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
@@ -76,6 +83,7 @@ class RadiationParameters:
                  min_cos_zenith=0.035, flux_epsilon=1e-6,
                  cld_tau_min=1e-6, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
+                 mcica_freeze_step=0.0,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
@@ -92,6 +100,7 @@ class RadiationParameters:
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
+            mcica_freeze_step=jnp.asarray(mcica_freeze_step),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
