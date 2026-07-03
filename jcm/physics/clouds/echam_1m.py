@@ -1076,7 +1076,11 @@ def cloud_microphysics_column_sweep(
         zsnmlt = jnp.minimum(0.99 * zsfl, zcons * ztdif)
         zrfl = zrfl + zsnmlt
         zsfl = zsfl - zsnmlt
-        zsmlt_rate = zsnmlt / jnp.maximum(mref, config.epsilon) / dt
+        # ``zsnmlt`` is a FLUX [kg/m²/s]; the mixing-ratio rate is
+        # flux/mref [1/s] with no further /dt (the extra /dt made melting
+        # cool ~1800× too little — snow melted without paying the latent
+        # heat of fusion, review finding 2.11).
+        zsmlt_rate = zsnmlt / jnp.maximum(mref, config.epsilon)
         dTdt_melt = -zlfdcp * zsmlt_rate
 
         # ---------- (2) pre-microphysics saturation adjustment ----------
@@ -1113,12 +1117,16 @@ def cloud_microphysics_column_sweep(
         # depletion in ``[0, zxlb]`` by construction so neither qc nor
         # qi can be driven negative.
 
-        # Density-correction factors used by accretion (zxrp1 needs the
-        # *forward* sqrt(rho/1.3)) and rain evap (Rotstayn needs the
-        # *inverse* sqrt(1.3/rho)).
+        # Density correction: ECHAM defines ``zqrho = 1.3/ρ`` and uses
+        # ``sqrt(zqrho)`` — i.e. sqrt(1.3/ρ) — in BOTH the Marshall-Palmer
+        # concentrations and the Rotstayn rain evaporation (mo_cloud.f90;
+        # review finding 2.13). The previous code used the inverted
+        # sqrt(ρ/1.3) for zxrp1 (its comment asserted the opposite of the
+        # reference), overestimating accretion by (1.3/ρ)^(8/9) — ~1.85×
+        # at 500 hPa.
         zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
-        zqrho_sqrt = jnp.sqrt(jnp.maximum(rho / 1.3, config.epsilon))
-        zqrho_sqrt_inv = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
+        zqrho_sqrt = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
+        zqrho_sqrt_inv = zqrho_sqrt
         zxrp1 = jnp.where(
             (zrfl > config.epsilon) & (zclcpre > config.epsilon),
             jnp.power(
@@ -1220,7 +1228,11 @@ def cloud_microphysics_column_sweep(
             c.alhc * (c.alhc / (c.rv * jnp.maximum(T1, 1.0)) - 1.0)
             / jnp.maximum(T1, 1.0) / 0.024
         )
-        zbst = T1 / jnp.maximum(zdv * esw, config.epsilon)
+        # Rotstayn's vapour-diffusion term is R_v·T/(D_v·e_sw) — ECHAM's
+        # ``zesat = esw/rv`` in the denominator (review finding 2.12; the
+        # missing R_v made rain evap ~1.5× too strong at 280 K, ~5× at
+        # 250 K).
+        zbst = c.rv * T1 / jnp.maximum(zdv * esw, config.epsilon)
         zthermo = jnp.maximum(zast + zbst, config.epsilon)
         zrfl_in_cf = zrfl / zclcpre_safe
         # Rotstayn (1997) per-area rate. The density factor here is the

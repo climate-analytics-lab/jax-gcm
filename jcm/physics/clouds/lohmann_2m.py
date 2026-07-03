@@ -988,8 +988,10 @@ def mixed_phase_deposition_and_corrections(
     # Saturation specific humidity (standard formula)
     # q_s = zes / (p - (1 - Rd/Rv)*zes)  — same form as ECHAM sat_spec_hum
     def _qsat(e, p):
+        # q_s = eps·e_s / (p − (1−eps)·e_s). The leading eps was missing
+        # (qsat 1.61× high — review finding 2.20); note 1/(1+vtmpc1) ≡ eps.
         e_clipped = jnp.minimum(e, 0.4 * p)   # safety clip (Fortran: zes < 0.4)
-        return e_clipped / (p - (1.0 - 1.0 / (1.0 + c.vtmpc1)) * e_clipped)
+        return c.eps * e_clipped / (p - (1.0 - c.eps) * e_clipped)
 
     qsat_tmp = _qsat(zes, pressure)          # pqsp1tmp: phase-appropriate
     qsat_tmp_water = _qsat(zesw, pressure)   # zqsp1tmpw: always over water
@@ -1004,10 +1006,20 @@ def mixed_phase_deposition_and_corrections(
     #    In Fortran: zqst1 uses tlucuap1 (lookup at it+1), approximated here
     #    by evaluating at (T_tmp + 1 K) and taking finite difference.
     # -------------------------------------------------------------------------
-    ztmp_ice_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
-    ztmp_water_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
+    # ECHAM mo_convect_tables Tetens pairs: ice c3ies=21.875/c4ies=7.66,
+    # water c3les=17.269/c4les=35.86, prefactor c2es = c1es·(Rd/Rv) =
+    # 610.78·eps — the lookup table tlucua stores eps·e_s, which is why the
+    # /pressure form below carries no explicit eps. The previous code used
+    # c.ak (the BOLTZMANN constant, 1.38e-23) as the exponent coefficient
+    # and c.p0s1_bg (101325 Pa!) as the prefactor: exp(~0)·101325/p pinned
+    # zqst1 at its 0.5 cap, made zdqsdt ~ +490 and the zqcon
+    # thermodynamic factor ~1e-6 — suppressing internal condensation/
+    # deposition by six orders of magnitude (review finding 1.2).
+    ztmp_ice_p1 = jnp.minimum(21.875 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
+    ztmp_water_p1 = jnp.minimum(17.269 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
 
-    zes_p1 = jnp.where(lo2, c.p0s1_bg * jnp.exp(ztmp_ice_p1), c.p0s1_bg * jnp.exp(ztmp_water_p1))
+    c2es = 610.78 * c.eps
+    zes_p1 = jnp.where(lo2, c2es * jnp.exp(ztmp_ice_p1), c2es * jnp.exp(ztmp_water_p1))
     zqst1 = zes_p1 / pressure
     zqst1 = jnp.minimum(zqst1, 0.5)
     zqst1 = zqst1 / (1.0 - c.vtmpc1 * zqst1)
@@ -3539,7 +3551,11 @@ def cloud_microphysics_2m(
         cloud_ice_evap=zero,         # not extracted from scan
         ice_flux_melt=zero,          # not extracted from scan
         pxitec=zero,
-        pxlevap=rain_evap,
+        # pxlevap is the clear-cell CLOUD-liquid evaporation (ECHAM
+        # zxlevap), not rain evaporation — passing rain_evap here as well
+        # as via pevp double-counted its moistening/cooling and removed
+        # the water from both qc and the rain flux (review finding 2.21).
+        pxlevap=zero,
         pxltec=zero,
         pxisub=zero,
         snow_sublimation_mmr=snow_sublim,
