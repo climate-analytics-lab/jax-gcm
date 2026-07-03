@@ -11,6 +11,7 @@ Based on the Sundqvist (1989) / Lohmann and Roeckner (1996) scheme used
 in ICON/ECHAM (``mo_cover.f90`` / ``mo_cloud.f90``).
 """
 
+import jax
 import jax.numpy as jnp
 from typing import Tuple
 import tree_math
@@ -63,6 +64,12 @@ class CloudParameters:
     # Set to 0 to disable the cutoff.
     cloud_top_pressure_pa: float
 
+    # Smoothing widths (maintainability review B.2.4); differentiable,
+    # annealable; width -> 0 recovers the hard constructs.
+    smooth_b0: float         # soft-clip width of the b0 ramp [-]
+    smooth_inv_score: float  # softmax sharpness of the inversion pick [K/m]
+    smooth_inv_thr: float    # width of the cinv stability gate [K/m]
+
     @classmethod
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
                  csatsc=0.7, cinv=0.25,
@@ -70,7 +77,9 @@ class CloudParameters:
                  ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
-                 cloud_top_pressure_pa=1000.0) -> 'CloudParameters':
+                 cloud_top_pressure_pa=1000.0,
+                 smooth_b0=0.02, smooth_inv_score=5.0e-4,
+                 smooth_inv_thr=2.0e-4) -> 'CloudParameters':
         """Return default cloud parameters.
 
         Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
@@ -97,6 +106,9 @@ class CloudParameters:
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
             cloud_top_pressure_pa=jnp.array(cloud_top_pressure_pa),
+            smooth_b0=jnp.array(smooth_b0),
+            smooth_inv_score=jnp.array(smooth_inv_score),
+            smooth_inv_thr=jnp.array(smooth_inv_thr),
         )
 
 
@@ -278,32 +290,40 @@ def _stratocumulus_zsat(
     # (otherwise the layer is too unstable to sustain stratocumulus).
     # Use the SAME ``-cinv*g/cp`` initial value ECHAM seeds ``zdtmin``
     # with, so any ``dTdz_clipped > -cinv*g/cp`` qualifies.
+    # Smooth inversion selection (review B.2.4). The argmax pick +
+    # one-hot .at[knvb].set made csatsc and cinv gradient-dead (the
+    # level index is piecewise-constant in T, and cinv appeared only in
+    # an inequality). Replaced by:
+    #   * a smooth validity weight per level: the cinv stability gate
+    #     becomes a sigmoid in (dTdz_clipped - threshold), so cinv is
+    #     in the value;
+    #   * a softmax over the (BL-masked) clipped lapse with a small
+    #     downward depth bias reproducing ECHAM's take-the-LOWEST-level
+    #     tie-breaking on the clip-to-0 plateau;
+    #   * a per-level zsat candidate (csatsc + zgam_k), applied with
+    #     weight a_k — enhancement smeared over the 1-3 near-tied
+    #     levels instead of exactly one (accepted physics risk in the
+    #     review). Widths -> 0 recover the hard pick.
     dtdz_threshold = -config.cinv * c.grav / c.cpd
     in_bl = (z_full >= config.inversion_z_min) & (z_full <= config.inversion_z_max)
-    valid = in_bl & (dTdz_clipped > dtdz_threshold)
-    # Set invalid levels to a strongly-negative sentinel so argmax skips them.
-    masked = jnp.where(valid, dTdz_clipped, -1e10)
-    # ECHAM's upward scan takes a new level only on STRICT improvement, so
-    # with the clip-to-0 plateau the first true inversion met going up from
-    # the surface wins — the LOWEST qualifying level. argmax returns the
-    # first (highest-altitude) maximum, so take the last occurrence.
-    knvb = (nlev - 1) - jnp.argmax(masked[::-1])
-    has_inversion = jnp.any(valid)
-
-    # zgam = max(0, -zdtdz · cp/g) evaluated on the UNCLIPPED lapse
-    # (mo_cover.f90:243-245 recomputes zdtdz at jb without the MIN(0,·)):
-    # at a true inversion (zdtdz > 0) zgam = 0 → zsat = csatsc (full
-    # boost); merely-stable layers weaken it toward zsat = 1.
-    zgam_at_knvb = jnp.maximum(-dTdz[knvb] * c.cpd / c.grav, 0.0)
-    zsat_value = jnp.where(
-        has_inversion & enhance_allowed,
-        jnp.minimum(1.0, config.csatsc + zgam_at_knvb),
-        1.0,
+    v_valid = jnp.where(
+        in_bl,
+        jax.nn.sigmoid(
+            (dTdz_clipped - dtdz_threshold) / config.smooth_inv_thr
+        ),
+        0.0,
     )
+    # Depth bias: ~1% of the score width per level, growing toward the
+    # surface (larger k), so exact plateau ties resolve to the lowest
+    # qualifying level exactly as ECHAM's strict-improvement scan.
+    depth_bias = 0.01 * config.smooth_inv_score * jnp.arange(nlev)
+    score = jnp.where(in_bl, dTdz_clipped, -1e10) + depth_bias
+    a_lev = jax.nn.softmax(score / config.smooth_inv_score) * v_valid
 
-    # Build zsat array: 1 everywhere, zsat_value at knvb only.
-    zsat = jnp.ones(nlev)
-    zsat = zsat.at[knvb].set(zsat_value)
+    zgam_lev = jnp.maximum(-dTdz * c.cpd / c.grav, 0.0)
+    zsat_cand = jnp.minimum(1.0, config.csatsc + zgam_lev)
+    enhance_f = jnp.asarray(enhance_allowed, dtype=zsat_cand.dtype)
+    zsat = 1.0 - a_lev * enhance_f * (1.0 - zsat_cand)
     return zsat
 
 
@@ -366,8 +386,18 @@ def calculate_cloud_fraction(
     zsat = _stratocumulus_zsat(temperature, pressure, config, enhance_allowed=enhance_allowed)
     zqr = specific_humidity / (qs * zsat + config.epsilon)
 
-    b0 = (zqr - rhc) / (1.0 - rhc + config.epsilon)
-    b0 = jnp.clip(b0, 0.0, 1.0)
+    b0_raw = (zqr - rhc) / (1.0 - rhc + config.epsilon)
+    # Softplus soft-clip to [0, 1] (review B.2.4): the hard clip made
+    # d(cf)/d(crt) exactly zero over the entire sub-critical and
+    # saturated RH ranges (~62% of state space) and fed the sqrt map an
+    # exact 1 at saturation (infinite slope). The softplus pair equals
+    # the identity in the interior, decays exponentially instead of
+    # snapping at the edges, and — because b0 approaches 1 only
+    # asymptotically — bounds the d(cc)/d(b0) slope at saturation.
+    # Width -> 0 recovers the hard clip.
+    w_b0 = config.smooth_b0
+    b0 = (w_b0 * jax.nn.softplus(b0_raw / w_b0)
+          - w_b0 * jax.nn.softplus((b0_raw - 1.0) / w_b0))
 
     # Cloud fraction: cc = 1 - sqrt(1 - b0). Guard sqrt against b0 == 1
     # via the double-where pattern so ``jax.grad`` doesn't pick up a
@@ -568,7 +598,6 @@ def condensation_evaporation(
 
 from typing import ClassVar  # noqa: E402
 
-import jax  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
