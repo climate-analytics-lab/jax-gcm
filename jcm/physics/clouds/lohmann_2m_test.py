@@ -1266,7 +1266,6 @@ class TestColumnWaterConservation2M:
         deck is warmer than the snow path's effective range, so rain is
         the expected exit).
         """
-        import numpy as np
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
         from jcm.physics.clouds.sundqvist import saturation_specific_humidity
