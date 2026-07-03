@@ -2106,12 +2106,10 @@ def update_precip_fluxes(
     zzdrr = zcons2 * pressure_thickness * rain_formation
     zzdrs = zcons2 * pressure_thickness * (snow_formation + snow_accretion)
 
-    # If ice_flux_from_above is non-zero it must be included (caller should pass pxiflux at top level)
-    # Top-level melting: convert part of snow -> rain if T > tmelt (uses plsdcp/plvdcp)
-    # Note: Fortran gated with (kk .EQ. klev); here caller should incorporate ice_flux_from_above only when appropriate.
-    # We perform the melting step unconditionally where ice_flux_from_above>0 and temp_tmp>tmelt to preserve behaviour.
-    has_incoming_ice = ice_flux_from_above > 0.0
-    zzdrs = zzdrs + jnp.where(has_incoming_ice, ice_flux_from_above, 0.0)
+    # Fold the sedimenting ice flux into the snow flux. The caller gates
+    # this with ECHAM's ``kk == klev`` condition (bottom level only) by
+    # passing zero elsewhere — see the column sweep.
+    zzdrs = zzdrs + jnp.maximum(ice_flux_from_above, 0.0)
 
     # 2) Top-level Melting of Incoming Ice into Rain
     # melting capacity (per area) limited by available energy
@@ -2119,7 +2117,7 @@ def update_precip_fluxes(
     # limit melting to a fraction xsec*zzdrs (same heuristic as Fortran)
     ztmp2 = jnp.minimum(xsec * zzdrs, melt_capacity)
     # apply melting where incoming ice exists and melting capacity>0
-    melt_applied = jnp.where(has_incoming_ice, ztmp2, 0.0)
+    melt_applied = jnp.where(ice_flux_from_above > 0.0, ztmp2, 0.0)
     zzdrr = zzdrr + melt_applied
     zzdrs = zzdrs - melt_applied
     # psmlt accumulates melting mass in kg/kg units (Fortran: psmlt += ztmp2/(zcons2*pdp))
@@ -3407,6 +3405,7 @@ def cloud_microphysics_2m(
          t_k, melt_k,
          q_k, dpg_k, subice_k, subwat_k, qsi_k, qsw_k, thermo_k,
          rain_form_k, snow_accr_k, snow_form_k,
+         is_bottom_k,
          ) = level_in
 
         # --- Sedimentation ---
@@ -3467,7 +3466,12 @@ def cloud_microphysics_2m(
             rain_evap_k, lsdcp, lvdcp,
             rain_form_k, snow_accr_k, snow_form_k,
             snow_sublim_k, t_k,
-            ice_flux,
+            # ECHAM folds the sedimenting ice flux into the snow flux ONLY
+            # at the bottom level (Fortran ``kk == klev`` gate). Passing
+            # the undepleted carry at every level counted a constant
+            # cirrus flux into snow once per level below it — ~nlev× snow
+            # (review finding 2.17).
+            jnp.where(is_bottom_k, ice_flux, 0.0),
             precip_cover, rain_flux, snow_flux, snow_melt,
             dt,
         )
@@ -3479,6 +3483,8 @@ def cloud_microphysics_2m(
         return carry_out, level_out
 
     # Stack per-level inputs: shape (nlev,) each → scanned along axis 0.
+    nlev_scan = temperature.shape[0]
+    is_bottom_level = jnp.arange(nlev_scan) == (nlev_scan - 1)
     scan_inputs = (
         cloud_fraction, air_density_correction, pressure_thickness,
         air_density, inv_rho, qi_after_cold, icnc_cold, cdnc_cold,
@@ -3486,6 +3492,7 @@ def cloud_microphysics_2m(
         specific_humidity, dp_over_g, subsat_wrt_ice, subsat_wrt_water,
         qsat_ice, qsat_water, thermo_term_water,
         qr_gain_warm, psacl, snow_formation_gridmean,
+        is_bottom_level,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
