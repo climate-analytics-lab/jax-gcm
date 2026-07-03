@@ -11,6 +11,7 @@ Based on ICON mo_cuascent.f90
 Date: 2025-01-09
 """
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from typing import NamedTuple, Tuple
@@ -125,6 +126,7 @@ def calculate_updraft(
     mass_flux_base: float,
     config: ConvectionParameters,
     land_fraction: jnp.ndarray = jnp.array(0.0),
+    type_weights: jnp.ndarray | None = None,
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -219,12 +221,31 @@ def calculate_updraft(
     # against it.
     k_levels = jnp.arange(nlev)
     p_base_const = jnp.full(nlev, pressure[kbase])
+    # Type-blended base entrainment and deep-convection weight. With the
+    # smooth type selection (tiedtke_nordeng.py) the per-type entrainment
+    # rates combine by the softmax weights instead of a hard ktype
+    # select, so entrpen/entrscv/entrmid keep gradients across the type
+    # thresholds; w_deep likewise gates the Nordeng organized
+    # entrainment/detrainment smoothly. ``type_weights=None`` (legacy
+    # callers/tests) falls back to the hard one-hot of ktype.
+    if type_weights is None:
+        type_weights = jnp.stack([
+            jnp.asarray(ktype == 1, dtype=temperature.dtype),
+            jnp.asarray(ktype == 2, dtype=temperature.dtype),
+            jnp.asarray(ktype == 3, dtype=temperature.dtype),
+        ])
+    entr_base_blend = (type_weights[0] * config.entrpen
+                       + type_weights[1] * config.entrscv
+                       + type_weights[2] * config.entrmid)
+    w_deep = type_weights[0]
     level_inputs = (
         k_levels, temperature, humidity, pressure, layer_thickness, rho,
         jnp.full(nlev, kbase), jnp.full(nlev, ktop),
         jnp.full(nlev, ktype),
-        jnp.full(nlev, config.entrpen), jnp.full(nlev, config.entrscv),
-        jnp.full(nlev, config.entrmid),
+        jnp.full(nlev, entr_base_blend), jnp.full(nlev, w_deep),
+        jnp.full(nlev, config.smooth_term_buoy),
+        jnp.full(nlev, config.smooth_term_mf),
+        jnp.full(nlev, config.smooth_precip_pa),
         jnp.full(nlev, config.cprcon),
         p_base_const,
         jnp.full(nlev, zdnoprc_col),
@@ -234,7 +255,8 @@ def calculate_updraft(
     def updraft_step_with_config(carry_tuple, inputs):
         carry, zbuoy_accum = carry_tuple
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
-         entrpen, entrscv, entrmid, cprcon, p_at_base, zdnoprc) = inputs
+         entr_base_in, w_deep_in, w_term_buoy, w_term_mf, w_precip,
+         cprcon, p_at_base, zdnoprc) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -246,9 +268,8 @@ def calculate_updraft(
         skip = jnp.logical_not(should_compute)
 
         def compute_updraft():
-            # Base turbulent entrainment rate by convection type
-            entr_base = jnp.where(ktype == 1, entrpen,
-                                  jnp.where(ktype == 2, entrscv, entrmid))
+            # Type-blended base turbulent entrainment rate (see above)
+            entr_base = entr_base_in
 
             # Humidity-dependent turbulent entrainment: drier environment
             # entrains more
@@ -267,12 +288,10 @@ def calculate_updraft(
             prev_buoy = carry.buoy[next_level_for_buoy]
             # Only positive buoyancy drives organized entrainment
             zbuoyz = jnp.maximum(prev_buoy, 0.0)
-            # Active only for deep convection (ktype=1)
-            entr_org = jnp.where(
-                ktype == 1,
-                zbuoyz * 0.5 / (1.0 + zbuoy_accum),
-                0.0,
-            )
+            # Organized entrainment scales with the smooth deep weight
+            # (1 for a solidly deep column; fades across the 1000 J/kg
+            # type boundary instead of switching).
+            entr_org = w_deep_in * zbuoyz * 0.5 / (1.0 + zbuoy_accum)
             entr = jnp.clip(entr_turb + entr_org, 0.0, 0.01)
 
             # Turbulent detrainment equals turbulent entrainment (ECHAM
@@ -293,7 +312,7 @@ def calculate_updraft(
             # Normalize: peak value of tan(pi/2 * 0.75 - pi/4) is bounded
             # Scale strength with cloud depth
             detr_strength = 0.003 * jnp.sqrt(cloud_depth / 10.0)
-            detr_org = jnp.where(ktype == 1, detr_strength * org_profile, 0.0)
+            detr_org = w_deep_in * detr_strength * org_profile
 
             detr = detr_turb + detr_org
             
@@ -373,11 +392,17 @@ def calculate_updraft(
             # is built in ``calculate_updraft`` from
             # ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``
             # blended by ``land_fraction``.
-            in_precip_zone = (p_at_base - pressure) >= zdnoprc
+            # Smooth precip onset: the hard ``depth >= zdnoprc`` gate put
+            # zdnoprc only in an inequality (identically zero gradient —
+            # unlearnable). A sigmoid over the depth excess makes the
+            # ocean/land onset thresholds calibratable; width → 0
+            # recovers the hard gate.
+            precip_zone_w = jax.nn.sigmoid(
+                ((p_at_base - pressure) - zdnoprc) / w_precip
+            )
             geoh_diff = c.grav * dz  # ≈ pgeoh(jk) - pgeoh(jk+1) in ECHAM
             cprcon_eff = jnp.where(
-                jnp.logical_and(mfu_new > mfu_threshold, in_precip_zone),
-                cprcon, 0.0,
+                mfu_new > mfu_threshold, cprcon * precip_zone_w, 0.0,
             )
             lu_after_precip = lu_new / (1.0 + cprcon_eff * geoh_diff)
             pdmfup = jnp.maximum(
@@ -403,23 +428,25 @@ def calculate_updraft(
             # below 1% of the base value — ECHAM's termination criterion in
             # `mo_cuascent.f90`), terminate the updraft here. This replaces the
             # previous fixed `ktop` which ignored the environment.
+            # Tapered cloud-top termination (review B.2.3). The hard
+            # ``where(buoy < 0 | mfu < 1%·mfb, 0, mfu)`` had a cliff:
+            # precip smooth in entrpen up to a critical value, then
+            # exactly 0 with zero gradient beyond. The survival fraction
+            # is now the product of two sigmoids — buoyancy (width
+            # ~3e-4 m/s² ≈ 0.01 K, so a solidly buoyant plume keeps
+            # >99.99% of its flux) and the mass-flux floor. The
+            # non-surviving fraction detrains its condensate here,
+            # exactly like the previous all-or-nothing dump; widths → 0
+            # recover the hard termination.
             above_cloud_base = k < kbase
-            mfu_too_small = carry.mfu[next_level] < 0.01 * mass_flux_base
-            terminate = jnp.logical_and(
-                above_cloud_base,
-                jnp.logical_or(buoy_new < 0.0, mfu_too_small),
+            surv_buoy = jax.nn.sigmoid(buoy_new / w_term_buoy)
+            surv_mf = jax.nn.sigmoid(
+                (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
+                 - 0.01) / w_term_mf
             )
-            # Cloud-top condensate dump (ECHAM's cloud-top block detrains the
-            # remaining plume condensate as plude — ``plude(kctop-1)`` from
-            # ``pmful``): when the updraft terminates here, everything the
-            # plume still carries detrains into this layer instead of
-            # disappearing with the zeroed mass flux.
-            plude_layer = jnp.where(
-                terminate,
-                plude_layer + lu_new * mfu_new,
-                plude_layer,
-            )
-            mfu_new = jnp.where(terminate, 0.0, mfu_new)
+            survival = jnp.where(above_cloud_base, surv_buoy * surv_mf, 1.0)
+            plude_layer = plude_layer + lu_new * mfu_new * (1.0 - survival)
+            mfu_new = mfu_new * survival
 
             # Update state
             new_state = carry._replace(

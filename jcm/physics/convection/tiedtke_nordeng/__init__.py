@@ -1,32 +1,18 @@
-"""Convection parameterizations for ECHAM physics
+"""Tiedtke-Nordeng mass-flux convection scheme (deep/shallow/mid-level).
 
-This module contains the Tiedtke-Nordeng mass-flux convection scheme
-including deep and shallow convection, convective adjustment, and
-associated cloud and precipitation processes.
+Only the API consumed via this package is re-exported (the composable
+physics term and its parameter struct); import scheme internals from
+their submodules (``.tiedtke_nordeng``, ``.updraft``, ``.downdraft``,
+``.adjustment``, ``.flux_tendencies``) directly so grep-for-callers
+stays meaningful.
 """
 
 from .tiedtke_nordeng import (
-    ConvectionData,
     ConvectionParameters,
-    ConvectionState,
-    ConvectionTendencies,
     TiedtkeConvection,
-    tiedtke_nordeng_convection,
-)
-from .adjustment import (
-    saturation_adjustment,
-    convective_adjustment,
-    energy_conservation_check
 )
 
 __all__ = [
-    "tiedtke_nordeng_convection",
-    "ConvectionData",
     "ConvectionParameters",
-    "ConvectionState",
-    "ConvectionTendencies",
     "TiedtkeConvection",
-    "saturation_adjustment",
-    "convective_adjustment",
-    "energy_conservation_check"
 ]

@@ -153,7 +153,9 @@ class TestRCEConvection(unittest.TestCase):
         peak lives in the mid-to-upper troposphere (350-650 hPa) rather
         than the boundary layer.
 
-        See ``fortran_harness/PLAN.md`` Bug C — the deviation-flux
+        See ``fortran_harness/PLAN.md`` Bug C (on the
+        ``origin/fortran-harness-vdiff`` branch, not in this tree) —
+        the deviation-flux
         formulation differs from ECHAM's full-flux + explicit
         detrainment, so absolute heating profile won't match Fortran
         bit-for-bit until we mirror the ECHAM formula. This test

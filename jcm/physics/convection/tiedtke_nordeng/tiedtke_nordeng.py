@@ -88,6 +88,19 @@ class ConvectionParameters:
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
     entrdd: float            # Downdraft fractional entrainment rate (m⁻¹)
 
+    # Smooth-trigger parameters (maintainability review Part B). The
+    # hard CAPE/type/termination gates gave every convection parameter an
+    # exactly-zero gradient over most of state space; each gate is now a
+    # sigmoid whose WIDTH is itself a differentiable, annealable
+    # parameter — width → 0 recovers the hard behaviour exactly.
+    trigger_cape: float      # CAPE activation threshold (J/kg; ex-hardcoded 100)
+    smooth_trigger_j: float  # Sigmoid width of the CAPE trigger (J/kg)
+    smooth_type_j: float     # Width of the deep/other blend at 1000 J/kg (J/kg)
+    smooth_rh: float         # Width of the moist-free-troposphere RH gate
+    smooth_term_buoy: float  # Updraft-termination buoyancy width (m/s²; ~3e-4 ≈ 0.01 K)
+    smooth_term_mf: float    # Updraft-termination mass-flux-ratio width
+    smooth_precip_pa: float  # zdnoprc precip-onset width (Pa)
+
     # Switches (ECHAM namelist lmfdudv; carried as a traced bool so the
     # struct stays a plain tree_math pytree)
     lmfdudv: jnp.ndarray
@@ -98,6 +111,10 @@ class ConvectionParameters:
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
                  cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
                  cmfctop=0.2, cmfdeps=0.3, entrdd=2.0e-4,
+                 trigger_cape=100.0, smooth_trigger_j=25.0,
+                 smooth_type_j=100.0, smooth_rh=0.02,
+                 smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
+                 smooth_precip_pa=2.0e3,
                  lmfdudv=True) -> 'ConvectionParameters':
         """Return default convection parameters"""
         return cls(
@@ -118,6 +135,13 @@ class ConvectionParameters:
             cmfctop=jnp.array(cmfctop),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
+            trigger_cape=jnp.array(trigger_cape),
+            smooth_trigger_j=jnp.array(smooth_trigger_j),
+            smooth_type_j=jnp.array(smooth_type_j),
+            smooth_rh=jnp.array(smooth_rh),
+            smooth_term_buoy=jnp.array(smooth_term_buoy),
+            smooth_term_mf=jnp.array(smooth_term_mf),
+            smooth_precip_pa=jnp.array(smooth_precip_pa),
             lmfdudv=jnp.array(lmfdudv),
         )
 
@@ -667,52 +691,68 @@ def tiedtke_nordeng_convection(
     rh_env = humidity / jnp.maximum(qsat_env, 1e-12)
     # Free-troposphere mask: ~700-300 hPa
     free_trop_mask = jnp.logical_and(pressure < 70_000.0, pressure > 30_000.0)
-    has_moist_free_trop = jnp.any(
-        jnp.logical_and(free_trop_mask, rh_env > 0.90)
-    )
 
-    def select_active_conv_type():
-        # Deep convection if CAPE is strong
-        def deep_branch():
-            return jnp.array(1)
-        # Otherwise, mid-level if free-trop moist conditions met,
-        # else shallow.
-        def mid_or_shallow_branch():
-            return lax.cond(has_moist_free_trop, lambda: jnp.array(3),
-                            lambda: jnp.array(2))
-        return lax.cond(cape > 1000.0, deep_branch, mid_or_shallow_branch)
+    # --- Smooth trigger and type selection (maintainability review B.2.2) --
+    # The hard ``lax.cond(cape > 100)`` activation and the deep/shallow/mid
+    # ``lax.switch`` made every convection parameter's gradient exactly zero
+    # in non-convecting columns and discontinuous at the thresholds. Both
+    # gates are now sigmoids: the trigger weight scales the closure mass
+    # flux (a "fuzzy convective trigger"), and the type weights blend the
+    # per-type entrainment rates and closures. Widths are differentiable
+    # parameters; width → 0 recovers the hard scheme exactly.
+    #
+    # Activation semantics preserved from the #529/#535 flicker fixes:
+    # trigger = [cape above the main threshold] OR [cape above a small
+    # buoyancy floor AND the surface supplies moisture]. The supply gate
+    # (1e-7 kg/m²/s) is a guard against a structurally absent surface
+    # term, not a tunable — it stays hard.
+    # Rescaled sigmoid: exactly 0 at cape = 0 (no phantom convection in
+    # stable columns — a bare sigmoid leaves ~2% of the closure flux on
+    # at zero CAPE), rising smoothly through ~0.5 at the threshold and
+    # saturating to 1. Gradients are nonzero for any cape > 0.
+    def _trigger_sigmoid(cape_v, threshold, width):
+        s0 = jax.nn.sigmoid(-threshold / width)
+        raw = jax.nn.sigmoid((cape_v - threshold) / width)
+        return jnp.maximum((raw - s0) / (1.0 - s0), 0.0)
 
-    # Activation (ECHAM ``ldcum``): convection is on when a cloud base exists
-    # AND either there is strong CAPE, *or* the column is buoyant (CAPE above a
-    # small floor) and the surface supplies moisture to sustain it. ECHAM keys
-    # activation off the moisture supply plus a buoyant updraft (``zdqpbl`` and
-    # ``ldcum``, mo_cumastr.f90), NOT off a CAPE threshold alone: gating on
-    # CAPE>100 makes convection switch fully off the moment a burst consumes
-    # CAPE, then back on as radiation rebuilds it — the on/off cloud-base
-    # flicker fixed in #529. But the moisture supply alone is not a sufficient
-    # trigger: ``find_cloud_base`` returns the LCL, which exists in many
-    # statically stable columns (CAPE==0, no level of free convection), so
-    # ``moisture_supply > 0`` fired deep convection in stable subsiding columns
-    # and ran the temperature away on a T63L47 real-orography spin-up. The
-    # ``cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER`` floor restores ECHAM's buoyant-
-    # updraft requirement while staying well below an actively-convecting
-    # column's CAPE, so continuous (flicker-free) convection is preserved.
-    convection_active = jnp.logical_and(
-        has_cloud_base,
-        jnp.logical_or(
-            cape > 100.0,
-            jnp.logical_and(
-                cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER,
-                moisture_supply > _MIN_MOISTURE_SUPPLY,
-            ),
-        ),
+    w_cape_main = _trigger_sigmoid(
+        cape, config.trigger_cape, config.smooth_trigger_j
     )
-    conv_type = lax.cond(
+    w_cape_floor = _trigger_sigmoid(
+        cape, _MIN_CAPE_FOR_MOISTURE_TRIGGER, config.smooth_trigger_j
+    )
+    supply_ok = (moisture_supply > _MIN_MOISTURE_SUPPLY).astype(cape.dtype)
+    trigger_weight = jnp.maximum(w_cape_main, w_cape_floor * supply_ok)
+
+    # Type weights (deep, shallow, mid). Deep engages smoothly at
+    # 1000 J/kg; the shallow/mid split follows a smooth version of the
+    # moist-free-troposphere criterion (max over 700-300 hPa levels of a
+    # sigmoid in RH about 0.90).
+    w_deep = jax.nn.sigmoid((cape - 1000.0) / config.smooth_type_j)
+    rh_weight_per_level = jnp.where(
+        free_trop_mask,
+        jax.nn.sigmoid((rh_env - 0.90) / config.smooth_rh),
+        0.0,
+    )
+    w_moist_trop = jnp.max(rh_weight_per_level)
+    type_weights = jnp.stack([
+        w_deep,                                   # deep
+        (1.0 - w_deep) * (1.0 - w_moist_trop),    # shallow
+        (1.0 - w_deep) * w_moist_trop,            # mid
+    ])
+
+    # Discrete diagnostic ktype (consumed by the Sundqvist guard and the
+    # cloud-depth ceiling): argmax of the type weights when active. The
+    # ceiling is a scan bound, not the physical cloud top (dynamic
+    # termination governs), so keeping it discrete costs no gradients
+    # that matter.
+    convection_active = jnp.logical_and(has_cloud_base, trigger_weight > 1e-3)
+    conv_type = jnp.where(
         convection_active,
-        select_active_conv_type,
-        lambda: jnp.array(0),  # No convection
-    )
-    
+        jnp.argmax(type_weights) + 1,
+        0,
+    ).astype(jnp.int32)
+
     # Initialize tendencies to zero. Dtype follows the inputs so the scheme is
     # float-structure agnostic (float32 or float64) and both ``lax.cond``
     # branches agree on output types.
@@ -728,7 +768,7 @@ def tiedtke_nordeng_convection(
     from .updraft import calculate_updraft
     from .downdraft import calculate_downdraft
     from .flux_tendencies import (
-        calculate_tendencies, mass_flux_closure
+        calculate_tendencies, mass_flux_closure_blend
     )
     
     # Apply full convection scheme if active (with tracer transport)
@@ -797,8 +837,8 @@ def tiedtke_nordeng_convection(
             moisture_supply / jnp.maximum(q_excess, zdqmin),
             config.cmfcmin, config.cmfcmax,
         )
-        mass_flux_cape = mass_flux_closure(
-            cape, cin, jnp.array(0.0), conv_type, config
+        mass_flux_cape = mass_flux_closure_blend(
+            cape, cin, jnp.array(0.0), type_weights, config
         )
         # Apply the moisture-anchored flux to any active convection (deep/
         # shallow/mid) where the budget closure is valid: with a well-
@@ -811,6 +851,13 @@ def tiedtke_nordeng_convection(
         # closure rather than a CFL-saturating or ~zero moisture flux.
         use_moisture = jnp.logical_and(conv_type >= 1, moisture_valid)
         mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
+
+        # Fuzzy trigger: the closure flux fades in over ~smooth_trigger_j
+        # around the CAPE threshold instead of snapping on — this is what
+        # gives tau/entrainment/threshold parameters nonzero gradients in
+        # near-trigger columns. Fully-active columns (weight ≈ 1) are
+        # unchanged.
+        mass_flux_base = mass_flux_base * trigger_weight
 
         # ECHAM mass-flux CFL cap (``mo_cumastr.f90:582-583``):
         #
@@ -832,6 +879,7 @@ def tiedtke_nordeng_convection(
             temperature, humidity, pressure, layer_thickness, rho,
             cloud_base, ktop, conv_type, mass_flux_base, config,
             land_fraction=land_fraction,
+            type_weights=type_weights,
         )
         
         # Calculate precipitation from updraft
