@@ -680,7 +680,9 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
 
         keys = set(model._final_dycore_state.tracers.keys())
         self.assertIn("specific_humidity", keys)
+        # qr/qs are no longer prognostic (2M precipitation is flux-form,
+        # review finding 2.18) — the guard covers the four cloud tracers.
         self.assertTrue(
-            {"qc", "qi", "qnc", "qni", "qr", "qs"}.issubset(keys),
+            {"qc", "qi", "qnc", "qni"}.issubset(keys),
             f"inject_jw_profile dropped cloud tracers; tracers present: {keys}",
         )
