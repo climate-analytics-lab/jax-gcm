@@ -187,6 +187,10 @@ class ConvectionData:
     cloud_base: jnp.ndarray          # Cloud base level index (ncols,)
     cloud_top: jnp.ndarray           # Cloud top level index (ncols,)
     cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
+    ktype: jnp.ndarray               # Convection type per column (0=off,
+                                     # 1=deep, 2=shallow, 3=mid) — consumed
+                                     # by the Sundqvist stratocumulus guard
+                                     # (ECHAM gates on ktype==0) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
@@ -210,6 +214,7 @@ class ConvectionData:
             cloud_base=jnp.zeros(nodal_shape, dtype=int),
             cloud_top=jnp.zeros(nodal_shape, dtype=int),
             cape=jnp.zeros(nodal_shape),
+            ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
@@ -1172,6 +1177,14 @@ class TiedtkeConvection(PhysicsTerm):
             cloud_base=jnp.zeros(ncols, dtype=int),
             cloud_top=jnp.zeros(ncols, dtype=int),
             cape=jnp.zeros(ncols),
+            # Per-column convection type for downstream guards (the
+            # Sundqvist Sc enhancement gates on ktype == 0). Custom /
+            # test schemes may return no state — treat as no convection.
+            ktype=(
+                _state_all.ktype.reshape(-1).astype(jnp.int32)
+                if _state_all is not None
+                else jnp.zeros(ncols, dtype=jnp.int32)
+            ),
             precip_conv=tendencies_all.precip_conv,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,

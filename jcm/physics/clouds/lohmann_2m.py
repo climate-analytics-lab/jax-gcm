@@ -886,8 +886,10 @@ def mixed_phase_deposition_and_corrections(
     # Saturation specific humidity (standard formula)
     # q_s = zes / (p - (1 - Rd/Rv)*zes)  — same form as ECHAM sat_spec_hum
     def _qsat(e, p):
+        # q_s = eps·e_s / (p − (1−eps)·e_s). The leading eps was missing
+        # (qsat 1.61× high — review finding 2.20); note 1/(1+vtmpc1) ≡ eps.
         e_clipped = jnp.minimum(e, 0.4 * p)   # safety clip (Fortran: zes < 0.4)
-        return e_clipped / (p - (1.0 - 1.0 / (1.0 + c.vtmpc1)) * e_clipped)
+        return c.eps * e_clipped / (p - (1.0 - c.eps) * e_clipped)
 
     qsat_tmp = _qsat(zes, pressure)          # pqsp1tmp: phase-appropriate
     qsat_tmp_water = _qsat(zesw, pressure)   # zqsp1tmpw: always over water
@@ -902,10 +904,20 @@ def mixed_phase_deposition_and_corrections(
     #    In Fortran: zqst1 uses tlucuap1 (lookup at it+1), approximated here
     #    by evaluating at (T_tmp + 1 K) and taking finite difference.
     # -------------------------------------------------------------------------
-    ztmp_ice_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
-    ztmp_water_p1 = jnp.minimum(c.ak * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
+    # ECHAM mo_convect_tables Tetens pairs: ice c3ies=21.875/c4ies=7.66,
+    # water c3les=17.269/c4les=35.86, prefactor c2es = c1es·(Rd/Rv) =
+    # 610.78·eps — the lookup table tlucua stores eps·e_s, which is why the
+    # /pressure form below carries no explicit eps. The previous code used
+    # c.ak (the BOLTZMANN constant, 1.38e-23) as the exponent coefficient
+    # and c.p0s1_bg (101325 Pa!) as the prefactor: exp(~0)·101325/p pinned
+    # zqst1 at its 0.5 cap, made zdqsdt ~ +490 and the zqcon
+    # thermodynamic factor ~1e-6 — suppressing internal condensation/
+    # deposition by six orders of magnitude (review finding 1.2).
+    ztmp_ice_p1 = jnp.minimum(21.875 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, eps), 700.0)
+    ztmp_water_p1 = jnp.minimum(17.269 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, eps), 700.0)
 
-    zes_p1 = jnp.where(lo2, c.p0s1_bg * jnp.exp(ztmp_ice_p1), c.p0s1_bg * jnp.exp(ztmp_water_p1))
+    c2es = 610.78 * c.eps
+    zes_p1 = jnp.where(lo2, c2es * jnp.exp(ztmp_ice_p1), c2es * jnp.exp(ztmp_water_p1))
     zqst1 = zes_p1 / pressure
     zqst1 = jnp.minimum(zqst1, 0.5)
     zqst1 = zqst1 / (1.0 - c.vtmpc1 * zqst1)
@@ -1048,6 +1060,7 @@ def mixed_phase_deposition_and_corrections(
         temperature_tmp,
         specific_humidity_tmp,
         qsat_tmp,
+        zvervmax,
     )
 
 def freezing_below_238K(
@@ -2016,12 +2029,10 @@ def update_precip_fluxes(
     zzdrr = zcons2 * pressure_thickness * rain_formation
     zzdrs = zcons2 * pressure_thickness * (snow_formation + snow_accretion)
 
-    # If ice_flux_from_above is non-zero it must be included (caller should pass pxiflux at top level)
-    # Top-level melting: convert part of snow -> rain if T > tmelt (uses plsdcp/plvdcp)
-    # Note: Fortran gated with (kk .EQ. klev); here caller should incorporate ice_flux_from_above only when appropriate.
-    # We perform the melting step unconditionally where ice_flux_from_above>0 and temp_tmp>tmelt to preserve behaviour.
-    has_incoming_ice = ice_flux_from_above > 0.0
-    zzdrs = zzdrs + jnp.where(has_incoming_ice, ice_flux_from_above, 0.0)
+    # Fold the sedimenting ice flux into the snow flux. The caller gates
+    # this with ECHAM's ``kk == klev`` condition (bottom level only) by
+    # passing zero elsewhere — see the column sweep.
+    zzdrs = zzdrs + jnp.maximum(ice_flux_from_above, 0.0)
 
     # 2) Top-level Melting of Incoming Ice into Rain
     # melting capacity (per area) limited by available energy
@@ -2029,7 +2040,7 @@ def update_precip_fluxes(
     # limit melting to a fraction xsec*zzdrs (same heuristic as Fortran)
     ztmp2 = jnp.minimum(xsec * zzdrs, melt_capacity)
     # apply melting where incoming ice exists and melting capacity>0
-    melt_applied = jnp.where(has_incoming_ice, ztmp2, 0.0)
+    melt_applied = jnp.where(ice_flux_from_above > 0.0, ztmp2, 0.0)
     zzdrr = zzdrr + melt_applied
     zzdrs = zzdrs - melt_applied
     # psmlt accumulates melting mass in kg/kg units (Fortran: psmlt += ztmp2/(zcons2*pdp))
@@ -2878,7 +2889,14 @@ def cloud_microphysics_2m(
     # rain instantly, leaving ~no cloud (LWP ~0.2 g/m2 vs the 1M scheme's ~20).
     # Flooring the droplet number by that same minimum keeps a realistic
     # cloud-water reservoir.
-    cdnc_min = minimum_CDNC(qc)
+    # minimum_CDNC expects the in-cloud water content in kg/m³ (only
+    # consumed when ldyn_cdnc_min=True); passing grid-mean kg/kg fed the
+    # dynamic branch values ~ρ·cf too small (review finding 2.24).
+    inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params.epsec)
+    qc_in_cloud_kgm3 = jnp.where(
+        cloud_fraction > params.epsec, qc * inv_cf_min * air_density, 0.0,
+    )
+    cdnc_min = minimum_CDNC(qc_in_cloud_kgm3)
     cdnc = jnp.maximum(cdnc, cdnc_min)
 
     # pauloc==1 and pclcstar==cloud_fraction are conservative first-pass
@@ -2891,7 +2909,16 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     warm_precip_mask = (temperature > params.tmelt) & (qc > params.ccwmin)
 
-    cdnc_warm, qc_after_warm, _autoconv_in_cloud, _autoconv_rate, _dcdnc_removal = (
+    # ECHAM runs the KK2000 warm-rain chain on the IN-CLOUD liquid (zxlb)
+    # and area-weights the products; feeding grid-mean qc underestimated
+    # the qc^2.47 autoconversion by ~cf^1.47 (review finding 2.22). Convert
+    # at the boundary: in-cloud in, grid-mean bookkeeping out.
+    qc_ic_warm = jnp.where(
+        cloud_fraction > params.epsec,
+        qc / jnp.maximum(cloud_fraction, params.epsec),
+        0.0,
+    )
+    cdnc_warm, qc_ic_after_warm, _autoconv_in_cloud, _autoconv_rate, _dcdnc_removal = (
         precip_formation_warm(
             warm_precip_mask,
             autoconv_factor,
@@ -2901,11 +2928,16 @@ def cloud_microphysics_2m(
             qr,
             cdnc_min,
             cdnc,
-            qc,
+            qc_ic_warm,
             dt,
         )
     )
-    qr_gain_warm = qc - qc_after_warm  # mass moved from qc to qr (kg/kg)
+    qc_after_warm = jnp.where(
+        cloud_fraction > params.epsec,
+        qc_ic_after_warm * cloud_fraction,
+        qc,
+    )
+    qr_gain_warm = qc - qc_after_warm  # grid-mean mass moved qc → rain (kg/kg)
 
     # ------------------------------------------------------------------
     # Derived quantities used across multiple process steps
@@ -2950,6 +2982,7 @@ def cloud_microphysics_2m(
     (
         condensation_rate, deposition_rate,
         temp_tmp, q_tmp, qsat_tmp,
+        zvervmax_wbf,
     ) = mixed_phase_deposition_and_corrections(
         pressure,
         icnc,
@@ -3066,10 +3099,24 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # WBF (Wegener-Bergeron-Findeisen): liquid → ice in mixed-phase
     # ------------------------------------------------------------------
+    # ECHAM ll_WBF (mo_cloud_micro_2m.f90:1590-1594): the Bergeron
+    # conversion fires only in the mixed-phase window (cthomi < T < tmelt;
+    # below cthomi freezing_below_238K already emptied the liquid), with
+    # active deposition (zdep > 0), enough droplets (cdnc ≥ floor), AND —
+    # the criterion the port dropped — a weak updraft:
+    # 0.01·zvervx < zvervmax, the Korolev/Mazin threshold velocity below
+    # which ice grows at the liquid's expense. Without it every
+    # mixed-phase cloud glaciated in one step and no supercooled liquid
+    # survived (review finding 2.19). zvervmax comes from the deposition
+    # block (ECHAM recomputes it from post-freezing zxib — a second-order
+    # refinement over reusing the deposition-stage value).
     wbf_mask = (
         (temperature < params.tmelt)
+        & (temperature > params.cthomi)
         & (in_cloud_liquid_het > params.epsec)
         & (in_cloud_ice_het > params.epsec)
+        & (deposition_rate > 0.0)
+        & (0.01 * updraft_velocity < zvervmax_wbf)
     )
     (
         cdnc_wbf, in_cloud_liquid_wbf, in_cloud_ice_wbf,
@@ -3126,10 +3173,9 @@ def cloud_microphysics_2m(
     )
 
     # Convert in-cloud → grid-mean for tendency computation.
-    qc_after_cold = in_cloud_liquid_cold * cloud_fraction
     qi_after_cold = in_cloud_ice_cold * cloud_fraction
-    qc_to_snow = qc_after_warm - qc_after_cold
-    qi_to_snow = qi - qi_after_cold
+    # (qc_to_snow / qi_to_snow state differences removed with the qr/qs
+    # ledger — see the dqrdt/dqsdt note below.)
 
     # ------------------------------------------------------------------
     # Flux-coupled column sweep (top-down lax.scan)
@@ -3146,21 +3192,47 @@ def cloud_microphysics_2m(
     melt_mask = temperature > params.tmelt
 
     # Pre-compute sublimation/evaporation quantities for the scan.
+    # ECHAM conventions (mo_cloud_micro_2m): the subsaturations are the
+    # NEGATIVE relative deficits ``min(q/qs − 1, 0)`` — the sublimation/
+    # evaporation chain needs the sign to produce a sink (zzeps =
+    # max(−…, coeff·subsat) with a final clip at 0). The previous
+    # positive-definite ``max(qs − q, 0)`` inverted the chain so the clip
+    # floored rain evaporation and snow sublimation at exactly zero —
+    # both processes were dead code (survey finding; §2.12-2M analog).
     dp_over_g = pressure_thickness * c.rgrav
-    subsat_wrt_ice = jnp.maximum(qsat_ice - specific_humidity, 0.0)
-    subsat_wrt_water = jnp.maximum(qsat_water - specific_humidity, 0.0)
-    thermo_term_water = 1.0 + (c.alhc ** 2 * qsat_water) / (
-        c.rv * c.cpd * jnp.maximum(temperature ** 2, params.epsec)
+    subsat_wrt_ice = jnp.minimum(
+        specific_humidity / jnp.maximum(qsat_ice, params.epsec) - 1.0, 0.0,
     )
+    subsat_wrt_water = jnp.minimum(
+        specific_humidity / jnp.maximum(qsat_water, params.epsec) - 1.0, 0.0,
+    )
+    # Rotstayn thermodynamic + vapour-diffusion factor (ECHAM zastbstw =
+    # zast + zbst), the same chain the 1M rain evaporation uses:
+    #   zast = Lv·(Lv/(Rv·T) − 1)/(T·0.024),  zbst = Rv·T/(Dv·esw),
+    # with Dv = 2.21/p. The previous value was the psychrometric factor
+    # 1 + L²qs/(Rv·cp·T²) (~2-5) — ~6 orders of magnitude smaller than
+    # zast+zbst, which would have made the (revived) evaporation ~1e6×
+    # too strong.
+    esw_orch = qsat_water * pressure / jnp.maximum(
+        c.eps + (1.0 - c.eps) * qsat_water, params.epsec,
+    )
+    zdv_orch = 2.21 / jnp.maximum(pressure, params.epsec)
+    zast_orch = (
+        c.alhc * (c.alhc / (c.rv * jnp.maximum(temperature, 1.0)) - 1.0)
+        / jnp.maximum(temperature, 1.0) / 0.024
+    )
+    zbst_orch = c.rv * temperature / jnp.maximum(zdv_orch * esw_orch, params.epsec)
+    thermo_term_water = zast_orch + zbst_orch
 
     def _flux_coupled_step(carry, level_in):
         """Process one level: sedi → melt → sublim/evap → update_precip."""
         (rain_flux, snow_flux, ice_flux, ice_flux_n,
-         falling_ice_frac, precip_cover, snow_melt) = carry
+         falling_ice_frac, precip_cover) = carry
         (cf_k, adc_k, dp_k, rho_k, inv_rho_k, qi_k, icnc_k, cdnc_k,
          t_k, melt_k,
          q_k, dpg_k, subice_k, subwat_k, qsi_k, qsw_k, thermo_k,
          rain_form_k, snow_accr_k, snow_form_k,
+         is_bottom_k,
          ) = level_in
 
         # --- Sedimentation ---
@@ -3175,11 +3247,17 @@ def cloud_microphysics_2m(
             dt,
         )
 
-        # --- Melting ---
+        # --- Melting --- (per-level pimlt/psmlt/pximlt are KEPT: the
+        # in-cloud melt mass goes to cloud liquid, the falling-ice melt to
+        # cloud liquid, the snow melt to rain — all with per-level fusion
+        # cooling in update_tendencies. The previous scan discarded all
+        # three (melted in-cloud ice VANISHED from the mass ledger, only
+        # the ICNC→CDNC number transfer survived) and broadcast a
+        # column-accumulated snow_melt to every level (finding 2.23).
         (
             icnc_post_melt, _qmel, cdnc_post_melt,
             rain_flux, snow_flux, ice_flux, ice_flux_n,
-            _ice_tend, _pimlt, _psmlt, _pximlt,
+            _ice_tend, pimlt_k, psmlt_k, pximlt_k,
         ) = melting_snow_and_ice(
             melt_k, t_k, qi_k, dp_k,
             icnc_post_sedi, lsdcp, lvdcp,
@@ -3197,7 +3275,7 @@ def cloud_microphysics_2m(
 
         (
             ice_flux, ice_flux_n,
-            _ice_sublim, snow_sublim_k, rain_evap_k,
+            ice_sublim_k, snow_sublim_k, rain_evap_k,
         ) = sublimation_snow_and_ice_evaporation_rain(
             precip_mask, falling_ice_mask_k,
             q_k, t_k,
@@ -3221,18 +3299,30 @@ def cloud_microphysics_2m(
             rain_evap_k, lsdcp, lvdcp,
             rain_form_k, snow_accr_k, snow_form_k,
             snow_sublim_k, t_k,
-            ice_flux,
-            precip_cover, rain_flux, snow_flux, snow_melt,
+            # ECHAM folds the sedimenting ice flux into the snow flux ONLY
+            # at the bottom level (Fortran ``kk == klev`` gate). Passing
+            # the undepleted carry at every level counted a constant
+            # cirrus flux into snow once per level below it — ~nlev× snow
+            # (review finding 2.17).
+            jnp.where(is_bottom_k, ice_flux, 0.0),
+            # Per-level melt bookkeeping (ECHAM zeroes zsmlt each jk):
+            # feed 0 in and take the routine's output as this level's
+            # increment, added to the melting-subroutine psmlt below.
+            precip_cover, rain_flux, snow_flux, jnp.array(0.0),
             dt,
         )
+        psmlt_level = psmlt_k + snow_melt
 
         carry_out = (rain_flux, snow_flux, ice_flux, ice_flux_n,
-                     falling_ice_frac, precip_cover, snow_melt)
+                     falling_ice_frac, precip_cover)
         level_out = (qi_post_sedi, icnc_post_melt, cdnc_post_melt,
-                     snow_sublim_k, rain_evap_k)
+                     ice_sublim_k, snow_sublim_k, rain_evap_k,
+                     psmlt_level, pimlt_k, pximlt_k)
         return carry_out, level_out
 
     # Stack per-level inputs: shape (nlev,) each → scanned along axis 0.
+    nlev_scan = temperature.shape[0]
+    is_bottom_level = jnp.arange(nlev_scan) == (nlev_scan - 1)
     scan_inputs = (
         cloud_fraction, air_density_correction, pressure_thickness,
         air_density, inv_rho, qi_after_cold, icnc_cold, cdnc_cold,
@@ -3240,30 +3330,31 @@ def cloud_microphysics_2m(
         specific_humidity, dp_over_g, subsat_wrt_ice, subsat_wrt_water,
         qsat_ice, qsat_water, thermo_term_water,
         qr_gain_warm, psacl, snow_formation_gridmean,
+        is_bottom_level,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
     init_carry = (zero_scalar, zero_scalar, zero_scalar,
-                  zero_scalar, zero_scalar, zero_scalar, zero_scalar)
+                  zero_scalar, zero_scalar, zero_scalar)
 
     _final_carry, scan_outs = jax.lax.scan(
         _flux_coupled_step, init_carry, scan_inputs,
     )
     (qi_after_scan, icnc_after_scan, cdnc_after_scan,
-     snow_sublim, rain_evap) = scan_outs
+     ice_sublim, snow_sublim, rain_evap,
+     psmlt_per_level, pimlt_per_level, pximlt_per_level) = scan_outs
 
     # Extract carry state at the bottom of the column. The first two
     # elements are the surface rain and snow flux (kg/m^2/s) — these are
     # the large-scale precipitation diagnostics that callers need.
     (
         surface_rain_flux, surface_snow_flux,
-        _, _, _, _, snow_melt_final,
+        _, _, _, _,
     ) = _final_carry
 
     # ------------------------------------------------------------------
     # update_tendencies_and_important_vars: full ECHAM6 accounting step
     # ------------------------------------------------------------------
-    inv_dt = 1.0 / dt
     liquid_cloud_flag = temperature > params.tmelt
     ice_cloud_flag = temperature <= params.tmelt
 
@@ -3294,7 +3385,7 @@ def cloud_microphysics_2m(
         freezing_rate=_freezing_rate,
         tompkins_ice=zero,
         tompkins_liq=zero,
-        incloud_ice_melt=zero,       # not extracted from scan (minor correction)
+        incloud_ice_melt=pimlt_per_level,
         lsdcp=lsdcp,
         lvdcp=lvdcp,
         air_density=air_density,
@@ -3303,13 +3394,22 @@ def cloud_microphysics_2m(
         snow_accretion=psacl,
         snow_formation=snow_formation_gridmean,
         cloud_ice_evap=zero,         # not extracted from scan
-        ice_flux_melt=zero,          # not extracted from scan
+        ice_flux_melt=pximlt_per_level,
         pxitec=zero,
-        pxlevap=rain_evap,
+        # pxlevap is the clear-cell CLOUD-liquid evaporation (ECHAM
+        # zxlevap), not rain evaporation — passing rain_evap here as well
+        # as via pevp double-counted its moistening/cooling and removed
+        # the water from both qc and the rain flux (review finding 2.21).
+        pxlevap=zero,
         pxltec=zero,
-        pxisub=zero,
+        # Falling-ice sublimation (ECHAM zxisub): the sublimation routine
+        # deducts this mass from the falling ice flux, so it must re-enter
+        # the column as vapor here — feeding zero destroyed water at the
+        # sublimation rate (only visible in cold columns where sedimenting
+        # ice crosses subsaturated layers).
+        pxisub=ice_sublim,
         snow_sublimation_mmr=snow_sublim,
-        snow_melt=snow_melt_final,
+        snow_melt=psmlt_per_level,
         cloud_ice_in_cloud=in_cloud_ice_cold,
         cloud_liquid_in_cloud=in_cloud_liquid_cold,
         temp_tmp=temperature,
@@ -3318,7 +3418,13 @@ def cloud_microphysics_2m(
         cloud_fraction=cloud_fraction_uicw,
         specific_humidity_tendency=zero,
         temp_tendency=dtedt_wbf,     # seed with WBF contribution
-        ice_tendency=zero,
+        # ECHAM folds ice sedimentation into pxite BEFORE this ledger
+        # (mo_cloud_micro_2m.f90 section 4: pxite = ztmst_rcp·(zxip1 −
+        # pxim1) after sedimentation_ice) — seeding zero here emitted the
+        # bottom-reaching ice flux as surface snow with no qi debit,
+        # opening the flux-form budget by exactly that flux (Codex review
+        # on #554).
+        ice_tendency=(qi_after_scan - qi_after_cold) / dt,
         liq_tendency=zero,
         tracer_tendency_cdnc=zero,
         tracer_tendency_icnc=zero,
@@ -3328,9 +3434,16 @@ def cloud_microphysics_2m(
     )
 
     # Mass tendencies: warm qc→qr, cold qi→qs + qc→qs, sedi+melt loss
-    qi_sedi_melt_loss = qi_after_cold - qi_after_scan
-    dqrdt = (qr_gain_warm - rain_evap) * inv_dt
-    dqsdt = (qc_to_snow + qi_to_snow + qi_sedi_melt_loss - snow_sublim) * inv_dt
+    # ECHAM carries NO rain/snow mixing-ratio tracers: precipitation
+    # leaves each level exclusively through the prfl/psfl fluxes assembled
+    # in update_precip_fluxes, and the surface fluxes are the outputs. The
+    # previous state-difference dqrdt/dqsdt double-booked the same mass
+    # (once in prognostic qr/qs, once in the scan fluxes), went negative
+    # whenever qi_after_cold gained from WBF/het/deposition, and was then
+    # silently clipped by the non-negative-tracer guard — hidden mass
+    # destruction (review finding 2.18).
+    dqrdt = jnp.zeros_like(qc)
+    dqsdt = jnp.zeros_like(qc)
 
     # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
     # of-air per second once we pass qnc/qni (per-kg) as the tm1 tracers
@@ -3425,8 +3538,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             TracerSpec("qi", units="kg/kg"),
             TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
             TracerSpec("qni", units="kg^-1", nondimensionalize=False),
-            TracerSpec("qr", units="kg/kg"),
-            TracerSpec("qs", units="kg/kg"),
+            # NOTE: rain/snow are NOT prognostic tracers in ECHAM's 2M —
+            # precipitation lives entirely in the within-step prfl/psfl
+            # fluxes (finding 2.18). The former qr/qs tracers double-booked
+            # that mass.
         )
 
     def __call__(
@@ -3552,8 +3667,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                 "qi": tend_all.dqidt.T + dqidt_strat,
                 "qnc": tend_all.dqncdt.T,
                 "qni": tend_all.dqnidt.T,
-                "qr": tend_all.dqrdt.T,
-                "qs": tend_all.dqsdt.T,
             },
         )
 

@@ -208,31 +208,37 @@ class TestKK2000Autoconversion:
         assert int(cfg_int.autoconversion_scheme) == int(cfg_str.autoconversion_scheme)
     
     def test_ice_autoconversion(self):
-        """Test ice autoconversion to snow"""
+        """Levkov aggregation properties (ECHAM mo_cloud.f90:996-1052).
+
+        The previous placeholder had a −15 °C Gaussian efficiency peak
+        and a hard 0.3 g/kg qi threshold — neither exists in the Levkov
+        chain, whose rate grows with the ice content (Moss radius) and
+        is temperature-independent at this stage (the T dependence sits
+        in the downstream aggregation-by-snow collection efficiency).
+        Pins: monotone in IWC, implicitly bounded (depletion ≤ qi even
+        at absurd dt), substantial at cirrus-anvil ice contents (the
+        placeholder's e-folding was ~30 days — effectively no sink).
+        """
         config = MicrophysicsParameters.default()
         cloud_fraction = jnp.array(0.7)
         dt = 1800.0
-        
-        # Test temperature dependence of aggregation efficiency
-        # At -15°C, aggregation is most efficient
-        t_optimal = tmelt - 15.0
-        t_cold = tmelt - 40.0
-        
-        # Use same in-cloud ice content for fair comparison
-        qi_in_cloud = 1.0e-3  # Above critical threshold at both temperatures
-        cloud_ice_opt = qi_in_cloud * cloud_fraction
-        cloud_ice_cold = qi_in_cloud * cloud_fraction
-        
-        rate_optimal = ice_autoconversion(cloud_ice_opt, t_optimal, cloud_fraction, dt, config)
-        rate_cold = ice_autoconversion(cloud_ice_cold, t_cold, cloud_fraction, dt, config)
-        
-        # At optimal temperature, autoconversion should be faster
-        assert rate_optimal > rate_cold
-        
-        # Test threshold behavior
-        cloud_ice_low = jnp.array(0.1e-3)  # Below typical threshold
-        rate_low = ice_autoconversion(cloud_ice_low, t_optimal, cloud_fraction, dt, config)
-        assert rate_low < 1e-10  # Should be essentially zero
+        t = tmelt - 40.0
+        rho = jnp.array(0.5)
+
+        rate_lo = ice_autoconversion(0.2e-3 * 0.7, t, cloud_fraction, dt, config, air_density=rho)
+        rate_hi = ice_autoconversion(1.0e-3 * 0.7, t, cloud_fraction, dt, config, air_density=rho)
+        assert float(rate_hi) > float(rate_lo) > 0.0
+
+        # Implicit integration: even with dt = 1 day the depletion cannot
+        # exceed the available ice.
+        rate_huge_dt = ice_autoconversion(
+            1.0e-3 * 0.7, t, cloud_fraction, 86400.0, config, air_density=rho)
+        assert float(rate_huge_dt) * 86400.0 <= 1.0e-3 * 0.7 + 1e-9
+
+        # Physically meaningful sink: ≥ 10 % of the in-cloud ice per
+        # 1800 s step at 1 g/kg in-cloud (the review measured ~57 %).
+        depletion_frac = float(rate_hi) * dt / (1.0e-3 * 0.7)
+        assert depletion_frac > 0.1
 
 
 class TestAccretion:
@@ -849,8 +855,12 @@ class TestColumnSweepMicrophysics:
         )
         # The aloft ice → snow flux is small; what matters is that the
         # warm layers melt all of it before the surface, so surface snow
-        # is essentially zero while surface rain is positive.
-        assert float(state.precip_snow) < 1e-10
+        # is nearly all melted while surface rain is positive. With the
+        # corrected melt energetics (finding 2.11: melting now pays the
+        # latent heat of fusion, capped by the layer's heat content) a
+        # ~1 % residual of unmelted snow survives a single warm layer —
+        # physical, unlike the pre-fix free melting that zeroed it.
+        assert float(state.precip_snow) < 0.02 * float(state.precip_rain)
         # Some ice was autoconverted to snow → melted → rain.
         assert float(state.precip_rain) >= 0.0
 

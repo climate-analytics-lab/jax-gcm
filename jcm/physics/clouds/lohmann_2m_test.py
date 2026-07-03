@@ -747,13 +747,13 @@ class TestMixedPhaseDepositionAndCorrections2M:
 
     def test_temperature_thermodynamic_consistency_ice(self):
         x = self._base_inputs()
-        pcnd_o, pdep_o, T_o, _, _ = mixed_phase_deposition_and_corrections(**x)
+        pcnd_o, pdep_o, T_o, _, _, _ = mixed_phase_deposition_and_corrections(**x)
         T_expected = x["temperature"] + x["lsdcp"] * pdep_o + x["lvdcp"] * pcnd_o
         assert jnp.allclose(T_o, T_expected, atol=1e-4)
 
     def test_moisture_conservation_ice(self):
         x = self._base_inputs()
-        pcnd_o, pdep_o, _, q_o, _ = mixed_phase_deposition_and_corrections(**x)
+        pcnd_o, pdep_o, _, q_o, _, _ = mixed_phase_deposition_and_corrections(**x)
         q_expected = x["specific_humidity"] - pcnd_o - pdep_o
         assert jnp.allclose(q_o, q_expected, atol=1e-9)
 
@@ -1174,7 +1174,10 @@ class TestIcon2MPipeline:
 
         physics = echam_physics(cloud_scheme="2m")
         names = {spec.name for spec in physics.required_tracers()}
-        assert names == {"qc", "qi", "qnc", "qni", "qr", "qs"}
+        # qr/qs are no longer prognostic: ECHAM's 2M carries precipitation
+        # exclusively in the within-step prfl/psfl fluxes; the tracers
+        # double-booked that mass (review finding 2.18).
+        assert names == {"qc", "qi", "qnc", "qni"}
         nondim_flags = {
             spec.name: spec.nondimensionalize
             for spec in physics.required_tracers()
@@ -1195,7 +1198,117 @@ class TestIcon2MPipeline:
 
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))
         assert jnp.all(jnp.isfinite(preds.dynamics.specific_humidity))
-        # Initial state should have seeded all six required tracers.
+        # Initial state should have seeded the four prognostic tracers
+        # (qr/qs dropped — precipitation is flux-form, finding 2.18).
         assert set(model._final_dycore_state.tracers.keys()) >= {
-            "specific_humidity", "qc", "qi", "qnc", "qni", "qr", "qs",
+            "specific_humidity", "qc", "qi", "qnc", "qni",
         }
+
+
+class TestColumnWaterConservation2M:
+    """The 2M flux-form ledger conserves column water against surface precip.
+
+    With rain/snow carried exclusively as within-step fluxes (the qr/qs
+    tracers double-booked mass and their negative state-difference
+    tendencies were silently clipped — review finding 2.18), every kg the
+    column loses must leave as surface precipitation:
+
+        Σ (dq + dqc + dqi)/dt · ρ·dz  +  rain_sfc + snow_sfc  ≈  0.
+
+    Verified against the gross internal water movement so the bound is
+    meaningful even when the column barely precipitates.
+    """
+
+    def test_water_budget_closes_against_surface_fluxes(self):
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(230.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[10:16].set(1e-3)
+        qi = jnp.zeros(nlev).at[4:8].set(2e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)
+        qni = jnp.where(qi > 0, 1e4, 0.0)
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        mref = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert gross > 0.0, "column did nothing — test is vacuous"
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"2M water budget open by {residual:.3e} kg/m2/s "
+            f"(gross movement {gross:.3e}, precip {P:.3e})"
+        )
+
+    def test_water_budget_closes_with_ice_reaching_the_surface(self):
+        """Polar-cirrus column: sedimenting ice exits as surface snow.
+
+        Pins two coupled sedimentation ledger entries (Codex review on
+        #554): the pxite seed carrying the scan's net qi change (fallout
+        loss above, exponential-integral re-deposit below cloud base) and
+        the pxisub vapor credit for falling ice sublimating in
+        subsaturated cloud-free air. The two omissions cancel in TOTAL
+        column water (the negative-in-cloud-ice correction refunds the
+        missing debit to vapor), so closure alone cannot pin them — the
+        below-cloud re-deposit assertion breaks the degeneracy: with the
+        seed absent, dqidt is exactly zero below the source cloud.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(210.0, 262.0, nlev)   # never above freezing
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.9 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.zeros(nlev).at[6:12].set(5e-4)
+        qc = jnp.zeros(nlev)
+        cf = jnp.where(qi > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        # Few, large crystals → fast fallout to the surface.
+        qni = jnp.where(qi > 0, 2e3, 0.0)
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, jnp.zeros(nlev), qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        mref = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        assert float(snow_sfc) > 0.0, "no surface snow — fallout never reached the ground"
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"budget open by {residual:.3e} with surface-reaching ice "
+            f"(snow_sfc {float(snow_sfc):.3e}, gross {gross:.3e})"
+        )
+        # The ice source cloud occupies levels 6..11; level 12 is clear
+        # (cf = 0, no in-cloud deposition), so any qi gain there can only
+        # be sedimenting ice re-depositing out of the falling flux — the
+        # part of the pxite seed that total-water closure cannot see.
+        assert float(tend.dqidt[12]) > 0.0, (
+            "no below-cloud-base qi gain from the sedimenting flux — the "
+            "scan's net ice change is not entering the pxite ledger"
+        )
