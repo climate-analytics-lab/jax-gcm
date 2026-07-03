@@ -17,7 +17,7 @@ from jcm.constants import tmelt, eps, alhc, cpd
 
 
 def _qs_for_cover(pressure, temperature):
-    """qs consistent with the cover's lo2 phase switch for ice-free columns.
+    """Build qs consistent with the cover's lo2 phase switch for ice-free columns.
 
     The cloud-fraction decision now uses ECHAM's binary lo2 saturation
     (water unless T < cthomi or ice is present — review finding 2.27), so
