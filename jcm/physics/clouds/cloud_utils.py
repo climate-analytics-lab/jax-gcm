@@ -4,16 +4,14 @@ Date: 2025-12-15
 """
 
 import jax.numpy as jnp
-from jax import jit
 from math import pi
 
 import jcm.constants as c
-from .lohmann_2m_params import (
-    eps, fact_PK, pow_PK, ldyn_cdnc_min, cdnc_min_fixed,
-    cdnc_min_lower, cdnc_min_upper, rcd_vol_max, cqtmin, conv_effr2mvr
-)
+from .lohmann_2m_params import CloudParams2M
 
-def eff_ice_crystal_radius(pxice: jnp.ndarray, picnc: jnp.ndarray) -> jnp.ndarray:
+def eff_ice_crystal_radius(
+    pxice: jnp.ndarray, picnc: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
     """Effective ice crystal radius following Lohmann et al. (2008, ERL), expression (1),
     using the Pruppacher & Klett (1997) mass–size relation parameters.
 
@@ -30,32 +28,33 @@ def eff_ice_crystal_radius(pxice: jnp.ndarray, picnc: jnp.ndarray) -> jnp.ndarra
         Effective ice crystal radius [micron].
 
     """
-    # fact_PK and pow_PK are constants/params from the scheme (imported in this module or via cloud_params_2m).
-    return 0.5e4 * (pxice / jnp.maximum(fact_PK * jnp.maximum(picnc, eps), eps)) ** (1.0 / pow_PK)
+    eps = params.eps
+    return 0.5e4 * (
+        pxice / jnp.maximum(params.fact_PK * jnp.maximum(picnc, eps), eps)
+    ) ** (1.0 / params.pow_PK)
 
-@jit
-def minimum_CDNC(pxwat, ldyn_cdnc_min=ldyn_cdnc_min, cdnc_min_fixed=cdnc_min_fixed):
+def minimum_CDNC(pxwat, params: CloudParams2M):
     """Set the minimum cloud droplet number concentration, either statically or dynamically.
 
     Parameters
     ----------
         pxwat (array): In-cloud water mixing ratio [kg/m^3].
-        ldyn_cdnc_min (bool): Flag to use dynamic CDNC minimum.
-        cdnc_min_fixed (float): Static minimum CDNC value in cm^-3.
+        params (CloudParams2M): Threaded scheme parameters; the
+            ``ldyn_cdnc_min`` static switch selects the dynamic branch.
 
     Returns
     -------
         pcdnc_min (array): Minimum cloud droplet number concentration [m^-3].
 
     """
-    if ldyn_cdnc_min:
+    if params.ldyn_cdnc_min:
         # Dynamic value for minimum CDNC
-        pcdnc_min = rcd_vol_max**(-3.0) * (3.0 / (4.0 * pi * c.rhow)) * pxwat
-        pcdnc_min = jnp.clip(pcdnc_min, cdnc_min_lower, cdnc_min_upper)
+        pcdnc_min = params.rcd_vol_max**(-3.0) * (3.0 / (4.0 * pi * c.rhow)) * pxwat
+        pcdnc_min = jnp.clip(pcdnc_min, params.cdnc_min_lower, params.cdnc_min_upper)
     else:
         # Static minimum CDNC
-        pcdnc_min = cdnc_min_fixed * 1.0e6  # Convert from cm^-3 to m^-3
-        pcdnc_min = jnp.full_like(pxwat, pcdnc_min)
+        pcdnc_min = params.cdnc_min_fixed * 1.0e6  # Convert from cm^-3 to m^-3
+        pcdnc_min = jnp.broadcast_to(pcdnc_min, pxwat.shape).astype(pxwat.dtype)
 
     return pcdnc_min
 
@@ -64,6 +63,7 @@ def gridbox_frac_falling_hydrometeor(
     precip_frac_from_above: jnp.ndarray,
     precip_flux_from_level: jnp.ndarray,
     precip_frac_from_level: jnp.ndarray,
+    params: CloudParams2M,
 ) -> jnp.ndarray:
     """Compute the grid box fraction covered by falling hydrometeor (e.g., rain+snow, sedimenting ice).
 
@@ -98,12 +98,12 @@ def gridbox_frac_falling_hydrometeor(
     total_precip_flux = precip_flux_from_above + precip_flux_from_level
 
     # Determine where total flux is greater than the minimum threshold
-    ll1 = total_precip_flux > cqtmin
+    ll1 = total_precip_flux > params.cqtmin
 
     # Compute weighted average fraction
     weighted_precip_frac = (
         (precip_frac_from_level * precip_flux_from_level + updated_precip_frac_from_above * precip_flux_from_above)
-        / jnp.maximum(total_precip_flux, cqtmin)
+        / jnp.maximum(total_precip_flux, params.cqtmin)
     )
     weighted_precip_frac = jnp.clip(weighted_precip_frac, 0.0, 1.0)
 
@@ -112,7 +112,9 @@ def gridbox_frac_falling_hydrometeor(
 
     return total_precip_frac
 
-def effective_2_volmean_radius_param_Schuman_2011(prieff: jnp.ndarray) -> jnp.ndarray:
+def effective_2_volmean_radius_param_Schuman_2011(
+    prieff: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
     """Convert effective radius to volume-mean radius using Schumann et al. (2011) parametrisation.
 
     Parameters
@@ -133,7 +135,7 @@ def effective_2_volmean_radius_param_Schuman_2011(prieff: jnp.ndarray) -> jnp.nd
 
     """
     # Multiply prieff (1e-6 m units) by 1e-6 to get metres, apply conv_effr2mvr and enforce minimum 1e-6 m.
-    return jnp.maximum(1e-6, conv_effr2mvr * 1e-6 * prieff)
+    return jnp.maximum(1e-6, params.conv_effr2mvr * 1e-6 * prieff)
 
 def breadth_factor(pcdnc: jnp.ndarray) -> jnp.ndarray:
     """Breadth factor as a function of cloud droplet number concentration (CDNC).
@@ -159,6 +161,7 @@ def threshold_vert_vel(
     icnc: jnp.ndarray,                # picnc [1/m^3]
     ice_radius: jnp.ndarray,          # price [m] volume-mean ice crystal radius
     eta: jnp.ndarray,                 # peta [-]
+    params: CloudParams2M,
 ) -> jnp.ndarray:
     """Threshold vertical velocity for the Wegener-Bergeron-Findeisen (WBF) criterion.
 
@@ -191,7 +194,7 @@ def threshold_vert_vel(
     """
     return (
         (sat_vap_pres_water - sat_vap_pres_ice)
-        / jnp.maximum(sat_vap_pres_ice, eps)
+        / jnp.maximum(sat_vap_pres_ice, params.eps)
         * icnc
         * ice_radius
         * eta
