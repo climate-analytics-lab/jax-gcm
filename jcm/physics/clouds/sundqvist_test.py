@@ -14,6 +14,21 @@ from .sundqvist import (
 from jcm.constants import tmelt, eps, alhc, cpd
 
 
+
+
+def _qs_for_cover(pressure, temperature):
+    """qs consistent with the cover's lo2 phase switch for ice-free columns.
+
+    The cloud-fraction decision now uses ECHAM's binary lo2 saturation
+    (water unless T < cthomi or ice is present — review finding 2.27), so
+    test humidities built as a fraction of qs must use the same surface,
+    not the legacy mixed-phase blend.
+    """
+    from jcm.physics.clouds.sundqvist import _qs_cover
+    return jax.vmap(lambda p_, t_: _qs_cover(p_, t_, jnp.zeros_like(t_)))(
+        pressure, temperature)
+
+
 class TestCondensationLinearisation:
     """The condensation step ports ECHAM ``mo_cloud.f90`` lines 696-784.
 
@@ -245,7 +260,7 @@ class TestCloudFraction:
         temperature = jnp.array([260.0])
         p_sfc = 100000.0
 
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        qs = _qs_for_cover(pressure, temperature)
         specific_humidity = 0.845 * qs
         cf, _ = calculate_cloud_fraction(
             temperature, specific_humidity, pressure, p_sfc, config
@@ -275,8 +290,8 @@ class TestCloudFraction:
         assert jnp.all(rh < 0.35)  # RH should be around 30%
         
         # Saturated case - should have clouds
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = 0.95 * qs  # 95% relative humidity
+        qs = _qs_for_cover(pressure, temperature)
+        specific_humidity = 0.95 * qs  # 95% relative humidity (cover qs)
         cf, rh = calculate_cloud_fraction(
             temperature, specific_humidity, pressure, 100000.0, config
         )
@@ -293,10 +308,13 @@ class TestCloudFraction:
         spurious cloud (q/qsat ~80× at ~180 K), which inflates total cloud
         cover and corrupts the radiation cloud field.
         """
-        config = CloudParameters.default()  # cutoff at 100 hPa
+        # The default cutoff is now ECHAM-like 10 hPa (finding 2.26: the
+        # 100 hPa stopgap deleted TTL cirrus); this test pins the cutoff
+        # MECHANISM, so it sets 100 hPa explicitly.
+        config = CloudParameters.default(cloud_top_pressure_pa=10000.0)
         pressure = jnp.array([90000.0, 50000.0, 30000.0, 8000.0, 5000.0, 3000.0])
         temperature = jnp.array([285.0, 250.0, 225.0, 200.0, 190.0, 185.0])
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        qs = _qs_for_cover(pressure, temperature)
         specific_humidity = 1.2 * qs  # supersaturated at every level
         cf, _ = calculate_cloud_fraction(
             temperature, specific_humidity, pressure, 100000.0, config
@@ -516,8 +534,8 @@ class TestShallowCloudScheme:
         temperature = jnp.linspace(288, 220, nlev)
         
         # High humidity in mid-levels
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = qs * 0.5  # Start at 50% RH
+        qs = _qs_for_cover(pressure, temperature)
+        specific_humidity = qs * 0.5  # Start at 50% RH (cover qs)
         specific_humidity = specific_humidity.at[8:12].set(qs[8:12] * 0.95)  # 95% RH in mid-levels
         
         cloud_water = jnp.zeros(nlev)
