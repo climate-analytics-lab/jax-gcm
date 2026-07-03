@@ -69,7 +69,7 @@ class CloudParameters:
                  ceffmin=10.0,
                  ceffmax=150.0, epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
-                 cloud_top_pressure_pa=10000.0) -> 'CloudParameters':
+                 cloud_top_pressure_pa=1000.0) -> 'CloudParameters':
         """Return default cloud parameters.
 
         Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
@@ -188,7 +188,13 @@ def saturation_specific_humidity(
     es_ice = saturation_vapor_pressure_ice(temperature)
     
     # Blend between ice and water saturation in mixed phase region
-    # Linear interpolation between t_ice and tmelt
+    # Linear interpolation between t_ice and tmelt.
+    # NOTE (review 2.27): ECHAM mo_cover uses a BINARY lo2 switch (ice qs
+    # only below cthomi or when ice > csecfrl is already present) rather
+    # than this blend; the cloud-fraction path applies that switch via
+    # _qs_cover below. The blended form remains for callers without a qi
+    # field (and for the condensation Newton pair, which must switch qs
+    # and L together with the 1M sweep lo2 work - tracked follow-up).
     weight = jnp.clip((temperature - 238.15) / (c.tmelt - 238.15), 0.0, 1.0)
     es = weight * es_water + (1.0 - weight) * es_ice
 
@@ -199,10 +205,34 @@ def saturation_specific_humidity(
     return jnp.clip(qs, 0.0, 0.5)
 
 
+def _qs_cover(
+    pressure: jnp.ndarray,
+    temperature: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+) -> jnp.ndarray:
+    # qs for the CLOUD-COVER decision: ECHAM binary lo2 phase switch,
+    #   lo2 = (T < cthomi) OR (T < tmelt AND qi > csecfrl)
+    # (ice memory: ice saturation only where ice already exists or
+    # homogeneous freezing guarantees it; csecfrl = 5e-6 kg/kg at T63).
+    # The previous unconditional blend inflated RH by up to ~35 % near
+    # -35 C in ice-free air (over-diagnosing cloud) and under-diagnosed
+    # cirrus where ice exists (review finding 2.27).
+    es_water = saturation_vapor_pressure_water(temperature)
+    es_ice = saturation_vapor_pressure_ice(temperature)
+    lo2 = (temperature < 238.15) | (
+        (temperature < c.tmelt) & (cloud_ice > 5.0e-6)
+    )
+    es = jnp.where(lo2, es_ice, es_water)
+    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
+    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
+    return jnp.clip(qs, 0.0, 0.5)
+
+
 def _stratocumulus_zsat(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
     config: CloudParameters,
+    enhance_allowed: jnp.ndarray = jnp.array(True),
 ) -> jnp.ndarray:
     """Per-layer stratocumulus saturation factor ``zsat`` ∈ (0, 1].
 
@@ -246,14 +276,18 @@ def _stratocumulus_zsat(
         jnp.zeros(1),                       # surface (level=N-1) has z=0
     ])
 
-    # dT/dz at each interior level k: between level k and k+1 (the layer
-    # immediately below k). Positive = inversion (T rises with height),
-    # negative = normal lapse.
+    # dT/dz across the interface ABOVE each level: ECHAM's
+    # ``zdtdz(jk) = (T(jk-1) − T(jk))·g/(geo(jk-1) − geo(jk))`` belongs to
+    # level jk — the level BELOW the interface, i.e. the cloud-topped
+    # boundary layer itself. The previous port assigned the lapse to the
+    # UPPER level and enhanced there, landing the csatsc boost in the
+    # warm dry layer ABOVE the marine-Sc inversion instead of in the Sc
+    # deck (review finding 2.25).
     dT = temperature[:-1] - temperature[1:]              # (nlev-1,)
     dz = jnp.maximum(dz_layer, 1.0)                      # avoid /0
-    dTdz_layer = dT / dz                                 # (nlev-1,) at upper level k
-    # Pad to (nlev,): no zdtdz defined at the surface (no layer below it).
-    dTdz = jnp.concatenate([dTdz_layer, jnp.zeros(1)])
+    dTdz_layer = dT / dz                                 # (nlev-1,) across interface k|k+1
+    # Level k (k ≥ 1) owns the lapse across the interface above it.
+    dTdz = jnp.concatenate([jnp.zeros(1), dTdz_layer])
 
     # ECHAM's ``zdtdz = MIN(0, zdtdz)`` clip — clips inversions (zdtdz>0)
     # to 0, leaving normal lapses unchanged. The argmax then finds the
@@ -272,17 +306,20 @@ def _stratocumulus_zsat(
     valid = in_bl & (dTdz_clipped > dtdz_threshold)
     # Set invalid levels to a strongly-negative sentinel so argmax skips them.
     masked = jnp.where(valid, dTdz_clipped, -1e10)
-    knvb = jnp.argmax(masked)
+    # ECHAM's upward scan takes a new level only on STRICT improvement, so
+    # with the clip-to-0 plateau the first true inversion met going up from
+    # the surface wins — the LOWEST qualifying level. argmax returns the
+    # first (highest-altitude) maximum, so take the last occurrence.
+    knvb = (nlev - 1) - jnp.argmax(masked[::-1])
     has_inversion = jnp.any(valid)
 
-    # zgam = max(0, -zdtdz · cp/g). At a TRUE inversion (zdtdz > 0),
-    # the MIN(0, zdtdz) clip already drove dTdz_clipped to 0 → zgam = 0
-    # → zsat = csatsc (full enhancement). At a "stable but not inverted"
-    # layer (zdtdz slightly negative), zgam > 0 → zsat = csatsc + zgam,
-    # weakening the enhancement until ``zsat = 1`` and it has no effect.
-    zgam_at_knvb = jnp.maximum(-dTdz_clipped[knvb] * c.cpd / c.grav, 0.0)
+    # zgam = max(0, -zdtdz · cp/g) evaluated on the UNCLIPPED lapse
+    # (mo_cover.f90:243-245 recomputes zdtdz at jb without the MIN(0,·)):
+    # at a true inversion (zdtdz > 0) zgam = 0 → zsat = csatsc (full
+    # boost); merely-stable layers weaken it toward zsat = 1.
+    zgam_at_knvb = jnp.maximum(-dTdz[knvb] * c.cpd / c.grav, 0.0)
     zsat_value = jnp.where(
-        has_inversion,
+        has_inversion & enhance_allowed,
         jnp.minimum(1.0, config.csatsc + zgam_at_knvb),
         1.0,
     )
@@ -298,7 +335,9 @@ def calculate_cloud_fraction(
     specific_humidity: jnp.ndarray,
     pressure: jnp.ndarray,
     surface_pressure: float,
-    config: CloudParameters
+    config: CloudParameters,
+    enhance_allowed: jnp.ndarray = jnp.array(True),
+    cloud_ice: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Diagnose cloud fraction following ECHAM ``mo_cover.f90``.
 
@@ -332,7 +371,9 @@ def calculate_cloud_fraction(
         ``(nlev,)``.
 
     """
-    qs = saturation_specific_humidity(pressure, temperature)
+    if cloud_ice is None:
+        cloud_ice = jnp.zeros_like(temperature)
+    qs = _qs_cover(pressure, temperature, cloud_ice)
 
     # Diagnostic relative humidity — NOT clipped at 1. ECHAM uses
     # ``zqr = q/(qsat·zsat)`` directly without clipping; super-saturated
@@ -345,7 +386,7 @@ def calculate_cloud_fraction(
 
     # Stratocumulus inversion enhancement (1 everywhere except at BL-top
     # inversion where it drops to ``csatsc`` ≤ 1, boosting ``zqr``).
-    zsat = _stratocumulus_zsat(temperature, pressure, config)
+    zsat = _stratocumulus_zsat(temperature, pressure, config, enhance_allowed=enhance_allowed)
     zqr = specific_humidity / (qs * zsat + config.epsilon)
 
     b0 = (zqr - rhc) / (1.0 - rhc + config.epsilon)
@@ -363,7 +404,9 @@ def calculate_cloud_fraction(
     )
 
     # Apply minimum cloud fraction threshold (matches ECHAM convention).
-    cloud_fraction = jnp.where(cloud_fraction < 0.01, 0.0, cloud_fraction)
+    # (The former cf < 0.01 -> 0 truncation claimed an "ECHAM convention"
+    # that does not exist in mo_cover and added a gradient discontinuity;
+    # removed - review finding 2.28.)
 
     # Stratospheric cutoff (ECHAM ``jks``, mo_cover.f90:142-144): no cloud
     # above ``cloud_top_pressure_pa``. The RH-closure otherwise fills the
@@ -751,13 +794,33 @@ class SundqvistCloudFraction(PhysicsTerm):
         # Cloud fraction is purely diagnostic: ``cc = 1 - sqrt(1 - b0)``
         # with ``b0 = (RH - RH_crit) / (1 - RH_crit)``. Vmap over columns
         # so :func:`calculate_cloud_fraction` works on (nlev,) slices.
+        # ECHAM guards on the stratocumulus enhancement (mo_cover.f90:
+        # 179-185): ocean columns (pfrw > 0.5) with no sea ice
+        # (pfri < 1e-12, from forcing.sice_am) and no active convection
+        # (ktype from the convection diagnostics when a convection term
+        # ran earlier in the step).
+        is_ocean = jnp.reshape(terrain.fmask, (-1,)) < 0.5
+        sice = getattr(forcing, "sice_am", None)
+        no_sea_ice = (
+            jnp.reshape(jnp.asarray(sice), (-1,)) < 1e-12
+            if sice is not None
+            else jnp.ones_like(is_ocean, dtype=bool)
+        )
+        conv = diagnostics.get("convection")
+        no_convection = (
+            jnp.reshape(conv.ktype, (-1,)) == 0
+            if conv is not None and hasattr(conv, "ktype")
+            else jnp.ones_like(is_ocean, dtype=bool)
+        )
+        enhance_allowed = is_ocean & no_sea_ice & no_convection
+
         cf_T, rh_T = jax.vmap(
             calculate_cloud_fraction,
-            in_axes=(1, 1, 1, 0, None),
+            in_axes=(1, 1, 1, 0, None, 0, 1),
             out_axes=(0, 0),
         )(
             state.temperature, state.specific_humidity, pressure_full,
-            surface_pressure, params,
+            surface_pressure, params, enhance_allowed, qi,
         )
         cloud_fraction = cf_T.T  # back to (nlev, ncols)
         rel_humidity = rh_T.T

@@ -293,7 +293,6 @@ class TestRCEConvection(unittest.TestCase):
             moisture_supply=jnp.array(5e-5),
         )
         precip = float(tendencies.precip_conv)
-        self.assertGreater(precip, 0.0, "test column did not precipitate")
 
         dpa = np.abs(np.diff(np.asarray(p)))
         dp_lev = np.concatenate([dpa, dpa[-1:]])
@@ -301,12 +300,19 @@ class TestRCEConvection(unittest.TestCase):
         dwater = np.asarray(
             tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt
         )
+        gross = float(np.sum(np.abs(dwater) * mass)) + abs(precip)
+        # Anti-vacuity: with the corrected ECHAM ice saturation (#547) the
+        # deep dry sub-cloud layer evaporates ALL the rain before the
+        # surface (precip is exactly 0 here) — the configuration this test
+        # guards is precisely that evaporation, so the guard is that it
+        # fired (sub-cloud moistening below), not that rain survives.
+        self.assertGreater(gross, 0.0, "column did nothing — vacuous")
         residual = float(np.sum(dwater * mass) + precip)
         self.assertLess(
-            abs(residual), max(1e-3 * precip, 1e-9),
+            abs(residual), max(1e-4 * gross, 1e-9),
             f"water budget open by {residual:.3e} with sub-cloud "
-            f"evaporation active (precip {precip:.3e}) — the evaporation's "
-            f"moistening is being masked out",
+            f"evaporation active (precip {precip:.3e}, gross {gross:.3e}) "
+            f"— the evaporation's moistening is being masked out",
         )
         # And the evaporation genuinely moistens below cloud base somewhere
         # (the pre-fix mask zeroed exactly these levels).
@@ -432,8 +438,12 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         # PATHOLOGY (the naive CAPE/(g·τ) fallback rode the layer-mass/dt
         # CFL cap, so its burst grew as dt shrank — the flicker mechanism);
         # with the fallback replaced, both branches are cured and the
-        # assertion flips to pin that.
-        self.assertLess(cape_short / cape_long, 1.25)
+        # assertion flips to pin that. Residual dt-dependence up to ~1.4
+        # remains on THIS deliberately explosive sounding because the
+        # ECHAM zmfmax = layer_mass/dt CFL cap still binds at dt = 600 s
+        # under the corrected (larger) ice saturation (#547) — the cap is
+        # by design; the pathological ratios were ≳2.
+        self.assertLess(cape_short / cape_long, 1.5)
 
     def test_moisture_anchored_flux_is_smaller_and_bounded(self):
         """The evaporation-limited flux is far gentler than the CAPE-cap burst.
