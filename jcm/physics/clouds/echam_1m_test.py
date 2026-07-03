@@ -979,4 +979,96 @@ class TestColumnSweepMicrophysics:
             f"surface precip {float(surface_precip):.3e} kg/m²/s"
         )
 
-    print("All tests passed!")
+
+class TestColumnSweepParameterGradients:
+    """Regression tests for NaN parameter gradients through the sweep.
+
+    ``x**frac`` at a zero base (the Marshall-Palmer ``zxrp1`` / ``zxsp1``
+    concentrations and the Rotstayn rain-evap rate) has an infinite
+    derivative, and where-masking the output alone produced
+    ``d(precip)/d(params) = NaN`` even though finite differences gave a
+    perfectly good ~1e-6. These tests fail on the unguarded code and pin
+    the double-where fix.
+    """
+
+    @staticmethod
+    def _precipitating_column(nlev=20):
+        """Warm near-saturated column with a liquid cloud aloft.
+
+        Same construction as
+        ``TestColumnSweepMicrophysics.test_warm_cloud_makes_surface_rain``:
+        q at 95 % saturation so rain reaches the surface.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(280.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.95 * qsw
+        qc = jnp.zeros(nlev).at[5].set(2e-3)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        return T, q, p, qc, qi, cf, rho, dz, ndrop
+
+    @staticmethod
+    def _mixed_column(nlev=20):
+        """Mixed-phase column (ice cloud aloft, liquid cloud below) so the
+        snow path — and with it ``cvtfall`` — is exercised.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(230.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.95 * qsw
+        qc = jnp.zeros(nlev).at[8].set(2e-3)
+        qi = jnp.zeros(nlev).at[4].set(5e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        return T, q, p, qc, qi, cf, rho, dz, ndrop
+
+    @staticmethod
+    def _total_precip(ccraut, cvtfall, column):
+        T, q, p, qc, qi, cf, rho, dz, ndrop = column
+        cfg = MicrophysicsParameters.default(ccraut=ccraut, cvtfall=cvtfall)
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        return state.precip_rain + state.precip_snow
+
+    def test_param_gradients_finite_and_match_fd(self):
+        ccraut0, cvtfall0 = 15.0, 3.29
+        column = self._precipitating_column()
+        d_ccraut, d_cvtfall = jax.grad(self._total_precip, argnums=(0, 1))(
+            ccraut0, cvtfall0, column,
+        )
+        # The essential regression: finite (the unguarded powers gave NaN).
+        assert jnp.isfinite(d_ccraut), f"d(precip)/d(ccraut) = {d_ccraut}"
+        assert jnp.isfinite(d_cvtfall), f"d(precip)/d(cvtfall) = {d_cvtfall}"
+        # More autoconversion → more rain: strictly positive here.
+        assert float(d_ccraut) > 0.0
+
+        # Cross-check the autoconversion gradient against central finite
+        # differences (well-conditioned: FD/AD agree to ~0.03 % here).
+        h = ccraut0 * 1e-3
+        fd = (
+            float(self._total_precip(ccraut0 + h, cvtfall0, column))
+            - float(self._total_precip(ccraut0 - h, cvtfall0, column))
+        ) / (2.0 * h)
+        assert jnp.isclose(d_ccraut, fd, rtol=0.05), (
+            f"AD {float(d_ccraut)} vs FD {fd}"
+        )
+
+    def test_cvtfall_gradient_finite_with_snow_active(self):
+        # cvtfall only enters through the falling-snow concentration zxsp1;
+        # a mixed-phase column makes its gradient nonzero (and previously
+        # NaN via the unguarded x**(1/1.16)).
+        column = self._mixed_column()
+        d_cvtfall = jax.grad(self._total_precip, argnums=1)(
+            15.0, 3.29, column,
+        )
+        assert jnp.isfinite(d_cvtfall), f"d(precip)/d(cvtfall) = {d_cvtfall}"
+        assert float(d_cvtfall) != 0.0

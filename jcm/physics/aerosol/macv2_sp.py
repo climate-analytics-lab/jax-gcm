@@ -97,11 +97,14 @@ def get_simple_aerosol(
     # Calculate total column AOD
     aod_total = jnp.sum(aod_profile, axis=0)
 
-    # Calculate Twomey effect using proper CDNC relationship
-    cdnc_factor = (
-        get_CDNC(aod_anthropogenic)
-        / get_CDNC(jnp.zeros_like(aod_anthropogenic))
-    )
+    # Twomey effect: Stevens et al. (2017) relative droplet-number
+    # enhancement (see get_dNovrN). The previous
+    # ``get_CDNC(aod)/get_CDNC(0)`` divided by ``get_CDNC(0) = 1`` and so
+    # used an ABSOLUTE AEROCOM CDNC (~137 at AOD 0.43) as this
+    # dimensionless multiplier, overstating the indirect effects by ~100×.
+    # ``get_CDNC`` remains in use where an absolute CDNC is wanted (the
+    # ``Nccn`` activation floor below).
+    cdnc_factor = get_dNovrN(aod_anthropogenic, aod_background)
 
     # CCN concentration [cm^-3] for the SPA-style activation floor used by
     # the two-moment microphysics. Both anthropogenic and background plume
@@ -351,10 +354,6 @@ def get_optical_properties(aod_profile, spatial_dist, parameters):
     # spatial_dist: (nplumes, ncols)
     # parameters.ssa550, parameters.asy550, parameters.angstrom: (nplumes,)
 
-    # Calculate plume contributions to total AOD
-    total_aod = jnp.sum(aod_profile, axis=0, keepdims=True)  # (1, ncols)
-    total_aod = jnp.where(total_aod > 0, total_aod, 1.0)  # Avoid division by zero
-
     # Weight by spatial distribution
     plume_weights = spatial_dist / jnp.sum(spatial_dist, axis=0, keepdims=True)
 
@@ -437,6 +436,27 @@ def get_CDNC(AOD, A=60, B=20):
     AEROCOM P1 original: A=60, B=20
     """
     return 1 + A * jnp.log(B * AOD + 1)
+
+
+def get_dNovrN(aod_anthropogenic, aod_background):
+    """Stevens et al. (2017) relative CDNC enhancement (Twomey factor).
+
+    ``sp_aop_dNovrN`` from mo_simple_plumes.f90:
+
+        dNovrN = ln(1000·(caod_sp + caod_bg) + 1) / ln(1000·caod_bg + 1)
+
+    with ``caod_sp`` the anthropogenic plume AOD at 550 nm and ``caod_bg``
+    the natural background AOD (the background plume contribution plus the
+    0.02 fine-mode constant, exactly the Fortran's caod_bg accumulation).
+    Dimensionless, 1.0 with no anthropogenic aerosol, and typically
+    1.0–1.6 (≈2 at the East-Asia plume maximum) — it multiplies a baseline
+    droplet number, unlike the ABSOLUTE AEROCOM CDNC from
+    :func:`get_CDNC`.
+    """
+    return (
+        jnp.log(1000.0 * (aod_anthropogenic + aod_background) + 1.0)
+        / jnp.log(1000.0 * aod_background + 1.0)
+    )
 
 
 # ---------------------------------------------------------------------------

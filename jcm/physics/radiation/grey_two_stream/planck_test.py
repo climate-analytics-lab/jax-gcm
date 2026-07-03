@@ -10,7 +10,6 @@ import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.planck import (
     planck_bands_lw,
     planck_function_wavenumber,
-    planck_derivative,
     total_thermal_emission
 )
 
@@ -133,52 +132,6 @@ def test_planck_bands_array_input():
     assert not jnp.allclose(planck_vals[1, :], planck_vals[2, :])
 
 
-def test_planck_derivative():
-    """Test Planck function temperature derivative"""
-    temperature = 288.0
-    wavenumber = 1000.0
-    
-    dplanck_dt = planck_derivative(temperature, wavenumber)
-    
-    # Should be positive (Planck function increases with temperature)
-    assert dplanck_dt > 0
-    assert not jnp.isnan(dplanck_dt)
-    assert jnp.isfinite(dplanck_dt)
-    
-    # Test with arrays
-    temperatures = jnp.array([200.0, 250.0, 300.0])
-    wavenumbers = jnp.array([500.0, 1000.0, 2000.0])
-    
-    # Single temperature, multiple wavenumbers
-    derivs = planck_derivative(temperature, wavenumbers)
-    assert derivs.shape == (3,)
-    assert jnp.all(derivs > 0)
-    
-    # Multiple temperatures, single wavenumber
-    derivs = planck_derivative(temperatures, wavenumber)
-    assert derivs.shape == (3,)
-    assert jnp.all(derivs > 0)
-
-
-def test_planck_derivative_numerical():
-    """Test Planck derivative against numerical differentiation"""
-    temperature = 288.0
-    wavenumber = 1000.0
-    
-    # Analytical derivative
-    analytical = planck_derivative(temperature, wavenumber)
-    
-    # Numerical derivative
-    delta_t = 0.01
-    planck_plus = planck_function_wavenumber(temperature + delta_t, wavenumber)
-    planck_minus = planck_function_wavenumber(temperature - delta_t, wavenumber)
-    numerical = (planck_plus - planck_minus) / (2 * delta_t)
-    
-    # Should be close (within 1% error)
-    relative_error = jnp.abs(analytical - numerical) / numerical
-    assert relative_error < 0.01
-
-
 def test_total_thermal_emission():
     """Test total thermal emission (Stefan-Boltzmann)"""
     temperatures = jnp.array([200.0, 288.0, 400.0])
@@ -213,15 +166,10 @@ def test_planck_temperature_dependence():
     temperatures = jnp.array([200.0, 250.0, 300.0, 350.0])
     
     planck_vals = planck_function_wavenumber(temperatures, wavenumber)
-    
+
     # Should increase monotonically with temperature
     for i in range(len(temperatures) - 1):
         assert planck_vals[i + 1] > planck_vals[i]
-    
-    # Test derivative consistency
-    for temp in temperatures:
-        derivative = planck_derivative(temp, wavenumber)
-        assert derivative > 0  # Should always be positive
 
 
 def test_planck_wavenumber_dependence():

@@ -314,7 +314,21 @@ class TestModelUnit(unittest.TestCase):
         df_dparams = f_vjp(ones_like(primal))
 
         self.assertFalse(df_dparams[0].isnan().any_true())
-    
+        # The gradients must also be CONNECTED: at least one physics
+        # parameter carries a nonzero adjoint. A refactor that makes the
+        # Parameters struct static/aux data (hiding tunables from autodiff —
+        # the anti-pattern CLAUDE.md forbids) yields all-zero gradients that
+        # the NaN check alone cannot see.
+        param_leaves = [
+            leaf for leaf in jax.tree_util.tree_leaves(df_dparams[0])
+            if jnp.result_type(leaf) != jax.dtypes.float0
+        ]
+        self.assertTrue(
+            any(bool(jnp.any(leaf != 0.0)) for leaf in param_leaves),
+            "all parameter gradients are exactly zero — parameters "
+            "disconnected from the model output",
+        )
+
     @pytest.mark.slow
     def test_speedy_model_param_gradients_isnan_jvp(self):
         from jcm.model import Model
@@ -363,6 +377,14 @@ class TestModelUnit(unittest.TestCase):
             if jnp.result_type(leaf) == jax.dtypes.float0:
                 continue
             self.assertFalse(jnp.any(jnp.isnan(leaf)))
+        # Connectivity: a unit parameter tangent must perturb the trajectory.
+        # All-zero JVP output means the parameters are disconnected from the
+        # model (e.g. accidentally marked static) — see the VJP twin above.
+        self.assertTrue(
+            bool(jnp.any(state.temperature != 0.0))
+            or bool(jnp.any(state.u_wind != 0.0)),
+            "unit parameter tangent produced an all-zero trajectory tangent",
+        )
 
     @pytest.mark.skip(reason="finite differencing produces nans")
     def test_speedy_model_state_gradient_check(self):

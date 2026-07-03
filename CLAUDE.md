@@ -56,6 +56,9 @@ jcm/                          # Main package
 ├── physics_interface.py      # Physics-dynamics coupling
 ├── diffusion.py              # Diffusion filter
 ├── config/                   # Hydra configuration files
+├── dycore/                   # DynamicalCore protocol + implementations
+│   ├── base.py, registry.py     # Protocol and registry
+│   └── dinosaur/                # Dinosaur wrapper (dycore.py) + state_bridge.py
 ├── physics/
 │   ├── physics_term.py          # PhysicsTerm base class
 │   ├── composable_physics.py    # ComposablePhysics container
@@ -65,15 +68,16 @@ jcm/                          # Main package
 │   │   ├── params.py
 │   │   ├── physics_data.py
 │   │   └── physical_constants.py
-│   ├── icon/                    # ICON infrastructure (params, coords)
-│   │   ├── icon_terms.py        # Composable terms + icon_physics() factory
-│   │   ├── icon_physics.py      # Standalone apply_* term functions used by icon_terms
-│   │   ├── icon_coords.py, icon_levels.py, icon_physics_data.py, parameters.py
-│   │   ├── unit_conversions.py, forcing.py
-│   │   └── constants/           # ICON physical constants
+│   ├── echam/                   # ECHAM infrastructure (terms, coords)
+│   │   ├── echam_terms.py       # Composable terms + echam_physics() factory
+│   │   ├── echam_coords.py      # ECHAM-specific coordinate transforms
+│   │   └── echam_levels.py      # Hybrid vertical level definitions
+│   │   # (per-scheme Parameters live with each scheme; boundary
+│   │   # conditions live in jcm/physics/forcing/echam_boundary_conditions.py)
 │   ├── radiation/
-│   │   ├── grey_two_stream/     # ICON-style grey two-stream package
-│   │   ├── rrtmgp.py
+│   │   ├── grey_two_stream/     # Grey two-stream package
+│   │   ├── rrtmgp.py            # RRTMGP correlated-k wrapper (jax-rrtmgp)
+│   │   ├── mcica.py + band_config.py  # McICA cloud sampling + band setup
 │   │   ├── nn_emulator.py + nn_emulator_scheme.py
 │   │   ├── radiation_types.py, cloud_optics.py, constants.py   # shared
 │   │   └── speedy_shortwave.py, speedy_longwave.py
@@ -85,16 +89,24 @@ jcm/                          # Main package
 │   ├── clouds/
 │   │   ├── sundqvist.py         # Sundqvist diagnostic cloud fraction
 │   │   ├── echam_1m.py          # ECHAM 1-moment microphysics
+│   │   ├── lohmann_2m.py        # Lohmann 2-moment microphysics (+ _params, cloud_utils)
 │   │   ├── speedy_humidity.py, speedy_condensation.py
 │   ├── vertical_diffusion/
 │   │   ├── tte_tke/             # TTE-TKE closure
 │   │   └── speedy_vdiff.py
-│   ├── gravity_waves/hines/     # Hines (1997) gravity wave drag
-│   ├── aerosol/macv2_sp.py      # Stevens et al. (2017) MACv2-SP simple plumes
+│   ├── gravity_waves/
+│   │   ├── hines/               # Hines (1997) non-orographic GWD
+│   │   ├── sso/                 # Lott & Miller subgrid-orography drag
+│   │   └── simple/              # Simple GWD fallback
+│   ├── aerosol/
+│   │   ├── macv2_sp.py          # Stevens et al. (2017) MACv2-SP simple plumes
+│   │   ├── spa.py               # Simple Plumes Activation (CDNC/ICNC for 2M)
+│   │   └── jam/                 # JAM modal aerosol (MAM4-style modes, tracers)
 │   ├── chemistry/simple_chemistry.py
-│   ├── diagnostics/wmo_tropopause.py
-│   ├── surface/                 # Speedy bulk + ICON multi-tile (in surface/icon/)
-│   ├── forcing/speedy_forcing.py
+│   ├── diagnostics/             # wmo_tropopause.py, moist_air_state.py
+│   ├── dissipation/upper_sponge.py  # Upper-level sponge dissipation
+│   ├── surface/                 # Speedy bulk + ECHAM multi-tile (in surface/echam/)
+│   ├── forcing/                 # speedy_forcing.py, echam_boundary_conditions.py
 │   ├── orographic_correction/speedy_orographic.py
 │   └── held_suarez/             # Simplified Held-Suarez forcing
 │       ├── held_suarez_physics.py
@@ -270,12 +282,12 @@ Auto-generated physics variable translation docs come from `jcm/physics/speedy/u
 
 ## Architecture Notes
 
-- **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core)
-- **Physics** parameterizations are modular — SPEEDY and ICON ports are the main implementations, Held-Suarez is a simpler alternative
-- **Composable physics is the only physics API.** `PhysicsTerm` (flax.nnx.Module) base class wraps each parameterization. `ComposablePhysics` (and `ComposableIconPhysics`) aggregates terms with `replace()`, `remove()`, and `__add__()` operators. Build pre-configured packages via the `speedy_physics()` and `icon_physics()` factories.
+- **Dynamics** are handled by the external `dinosaur` package (spectral dynamical core), wrapped behind the `DynamicalCore` protocol in `jcm/dycore/` (dinosaur wrapper + state_bridge)
+- **Physics** parameterizations are modular — SPEEDY and ECHAM ports are the main implementations, Held-Suarez is a simpler alternative
+- **Composable physics is the only physics API.** `PhysicsTerm` (flax.nnx.Module) base class wraps each parameterization. `ComposablePhysics` aggregates terms with `replace()`, `remove()`, and `__add__()` operators. Build pre-configured packages via the `speedy_physics()` and `echam_physics()` factories.
 - **physics_interface.py** bridges dynamics (spectral space) and physics (gridpoint space) with `PhysicsState` and `PhysicsTendency` structs
 - **model.py** orchestrates time-stepping, combining dynamics and physics
-- **Physics directory** is organized by physical process. Files are named after the **scheme** (e.g. `convection/tiedtke_nordeng/`, `clouds/sundqvist.py`, `aerosol/macv2_sp.py`), not the model they were ported from. Model-specific *infrastructure* (parameter containers, coords, data structs) stays under `speedy/` and `icon/`.
+- **Physics directory** is organized by physical process. Files are named after the **scheme** (e.g. `convection/tiedtke_nordeng/`, `clouds/sundqvist.py`, `aerosol/macv2_sp.py`), not the model they were ported from. Model-specific *infrastructure* (terms, coords, levels) stays under `speedy/` and `echam/`.
 - Configuration is managed via **Hydra** (see `jcm/config/`)
 - Supports multiple resolutions: T21 to T425 spectral truncations
 - SPMD sharding support for multi-device execution

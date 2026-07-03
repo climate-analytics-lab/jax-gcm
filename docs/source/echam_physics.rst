@@ -273,7 +273,7 @@ Cloud Microphysics
 
 JAX-GCM ships two cloud microphysics schemes; the 1-moment scheme is the default ``echam_physics(cloud_scheme="1m")`` and the 2-moment scheme is selectable via ``cloud_scheme="2m"``.
 
-**1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics`
+**1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep`
 
 Bulk single-moment scheme based on ICON's ``mo_cloud.f90`` (single-moment branch). Tracks cloud liquid (``qc``) and cloud ice (``qi``) as prognostic tracers; rain and snow fluxes are computed within each column and not advected.
 
@@ -295,7 +295,7 @@ Key processes:
 
 7. **Evaporation / sublimation** of precipitation in subsaturated layers
 
-A faithful column-sweep variant :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep` is also implemented (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation). It is currently NOT wired into the default factory because it interacts with Sundqvist condensation in a way that creates a positive moisture-feedback loop (rain re-evap → condensation → latent heat release → convection); a coupled implicit Newton step between the rain-evap source and the condensation sink is the planned fix. Until then ``apply_microphysics_1m`` calls the per-level helper.
+The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the path wired into the default factory: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop. The legacy per-level :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics` remains available but is not wired into the factory.
 
 **Configurable parameters** (:py:class:`jcm.physics.clouds.echam_1m.MicrophysicsParameters`):
 
@@ -350,7 +350,7 @@ Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation cl
 .. admonition:: Notes
 
    - The Sundqvist condensation that feeds the microphysics uses a linearised Newton step (``cond = (q - qs) / (1 + L/cp · dqs/dT)``) ported from ICON ``mo_cloud.f90`` with the Newton denominator that damps the per-step heating by ~6× in the warm troposphere — without it, single-step condensation at 100 % supersat produced ~+60 K heating spikes vs ECHAM's ~+12 K.
-   - ``qc`` and ``qi`` are declared as prognostic tracers via ``EchamCloudsAndMicrophysics1M.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes per ICON ``mo_cloud.f90:267-268`` (``zrfl/zsfl`` reset to 0 at TOA each call).
+   - ``qc`` and ``qi`` are declared as prognostic tracers via ``Echam1MMicrophysics.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes per ICON ``mo_cloud.f90:267-268`` (``zrfl/zsfl`` reset to 0 at TOA each call).
 
 
 Cloud–Aerosol Coupling (SPA activation)
@@ -514,16 +514,16 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - Used by
    * - ``orog`` (terrain.nc)
      - Static
-     - Dynamics (modal orography), surface (lapse-correction lower bound), :py:class:`EchamSSO`
+     - Dynamics (modal orography), surface (lapse-correction lower bound), :py:class:`LottMillerSso`
    * - ``lsm`` (terrain.nc)
      - Static
      - ``terrain.fmask`` — tile-fraction split between ocean / sea-ice / land
    * - ``orostd``, ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval`` (terrain.nc)
      - Static (optional)
-     - SSO descriptors for :py:class:`EchamSSO`. Filled with zeros if absent.
+     - SSO descriptors for :py:class:`LottMillerSso`. Filled with zeros if absent.
    * - ``stl`` (forcing.nc) → ``forcing.stl_am``
      - 12-month climatology
-     - Land-tile surface temperature in :func:`apply_surface` (passed through unmodified). When generated from the JSBACH IC file (``ic_land_soil_T63GR15_*.nc``, field ``surf_temp``), this is the real ECHAM/JSBACH land T at the model's orography.
+     - Land-tile surface temperature in :py:class:`EchamSurface` (passed through unmodified). When generated from the JSBACH IC file (``ic_land_soil_T63GR15_*.nc``, field ``surf_temp``), this is the real ECHAM/JSBACH land T at the model's orography.
    * - ``sst`` (forcing.nc) → ``forcing.sea_surface_temperature``
      - 12-month climatology
      - Ocean-tile surface temperature; also caps the sea-ice tile via ``min(sst, ctfreez = 271.38 K)`` (the saline freezing point — this is a physical constraint, not a workaround).
@@ -566,8 +566,8 @@ Gravity Wave Drag
 
 The gravity-wave drag system in JAX-GCM is split into three coexisting schemes
 under :py:mod:`jcm.physics.gravity_waves`. The default ECHAM physics factory
-(:py:func:`jcm.physics.echam.echam_terms.echam_physics`) wires :py:class:`EchamHines`
-and :py:class:`EchamSSO` into the term list; the :py:class:`EchamSimpleGwd`
+(:py:func:`jcm.physics.echam.echam_terms.echam_physics`) wires :py:class:`HinesGwd`
+and :py:class:`LottMillerSso` into the term list; the :py:class:`SimpleGwd`
 fallback is available but excluded from the default.
 
 **Hines (1997) — non-orographic spectral GWD**

@@ -28,22 +28,20 @@ from jax_solar import (
 import jax_datetime as jdt
 from .gas_optics import (
     water_vapor_continuum, co2_absorption, ozone_absorption_sw,
-    ozone_absorption_lw, gas_optical_depth_lw, gas_optical_depth_sw,
-    rayleigh_optical_depth
+    ozone_absorption_lw, gas_optical_depth_lw, gas_optical_depth_sw
 )
 from .planck import (
     planck_bands_lw, planck_function_wavenumber, integrated_planck_function,
-    planck_derivative, total_thermal_emission,
-    band_fraction
+    total_thermal_emission
 )
 from ..cloud_optics import (
     effective_radius_liquid, effective_radius_ice,
     liquid_cloud_optics_sw, ice_cloud_optics_sw,
-    liquid_cloud_optics_lw, cloud_optics, cloud_overlap_factor
+    liquid_cloud_optics_lw, cloud_optics
 )
 from .two_stream import (
     two_stream_coefficients, layer_reflectance_transmittance,
-    adding_method, longwave_fluxes, shortwave_fluxes,
+    longwave_fluxes, shortwave_fluxes,
     flux_to_heating_rate
 )
 
@@ -197,15 +195,6 @@ class TestGasOptics:
         from jcm.physics.radiation.constants import N_SW_BANDS
         assert tau_sw.shape == (self.nlev, N_SW_BANDS)
         assert jnp.all(tau_sw >= 0)
-    
-    def test_rayleigh_scattering(self):
-        """Test Rayleigh optical depth"""
-        tau_ray = rayleigh_optical_depth(self.pressure, self.thickness)
-        
-        assert tau_ray.shape == (self.nlev,)
-        assert jnp.all(tau_ray >= 0)
-        # Should decrease with altitude (pressure)
-        assert tau_ray[0] > tau_ray[-1]
 
 
 class TestPlanckFunctions:
@@ -243,35 +232,6 @@ class TestPlanckFunctions:
         expected = STEFAN_BOLTZMANN * T**4
         assert jnp.allclose(emission, expected, rtol=1e-10)
     
-    def test_planck_derivative(self):
-        """Test Planck function temperature derivative"""
-        T = 280.0
-        nu = 700.0
-        
-        dB_dT = planck_derivative(T, nu)
-        assert dB_dT > 0  # Should increase with T
-        
-        # Numerical derivative check
-        dT = 0.1
-        B1 = planck_function_wavenumber(T - dT/2, nu)
-        B2 = planck_function_wavenumber(T + dT/2, nu)
-        dB_dT_num = (B2 - B1) / dT
-        assert jnp.allclose(dB_dT, dB_dT_num, rtol=0.01)
-    
-    def test_band_fractions(self):
-        """Test thermal emission band fractions"""
-        T = 288.0
-        bands = ((10, 350), (350, 500), (500, 2500))
-        fracs = band_fraction(T, bands, is_lw=True)
-        
-        from jcm.physics.radiation.constants import N_LW_BANDS
-        assert fracs.shape == (N_LW_BANDS,)
-        assert jnp.all(fracs >= 0) and jnp.all(fracs <= 1)
-        # These bands (10-2500 cm^-1) cover MOST of the thermal infrared spectrum
-        # The thermal IR is roughly 4-1000 μm = 10-2500 cm^-1
-        assert jnp.sum(fracs) > 0  # Should have some emission
-        assert jnp.sum(fracs) <= 1.0  # Should not exceed 1.0
-
 
 class TestCloudOptics:
     """Test cloud optical properties"""
@@ -337,19 +297,6 @@ class TestCloudOptics:
         
         # LW should be pure absorption
         assert jnp.all(lw_optics.single_scatter_albedo == 0)
-    
-    def test_cloud_overlap(self):
-        """Test cloud overlap calculation"""
-        cf_above = 0.8
-        cf_current = 0.6
-        
-        # Maximum overlap
-        overlap_max = cloud_overlap_factor(cf_above, cf_current, overlap_param=1.0)
-        assert overlap_max == 0.6  # min(0.8, 0.6)
-        
-        # Random overlap
-        overlap_rand = cloud_overlap_factor(cf_above, cf_current, overlap_param=0.0)
-        assert jnp.allclose(overlap_rand, 0.48)  # 0.8 * 0.6
 
 
 class TestTwoStreamSolver:
@@ -390,20 +337,6 @@ class TestTwoStreamSolver:
         # Direct beam transmission follows Beer's law
         expected_T_dir = jnp.exp(-self.tau / 0.5)
         assert jnp.allclose(T_dir, expected_T_dir, atol=0.01)
-    
-    def test_adding_method(self):
-        """Test adding method for layer combination"""
-        R1, T1 = 0.2, 0.7
-        R2, T2 = 0.3, 0.6
-        
-        R_combined, T_combined = adding_method(
-            jnp.array(R1), jnp.array(T1),
-            jnp.array(R2), jnp.array(T2)
-        )
-        
-        # Combined layer should reflect more
-        assert R_combined > R1 and R_combined > R2
-        assert 0 <= T_combined <= 1
     
     def test_flux_to_heating(self):
         """Test heating rate calculation"""
@@ -486,8 +419,8 @@ class TestRadiationIntegration:
         assert flux_down.shape == (self.nlev + 1, self.n_lw_bands)
 
         # Surface should emit upward (only check bands with non-zero values).
-        # Due to a pre-existing bug in band_fraction, only the first two bands
-        # have values.
+        # Due to a pre-existing bug in the band-integrated Planck values,
+        # only the first two bands have values.
         assert jnp.all(flux_up[-1, :2] > 0)
 
         # TOA should have net upward flux (OLR) for bands with non-zero values
@@ -607,7 +540,6 @@ def run_all_tests():
     gas_tests.test_co2_absorption()
     gas_tests.test_ozone_absorption()
     gas_tests.test_gas_optical_depth()
-    gas_tests.test_rayleigh_scattering()
     print("✓ Gas optics tests passed")
     
     # Planck tests
@@ -615,8 +547,6 @@ def run_all_tests():
     planck_tests.test_planck_function()
     planck_tests.test_integrated_planck()
     planck_tests.test_stefan_boltzmann()
-    planck_tests.test_planck_derivative()
-    planck_tests.test_band_fractions()
     print("✓ Planck function tests passed")
     
     # Cloud tests
@@ -626,7 +556,6 @@ def run_all_tests():
     cloud_tests.test_liquid_cloud_optics()
     cloud_tests.test_ice_cloud_optics()
     cloud_tests.test_combined_cloud_optics()
-    cloud_tests.test_cloud_overlap()
     print("✓ Cloud optics tests passed")
     
     # Two-stream tests
@@ -634,7 +563,6 @@ def run_all_tests():
     ts_tests.setup_method()
     ts_tests.test_two_stream_coefficients()
     ts_tests.test_layer_properties()
-    ts_tests.test_adding_method()
     ts_tests.test_flux_to_heating()
     print("✓ Two-stream solver tests passed")
     

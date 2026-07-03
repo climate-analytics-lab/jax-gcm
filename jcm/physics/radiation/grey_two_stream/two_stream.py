@@ -136,42 +136,6 @@ def layer_reflectance_transmittance(
     return R_dif, T_dif, R_dir, T_dir
 
 
-@jax.jit
-def adding_method(
-    R1: jnp.ndarray,
-    T1: jnp.ndarray,
-    R2: jnp.ndarray,
-    T2: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Combine two layers using adding method.
-    
-    Args:
-        R1, T1: Reflectance and transmittance of upper layer
-        R2, T2: Reflectance and transmittance of lower layer
-        
-    Returns:
-        Combined reflectance and transmittance
-
-    """
-    # Denominator with numerical stability
-    denom = 1.0 - R1 * R2
-    denom = jnp.where(denom < 1e-10, 1e-10, denom)
-    
-    # Combined reflectance
-    # R = R1 + T1² * R2 / (1 - R1 * R2)
-    R_combined = R1 + T1**2 * R2 / denom
-    
-    # Combined transmittance  
-    # T = T1 * T2 / (1 - R1 * R2)
-    T_combined = T1 * T2 / denom
-    
-    # Ensure physical bounds
-    R_combined = jnp.clip(R_combined, 0.0, 1.0)
-    T_combined = jnp.clip(T_combined, 0.0, 1.0)
-    
-    return R_combined, T_combined
-
-
 def longwave_fluxes_single_band(
     tau: jnp.ndarray,
     ssa: jnp.ndarray, 

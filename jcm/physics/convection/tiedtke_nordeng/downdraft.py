@@ -29,6 +29,11 @@ class DowndraftState(NamedTuple):
     td: jnp.ndarray      # Downdraft temperature (K)
     qd: jnp.ndarray      # Downdraft specific humidity (kg/kg)
     mfd: jnp.ndarray     # Downdraft mass flux (kg/m²/s) - negative values
+    pdmfdp: jnp.ndarray  # Downdraft precip sink per layer (kg/m²/s, ≤ 0) —
+                         # ECHAM ``pdmfdp = −pmfd·zcond``: rain evaporated
+                         # into the descending parcel, debited from the rain
+                         # flux and credited back to the environment through
+                         # the cudtdq ledger.
     lfs: int             # Level of free sinking
     active: bool         # Whether downdraft is active
 
@@ -170,9 +175,9 @@ def find_lfs(
 
 
 def downdraft_step(
-    carry: DowndraftState,
+    carry_and_rain: Tuple,
     level_inputs: Tuple
-) -> Tuple[DowndraftState, DowndraftState]:
+) -> Tuple[Tuple, DowndraftState]:
     """Single step of downdraft calculation for use with lax.scan
 
     Mirrors ECHAM ``mo_cudescent.f90::cuddraf``: in the bulk of the
@@ -192,6 +197,7 @@ def downdraft_step(
         Tuple of (updated_carry, output_state)
 
     """
+    carry, rain_flux = carry_and_rain
     (k, env_temp, env_q, pressure, dz, rho, precip,
      entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac) = level_inputs
 
@@ -251,39 +257,52 @@ def downdraft_step(
         td_mix = (1.0 - mix_fraction) * td_desc + mix_fraction * env_temp
         qd_mix = (1.0 - mix_fraction) * qd_desc + mix_fraction * env_q
 
-        # 5) Evaporative cooling from precipitation (mirrors cuadjtq
-        # icall=2: parcel is forced to saturation by evaporating rain
-        # into it, capped by the available rain mass flux).
-        qs = saturation_mixing_ratio(pressure, td_mix)
-        evap_potential = jnp.maximum(qs - qd_mix, 0.0)
-        safe_abs_mfd = jnp.maximum(jnp.abs(mfd_new), cmfcmin)
-        evap_rate = jnp.minimum(
-            cevapcu * evap_potential * safe_abs_mfd,
-            precip,
+        # 5) Saturate the descending parcel by evaporating rain into it —
+        # ECHAM cuddraf lines 286-316: cuadjtq(kcall=2) drives (T,q) to
+        # saturation (evaporation-only Newton step), and the vapour taken
+        # up is debited from the rain flux as ``pdmfdp = −pmfd·zcond`` (a
+        # NEGATIVE per-layer precip increment: the environment gets the
+        # cooling + moistening back through the cudtdq ledger). The
+        # previous cevapcu-scaled pseudo-evaporation warmed the parcel
+        # nearly dry-adiabatically, so it lost negative buoyancy within a
+        # level or two and the downdraft died at its LFS value; cevapcu
+        # itself belongs to the sub-cloud Kessler chain in cuflx, not here.
+        from .adjustment import cuadjtq
+        td_clipped = jnp.clip(td_mix, 100.0, 400.0)
+        td_new, qd_new, zcond = cuadjtq(
+            td_clipped, qd_mix, pressure, kcall=2,
         )
-        td_new = td_mix - c.alhc * evap_rate / (c.cpd * safe_abs_mfd)
-        qd_new = qd_mix + evap_rate / safe_abs_mfd
+        # zcond ≤ 0 is the vapour ADDED to the parcel (q_before − q_after).
+        # Rain consumed per layer: zdmfdp = −mfd·zcond ≤ 0 (mfd < 0).
+        zdmfdp = -mfd_new * zcond
 
-        td_new = jnp.clip(td_new, 100.0, 400.0)
-        qd_new = jnp.maximum(qd_new, 0.0)
-
-        # 6) Buoyancy check: kill downdraft if it has become positively
-        # buoyant relative to the environment (ECHAM cuddraf line 339:
-        # ``llo1 = zbuo<0 .AND. (prfl - pmfd*zcond > 0)``).
+        # 6) Termination (cuddraf line 310): keep the downdraft only while
+        # negatively buoyant AND the rain it would consume is available
+        # (rain_flux − mfd·zcond > 0).
         vt_down = td_new * (1.0 + 0.608 * qd_new)
         vt_env = env_temp * (1.0 + 0.608 * env_q)
-        still_neg_buoyant = vt_down < vt_env
-        mfd_final = jnp.where(still_neg_buoyant, mfd_new, 0.0)
+        rain_available = rain_flux + zdmfdp > 0.0
+        keep = jnp.logical_and(vt_down < vt_env, rain_available)
+        mfd_final = jnp.where(keep, mfd_new, 0.0)
+        zdmfdp = jnp.where(keep, zdmfdp, 0.0)
+        rain_flux_new = rain_flux + zdmfdp
 
-        return carry._replace(
+        new_state = carry._replace(
             td=carry.td.at[k].set(td_new),
             qd=carry.qd.at[k].set(qd_new),
             mfd=carry.mfd.at[k].set(mfd_final),
+            pdmfdp=carry.pdmfdp.at[k].set(zdmfdp),
             active=jnp.abs(mfd_final) > cmfcmin,
         )
+        return new_state, rain_flux_new
 
-    updated_state = lax.cond(skip, lambda: carry, compute_downdraft)
-    return updated_state, updated_state
+    def keep_state():
+        return carry, rain_flux
+
+    (updated_state, rain_flux_out) = lax.cond(
+        skip, keep_state, compute_downdraft,
+    )
+    return (updated_state, rain_flux_out), updated_state
 
 
 def calculate_downdraft(
@@ -364,6 +383,7 @@ def calculate_downdraft(
         td=td_final,
         qd=qd_final,
         mfd=mfd_final,
+        pdmfdp=jnp.zeros(nlev),
         lfs=lfs,
         active=has_lfs
     )
@@ -392,11 +412,13 @@ def calculate_downdraft(
         p_taper_frac,
     )
     
-    # Use scan to compute downdraft from LFS downward
-    final_state, all_states = lax.scan(
+    # Use scan to compute downdraft from LFS downward. The carry threads
+    # the remaining rain flux so per-layer cuadjtq evaporation depletes it
+    # (cuddraf's ``prfl`` accumulation).
+    (final_state, _rain_left), all_states = lax.scan(
         partial(downdraft_step),
-        initial_state,
+        (initial_state, precip_rate),
         level_inputs
     )
-    
+
     return final_state

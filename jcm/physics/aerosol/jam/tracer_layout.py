@@ -76,13 +76,3 @@ def tracer_specs(spec: ModalAerosolSpec) -> tuple[TracerSpec, ...]:
                     )
                 )
     return tuple(out)
-
-
-def mass_names_for_mode(
-    spec: ModalAerosolSpec, mode_short: str, *, cloud_borne: bool = False
-) -> tuple[str, ...]:
-    """Mass tracer keys for one mode, in the population's species order."""
-    mode = spec.mode(mode_short)
-    return tuple(
-        mass_name(sp, mode.short, cloud_borne=cloud_borne) for sp in mode.species
-    )

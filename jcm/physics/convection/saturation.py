@@ -1,68 +1,53 @@
-"""Shared saturation thermodynamics (Tetens) for the convection schemes.
+"""Saturation thermodynamics for the convection schemes.
 
-Centralises the Tetens saturation-vapour-pressure coefficients and the
-saturation specific-humidity / mixing-ratio formulas (and the analytic
-``dqs/dT`` used by the Newton adjustment steps) that were previously duplicated
-across ``tiedtke_nordeng``, ``updraft``, ``adjustment`` and ``betts_miller``.
+Thin wrappers around :mod:`jcm.physics.thermodynamics` — the single shared
+ECHAM 6.3 saturation implementation — preserving the signatures that
+``tiedtke_nordeng`` (updraft, downdraft, cuadjtq Newton steps, CAPE) and
+``betts_miller`` call.
 
 Scheme-specific choices are parameters rather than separate copies:
 
-* ``phase`` selects the saturation surface — ``"auto"`` (water above the melting
-  point, ice below; the ECHAM/Tiedtke convention), ``"water"`` (Betts-Miller,
-  following Isca), or ``"ice"``.
+* ``phase`` selects the saturation surface — ``"auto"`` (water at/above the
+  melting point, ice below; the ECHAM/Tiedtke convention), ``"water"``
+  (Betts-Miller, following Isca), or ``"ice"``.
 * ``clip`` optionally bounds the returned specific humidity (Tiedtke clips to
   ``[0, 0.5]`` via :func:`saturation_mixing_ratio`).
 
-Physical constants (``eps``, ``tmelt``) are read by attribute access from
-:mod:`jcm.constants`, so a runtime ``set_constants`` override is honoured.
+The coefficients are ECHAM's ``mo_convect_tables`` c3/c4 pairs (water:
+``c3les = 17.269`` / ``c4les = 35.86 K``; ice: ``c3ies = 21.875`` /
+``c4ies = 7.66 K``). This module previously carried its own Tetens constants
+whose ice pair reused the *water* ``c4`` (35.86) as the ice ``A`` coefficient
+— a transcription error that made sub-freezing saturation ~3× too low at
+−20 °C and ~60× too low at −60 °C. Delegating to the shared module is what
+fixed that; the water branch changed only microscopically (17.27/237.3 →
+17.269 / (T − 35.86), equivalent to ~0.01 %).
 
 These functions are intentionally *not* ``@jit``-ed: they are always called
-inside the model's outer jit (the ``_run_from_state`` step), so they are inlined
-and fused into that compiled graph. ``phase`` is a static Python string resolved
-at trace time — each phase bakes a constant into its caller's trace, so distinct
-phases never share a compiled artifact.
+inside the model's outer jit (the ``_run_from_state`` step), so they are
+inlined and fused into that compiled graph. ``phase`` is a static Python
+string resolved at trace time.
 """
 
 import jax.numpy as jnp
 
-import jcm.constants as c
+from jcm.physics import thermodynamics
 
-# Tetens coefficients: es = ES0 * exp(A * tc / (tc + B)), with tc = T - tmelt.
-# Water is used above the melting point, ice below. The ice ``A`` (35.86) is
-# this package's historical value; what matters for the Newton steps is that the
-# saturation target and its derivative use the *same* coefficients.
-ES0 = 610.78          # Pa (saturation vapour pressure at the melting point)
-A_WATER = 17.27
-B_WATER = 237.3
-A_ICE = 35.86
-B_ICE = 265.5
-
-# Math-safety temperature clip: the Tetens denominators (tc + B) vanish near
-# 8-36 K, far below any physical temperature. A loose bound avoids NaNs without
-# masking genuine upstream bugs.
-_T_MIN = 50.0
-_T_MAX = 500.0
+# Saturation vapour pressure at the melting point [Pa] — re-exported because
+# callers/tests use it as the phase-independent anchor value es(tmelt).
+ES0 = thermodynamics.C1ES
 
 
 def saturation_vapor_pressure(temperature: jnp.ndarray,
                               phase: str = "auto") -> jnp.ndarray:
-    """Tetens saturation vapour pressure (Pa).
+    """Saturation vapour pressure (Pa).
 
     Args:
         temperature: Temperature (K).
-        phase: ``"auto"`` (water above ``tmelt``, ice below), ``"water"`` or
-            ``"ice"``.
+        phase: ``"auto"`` (water at/above ``tmelt``, ice below), ``"water"``
+            or ``"ice"``.
 
     """
-    temperature = jnp.clip(temperature, _T_MIN, _T_MAX)
-    tc = temperature - c.tmelt
-    es_water = ES0 * jnp.exp(A_WATER * tc / (tc + B_WATER))
-    if phase == "water":
-        return es_water
-    es_ice = ES0 * jnp.exp(A_ICE * tc / (tc + B_ICE))
-    if phase == "ice":
-        return es_ice
-    return jnp.where(temperature > c.tmelt, es_water, es_ice)
+    return thermodynamics.saturation_vapor_pressure(temperature, phase=phase)
 
 
 def saturation_specific_humidity(temperature: jnp.ndarray,
@@ -75,13 +60,12 @@ def saturation_specific_humidity(temperature: jnp.ndarray,
         temperature: Temperature (K).
         pressure: Pressure (Pa).
         phase: Saturation surface, see :func:`saturation_vapor_pressure`.
-        clip: Optional ``(lo, hi)`` bound on the result.
+        clip: Optional ``(lo, hi)`` bound on the result (applied on top of
+            the shared implementation's ECHAM ``MIN(..., 0.5)`` cap).
 
     """
-    es = saturation_vapor_pressure(temperature, phase=phase)
-    # Cap es below the pressure so the denominator stays positive at low p.
-    es = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es / jnp.maximum(pressure - es * (1.0 - c.eps), 1.0)
+    qs = thermodynamics.saturation_specific_humidity(
+        temperature, pressure, phase=phase)
     if clip is not None:
         qs = jnp.clip(qs, clip[0], clip[1])
     return qs
@@ -107,17 +91,8 @@ def saturation_specific_humidity_and_derivative(
     """Return ``(qs, dqs/dT)`` analytically for the cuadjtq / updraft Newton steps.
 
     Computing the derivative in closed form keeps the Newton iteration
-    bit-reproducible under JIT without differentiating through a lookup table.
+    bit-reproducible under JIT without differentiating through the guard
+    logic; the derivative uses the same c3/c4 coefficients as the value.
     """
-    es = saturation_vapor_pressure(temperature, phase=phase)
-    p_safe = jnp.maximum(pressure, 1.0)
-    es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
-    qs = c.eps * es_safe / denom
-
-    tc = temperature - c.tmelt
-    des_dT_water = es * A_WATER * B_WATER / jnp.maximum((tc + B_WATER) ** 2, 1e-3)
-    des_dT_ice = es * A_ICE * B_ICE / jnp.maximum((tc + B_ICE) ** 2, 1e-3)
-    des_dT = jnp.where(temperature > c.tmelt, des_dT_water, des_dT_ice)
-    dqs_dT = c.eps * p_safe * des_dT / denom ** 2
-    return qs, dqs_dT
+    return thermodynamics.saturation_specific_humidity_and_derivative(
+        temperature, pressure, phase=phase)

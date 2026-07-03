@@ -201,8 +201,18 @@ class TestSaturationAdjustment:
         assert 0.75 < rh_final < 1.05  # Should be much closer to saturation
     
     def test_condensation_cold(self):
-        """Test condensation in cold conditions"""
-        temperature = jnp.array(250.0)  # Well below freezing
+        """Test condensation in cold conditions (ice-only regime).
+
+        The start temperature must stay in the ice-only regime *after*
+        condensational warming: the liquid/ice split ramps up from
+        ``tmelt - 23 = 250.15 K``, and with the correct ECHAM ice
+        saturation (es_ice ~3x the old broken coefficient's value at
+        these temperatures) the larger condensate load warms a parcel
+        started at 250.0 K past the ramp edge, forming a trace of
+        liquid. 240 K keeps the adjusted parcel comfortably below the
+        ramp so the ice-only assertion tests the split, not the edge.
+        """
+        temperature = jnp.array(240.0)  # Well below the liquid/ice ramp
         pressure = jnp.array(50000.0)
         
         # Create supersaturated state

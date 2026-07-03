@@ -16,12 +16,6 @@ from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     find_cloud_base,
     calculate_cape_cin
 )
-from jcm.physics.convection.tiedtke_nordeng.tracer_transport import (
-    TracerIndices,
-    initialize_tracers
-)
-
-
 def create_realistic_atmosphere(nlev=20, unstable=True):
     """Create a realistic atmospheric profile for testing"""
     # Physical constants
@@ -360,40 +354,6 @@ class TestJAXCompatibility:
         assert jnp.isfinite(gradient), "Gradient should be finite"
 
 
-class TestTracerTransport:
-    """Test tracer transport functionality"""
-    
-    def test_tracer_initialization(self):
-        """Test tracer initialization"""
-        nlev = 20
-        
-        # Basic tracers only
-        tracers_basic, indices_basic = initialize_tracers(nlev, include_chemistry=False)
-        assert tracers_basic.shape == (nlev, 3), "Should have 3 basic tracers"
-        
-        # With chemistry
-        tracers_chem, indices_chem = initialize_tracers(nlev, include_chemistry=True)
-        assert tracers_chem.shape[1] > 3, "Should have additional chemical tracers"
-        
-        # Check indices
-        assert indices_basic.iqv == 0, "Water vapor should be index 0"
-        assert indices_basic.iqc == 1, "Cloud water should be index 1"
-        assert indices_basic.iqi == 2, "Cloud ice should be index 2"
-        assert indices_basic.iqt == 3, "Additional tracers should start at index 3"
-    
-    def test_tracer_indices(self):
-        """Test tracer indices structure"""
-        indices = TracerIndices()
-        
-        assert hasattr(indices, 'iqv'), "Should have water vapor index"
-        assert hasattr(indices, 'iqc'), "Should have cloud water index"
-        assert hasattr(indices, 'iqi'), "Should have cloud ice index"
-        assert hasattr(indices, 'iqt'), "Should have additional tracer start index"
-        
-        # Check ordering
-        assert indices.iqv < indices.iqc < indices.iqi < indices.iqt, "Indices should be ordered"
-
-
 class TestConfiguration:
     """Test configuration parameters"""
     
@@ -564,10 +524,14 @@ class TestDowndraftLFS:
     """Test downdraft level of free sinking criteria."""
 
     def test_cmfdeps_parameter_exists(self):
-        """Verify cmfdeps parameter exists with default value ~0.33."""
+        """Verify cmfdeps carries the ECHAM 6.3 value.
+
+        0.3 per mo_echam_conv_constants.f90:113 (the earlier 0.33 was an
+        approximation from before the Fortran parameter block was checked).
+        """
         config = ConvectionParameters.default()
         assert hasattr(config, 'cmfdeps'), "Should have cmfdeps parameter"
-        assert float(config.cmfdeps) == pytest.approx(0.33)
+        assert float(config.cmfdeps) == pytest.approx(0.3)
 
     def test_cmfdeps_used_in_lfs_threshold(self):
         """LFS threshold should use cmfdeps (not cmfcmin) times base mass flux.
@@ -579,9 +543,9 @@ class TestDowndraftLFS:
         config = ConvectionParameters.default()
         base_mf = 0.1  # Typical cloud base mass flux (kg/m²/s)
 
-        # Correct threshold using cmfdeps
+        # Correct threshold using cmfdeps (ECHAM value 0.3)
         threshold_correct = float(config.cmfdeps) * base_mf
-        assert threshold_correct == pytest.approx(0.033, rel=0.01)
+        assert threshold_correct == pytest.approx(0.03, rel=0.01)
 
         # Old (wrong) threshold using cmfcmin would be negligible
         threshold_wrong = float(config.cmfcmin) * base_mf

@@ -45,8 +45,7 @@ Example::
     # RRTMGP is the default radiation; convective_rh defaults to
     # relative_humidity − 0.1 so Betts-Miller actually precipitates (see
     # ``rce_column`` on why rhbm must sit below the environmental RH).
-    scm = rce_column(sst=300.0, relative_humidity=0.7, solar_constant=728.4,
-                     co2_ppmv=0.0)
+    scm = rce_column(sst=300.0, relative_humidity=0.7, co2_ppmv=0.0)
     ic  = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7)
     preds = run_rce(scm, ic, n_days=100)
     t_equilibrium = preds.relaxed_states["temperature"][-1]   # (nlev,) profile
@@ -311,7 +310,7 @@ def rce_column(
     relative_humidity: float = 0.7,
     convective_rh: float | None = None,
     co2_ppmv: float = 348.0,
-    solar_constant: float = 728.4,
+    solar_constant: float = 543.2,
     lat_deg: float = 42.55,
     nlev: int = 47,
     vertical=None,
@@ -358,6 +357,14 @@ def rce_column(
         co2_ppmv: CO₂ volume mixing ratio [ppmv] on ``forcing.co2_vmr``.
         solar_constant: Solar constant [W/m²] for the *default* radiation term;
             tune to hit the target TOA SW. Ignored if ``radiation`` is given.
+            The default 543.2 delivers the RCEMIP target ``toa_sw_down``
+            ≈ 409.6 W/m² at this configuration's fixed sun (µ0 = 0.7427 at
+            ``lat_deg=42.55`` / ``day_of_year_fraction=0.22``, orbital
+            distance factor 1.0153): 543.2 × 1.0153 × 0.7427 ≈ 409.6. The
+            previous default (728.4) was calibrated against the µ0²
+            insolation bug in the RRTMGP glue (fixed alongside this change)
+            and would now deliver ~549 W/m² — enough to shut Betts-Miller
+            deep convection off entirely in the default column.
         lat_deg: Column latitude [deg] (fixes the zenith angle with ``solar``).
         nlev: Number of levels for ``get_echam_levels`` (47 or 40) when
             ``vertical`` is not given.

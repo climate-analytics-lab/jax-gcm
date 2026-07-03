@@ -219,9 +219,13 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     assert jnp.allclose(convection.heating_rate, tendency.temperature)
     assert jnp.allclose(convection.moistening_rate, tendency.specific_humidity)
 
-    # ...which is the *capped* heating, not the raw scheme output.
-    expected_dt = jnp.broadcast_to(jnp.clip(dtedt_col, -cap, cap)[:, None], shape)
-    expected_dq = jnp.broadcast_to(dqdt_col[:, None], shape)
+    # ...which is the *capped* ledger, not the raw scheme output. The cap
+    # scales the WHOLE per-level ledger proportionally (T and q together)
+    # so the local energy/water pairing survives the guard — clipping T
+    # alone left the moistening at the uncapped rate (review finding 2.8).
+    cap_scale = jnp.clip(cap / jnp.maximum(jnp.abs(dtedt_col), 1e-30), 0.0, 1.0)
+    expected_dt = jnp.broadcast_to((dtedt_col * cap_scale)[:, None], shape)
+    expected_dq = jnp.broadcast_to((dqdt_col * cap_scale)[:, None], shape)
     assert jnp.allclose(convection.heating_rate, expected_dt)
     assert jnp.allclose(convection.moistening_rate, expected_dq)
     # Guard the "post-cap" semantics: the raw (uncapped) profile would differ.
@@ -968,15 +972,13 @@ class TestConvectivePrecipitation:
                 f"got precip_conv={float(tendencies.precip_conv):.4e}"
 
     def test_calculate_precipitation_rate_sums_pdmfup(self):
-        """``calculate_precipitation_rate`` should sum the per-layer
-        precipitation generated inside the updraft (``pdmfup`` field).
+        """``calculate_precipitation_rate`` sums the per-layer generation.
 
-        The previous implementation returned ``sum(mfu*lu)*cprcon``, which
-        is ~60x too small relative to what the per-layer precip-conversion
-        step (ECHAM cuasc lines 454-457) actually produces. The Fortran
-        harness flagged this as Bug B (parcel liquid water builds up
-        unphysically when no precip is removed each layer, distorting
-        buoyancy and terminating the updraft early).
+        This is ECHAM's ``prain`` PRODUCTION diagnostic (Σ pdmfup before
+        any sink). The SURFACE precipitation is no longer this sum — the
+        cuflx budget (``convective_precip_fluxes``) subtracts downdraft
+        consumption and sub-cloud evaporation and carries the snow phase;
+        ``ConvectionTendencies.precip_conv`` is rain+snow from that budget.
         """
         from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import calculate_precipitation_rate
         from jcm.physics.convection.tiedtke_nordeng.updraft import UpdatedraftState
@@ -997,6 +999,7 @@ class TestConvectivePrecipitation:
             detr=jnp.zeros(nlev),
             buoy=jnp.zeros(nlev),
             pdmfup=pdmfup,
+            plude=jnp.zeros(nlev),
         )
         config = ConvectionParameters.default()
 

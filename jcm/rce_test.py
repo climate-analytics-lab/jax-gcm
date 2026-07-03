@@ -9,6 +9,7 @@ the imbalance is the implied ocean heat flux), keeps a convectively bounded
 lapse rate, and produces order-of-magnitude-reasonable OLR.
 """
 
+import functools
 import unittest
 
 import numpy as np
@@ -171,42 +172,41 @@ class TestRceColumnConstruction(unittest.TestCase):
         self.assertIsNone(scm.state_closure)
 
 
+@functools.lru_cache(maxsize=1)
+def _grey_rce_rollout(sst=300.0, relative_humidity=0.7, n_days=50.0):
+    """One shared 50-day grey RCE rollout for the slow grey-RCE classes.
+
+    The equilibration, lapse-rate, and radiative-convective-balance
+    assertions all interrogate the *same* physical configuration, so they
+    share a single cached integration (the pattern
+    ``scm_boundary_layer_cases_test.py`` uses) instead of running four
+    independent 40–50-day rollouts. PR CI runs the slow suite in a single
+    process, so the cache is fully effective there.
+    """
+    vertical = SigmaCoordinates.equidistant(20)
+    scm = rce_column(
+        sst=sst, relative_humidity=relative_humidity, lat_deg=0.0,
+        radiation=GreyTwoStreamRadiation(
+            params=RadiationParameters.default(solar_constant=420.0),
+        ),
+        vertical=vertical, dt_seconds=1800.0,  # convective_rh defaults to RH−0.1
+    )
+    ic = rce_initial_state(vertical, sst=sst, relative_humidity=relative_humidity)
+    return vertical, scm, run_rce(scm, ic, n_days=n_days)
+
+
 @pytest.mark.slow
 class TestRceIntegrationGrey(unittest.TestCase):
-    """End-to-end grey-radiation RCE: finiteness, equilibration, lapse rate.
+    """End-to-end grey-radiation RCE: physical troposphere, bounded lapse rate.
 
     Grey radiation on a cheap sigma grid keeps this fast; the RRTMGP Case-1
     configuration is exercised separately in :class:`TestRceIntegrationRrtmgp`.
+    Equilibration itself is pinned (with tighter thresholds) by
+    :class:`TestRceRadiativeConvectiveBalance` on the same cached rollout.
     """
 
-    def _run(self, sst=300.0, n_days=40.0):
-        vertical = SigmaCoordinates.equidistant(20)
-        scm = rce_column(
-            sst=sst, relative_humidity=0.7, lat_deg=0.0,
-            radiation=GreyTwoStreamRadiation(
-                params=RadiationParameters.default(solar_constant=420.0),
-            ),
-            vertical=vertical, dt_seconds=1800.0,
-        )
-        ic = rce_initial_state(vertical, sst=sst, relative_humidity=0.7)
-        return scm, run_rce(scm, ic, n_days=n_days)
-
-    def test_runs_finite_and_equilibrates(self):
-        _, preds = self._run()
-        T = preds.relaxed_states["temperature"]
-        dT = preds.tendencies.temperature
-
-        self.assertTrue(bool(jnp.all(jnp.isfinite(T[-1]))))
-
-        rms0 = float(jnp.sqrt(jnp.mean(dT[0] ** 2)) * 86400.0)
-        rms_end = float(jnp.sqrt(jnp.mean(dT[-1] ** 2)) * 86400.0)
-        # The column should be settling: the final RMS heating rate is well
-        # below the initial transient and small in absolute terms.
-        self.assertLess(rms_end, 0.5 * rms0)
-        self.assertLess(rms_end, 0.3)  # K/day
-
     def test_troposphere_physical_and_lapse_rate_bounded(self):
-        _, preds = self._run()
+        vertical, _, preds = _grey_rce_rollout()
         T = np.asarray(preds.relaxed_states["temperature"][-1])
         # Exclude the single thin top layer (grey radiation over-warms it —
         # a known artefact of the scheme at the model top, not a framework bug).
@@ -217,7 +217,6 @@ class TestRceIntegrationGrey(unittest.TestCase):
         # Lapse rate in the lower/mid troposphere must not exceed the dry
         # adiabat (~10 K/km) — i.e. convection has removed the super-adiabatic
         # layers the radiative-equilibrium profile would otherwise have.
-        vertical = SigmaCoordinates.equidistant(20)
         sigma = 0.5 * (np.asarray(vertical.boundaries)[:-1]
                        + np.asarray(vertical.boundaries)[1:])
         z = -7.6e3 * np.log(np.maximum(sigma, 1e-4))  # approx height
@@ -247,16 +246,7 @@ class TestRceRadiativeConvectiveBalance(unittest.TestCase):
     """
 
     def _run(self, sst=300.0, relative_humidity=0.7, n_days=50.0):
-        vertical = SigmaCoordinates.equidistant(20)
-        scm = rce_column(
-            sst=sst, relative_humidity=relative_humidity, lat_deg=0.0,
-            radiation=GreyTwoStreamRadiation(
-                params=RadiationParameters.default(solar_constant=420.0),
-            ),
-            vertical=vertical, dt_seconds=1800.0,  # convective_rh defaults to RH−0.1
-        )
-        ic = rce_initial_state(vertical, sst=sst, relative_humidity=relative_humidity)
-        return vertical, scm, run_rce(scm, ic, n_days=n_days)
+        return _grey_rce_rollout(sst, relative_humidity, n_days)
 
     @staticmethod
     def _heating_rates(preds):
@@ -400,6 +390,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7).copy(
             u_wind=jnp.full(nlev, 5.0),
         )
+        # 80 days = 40-day spin-up + the 40-day averaging window below.
+        # Measured convergence of the windowed rms mean tendency (K/day):
+        # days 10-50: 0.243, 20-50: 0.223, 30-60: 0.143, 40-80: 0.099 —
+        # the column approaches its time-mean equilibrium slowly, so
+        # shortening the spin-up materially erodes the 0.2 K/day margin.
+        # Keep the full 80 days (~73 s wall-clock; the margin is worth it).
         preds = run_rce(scm, ic, n_days=80.0)
 
         T = np.asarray(preds.relaxed_states["temperature"])
@@ -432,12 +428,16 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         ).reshape(len(preds.times), -1)[:, 0]
         self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
 
-        # The high-frequency convective flicker is bounded. The cloud-base
-        # mass-flux closure fix (anchoring to the surface moisture supply +
-        # keeping convection active while it is supplied) roughly halves the
-        # per-level temporal scatter of the total heating (≈14 → ≈7 K/day);
-        # the bare-CAPE on/off closure exceeds this bound. (A residual flicker
-        # remains pending the half-level flux re-stagger — see the class
-        # docstring — so this is an upper bound, not a "smooth" assertion.)
+        # The high-frequency convective flicker is bounded. History of this
+        # pin: the bare-CAPE on/off closure gave ≈14 K/day per-level
+        # temporal scatter; the moisture-supply closure fix halved it to
+        # ≈7; the faithful cuflx/cudtdq ledger raises it to ≈12.3 — the
+        # per-level L·pdmfup/plude heating is genuinely localized where the
+        # removed grid-mean saturation adjustment used to smear it. The
+        # on/off closure pathology this bound originally guarded is now
+        # pinned directly by the closure dt-invariance test
+        # (rce_integration_test), so the bound tracks the measured faithful
+        # value + margin. It should tighten again once the half-level flux
+        # re-stagger (#530) lands.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
-        self.assertLess(max_temporal_std, 10.0)  # K/day
+        self.assertLess(max_temporal_std, 14.0)  # K/day

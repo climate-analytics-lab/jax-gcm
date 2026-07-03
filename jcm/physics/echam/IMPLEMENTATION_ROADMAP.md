@@ -44,11 +44,11 @@ must hold across every commit.
       stale once their term migrations land — re-anchor the doc to the
       scheme-named term classes after Phase 5.
 
-- [ ] ``REMAINING_ISSUES.md`` (next to this file) catalogues bugs by
-      old-style ``apply_*`` line numbers. Either rebase the line
-      numbers onto the new term files in Phase 5 or — better — kill it
-      entirely and migrate any still-open bugs to GitHub issues with
-      the right ``physics/`` labels.
+- [x] ``REMAINING_ISSUES.md`` — deleted. All items it listed were already
+      resolved in the tree except the TKE source-term question (VD-2),
+      which is tracked by the FIXME in
+      ``jcm/physics/vertical_diffusion/tte_tke/tke_budget.py`` (TKE
+      source terms summed but transport handled by the matrix solver).
 
 ### Smaller nits
 

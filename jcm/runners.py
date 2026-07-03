@@ -641,16 +641,32 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
 def build_tracer_filter(cfg: DictConfig):
     """Build the optional dycore-side gridpoint tracer filter.
 
-    Enabled via ``cfg.diffusion.tracer_positivity`` (default off). The only
-    filter currently is mass-conserving positivity, which a spectral core
-    applies as it projects to the physics gridpoint state so the sharp-source
-    tracer fields of prescribed aerosol emissions stay non-negative at the
+    Controlled by ``cfg.diffusion.tracer_positivity``. The only filter currently
+    is mass-conserving positivity, which a spectral core applies as it projects
+    to the physics gridpoint state so the sharp-source tracer fields of
+    prognostic/prescribed aerosol emissions stay non-negative at the
     dynamics→physics boundary (Gibbs ringing otherwise NaNs the microphysics;
-    see issue #521). Returns ``None`` when disabled — a no-op on the dycore.
+    see issue #521).
+
+    Resolution of the config value:
+
+    * ``true`` / ``false`` — force the filter on/off.
+    * ``"auto"`` (or unset) — enable it only when the physics advects prognostic
+      aerosol tracers (``physics.aerosol_module == "jam"``). This defaults the
+      fix on for exactly the runs that need it while leaving non-aerosol runs
+      bit-identical (the filter differs from the plain ``verify_state`` clip only
+      where a tracer rings negative).
+
+    Returns ``None`` when disabled — a no-op on the dycore.
     """
     diffusion = cfg.get("diffusion", None)
-    enabled = (False if diffusion is None
-               else bool(diffusion.get("tracer_positivity", False)))
+    tp = None if diffusion is None else diffusion.get("tracer_positivity", "auto")
+    if isinstance(tp, bool):
+        enabled = tp
+    else:  # "auto" / null → on iff prognostic aerosols are advected
+        physics = cfg.get("physics", None)
+        aerosol_module = None if physics is None else physics.get("aerosol_module", None)
+        enabled = (aerosol_module == "jam")
     if not enabled:
         return None
     from jcm.filters import MassConservingPositivity

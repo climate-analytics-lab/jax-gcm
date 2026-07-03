@@ -59,7 +59,10 @@ class ConvectionParameters:
     cmfcmin: float           # Minimum cloud base mass flux (kg/m²/s)
     
     # Precipitation parameters
-    cprcon: float            # Coefficient for precipitation conversion
+    cprcon: float            # Precip conversion coefficient [s²/m²] — ECHAM
+                             # mo_echam_conv_constants.f90:127: 2.5e-4 at
+                             # T31/T63, 1.5e-4 at T127+. Enters the ascent as
+                             # ``plu/(1 + cprcon·Δgeopotential)``.
     cu_dnoprc_ocean: float   # Pressure thickness above cloud base before
                              # precip generation starts, over ocean (Pa)
                              # — ECHAM ``zdnoprc`` ocean default 1.5e4
@@ -85,12 +88,17 @@ class ConvectionParameters:
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
     entrdd: float            # Downdraft fractional entrainment rate (m⁻¹)
 
+    # Switches (ECHAM namelist lmfdudv; carried as a traced bool so the
+    # struct stays a plain tree_math pytree)
+    lmfdudv: jnp.ndarray
+
     @classmethod
     def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4, # FIXME: validate dt_conv
-                 tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=1.4e-3,
+                 tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
                  cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
-                 cmfctop=0.33, cmfdeps=0.33, entrdd=2.0e-4) -> 'ConvectionParameters':
+                 cmfctop=0.2, cmfdeps=0.3, entrdd=2.0e-4,
+                 lmfdudv=True) -> 'ConvectionParameters':
         """Return default convection parameters"""
         return cls(
             dt_conv=jnp.array(dt_conv),
@@ -110,6 +118,7 @@ class ConvectionParameters:
             cmfctop=jnp.array(cmfctop),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
+            lmfdudv=jnp.array(lmfdudv),
         )
 
 
@@ -207,23 +216,6 @@ class ConvectionData:
             heating_rate=jnp.zeros((nlev,) + nodal_shape),
             moistening_rate=jnp.zeros((nlev,) + nodal_shape),
         )
-
-
-def moist_static_energy(temperature: jnp.ndarray,
-                       height: jnp.ndarray, 
-                       mixing_ratio: jnp.ndarray) -> jnp.ndarray:
-    """Calculate moist static energy
-    
-    Args:
-        temperature: Temperature (K)
-        height: Geopotential height (m)  
-        mixing_ratio: Water vapor mixing ratio (kg/kg)
-        
-    Returns:
-        Moist static energy (J/kg)
-
-    """
-    return c.cpd * temperature + c.grav * height + c.alhc * mixing_ratio
 
 
 def initialize_convection(temperature: jnp.ndarray,
@@ -733,7 +725,6 @@ def tiedtke_nordeng_convection(
     from .flux_tendencies import (
         calculate_tendencies, mass_flux_closure
     )
-    from .adjustment import convective_adjustment
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
@@ -851,6 +842,74 @@ def tiedtke_nordeng_convection(
             updraft_state, precip_rate, cloud_base, ktop, config
         )
         
+        # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
+        # Rescale the trial cloud-base flux so the REALIZED flux profile
+        # would consume the plume CAPE in cmftau seconds:
+        #     zmfub1 = zcape·zmfub / (zheat·cmftau)
+        # zheat is the CAPE-consumption rate per unit net convective mass
+        # flux (environment stability × g·(mfu+mfd)/ρ summed over the cloud
+        # column); zcape is the plume CAPE with virtual-T and condensate
+        # loading. This replaces the dimensionally-inconsistent CAPE/(g·τ)
+        # (units m/s, review finding 2.5). ECHAM applies the rescale by
+        # re-running cuasc with the corrected base flux; because the parcel
+        # properties are independent of the flux magnitude (fractional
+        # entrainment) and every flux is linear in it, an in-place linear
+        # rescale of the plume fluxes is equivalent to first order and
+        # avoids the second ascent pass. The downdraft arrays are rescaled
+        # by the same factor, exactly as mo_cumastr.f90:945-958.
+        in_cloud = (jnp.arange(nlev) >= jnp.minimum(ktop, cloud_base)) & (
+            jnp.arange(nlev) <= jnp.maximum(ktop, cloud_base)
+        )
+        zroi = c.rd * temperature * (1.0 + c.vtmpc1 * humidity) / pressure
+        dT_up = jnp.diff(temperature, prepend=temperature[:1])   # T(k-1)-T(k), TOA-first
+        dq_up = jnp.diff(humidity, prepend=humidity[:1])
+        net_mf = updraft_state.mfu + downdraft_state.mfd
+        zheat = jnp.sum(
+            jnp.where(
+                in_cloud,
+                ((-dT_up + c.grav * layer_thickness / c.cpd) / temperature
+                 + c.vtmpc1 * (-dq_up))
+                * (c.grav * net_mf) * zroi,
+                0.0,
+            )
+        )
+        zcape_plume = jnp.sum(
+            jnp.where(
+                in_cloud & (updraft_state.mfu > 0),
+                (c.grav * (updraft_state.tu - temperature) / temperature
+                 + c.grav * c.vtmpc1 * (updraft_state.qu - humidity)
+                 - c.grav * updraft_state.lu) * layer_thickness,
+                0.0,
+            )
+        )
+        zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
+        zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
+        zmfub1 = jnp.clip(zmfub1, 0.001, mfu_cfl_max)
+        # Deliberate deviation from ECHAM: the rescale applies only when the
+        # cloud-base flux came from the CAPE fallback. ECHAM rescales every
+        # deep column (its first guess is always the PBL moisture budget),
+        # but in the single-column RCE the rescale on top of the moisture-
+        # anchored flux re-introduces the CAPE-tracking pulse the #529/#535
+        # closure work eliminated (measured: max temporal heating std 7 →
+        # 12 K/day). Where the moisture closure is invalid the fallback is
+        # now Nordeng's zcape/(zheat·cmftau) — replacing the dimensionally
+        # inconsistent CAPE/(g·τ) — so both branches are physical.
+        rescale = jnp.where(
+            (conv_type == 1) & (zheat > 1e-10) & (zcape_plume > 0.0)
+            & jnp.logical_not(use_moisture),
+            zmfub1 / zmfub,
+            1.0,
+        )
+        updraft_state = updraft_state._replace(
+            mfu=updraft_state.mfu * rescale,
+            pdmfup=updraft_state.pdmfup * rescale,
+            plude=updraft_state.plude * rescale,
+        )
+        downdraft_state = downdraft_state._replace(
+            mfd=downdraft_state.mfd * rescale,
+            pdmfdp=downdraft_state.pdmfdp * rescale,
+        )
+
         # Calculate final tendencies for basic variables
         tendencies = calculate_tendencies(
             temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
@@ -858,97 +917,38 @@ def tiedtke_nordeng_convection(
             cloud_base, ktop, dt, config
         )
         
-        # Calculate fixed qc/qi transport
-        mass_flux_profile = updraft_state.mfu - downdraft_state.mfd
+        # qc/qi tendencies come from the cudtdq ledger's detrained
+        # condensate (g/Δp·plude, ECHAM pxtecl/pxteci) — computed inside
+        # calculate_tendencies. The previous ``mass_flux·tracer·0.1`` /
+        # ``diff(...)·0.001`` pseudo-transport and the ``lu·0.1``/``lu·0.05``
+        # magic-number production had no ECHAM counterpart and were
+        # dimensionally meaningless (review finding 2.4).
+        dqc_dt = tendencies.dqc_dt
+        dqi_dt = tendencies.dqi_dt
+        qc_conv = tendencies.qc_conv
+        qi_conv = tendencies.qi_conv
         
-        def calculate_tracer_tendency(tracer_profile):
-            # Simple finite difference for transport
-            tracer_flux = mass_flux_profile * tracer_profile * 0.1  # Mixing efficiency
-            # Tendency from flux divergence (simplified)
-            return jnp.diff(tracer_flux, append=0.0) * 0.001  # Scale factor
-        
-        # Calculate fixed qc/qi tendencies
-        dqc_dt = calculate_tracer_tendency(qc)
-        dqi_dt = calculate_tracer_tendency(qi)
-        
-        # Enhanced cloud water/ice production from condensation
-        qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu * 0.1, 0.0)
-        qi_conv = jnp.where(
-            (updraft_state.mfu > 0) & (temperature < c.tmelt),
-            updraft_state.lu * 0.05, 0.0
-        )
-        
-        # Final saturation adjustment: apply the convective tendencies,
-        # remove any residual supersaturation via iterative saturation
-        # adjustment (matches the post-convection `cuadjtq` call in the
-        # ECHAM reference), then re-derive the tendencies that produce
-        # the adjusted state.
-        #
-        # Restrict the adjustment to the cloud column. ECHAM's `cuadjtq`
-        # is only called on the cloud levels processed by cuasc /
-        # cubase; running it across the whole column makes the
-        # saturation adjustment fire on every above-cloud-top level
-        # whose initial RH happens to exceed the JAX qsat cutoff
-        # (which differs slightly from the lookup-table values ECHAM
-        # uses), producing spurious heating tens of times larger than
-        # the actual convective flux divergence. See the harness
-        # comparison in fortran_harness/compare_cumastr.py for the
-        # diagnostic that surfaces this.
-        #
-        # The cloud column is delimited by the *actual* updraft extent
-        # (where mfu is still nonzero), not the scan ceiling ``ktop`` —
-        # using the ceiling lets the adjustment fire above the real
-        # cloud top, where the env can be supersaturated relative to
-        # JAX's qsat formula and the iteration explodes into spurious
-        # condensational heating. Derive the actual top from where the
-        # updraft mass flux extends.
-        _mfu_active_for_mask = updraft_state.mfu > config.cmfcmin
-        _has_active_for_mask = jnp.any(_mfu_active_for_mask)
-        _candidate_for_mask = jnp.where(
-            _mfu_active_for_mask, jnp.arange(nlev),
-            jnp.array(nlev, jnp.int32),
-        )
-        actual_top_for_mask = jnp.where(
-            _has_active_for_mask,
-            jnp.min(_candidate_for_mask).astype(jnp.int32),
-            ktop,
-        )
-        cloud_top = jnp.minimum(actual_top_for_mask, cloud_base)
-        cloud_bottom = jnp.maximum(actual_top_for_mask, cloud_base)
-        cloud_mask = (jnp.arange(nlev) >= cloud_top - 1) & (
-            jnp.arange(nlev) <= cloud_bottom
-        )
-        zero_outside = lambda arr: jnp.where(cloud_mask, arr, 0.0)
-        t_adj, q_adj, qc_adj, qi_adj = convective_adjustment(
-            temperature, humidity, pressure, qc, qi,
-            zero_outside(tendencies.dtedt), zero_outside(tendencies.dqdt),
-            zero_outside(dqc_dt), zero_outside(dqi_dt), dt,
-        )
-        # Outside the cloud column, leave the original state untouched
-        # (no tendency, no condensation) regardless of what the
-        # saturation lookup said.
-        t_adj  = jnp.where(cloud_mask, t_adj,  temperature)
-        q_adj  = jnp.where(cloud_mask, q_adj,  humidity)
-        qc_adj = jnp.where(cloud_mask, qc_adj, qc)
-        qi_adj = jnp.where(cloud_mask, qi_adj, qi)
-        inv_dt = 1.0 / jnp.maximum(dt, 1e-6)
-        dtedt_adj = (t_adj - temperature) * inv_dt
-        dqdt_adj = (q_adj - humidity) * inv_dt
-        dqc_dt_adj = (qc_adj - qc) * inv_dt
-        dqi_dt_adj = (qi_adj - qi) * inv_dt
-
+        # NOTE: ECHAM applies NO grid-mean saturation adjustment after
+        # cudtdq (verified against mo_cumastr.f90 — after the tendencies
+        # only cududv and the tracer mass fixer run; environment
+        # supersaturation is the stratiform cloud scheme's job, fed by the
+        # detrained condensate). The previous ``convective_adjustment`` over
+        # the cloud column double-counted stratiform condensation and
+        # contributed ~2/3 of the column heating (review finding 2.1); with
+        # the faithful flux/precip ledger above, the raw tendencies flow
+        # through unmodified.
         # Create enhanced tendencies with fixed qc/qi transport and the
         # adjusted saturation state.
         enhanced_tendencies = ConvectionTendencies(
-            dtedt=dtedt_adj,
-            dqdt=dqdt_adj,
+            dtedt=tendencies.dtedt,
+            dqdt=tendencies.dqdt,
             dudt=tendencies.dudt,
             dvdt=tendencies.dvdt,
             qc_conv=qc_conv,
             qi_conv=qi_conv,
             precip_conv=tendencies.precip_conv,
-            dqc_dt=dqc_dt_adj,
-            dqi_dt=dqi_dt_adj,
+            dqc_dt=dqc_dt,
+            dqi_dt=dqi_dt,
         )
         
         # ECHAM-ICON convention: ktop is the smallest level index (highest
@@ -1134,17 +1134,27 @@ class TiedtkeConvection(PhysicsTerm):
         # the updraft loop — ECHAM bounds those via the per-level moist-
         # adjustment limits in ``mo_cuadjust.f90`` which we have not yet
         # ported. Until that lands this cap is the safety net.
+        # Where the cap fires, scale the WHOLE per-level ledger by the same
+        # factor rather than clipping T alone: clipping only the heating
+        # decoupled the T/q pair (moistening continued at the uncapped rate
+        # while its latent heating was truncated — review finding 2.8). A
+        # proportional scale keeps the local energy/water pairing intact;
+        # column conservation is still broken wherever the cap fires, which
+        # is inherent to any such guard.
         _DTDT_MAX = 5.0 / 3600.0  # K/s
-        dt_capped = jnp.clip(tendencies_all.dtedt, -_DTDT_MAX, _DTDT_MAX)
+        cap_scale = jnp.clip(
+            _DTDT_MAX / jnp.maximum(jnp.abs(tendencies_all.dtedt), 1e-30),
+            0.0, 1.0,
+        )
 
         tendency = PhysicsTendency(
             u_wind=tendencies_all.dudt.T,
             v_wind=tendencies_all.dvdt.T,
-            temperature=dt_capped.T,
-            specific_humidity=tendencies_all.dqdt.T,
+            temperature=(tendencies_all.dtedt * cap_scale).T,
+            specific_humidity=(tendencies_all.dqdt * cap_scale).T,
             tracers={
-                "qc": tendencies_all.dqc_dt.T,
-                "qi": tendencies_all.dqi_dt.T,
+                "qc": (tendencies_all.dqc_dt * cap_scale).T,
+                "qi": (tendencies_all.dqi_dt * cap_scale).T,
             },
         )
 

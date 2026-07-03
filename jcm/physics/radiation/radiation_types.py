@@ -256,28 +256,6 @@ class RadiationState(NamedTuple):
     aerosol_asymmetry: jnp.ndarray         # Aerosol asymmetry factor [nlev, nbands]
 
 
-class RadiationFluxes(NamedTuple):
-    """Radiation fluxes at interfaces"""
-    
-    # Shortwave fluxes (W/m²) [nlev+1]
-    sw_down: jnp.ndarray             # Downward shortwave flux
-    sw_up: jnp.ndarray               # Upward shortwave flux
-    sw_down_clear: jnp.ndarray       # Clear-sky downward shortwave
-    sw_up_clear: jnp.ndarray         # Clear-sky upward shortwave
-    
-    # Longwave fluxes (W/m²) [nlev+1]
-    lw_down: jnp.ndarray             # Downward longwave flux
-    lw_up: jnp.ndarray               # Upward longwave flux
-    lw_down_clear: jnp.ndarray       # Clear-sky downward longwave
-    lw_up_clear: jnp.ndarray         # Clear-sky upward longwave
-    
-    # Surface components (W/m²)
-    sw_down_vis_dir: jnp.ndarray     # Direct visible at surface
-    sw_down_vis_dif: jnp.ndarray     # Diffuse visible at surface
-    sw_down_nir_dir: jnp.ndarray     # Direct near-IR at surface
-    sw_down_nir_dif: jnp.ndarray     # Diffuse near-IR at surface
-
-
 class RadiationTendencies(NamedTuple):
     """Tendencies from radiation"""
     
@@ -292,24 +270,3 @@ class OpticalProperties(NamedTuple):
     optical_depth: jnp.ndarray       # Layer optical depth [nlev, nbands]
     single_scatter_albedo: jnp.ndarray  # Single scattering albedo [nlev, nbands]
     asymmetry_factor: jnp.ndarray    # Asymmetry factor [nlev, nbands]
-
-
-@tree_math.struct
-class SpectralBands:
-    """Definition of spectral bands"""
-    
-    # Shortwave bands (wavelength in micrometers)
-    sw_band_limits: tuple = (
-        (0.2, 0.7),    # Visible
-        (0.7, 4.0),    # Near-IR
-    )
-    
-    # Longwave bands (wavenumber in cm⁻¹)
-    lw_band_limits: tuple = (
-        (10, 350),     # Window region
-        (350, 500),    # CO2 band
-        (500, 2500),   # H2O bands
-    )
-    
-    # Band weights for solar spectrum
-    sw_solar_fraction: tuple = (0.5, 0.5)  # Simplified equal split

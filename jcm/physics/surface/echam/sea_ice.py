@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
@@ -155,9 +156,14 @@ def sea_ice_physics_step(
     air_density = (atmospheric_state.pressure /
                   (c.rd * atmospheric_state.temperature))
 
-    # Surface saturation humidity
-    e_sat = 611.0 * jnp.exp(17.27 * (surface_temp - c.tmelt) /
-                           (surface_temp - c.tmelt + 237.3))
+    # Surface saturation humidity — over ICE, unconditionally: this is a
+    # sea-ice tile and the latent-heat flux below uses the sublimation
+    # latent heat ``alhs``, so the saturation surface must be ice for the
+    # flux pair to be thermodynamically consistent. Shared ECHAM
+    # coefficients from jcm.physics.thermodynamics; the simplified
+    # ``eps·es/p`` conversion (vs the full ``eps·es/(p−(1−eps)·es)``) is
+    # kept — the difference is <0.5 % at these temperatures.
+    e_sat = thermodynamics.saturation_vapor_pressure(surface_temp, phase="ice")
     q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
 
     # Temperature and humidity differences. Positive convention: flux UP
