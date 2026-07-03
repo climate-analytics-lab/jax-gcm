@@ -80,7 +80,12 @@ def get_simple_aerosol(
         prof * cw_bg[:, jnp.newaxis, :], axis=(0, 1),
     )                                              # (ncols,)
 
-    tiny = jnp.finfo(aod_profile.dtype).tiny
+    # Zero-AOD threshold for the completing divisions. The Fortran uses
+    # TINY(1.) in float64; in float32 the division VJP forms num/den**2,
+    # so any threshold whose SQUARE underflows (den < ~1e-19) still
+    # produces inf/NaN gradients through far-plume-tail cells. 1e-15 AOD
+    # is radiatively indistinguishable from zero and keeps den**2 normal.
+    tiny = jnp.asarray(1e-15, dtype=aod_profile.dtype)
 
     # 550 nm diagnostic SSA/ASY profiles: anthropogenic-AOD-weighted
     # plume means with the reference AOD->0 limits (ssa -> 1, asy -> 0).
@@ -88,8 +93,19 @@ def get_simple_aerosol(
     asy_sum_550 = jnp.einsum(
         'p,pkc->kc', parameters.ssa550 * parameters.asy550, aod_550,
     )
-    asy_profile = jnp.where(ssa_sum_550 > tiny, asy_sum_550 / ssa_sum_550, 0.0)
-    ssa_profile = jnp.where(aod_profile > tiny, ssa_sum_550 / aod_profile, 1.0)
+    # Double-where gradient guard (the #547 pattern): the inactive branch
+    # of a bare where() is still differentiated, and even a
+    # maximum(den, tiny) guard NaNs in reverse mode because the division
+    # VJP forms num/den**2 and tiny**2 underflows to zero in float32. The
+    # denominator must be replaced by a benign constant where inactive.
+    ssa_has = ssa_sum_550 > tiny
+    aod_has = aod_profile > tiny
+    asy_profile = jnp.where(
+        ssa_has, asy_sum_550 / jnp.where(ssa_has, ssa_sum_550, 1.0), 0.0,
+    )
+    ssa_profile = jnp.where(
+        aod_has, ssa_sum_550 / jnp.where(aod_has, aod_profile, 1.0), 1.0,
+    )
 
     # Per-SW-band optics: the per-plume wavelength kernels (Stevens 2017
     # closed forms) enter the plume sum as (nb, nplumes) factors — an
@@ -107,19 +123,24 @@ def get_simple_aerosol(
     aod_sw_per_band = jnp.einsum('bp,pkc->bkc', lfac_aod, aod_550)
     ssa_sum_b = jnp.einsum('bp,pkc->bkc', lfac_aod * ssa_b, aod_550)
     asy_sum_b = jnp.einsum('bp,pkc->bkc', lfac_aod * ssa_b * asy_b, aod_550)
+    ssa_b_has = ssa_sum_b > tiny
+    aod_b_has = aod_sw_per_band > tiny
     asy_sw_per_band = jnp.where(
-        ssa_sum_b > tiny, asy_sum_b / jnp.maximum(ssa_sum_b, tiny), 0.0,
+        ssa_b_has, asy_sum_b / jnp.where(ssa_b_has, ssa_sum_b, 1.0), 0.0,
     )
     ssa_sw_per_band = jnp.where(
-        aod_sw_per_band > tiny,
-        ssa_sum_b / jnp.maximum(aod_sw_per_band, tiny), 1.0,
+        aod_b_has,
+        ssa_sum_b / jnp.where(aod_b_has, aod_sw_per_band, 1.0), 1.0,
     )
 
     # Column Angstrom diagnostic for hosts that band-scale a column AOD
     # themselves (grey two-stream): plume-AOD-weighted mean, arbitrary
     # (zero) where there is no plume AOD to scale.
     ang_sum = jnp.einsum('p,pkc->c', parameters.angstrom, aod_550)
-    angstrom = jnp.where(caod_sp > tiny, ang_sum / jnp.maximum(caod_sp, tiny), 0.0)
+    caod_has = caod_sp > tiny
+    angstrom = jnp.where(
+        caod_has, ang_sum / jnp.where(caod_has, caod_sp, 1.0), 0.0,
+    )
 
     # Twomey factor (Stevens et al. 2017 dNovrN) and the absolute-CCN
     # activation floor for the SPA path.

@@ -391,6 +391,38 @@ class TestJAXCompatibility:
         assert jnp.all(jnp.isfinite(g))
         assert float(g[2]) > 0.9   # East-Asia column sits on plume 3
 
+    def test_gradient_finite_through_zero_aod_columns(self):
+        """Gradients survive columns/levels with zero anthropogenic AOD.
+
+        Codex review on #555: a bare where() around the 550 nm profile
+        divisions still differentiates the inactive 0/0 branch, NaN-ing
+        any gradient that touches ssa/asy_profile (grey radiation does).
+        A mid-Pacific column plus an orography-masked column exercise
+        exactly those zero-denominator cells.
+        """
+        height, dz, _ = _column_grid(ncols=2)
+        oro = jnp.array([0.0, 8000.0])
+        lats, lons = jnp.array([0.0, 0.0]), jnp.array([180.0, 180.0])
+        data = AerosolData.zeros((2,), 30, n_bnd_sw=1, n_bnd_lw=1)
+        f = _forcing_ones()
+
+        def loss(aod_spmx):
+            p = AerosolParameters.default()
+            p = type(p)(**{**{k: getattr(p, k) for k in (
+                'nplumes', 'nfeatures', 'plume_lat', 'plume_lon', 'beta_a',
+                'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
+                'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
+                'ftr_weight', 'background_aod', 'spa_prefactor',
+                'spa_exponent')}, 'aod_spmx': aod_spmx})
+            out = get_simple_aerosol(height, dz, oro, lats, lons, data, p,
+                                     f, jnp.asarray([550.0]))
+            # Sum the fields whose divisions had the NaN-gradient risk.
+            return (jnp.sum(out.ssa_profile) + jnp.sum(out.asy_profile)
+                    + jnp.sum(out.aod_profile))
+
+        g = jax.grad(loss)(AerosolParameters.default().aod_spmx)
+        assert jnp.all(jnp.isfinite(g)), g
+
     def test_gradient_wrt_coordinates(self):
         p = AerosolParameters.default()
 
