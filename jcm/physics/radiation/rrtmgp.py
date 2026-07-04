@@ -659,25 +659,54 @@ def radiation_scheme_rrtmgp(
     # gas optics; ``h2o`` is always overridden internally from ``q_t``.
     # Each profile is shaped (1, 1, nz+2*halo) to match the rest of
     # rrtmgp_input.
+    #
+    # ORIENTATION: the library frame is surface-first (z index 0 = bottom;
+    # see the flips in ``prepare_rrtmgp_data``), while jcm physics columns
+    # are TOA-first. Every per-level profile handed to the library below
+    # (gas VMRs and per-band aerosol) must flip under the SAME
+    # ``needs_reversal`` as temperature/pressure/clouds. These two groups
+    # previously skipped the flip: the chemistry ozone profile entered gas
+    # optics upside down, and the per-band aerosol landed with its
+    # surface-concentrated tau at the model top — the resulting spurious
+    # top-level LW cooling from JAM's dust/BC LW bands grew a 2-grid
+    # oscillation at 1 Pa that NaN'd coupled JAM runs by day ~10 (and the
+    # same inversion put MACv2-SP's SW tau at the top of every RRTMGP run).
+    flip_profile = lambda a: a[::-1]  # noqa: E731
+    flip_per_band = lambda a: a[:, ::-1]  # noqa: E731
+    identity_fn = lambda a: a  # noqa: E731
+
+    def _oriented(profile_1d: jnp.ndarray) -> jnp.ndarray:
+        """TOA-first (nlev,) profile → library surface-first orientation."""
+        return lax.cond(needs_reversal, flip_profile, identity_fn, profile_1d)
+
+    def _oriented_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
+        """TOA-first (n_bnd, nlev) → library surface-first orientation."""
+        return lax.cond(needs_reversal, flip_per_band, identity_fn, arr_2d)
+
     halo = 1
     nlev = icon_state.temperature.shape[0]
     vmr_fields: dict[str, jnp.ndarray] = {}
     if ozone_vmr is not None:
-        # ``ozone_vmr`` arrives as a (nlev,) profile in mole fraction.
-        vmr_fields["o3"] = _to_3d_with_filled_halo(ozone_vmr, nlev, halo)
+        # ``ozone_vmr`` arrives as a (nlev,) TOA-first profile in mole
+        # fraction; reorient before halo-padding.
+        vmr_fields["o3"] = _to_3d_with_filled_halo(
+            _oriented(ozone_vmr), nlev, halo,
+        )
     if co2_vmr is not None:
         vmr_fields["co2"] = _to_3d_with_filled_halo(
-            jnp.broadcast_to(co2_vmr, (nlev,)), nlev, halo,
+            _oriented(jnp.broadcast_to(co2_vmr, (nlev,))), nlev, halo,
         )
     if ch4_vmr is not None:
+        # CH4 is a real profile (methane-oxidation chemistry), not a
+        # scalar — it needs the reorientation too.
         vmr_fields["ch4"] = _to_3d_with_filled_halo(
-            jnp.broadcast_to(ch4_vmr, (nlev,)), nlev, halo,
+            _oriented(jnp.broadcast_to(ch4_vmr, (nlev,))), nlev, halo,
         )
     if n2o_vmr is not None:
         # Prescribed from ``forcing.n2o_vmr``; overrides RRTMGP's
         # ``vmr_global_means.json`` fallback for N2O.
         vmr_fields["n2o"] = _to_3d_with_filled_halo(
-            jnp.broadcast_to(n2o_vmr, (nlev,)), nlev, halo,
+            _oriented(jnp.broadcast_to(n2o_vmr, (nlev,))), nlev, halo,
         )
 
     # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
@@ -686,7 +715,13 @@ def radiation_scheme_rrtmgp(
     # for ``compute_heating_rate``. LW is omitted — MACv2-SP only models
     # SW aerosol effects per ``mo_bc_aeropt_splumes.f90``.
     def _to_4d_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
-        """(n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo) with edge halos."""
+        """TOA-first (n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo), library frame.
+
+        Reorients to the library's surface-first z axis first, then
+        edge-fills the halos (halo 0 = below-surface copy of the surface
+        layer, halo -1 = above-top copy of the top layer).
+        """
+        arr_2d = _oriented_per_band(arr_2d)
         n_bnd = arr_2d.shape[0]
         out = jnp.zeros((n_bnd, 1, 1, nlev + 2 * halo), dtype=arr_2d.dtype)
         out = out.at[:, 0, 0, halo:halo + nlev].set(arr_2d)

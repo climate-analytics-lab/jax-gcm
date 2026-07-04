@@ -757,3 +757,88 @@ class TestRRTMGPRadiationQuickWins:
         assert float(diag_cloudy.toa_sw_up_clear) == pytest.approx(
             float(diag_clear.toa_sw_up_clear), rel=1e-4
         )
+
+
+class TestRRTMGPVerticalOrientation:
+    """Per-level inputs must reach the solver in the library's frame.
+
+    jcm physics columns are TOA-first while the jax-rrtmgp library is
+    surface-first; temperature/pressure/clouds flip in
+    ``prepare_rrtmgp_data`` but the per-band aerosol and the gas-VMR
+    profiles previously skipped the flip. The signature failure was
+    surface-concentrated aerosol tau acting at the model top: spurious
+    top-level LW cooling from JAM's dust/BC LW bands grew a two-grid
+    oscillation at 1 Pa that NaN'd coupled JAM runs by day ~10, and
+    MACv2-SP's SW tau heated the top of every RRTMGP run. These tests
+    pin locality (aerosol acts at the levels that carry it) and the
+    ozone profile's orientation.
+    """
+
+    def _lw_heating(self, inputs):
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        return np.asarray(diag.lw_heating_rate)
+
+    def test_low_level_lw_aerosol_acts_low_not_at_top(self):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+
+        clean = AerosolData.zeros((), nlev, n_bnd_sw=14, n_bnd_lw=16)
+        # Dust-like LW aerosol confined to the three SURFACE layers
+        # (TOA-first indices -3:). With the historical orientation bug
+        # these landed at the library top and cooled the TOA layer ~100x.
+        tau = jnp.zeros((16, nlev)).at[:, -3:].set(0.05)
+        ssa = jnp.zeros((16, nlev)).at[:, -3:].set(0.5)
+        asy = jnp.zeros((16, nlev)).at[:, -3:].set(0.3)
+        dusty = clean.copy(
+            aod_lw_per_band=tau, ssa_lw_per_band=ssa, asy_lw_per_band=asy,
+        )
+
+        base = self._lw_heating({**inputs, "aerosol_data": clean})
+        pert = self._lw_heating({**inputs, "aerosol_data": dusty})
+        diff = pert - base
+
+        top_change = abs(diff[0])
+        low_change = np.abs(diff[-3:]).max()
+        # The aerosol must act where it is: significant response in the
+        # loaded surface layers, and the TOA layer essentially untouched
+        # (it holds no aerosol and only sees the tiny OLR perturbation).
+        assert low_change > 1e-7, f"no low-level LW response ({low_change})"
+        assert top_change < 0.1 * low_change, (
+            f"top-layer LW heating changed by {top_change} vs low-level "
+            f"{low_change} — surface aerosol is acting at the model top "
+            "(vertical orientation regression)"
+        )
+
+    def test_ozone_profile_orientation_reaches_gas_optics(self):
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+
+        pf = np.asarray(inputs["pressure_levels"])
+        # Stratospheric ozone: 8 ppm bump centred at 20 hPa (upper part
+        # of this TOA-first column), near-zero in the troposphere.
+        o3 = jnp.asarray(8.0e-6 * np.exp(
+            -((np.log(pf) - np.log(2000.0)) / 1.0) ** 2
+        ))
+
+        _, d_correct = radiation_scheme_rrtmgp(**{**inputs, "ozone_vmr": o3})
+        _, d_flipped = radiation_scheme_rrtmgp(
+            **{**inputs, "ozone_vmr": o3[::-1]}
+        )
+        sw_c = np.asarray(d_correct.sw_heating_rate)
+        sw_f = np.asarray(d_flipped.sw_heating_rate)
+        assert sw_c.max() > 1e-7, "daytime column expected (noon equator)"
+        # Orientation must matter at all (guards against the profile being
+        # silently discarded)...
+        assert np.abs(sw_c - sw_f).max() > 1e-7
+        # ...and the physically-oriented profile must put the ozone SW
+        # heating in the upper half of the column (TOA-first indices).
+        upper = sw_c[: nlev // 2].max()
+        lower = sw_c[nlev // 2:].max()
+        assert upper > lower, (
+            f"SW heating peak below mid-column (upper {upper}, lower "
+            f"{lower}) — ozone profile entering gas optics upside down"
+        )
