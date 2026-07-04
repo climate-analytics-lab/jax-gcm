@@ -621,7 +621,7 @@ def cloud_microphysics_2m(
         dqdt, dtedt, dqidt, dqcdt,
         dqncdt_m3, dqnidt_m3,
         _incloud_liq, _incloud_ice,
-        _liq_eff_radius, _ice_eff_radius,
+        liq_eff_radius, ice_eff_radius,
     ) = update_tendencies_and_important_vars(
         icnc=icnc_after_scan,
         cdnc=cdnc_after_scan,
@@ -721,7 +721,12 @@ def cloud_microphysics_2m(
         dqrdt=dqrdt,
         dqsdt=dqsdt,
     )
-    return tendencies, surface_rain_flux, surface_snow_flux
+    # Microphysical effective radii (ECHAM preffl/preffi, um) — consumed
+    # by the radiation term via the clouds carry (finding 2.36: the
+    # radiation-side fabricated r_eff(T)*clip(IWC) saturated at the LUT
+    # edge for thin cirrus, mis-forcing the TTL).
+    return tendencies, surface_rain_flux, surface_snow_flux, \
+        liq_eff_radius, ice_eff_radius
 
 
 # ---------------------------------------------------------------------------
@@ -876,10 +881,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             "ice_nuclei_deposition", zeros_2d
         )
 
-        tend_all, surface_rain_flux, surface_snow_flux = jax.vmap(
+        (tend_all, surface_rain_flux, surface_snow_flux,
+         r_eff_liq_all, r_eff_ice_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -929,5 +935,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             qnc_prev=qnc, qni_prev=qni,
             precip_rain=surface_rain_flux,
             precip_snow=surface_snow_flux,
+            # Microphysical effective radii (um) for the radiation term
+            # (ECHAM preffl/preffi; consumed next step via the carry —
+            # same lag as every cross-term diagnostic).
+            r_eff_liq=r_eff_liq_all.T,
+            r_eff_ice=r_eff_ice_all.T,
         )
         return tendency, {**diagnostics, "clouds": clouds_next}

@@ -36,6 +36,10 @@ class CloudData:
     # steps so the 2M ``update_tendencies_and_important_vars`` step has
     # the tm1 state it needs. Stored per kg of air (matching the
     # qnc/qni tracer convention).
+    # Microphysical effective radii [um] (nlev, ncols); 0 = not provided
+    # (1M / cold start) — radiation falls back to its diagnostic formulas.
+    r_eff_liq: jnp.ndarray
+    r_eff_ice: jnp.ndarray
     qnc_prev: jnp.ndarray            # Previous-step cloud droplet number [1/kg] (nlev, ncols)
     qni_prev: jnp.ndarray            # Previous-step ice crystal number    [1/kg] (nlev, ncols)
 
@@ -65,6 +69,8 @@ class CloudData:
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
+            r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
+            r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
             qnc_prev=jnp.zeros((nlev,) + nodal_shape),
             qni_prev=jnp.zeros((nlev,) + nodal_shape),
             toa_sw_up_all=jnp.zeros(nodal_shape),
@@ -81,6 +87,8 @@ class CloudData:
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
             'droplet_number': self.droplet_number,
+            'r_eff_liq': self.r_eff_liq,
+            'r_eff_ice': self.r_eff_ice,
             'qnc_prev': self.qnc_prev,
             'qni_prev': self.qni_prev,
             'toa_sw_up_all': self.toa_sw_up_all,

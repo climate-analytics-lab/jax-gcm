@@ -1235,7 +1235,7 @@ class TestColumnWaterConservation2M:
         qni = jnp.where(qi > 0, 1e4, 0.0)
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, qnc, qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1283,7 +1283,7 @@ class TestColumnWaterConservation2M:
 
         def run(nic):
             params = CloudParams2M.default(nic_cirrus=nic)
-            tend, _, _ = cloud_microphysics_2m(
+            tend, _, _, *_ = cloud_microphysics_2m(
                 T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
                 jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
                 jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1322,7 +1322,7 @@ class TestColumnWaterConservation2M:
         qsi = c.eps * esi / np.asarray(p)
         q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
-        tend, _, _ = cloud_microphysics_2m(
+        tend, _, _, *_ = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), jnp.full(nlev, 0.287), rho,
             jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1365,7 +1365,7 @@ class TestColumnWaterConservation2M:
         qnc = jnp.where(qc > 0, 5e7, 0.0)       # 50/mg — modest CDNC
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, qnc, jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1413,7 +1413,7 @@ class TestColumnWaterConservation2M:
         qni = jnp.where(qi > 0, 2e3, 0.0)
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, jnp.zeros(nlev), qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
