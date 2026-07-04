@@ -146,7 +146,17 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # Warm precipitation formation (KK2000 autoconversion + accretion)
     # ------------------------------------------------------------------
-    warm_precip_mask = (temperature > params.tmelt) & (qc > params.ccwmin)
+    # ECHAM ll_prcp_warm (mo_cloud_micro_2m.f90:1662-1664): cloud cell
+    # with liquid present and CDNC at/above the activation floor —
+    # NO temperature condition. Warm-rain coalescence operates on
+    # supercooled liquid too; a (T > tmelt) gate left every supercooled
+    # stratus deck (polar boundary layers, storm tracks, 238-273 K)
+    # without its only liquid sink once the corrected mixed-phase
+    # partitioning (#554, finding 2.27) started producing supercooled
+    # liquid there — cloud water built up ~50x over a month of coupled
+    # T63L47 integration and NaN'd the run radiatively. The
+    # cdnc >= cdnc_min leg holds by construction after the entry floor.
+    warm_precip_mask = (cloud_fraction > params.epsec) & (qc > params.ccwmin)
 
     # ECHAM runs the KK2000 warm-rain chain on the IN-CLOUD liquid (zxlb)
     # and area-weights the products; feeding grid-mean qc underestimated
