@@ -371,6 +371,139 @@ class TestEmissionsConfig(unittest.TestCase):
                 build_forcing(cfg, coords)
 
 
+class TestNaturalForcingFilesConfig(unittest.TestCase):
+    """CLI/config plumbing for the DMS / dust / oxidant climatology hooks.
+
+    Synthetic HAMMOZ-layout files (``(time[, mlev], lat, lon)``, descending
+    latitude) on the T42 grid verify that a Hydra cfg with ``dms_file`` /
+    ``dust_file`` / ``oxidants_file`` populates the corresponding forcing
+    fields nonzero, and that grid mismatches raise instead of silently
+    zeroing the emissions.
+    """
+
+    def _coords(self):
+        from jcm.runners import build_coords
+        return build_coords(
+            _compose(["physics=echam", "grid=echam_t42_l8_sigma"])
+        )
+
+    def _model_latlon(self, coords):
+        lat = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
+        lon = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
+        return lat, lon
+
+    def _write_files(self, tmp, coords, lat_offset=0.0, nlev=None):
+        """Write tiny synthetic DMS/dust/oxidant files in the HAMMOZ layout."""
+        import xarray as xr
+        lat, lon = self._model_latlon(coords)
+        lat = lat[::-1] + lat_offset          # descending (N→S), file style
+        nlat, nlon = lat.size, lon.size
+        nlev = nlev if nlev is not None else coords.nodal_shape[0]
+        time = np.array([f"2000-{m:02d}-15" for m in range(1, 13)],
+                        dtype="datetime64[ns]")
+        base = {"time": time, "lat": lat, "lon": lon}
+
+        dms = Path(tmp) / "dms.nc"
+        xr.Dataset(
+            {"DMS_sea": (("time", "lat", "lon"),
+                         np.full((12, nlat, nlon), 2.0),
+                         {"units": "nanomol l-1"})},
+            coords=base,
+        ).to_netcdf(dms)
+
+        dust = Path(tmp) / "dust.nc"
+        xr.Dataset(
+            {"pot_source": (("time", "lat", "lon"),
+                            np.full((12, nlat, nlon), 1.5),
+                            {"units": "1."})},
+            coords=base,
+        ).to_netcdf(dust)
+
+        ox = Path(tmp) / "oxidants.nc"
+        ox_vars = {
+            v: (("time", "mlev", "lat", "lon"),
+                np.full((12, nlev, nlat, nlon), 1.0e-9),
+                {"units": "mole mole-1"})
+            for v in ("OH_VMR_avrg", "NO3_VMR_avrg", "O3_VMR_avrg",
+                      "H2O2_VMR_avrg")
+        }
+        ox_vars["hybm"] = (("mlev",), np.linspace(0.0, 1.0, nlev))
+        xr.Dataset(
+            ox_vars, coords={**base, "mlev": np.arange(nlev)},
+        ).to_netcdf(ox)
+        return str(dms), str(dust), str(ox)
+
+    def test_cfg_populates_all_three_fields_nonzero(self):
+        import tempfile
+        from jcm.forcing import WRAP_YEAR, TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as tmp:
+            dms, dust, ox = self._write_files(tmp, coords)
+            cfg = _compose([
+                "physics=echam-jam", "grid=echam_t42_l8_sigma",
+                f"forcing.dms_file={dms}",
+                f"forcing.dust_file={dust}",
+                f"forcing.oxidants_file={ox}",
+            ])
+            f = build_forcing(cfg, coords)
+        nlon, nlat = coords.horizontal.nodal_shape
+        nlev = coords.nodal_shape[0]
+        for leaf, shape in [
+            (f.dms_seawater, (12, nlon, nlat)),
+            (f.dust_source, (12, nlon, nlat)),
+            (f.oxidant_vmr["oh"], (12, nlev, nlon, nlat)),
+            (f.oxidant_vmr["o3"], (12, nlev, nlon, nlat)),
+        ]:
+            self.assertIsInstance(leaf, TimeSeries)
+            self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+            self.assertEqual(leaf.values.shape, shape)
+            self.assertGreater(float(np.abs(np.asarray(leaf.values)).min()),
+                               0.0)
+        # DMS converted nmol/L → kg/m³; dust clipped to 1.
+        self.assertAlmostEqual(float(f.dms_seawater.values[0, 0, 0]),
+                               2.0 * 6.21324e-8, places=12)
+        self.assertEqual(float(f.dust_source.values.max()), 1.0)
+        # kind=default parent keeps the aquaplanet cos²-lat SST profile.
+        from jcm.forcing import default_forcing
+        np.testing.assert_array_equal(
+            np.asarray(f.sea_surface_temperature),
+            np.asarray(default_forcing(coords.horizontal)
+                       .sea_surface_temperature),
+        )
+
+    def test_null_paths_are_noops(self):
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        f = build_forcing(cfg, coords)
+        # No files → no forcing at all (kind: default returns None).
+        self.assertIsNone(f)
+
+    def test_lat_mismatch_raises(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as tmp:
+            dms, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.dms_file={dms}"])
+            with self.assertRaisesRegex(ValueError, "latitudes"):
+                build_forcing(cfg, coords)
+
+    def test_oxidant_level_mismatch_raises(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, ox = self._write_files(tmp, coords,
+                                         nlev=coords.nodal_shape[0] + 3)
+            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                            f"forcing.oxidants_file={ox}"])
+            with self.assertRaisesRegex(ValueError, "levels"):
+                build_forcing(cfg, coords)
+
+
 class TestEndToEnd(unittest.TestCase):
     """Tiny end-to-end runs at T31/L8.
 

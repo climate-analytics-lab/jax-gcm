@@ -718,9 +718,13 @@ def build_forcing(cfg: DictConfig, coords):
     aquaplanet ``default_forcing(coords.horizontal)``. ``kind: from_file``
     loads a netCDF boundary file via ``ForcingData.from_file``.
 
-    Optionally attaches an ozone climatology (``cfg.forcing.ozone_file``) and
-    prescribed aerosol emissions (``cfg.forcing.emissions_file``); both files
-    must already be on the model horizontal grid.
+    Optionally attaches an ozone climatology (``cfg.forcing.ozone_file``),
+    prescribed aerosol emissions (``cfg.forcing.emissions_file``), a seawater
+    DMS climatology (``cfg.forcing.dms_file``), a dust source/erodibility map
+    (``cfg.forcing.dust_file``) and an oxidant climatology
+    (``cfg.forcing.oxidants_file``); all files must already be on the model
+    horizontal grid (the HAMMOZ-style natural-emission files may have
+    descending latitude — they are validated and flipped to model order).
     """
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is None or forcing_cfg.kind == "default":
@@ -732,7 +736,31 @@ def build_forcing(cfg: DictConfig, coords):
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
     forcing = _attach_emissions(forcing, forcing_cfg, coords)
+    forcing = _attach_dms(forcing, forcing_cfg, coords)
+    forcing = _attach_dust(forcing, forcing_cfg, coords)
+    forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     return forcing
+
+
+def _model_latlon_deg(coords):
+    """Model nodal latitudes/longitudes in degrees (dinosaur stores radians)."""
+    import numpy as np
+    lat_deg = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
+    lon_deg = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
+    return lat_deg, lon_deg
+
+
+def _ensure_parent_forcing(forcing, coords):
+    """Build the aquaplanet parent ``ForcingData`` when ``kind: default``.
+
+    Same rationale as ``_attach_ozone``: ``default_forcing`` preserves the
+    cos²-latitude SST climatology that ``ForcingData.zeros`` would silently
+    replace with a uniform 288.15 K placeholder.
+    """
+    if forcing is not None:
+        return forcing
+    from jcm.forcing import default_forcing
+    return default_forcing(coords.horizontal)
 
 
 def _attach_ozone(forcing, forcing_cfg, coords):
@@ -848,6 +876,130 @@ def _validate_emissions_grid(mapping, coords, path):
                 f"horizontal shape {spatial}, but the model grid is {nodal}. "
                 "Regrid the file with jcm.data.emissions.prepare first."
             )
+
+
+def _attach_dms(forcing, forcing_cfg, coords):
+    """Attach the seawater-DMS climatology from ``cfg.forcing.dms_file``.
+
+    No-op when unset. Loads a HAMMOZ-style monthly ``DMS_sea (time, lat, lon)``
+    climatology (nmol/L, converted to kg/m³ — see
+    :func:`jcm.forcing.read_dms_seawater`) as a ``WRAP_YEAR`` ``TimeSeries``
+    on ``forcing.dms_seawater``, which :class:`DmsEmissions` consumes. The
+    file must already be on the model horizontal grid; lat/lon values are
+    validated (a descending-latitude file is flipped) and a mismatch raises —
+    the term otherwise falls back to zero on a size mismatch, which from the
+    CLI would look like the file "did nothing". Needs a JAM physics package
+    (e.g. ``physics=echam-jam``) for the field to be consumed.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = forcing_cfg.get("dms_file", None)
+    if path in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.forcing import read_dms_seawater
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    with xr.open_dataset(str(path)) as ds:
+        ts = read_dms_seawater(ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(dms_seawater=ts)
+
+
+def _attach_dust(forcing, forcing_cfg, coords):
+    """Attach the dust-source/erodibility map from ``cfg.forcing.dust_file``.
+
+    No-op when unset. Loads a HAMMOZ-style monthly ``pot_source
+    (time, lat, lon)`` climatology (clipped to the [0, 1] erodibility contract
+    of :class:`DustEmissions` — see :func:`jcm.forcing.read_dust_source`) as a
+    ``WRAP_YEAR`` ``TimeSeries`` on ``forcing.dust_source``. Grid handling as
+    in :func:`_attach_dms`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = forcing_cfg.get("dust_file", None)
+    if path in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.forcing import read_dust_source
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    with xr.open_dataset(str(path)) as ds:
+        ts = read_dust_source(ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(dust_source=ts)
+
+
+def _attach_oxidants(forcing, forcing_cfg, coords):
+    """Attach the oxidant climatology from ``cfg.forcing.oxidants_file``.
+
+    No-op when unset. Loads a HAMMOZ/MACC-style monthly
+    ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole-fraction
+    climatology on ECHAM hybrid model levels into ``forcing.oxidant_vmr`` as
+    ``WRAP_YEAR`` ``TimeSeries`` leaves; :class:`PrescribedOxidants` converts
+    VMR → molec cm⁻³ in-term where T and p are available. The file's levels
+    are mapped **one-to-one** onto the model levels: the level count is
+    asserted in :func:`jcm.forcing.read_oxidant_vmr`, and when the model runs
+    hybrid vertical coordinates the file's ``hyam``/``hybm`` are additionally
+    cross-checked against the model's coefficients here, so a file on
+    different 47 levels can't be wired in silently. Horizontal grid handling
+    as in :func:`_attach_dms`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = forcing_cfg.get("oxidants_file", None)
+    if path in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.forcing import read_oxidant_vmr
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    nlev = int(coords.nodal_shape[0])
+    with xr.open_dataset(str(path)) as ds:
+        mapping = read_oxidant_vmr(ds, nlev=nlev,
+                                   lat_deg=lat_deg, lon_deg=lon_deg)
+        _validate_oxidant_levels(ds, coords, path)
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(oxidant_vmr=mapping)
+
+
+def _validate_oxidant_levels(ds, coords, path):
+    """Cross-check the oxidant file's hybrid coefficients against the model.
+
+    Only applies when both the file (``hyam``/``hybm``, plus ``p0`` in Pa for
+    files storing normalized ``hyam``) and the model
+    (:class:`dinosaur.hybrid_coordinates.HybridCoordinates`) define hybrid
+    levels; a sigma-coordinate model only gets the level-count assert in
+    ``read_oxidant_vmr`` (documented assumption: the file matches the model
+    levels). Full-level model coefficients are boundary midpoints, matching
+    the ECHAM ``hyam/hybm`` convention.
+    """
+    import numpy as np
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    vertical = coords.vertical
+    if not isinstance(vertical, HybridCoordinates):
+        return
+    if "hyam" not in ds or "hybm" not in ds:
+        return
+    hyam = np.asarray(ds["hyam"].values, dtype=float)
+    hybm = np.asarray(ds["hybm"].values, dtype=float)
+    # HAMMOZ files store hyam normalized by the reference pressure p0 [Pa];
+    # dinosaur's a_boundaries are in Pa.
+    if "p0" in ds:
+        hyam = hyam * float(ds["p0"].values)
+    a = np.asarray(vertical.a_boundaries, dtype=float)
+    b = np.asarray(vertical.b_boundaries, dtype=float)
+    a_full = 0.5 * (a[:-1] + a[1:])
+    b_full = 0.5 * (b[:-1] + b[1:])
+    if (not np.allclose(a_full, hyam, atol=1.0)          # Pa
+            or not np.allclose(b_full, hybm, atol=1e-5)):
+        raise ValueError(
+            f"forcing.oxidants_file {path!r}: hybrid-level coefficients "
+            "(hyam/hybm) don't match the model's vertical grid — the file "
+            "must be on the model levels (no vertical interpolation is "
+            "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
+            "with grid=echam_t63_l47_hybrid) or re-interpolate it."
+        )
 
 
 # ---------------------------------------------------------------------------
