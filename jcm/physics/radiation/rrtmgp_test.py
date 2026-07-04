@@ -234,6 +234,177 @@ class TestRRTMGPScheme:
         assert diag.toa_lw_up >= 0.0
 
 
+class TestRRTMGPGreenhouseGases:
+    """Prescribed GHG profiles must reach the gas optics and warm the column.
+
+    Covers the ``vmr_fields`` plumbing for O3 / CH4 / N2O (CO2 rides along
+    in every test via ``_make_inputs``) and the scalar ``cdnc_factor``
+    normalisation branch.
+    """
+
+    def test_added_ghgs_reduce_olr(self):
+        nlev = 10
+        base = _make_inputs(nlev=nlev)
+        base["compute_cre"] = False
+        # Scalar (ndim == 0) cdnc factor exercises the normalisation branch.
+        base["aerosol_data"] = base["aerosol_data"].copy(
+            cdnc_factor=jnp.float32(1.0),
+        )
+        _, diag_base = radiation_scheme_rrtmgp(**base)
+
+        enhanced = dict(base)
+        # 4x CO2 + realistic CH4 / N2O + a stratosphere-weighted O3 profile.
+        enhanced["co2_vmr"] = 1600e-6
+        enhanced["ch4_vmr"] = jnp.array(1.8e-6)
+        enhanced["n2o_vmr"] = jnp.array(320e-9)
+        enhanced["ozone_vmr"] = jnp.geomspace(8e-6, 3e-8, nlev)  # TOA-first
+        _, diag_ghg = radiation_scheme_rrtmgp(**enhanced)
+
+        olr_base = float(diag_base.toa_lw_up)
+        olr_ghg = float(diag_ghg.toa_lw_up)
+        assert np.isfinite(olr_base) and np.isfinite(olr_ghg)
+        # Greenhouse effect: more absorbers -> less outgoing longwave.
+        assert olr_ghg < olr_base, (
+            f"adding 4xCO2+CH4+N2O+O3 must reduce OLR "
+            f"(base {olr_base:.2f}, ghg {olr_ghg:.2f} W/m2)"
+        )
+        # The reduction should be a few W/m2, not a rounding artefact.
+        assert olr_base - olr_ghg > 1.0
+
+
+class TestColumnVectorHelper:
+    def test_column_vector_reshapes_vmapped_scalars(self):
+        from jcm.physics.radiation.rrtmgp import _column_vector_rrtmgp
+
+        vals = jnp.arange(6.0).reshape(6, 1)
+        out = _column_vector_rrtmgp(vals, 6)
+        assert out.shape == (6,)
+        assert jnp.allclose(out, jnp.arange(6.0))
+
+
+class TestRRTMGPTermComputeAndCache:
+    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+
+    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
+    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
+    with ``radiation_interval = 2 x dt``, so the first call must run the
+    full scheme and the second call must replay the cached heating rates
+    (while still bumping the radiation step counter).
+    """
+
+    NLEV = 8
+    NCOLS = 2
+    DT = 1800.0
+
+    def _term_and_inputs(self):
+        import jcm.constants as c
+        from flax import nnx
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.chemistry.simple_chemistry import ChemistryData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.radiation.radiation_types import RadiationData
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+
+        # Recompute every 2nd step: interval = 2 x dt.
+        params = RadiationParameters.default(radiation_interval=2 * self.DT)
+        term = RRTMGPRadiation(params=params, compute_cre=False)
+        # Per-column lat/lon normally cached from the model coords; two
+        # columns (equator, mid-latitude) are enough here.
+        term._lats = nnx.Variable(jnp.array([0.0, 45.0]))
+        term._lons = nnx.Variable(jnp.array([0.0, 90.0]))
+
+        # A plausible TOA-first clear-sky column, broadcast to 2 columns.
+        col = lambda profile: jnp.broadcast_to(  # noqa: E731
+            jnp.asarray(profile)[:, None], (len(profile), ncols),
+        )
+        p_full = jnp.linspace(2e3, 9.5e4, nlev)
+        p_half = jnp.linspace(1e3, 1.0e5, nlev + 1)
+        T = jnp.linspace(220.0, 288.0, nlev)
+        rho = p_full / (c.rd * T)
+        dz = (p_half[1:] - p_half[:-1]) / (rho * c.grav)
+
+        state = PhysicsState.zeros(
+            (nlev, ncols),
+            temperature=col(T),
+            specific_humidity=col(jnp.geomspace(1e-6, 8e-3, nlev)),
+            normalized_surface_pressure=jnp.ones((ncols,)),
+        )
+        diagnostics = {
+            "_dt_seconds": self.DT,
+            "pressure_full": col(p_full),
+            "pressure_half": col(p_half),
+            "layer_thickness": col(dz),
+            "air_density": col(rho),
+            "radiation": RadiationData.zeros((ncols,), nlev).copy(
+                surface_albedo_vis=jnp.full((ncols,), 0.07),
+                surface_albedo_nir=jnp.full((ncols,), 0.07),
+                surface_emissivity=jnp.full((ncols,), 0.98),
+            ),
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.full((ncols,), 288.0),
+            ),
+            "chemistry": ChemistryData.zeros((ncols,), nlev),
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "clouds": CloudData.zeros((ncols,), nlev),
+        }
+        forcing = ForcingData.zeros((ncols,))
+        return term, state, diagnostics, forcing
+
+    def test_compute_then_cache_cycle(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+
+        # --- Step 0: radiation step counter 0 -> full compute.
+        tend1, diag1 = term(state, diagnostics, forcing, None)
+        rad1 = diag1["radiation"]
+        assert int(rad1.step) == 1, "step counter must advance on compute"
+        assert tend1.temperature.shape == (self.NLEV, self.NCOLS)
+        assert bool(jnp.all(jnp.isfinite(tend1.temperature)))
+        # Clear-sky OLR from a 288 K surface must be physically sized.
+        olr = np.asarray(rad1.toa_lw_up)
+        assert olr.shape == (self.NCOLS,)
+        assert np.all(olr > 100.0) and np.all(olr < 400.0), f"OLR {olr}"
+        # The tendency the term reports is the total heating rate.
+        np.testing.assert_allclose(
+            np.asarray(tend1.temperature),
+            np.asarray(rad1.sw_heating_rate + rad1.lw_heating_rate),
+            rtol=1e-5, atol=1e-10,
+        )
+        # CRE mirror onto the clouds carry.
+        np.testing.assert_array_equal(
+            np.asarray(diag1["clouds"].toa_lw_up_all),
+            np.asarray(rad1.toa_lw_up),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(diag1["clouds"].toa_sw_up_all),
+            np.asarray(rad1.toa_sw_up),
+        )
+
+        # --- Step 1: interval = 2 steps -> cached replay. Perturb the
+        # atmosphere to prove the output comes from the cache, not a
+        # recompute.
+        hot_state = state.copy(temperature=state.temperature + 10.0)
+        tend2, diag2 = term(hot_state, diag1, forcing, None)
+        rad2 = diag2["radiation"]
+        assert int(rad2.step) == 2, "step counter must advance on cached steps"
+        np.testing.assert_array_equal(
+            np.asarray(rad2.toa_lw_up), np.asarray(rad1.toa_lw_up),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rad2.lw_heating_rate),
+            np.asarray(rad1.lw_heating_rate),
+        )
+        np.testing.assert_allclose(
+            np.asarray(tend2.temperature),
+            np.asarray(rad1.sw_heating_rate + rad1.lw_heating_rate),
+            rtol=1e-5, atol=1e-10,
+        )
+
+
 class TestGreyVsRRTMGP:
     """Compare grey and RRTMGP schemes for structural agreement."""
 
