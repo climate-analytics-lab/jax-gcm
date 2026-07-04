@@ -421,6 +421,7 @@ def tiedtke_nordeng_convection(
     config: ConvectionParameters = None,
     land_fraction: jnp.ndarray = jnp.array(0.0),
     moisture_supply: jnp.ndarray = jnp.array(0.0),
+    moisture_tend_profile: jnp.ndarray | None = None,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -465,6 +466,25 @@ def tiedtke_nordeng_convection(
     cloud_base, has_cloud_base = find_cloud_base(
         temperature, humidity, pressure, config
     )
+
+    # ECHAM zdqpbl closure supply (mo_cumastr.f90:534-545): the moisture-
+    # budget first guess integrates the PRE-CONVECTION moisture tendency
+    # pqte over the levels at/below cloud base — in convergence zones
+    # (ITCZ) this is 10-20 mm/day where surface evaporation alone is 1-2,
+    # and it is exactly the signal that lets convection organize. When the
+    # host provides ``moisture_tend_profile`` (the lagged total moisture
+    # tendency minus the previous convective moistening — the closest
+    # available analog of pqte under the convection-first term ordering),
+    # the supply becomes max(0, Σ_{k>=kcbot} pqte·ρ·Δz); the scalar
+    # ``moisture_supply`` (surface evaporation) remains the floor so a
+    # convergence-free column keeps the #529 continuous-convection anchor.
+    if moisture_tend_profile is not None:
+        below_base = jnp.arange(nlev) >= cloud_base
+        zdqpbl = jnp.sum(
+            jnp.where(below_base, moisture_tend_profile * rho * layer_thickness, 0.0)
+        )
+        moisture_supply = jnp.maximum(moisture_supply, zdqpbl)
+
     
     # Calculate CAPE and CIN if cloud base exists
     cape, cin = lax.cond(
@@ -985,9 +1005,29 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             moisture_supply = jnp.zeros(ncols)
 
+        # Lagged pqte analog for the zdqpbl closure supply: the total
+        # change of q over the previous step (dynamics advection + all
+        # physics) minus the previous CONVECTIVE moistening — ECHAM's
+        # pqte at cucall time contains advection+vdiff but not cumastr
+        # itself. First step (zero snapshot) falls back to the scalar
+        # evaporation supply.
+        prev_conv = diagnostics.get("convection")
+        if prev_conv is not None and hasattr(prev_conv, "q_snapshot"):
+            q_snap_prev = prev_conv.q_snapshot
+            have_snap = jnp.any(q_snap_prev != 0.0)
+            pqte_equiv = jnp.where(
+                have_snap,
+                (state.specific_humidity - q_snap_prev) / dt
+                - prev_conv.moistening_rate,
+                0.0,
+            )
+            moisture_tend_profile = pqte_equiv
+        else:
+            moisture_tend_profile = jnp.zeros_like(state.specific_humidity)
+
         column_fn = jax.vmap(
             tiedtke_nordeng_convection,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -995,6 +1035,7 @@ class TiedtkeConvection(PhysicsTerm):
             pressure_full, layer_thickness, air_density,
             state.u_wind, state.v_wind, qc, qi,
             dt, params, land_fraction, moisture_supply,
+            moisture_tend_profile,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied
@@ -1015,10 +1056,26 @@ class TiedtkeConvection(PhysicsTerm):
         # column conservation is still broken wherever the cap fires, which
         # is inherent to any such guard.
         _DTDT_MAX = 5.0 / 3600.0  # K/s
-        cap_scale = jnp.clip(
-            _DTDT_MAX / jnp.maximum(jnp.abs(tendencies_all.dtedt), 1e-30),
-            0.0, 1.0,
+        # Per-COLUMN scale: the tightest per-level factor applies to the
+        # WHOLE convective ledger — tendencies AND the precip/detrainment
+        # diagnostics. The previous per-level scaling left precip_conv
+        # unscaled, so every capped burst opened the composed column
+        # water budget by the scaled-away amount (caught by the composed
+        # closure test once the unconditional Nordeng rescale made
+        # capped bursts routine at pulse peaks). A homogeneous column
+        # rescale is exactly how ECHAM's own zmfub1 amplitude scaling
+        # acts, so proportionality inside the ledger is preserved and
+        # column conservation is exact by linearity. The cap itself
+        # remains the documented stopgap for the unported mo_cuadjust
+        # per-level limits.
+        cap_scale = jnp.min(
+            jnp.clip(
+                _DTDT_MAX / jnp.maximum(jnp.abs(tendencies_all.dtedt), 1e-30),
+                0.0, 1.0,
+            ),
+            axis=1, keepdims=True,
         )
+        cap_scale_col = cap_scale[:, 0]
 
         tendency = PhysicsTendency(
             u_wind=tendencies_all.dudt.T,
@@ -1053,7 +1110,8 @@ class TiedtkeConvection(PhysicsTerm):
                 if _state_all is not None
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
-            precip_conv=tendencies_all.precip_conv,
+            precip_conv=tendencies_all.precip_conv * cap_scale_col,
+            q_snapshot=state.specific_humidity,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
             heating_rate=tendency.temperature,

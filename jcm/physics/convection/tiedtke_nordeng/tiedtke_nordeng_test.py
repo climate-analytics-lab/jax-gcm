@@ -102,7 +102,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply,
+        moisture_supply, *extra,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -173,7 +173,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply,
+        moisture_supply, *extra,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -223,7 +223,13 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     # scales the WHOLE per-level ledger proportionally (T and q together)
     # so the local energy/water pairing survives the guard — clipping T
     # alone left the moistening at the uncapped rate (review finding 2.8).
-    cap_scale = jnp.clip(cap / jnp.maximum(jnp.abs(dtedt_col), 1e-30), 0.0, 1.0)
+    # The cap is a per-COLUMN homogeneous scale now (tightest per-level
+    # ratio applied to the whole ledger incl. precip_conv): per-level
+    # clipping left the precip diagnostic unscaled and opened the
+    # composed column water budget at every capped burst.
+    cap_scale = jnp.min(
+        jnp.clip(cap / jnp.maximum(jnp.abs(dtedt_col), 1e-30), 0.0, 1.0)
+    )
     expected_dt = jnp.broadcast_to((dtedt_col * cap_scale)[:, None], shape)
     expected_dq = jnp.broadcast_to((dqdt_col * cap_scale)[:, None], shape)
     assert jnp.allclose(convection.heating_rate, expected_dt)
