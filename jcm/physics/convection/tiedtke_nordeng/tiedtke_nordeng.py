@@ -1099,11 +1099,12 @@ class TiedtkeConvection(PhysicsTerm):
         # radiative-convective stack with no surface term) it stays zero and the
         # scheme falls back to the CAPE closure.
         #
-        # Use the *effective* (implicitly damped) evaporation — the moisture the
-        # surface step actually added to the column (imp_moist·E) — not the raw
-        # surface flux, so the budget closure can never export more water than
-        # was supplied. Fall back to the raw flux for any surface state predating
-        # that field.
+        # Read ``effective_evaporation`` — the moisture the column actually
+        # received. Since the surface exchange became the bottom boundary row
+        # of the vdiff implicit solve, this equals ``evaporation`` identically
+        # (reported == delivered, the ECHAM pev_vdiff identity), so the budget
+        # closure can never export more water than was supplied. Fall back to
+        # the raw flux for any surface state predating the field.
         surface_diag = diagnostics.get("surface")
         if surface_diag is not None and getattr(
             surface_diag, "effective_evaporation", None) is not None:

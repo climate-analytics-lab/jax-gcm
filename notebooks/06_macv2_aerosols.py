@@ -68,40 +68,18 @@ def load_macv2_sp(path: Path) -> xr.Dataset:
 
 def aerosol_parameters_from_macv2(ds: xr.Dataset) -> AerosolParameters:
     """Pull the static plume geometry out of the file and pack it into
-    `AerosolParameters`. These replace the placeholder defaults that the
-    JAX port has been using.
+    `AerosolParameters`.
 
-    Note on shape conventions: the netCDF stores `(plume, feature)` for
-    feature-indexed fields; the JAX port expects `(feature, plume)`.
-    We transpose at load time.
+    Thin wrapper over `AerosolParameters.from_dataset`, which owns the
+    `(plume, feature)` -> `(feature, plume)` transposes and the
+    jcm-specific extension fields (`spa_prefactor`/`spa_exponent` — a
+    hand-rolled constructor that omits them raises TypeError, since
+    tree_math structs have no field defaults). Note the struct defaults
+    are already these same values: `AerosolParameters.default()` IS the
+    MACv2.0-SP_v1.nc static geometry, so this loader is only needed to
+    consume a modified parameter file.
     """
-    def to_jax(name: str) -> jnp.ndarray:
-        return jnp.asarray(ds[name].values)
-
-    def to_jax_T(name: str) -> jnp.ndarray:
-        # netCDF: (plume, feature). JAX struct: (feature, plume).
-        return jnp.asarray(ds[name].values.T)
-
-    return AerosolParameters(
-        nplumes=int(ds.sizes["plume_number"]),
-        nfeatures=int(ds.sizes["plume_feature"]),
-        plume_lat=to_jax("plume_lat"),
-        plume_lon=to_jax("plume_lon"),
-        beta_a=to_jax("beta_a"),
-        beta_b=to_jax("beta_b"),
-        aod_spmx=to_jax("aod_spmx"),
-        aod_fmbg=to_jax("aod_fmbg"),
-        asy550=to_jax("asy550"),
-        ssa550=to_jax("ssa550"),
-        angstrom=to_jax("angstrom"),
-        sig_lon_E=to_jax_T("sig_lon_E"),
-        sig_lon_W=to_jax_T("sig_lon_W"),
-        sig_lat_E=to_jax_T("sig_lat_E"),
-        sig_lat_W=to_jax_T("sig_lat_W"),
-        theta=to_jax_T("theta"),
-        ftr_weight=to_jax_T("ftr_weight"),
-        background_aod=jnp.asarray(0.02),
-    )
+    return AerosolParameters.from_dataset(ds)
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +93,16 @@ def macv2_year_weight_timeseries(ds: xr.Dataset) :
     index 0 and `BY_DATE` alignment so the model picks the right year
     based on its calendar clock.
     """
-    # Transpose to (year, plume).
-    yw = jnp.asarray(ds["year_weight"].values.T)  # (251, 9)
+    # Transpose to (year, plume). The v1 file only carries valid data
+    # for 1850-2016; 2017-2100 are _FillValue, which xarray delivers as
+    # NaN — feeding those into a post-2016 run would inject NaN AOD.
+    # Forward-fill the last valid year (a documented convention, not
+    # part of the reference, which STOPs out of range).
+    yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
+    valid = ~np.isnan(yw_np).any(axis=1)
+    last_valid = np.where(valid)[0].max()
+    yw_np[last_valid + 1:] = yw_np[last_valid]
+    yw = jnp.asarray(yw_np)
 
     # Build a time axis in seconds-since-1970 for each year-start.
     # The MACv2 file labels year `Y` as the integer Y; we treat that as

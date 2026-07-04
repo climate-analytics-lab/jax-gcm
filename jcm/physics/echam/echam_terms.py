@@ -179,10 +179,12 @@ def echam_physics(
     elif cloud_scheme == "2m":
         micro_term = Lohmann2MMicrophysics(params=microphysics_2m_p)
         # SPA activation knobs live on AerosolParameters — wire them into
-        # the 2M term so it stays self-contained at compose time.
+        # the 2M term so it stays self-contained at compose time. Pass the
+        # values through untouched (no float() cast) so the gradient path
+        # from AerosolParameters to the 2M activation stays intact.
         micro_term.configure_spa(
-            float(aerosol_p.spa_prefactor),
-            float(aerosol_p.spa_exponent),
+            aerosol_p.spa_prefactor,
+            aerosol_p.spa_exponent,
         )
     else:
         raise ValueError(

@@ -240,12 +240,13 @@ class SurfaceData:
 
     # Evaporation
     evaporation: jnp.ndarray         # Evaporation [kg/m²/s] (ncols,)
-    # Effective evaporation actually added to the lowest layer this step, i.e.
-    # the raw flux times the implicit surface-flux damping ``imp_moist`` (see
-    # ``surface_physics``). This is the moisture the column truly received and is
-    # what the Tiedtke moisture-budget closure should anchor to; the raw
-    # ``evaporation`` above is the undamped surface flux (P-E diagnostics).
-    effective_evaporation: jnp.ndarray  # Damped evaporation [kg/m²/s] (ncols,)
+    # Since the surface exchange became the bottom boundary row of the vdiff
+    # implicit solve, the published evaporation IS the moisture the column
+    # received (the ECHAM ``pev_vdiff`` identity), so this field now always
+    # equals ``evaporation``. Kept for API stability — the Tiedtke
+    # moisture-budget closure anchors to it (the raw-vs-damped distinction
+    # and the old ``imp_moist`` factor no longer exist).
+    effective_evaporation: jnp.ndarray  # == evaporation [kg/m²/s] (ncols,)
 
     # Exchange coefficients
     ch: jnp.ndarray                  # Heat exchange coefficient [1] (ncols,)

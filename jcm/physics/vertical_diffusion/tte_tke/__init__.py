@@ -15,7 +15,8 @@ from .vertical_diffusion_types import (
     VDiffState,
     VDiffTendencies,
     VDiffDiagnostics,
-    VDiffMatrixSystem
+    VDiffMatrixSystem,
+    VDiffSurfaceFluxes
 )
 
 from .turbulence_coefficients import (
@@ -34,7 +35,8 @@ from .surface_layer import (
 from .matrix_solver import (
     setup_matrix_system,
     solve_tridiagonal_system,
-    vertical_diffusion_step
+    vertical_diffusion_step,
+    diagnose_surface_fluxes
 )
 
 from .vertical_diffusion import (
@@ -54,6 +56,7 @@ __all__ = [
     "VDiffTendencies",
     "VDiffDiagnostics",
     "VDiffMatrixSystem",
+    "VDiffSurfaceFluxes",
 
     # Turbulence coefficients
     "compute_richardson_number",
@@ -69,6 +72,7 @@ __all__ = [
     "setup_matrix_system",
     "solve_tridiagonal_system",
     "vertical_diffusion_step",
+    "diagnose_surface_fluxes",
 
     # Main interface
     "TteTkeVerticalDiffusion",

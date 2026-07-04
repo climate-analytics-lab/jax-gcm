@@ -4,11 +4,14 @@ This module provides the main interface for vertical diffusion and boundary laye
 physics, integrating turbulence coefficient calculations with the matrix solver.
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
 )
@@ -158,19 +161,31 @@ def prepare_vertical_diffusion_state(
     )
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("couple_surface",))
 def vertical_diffusion_column(
     state: VDiffState,
     params: VDiffParameters,
-    dt: float
+    dt: float,
+    couple_surface: bool = True,
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
     """Compute vertical diffusion for a single column.
-    
+
+    By default the implicit solve carries the ECHAM surface exchange as the
+    bottom-row Robin boundary condition for u, v, T and qv: the per-tile
+    exchange velocities are computed *before* the matrix step, collapsed to
+    grid coefficients / targets (see inline comments), fed into the solve,
+    and the delivered surface fluxes are diagnosed from the implicit
+    solution (reported == delivered by construction — ECHAM's ``pev_vdiff``
+    identity). Set ``couple_surface=False`` to run the interior-only
+    operator with the legacy zero-flux (insulating, free-slip) boundaries —
+    used by tests that pin the interior diffusion in isolation.
+
     Args:
         state: Vertical diffusion state
         params: Vertical diffusion parameters
         dt: Time step [s]
-        
+        couple_surface: Static flag — include the surface Robin BC (default).
+
     Returns:
         Tuple of (tendencies, diagnostics)
 
@@ -243,10 +258,73 @@ def vertical_diffusion_column(
         )
     )
 
+    # Per-tile exchange velocities are computed BEFORE the matrix step so
+    # they can serve as the implicit solve's surface boundary condition
+    # (previously they were diagnostics-only, decoupled from the column).
     diagnostics = compute_turbulence_diagnostics(
         state_for_solver, params, exchange_coeff_momentum,
         exchange_coeff_heat, exchange_coeff_moisture,
     )
+
+    if couple_surface:
+        # === Tile collapse for the surface Robin BC ========================
+        # Every tile surface value X_s is prescribed this step (SST forcing,
+        # min(SST, ctfreez) ice, stl_am land — the ECHAM "ocean branch"
+        # where the Richtmyer–Morton handshake degenerates to a plain Robin
+        # BC), so the per-tile rows collapse linearly to one grid
+        # coefficient and one flux-weighted target per variable:
+        #
+        #   moisture:  C_q = Σ_t f_t·w_t·C_E,t
+        #              q_s_eff = Σ_t f_t·w_t·C_E,t·q_sat(T_s,t, p_sfc) / C_q
+        #   heat:      C_h = Σ_t f_t·C_H,t
+        #              T_s_eff = Σ_t f_t·C_H,t·T_s,t / C_h − φ_K/cpd
+        #   momentum:  C_m = Σ_t f_t·C_M,t ; target = (ocean_u, ocean_v)
+        #
+        # The wetness weighting w_t reproduces the port's own tile formula
+        # (surface_layer.py: qts = w·qsat + (1−w)·q_air ⇒ flux ρC·w·(qsat −
+        # q̂)), ECHAM's cair = csat = w special case of richtmyer_land.
+        #
+        # The −φ_K/cpd term on the heat target is MANDATORY: the solver
+        # diffuses T, not dry static energy s = cp·T + gz (a pre-existing
+        # interior infidelity, tracked separately). Coupling T_K directly to
+        # T_s would drive a spurious flux equal to the adiabatic lapse
+        # across the lowest half-layer; exchanging with T_s − φ_K/cpd (φ_K =
+        # g·(height_full[K] − height_half[K+1/2]), height above the surface)
+        # makes the bottom exchange exactly the dry-static-energy flux
+        # ρ·C_H·(s_s − ŝ_K)/cp.
+        # ====================================================================
+        frac = state.surface_fraction                       # (ncol, nsfc)
+        wet = jnp.clip(state.surface_wetness, 0.0, 1.0)
+        ch_t = diagnostics.surface_exchange_heat
+        ce_t = diagnostics.surface_exchange_moisture
+        cm_t = diagnostics.surface_exchange_momentum
+
+        c_mom = jnp.sum(frac * cm_t, axis=1)
+        c_heat = jnp.sum(frac * ch_t, axis=1)
+        c_moist = jnp.sum(frac * wet * ce_t, axis=1)
+
+        # Per-tile saturation humidity at the surface pressure — the same
+        # thermodynamics the ECHAM-Louis surface layer uses for its qts.
+        p_sfc = state.pressure_half[:, -1]
+        qsat_tiles = saturation_specific_humidity(
+            p_sfc[:, None], state.surface_temperature,
+        )
+        tiny = 1.0e-12  # C floors at 1e-6 per tile; guard the 0-fraction limit
+        q_s_eff = (
+            jnp.sum(frac * wet * ce_t * qsat_tiles, axis=1)
+            / jnp.maximum(c_moist, tiny)
+        )
+        phi_k = c.grav * (state.height_full[:, -1] - state.height_half[:, -1])
+        t_s_eff = (
+            jnp.sum(frac * ch_t * state.surface_temperature, axis=1)
+            / jnp.maximum(c_heat, tiny)
+        ) - phi_k / c.cpd
+
+        surface_exchange = (c_mom, c_heat, c_moist)
+        surface_target = (state.ocean_u, state.ocean_v, t_s_eff, q_s_eff)
+    else:
+        surface_exchange = None
+        surface_target = None
 
     # The matrix solver returns ``tke_tendency = (matrix_tke_new -
     # state_for_solver.tke) / dt``. Since the caller computes
@@ -257,15 +335,17 @@ def vertical_diffusion_column(
     #   new_tke_tend = (matrix_tke_new - state.tke) / dt
     #                = ((post_source_tke + dt * transport_tend) - state.tke) / dt
     #                = (post_source_tke - state.tke) / dt + transport_tend
-    tendencies = vertical_diffusion_step(
+    tendencies, surface_fluxes = vertical_diffusion_step(
         state_for_solver, params,
         exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture,
         dt, tke_exchange_coeff,
+        surface_exchange=surface_exchange, surface_target=surface_target,
     )
     tke_tend_rebased = (
         tendencies.tke_tendency + (post_source_tke - state.tke) / dt
     )
     tendencies = tendencies._replace(tke_tendency=tke_tend_rebased)
+    diagnostics = diagnostics._replace(surface_fluxes=surface_fluxes)
 
     return tendencies, diagnostics
 
@@ -411,12 +491,24 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     fractions, temperatures, roughness (water uses the Charnock-derived
     heat roughness ``exp(2 - 86 z0^0.375)``), and surface wetness inline.
 
+    Owns the whole turbulent column, ECHAM-style: the per-tile exchange
+    velocities are computed before the implicit solve and enter it as the
+    bottom-row surface Robin boundary condition for u/v/T/qv, so the term's
+    tendencies carry the surface fluxes (drag, sensible/latent heat,
+    evaporation) as well as the interior mixing. The delivered fluxes are
+    diagnosed from the implicit solution (reported == delivered ==
+    column-integrated tendency, the ECHAM ``pev_vdiff`` identity) and
+    exported as ``surface_evaporation`` / ``surface_sensible_heat`` /
+    ``surface_latent_heat`` / ``surface_stress_u/v``, which the downstream
+    ``EchamSurface`` term republishes as the public ``"surface"`` fluxes.
+
     Reads the previous-step TKE from
     ``diagnostics["vertical_diffusion"].tke`` and writes the updated
-    TKE / km / kh / surface exchange coefs / PBL height /
-    friction_velocity back to the public ``"vertical_diffusion"`` key.
-    The 0.01 m²/s² TKE clamp matches ECHAM's lower bound; without it the
-    coefficient cascade diverges in the upper troposphere.
+    TKE / km / kh / surface exchange coefs / delivered surface fluxes /
+    PBL height / friction_velocity back to the public
+    ``"vertical_diffusion"`` key. The 0.01 m²/s² TKE clamp matches ECHAM's
+    lower bound; without it the coefficient cascade diverges in the upper
+    troposphere.
     """
 
     name: ClassVar[str] = "tte_tke_vertical_diffusion"
@@ -508,7 +600,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # for ice (saline freezing point, ECHAM iniphy.f90:71), stl_am
         # for land.
         surface_in = diagnostics["surface"]
-        sst_col = surface_in.surface_temperature.reshape(ncols)
+        # Water-tile temperature straight from the SST FORCING, not the
+        # blended ``surface.surface_temperature`` (which is snapped to
+        # one-or-the-other in mixed coastal cells — with fmask > 0.5 the
+        # residual ocean fraction would exchange with the LAND
+        # temperature through the new Robin delivery row, corrupting
+        # coastal fluxes; Codex review on #555). Same per-tile sources
+        # as EchamSurface's rebuild.
+        sst_col = forcing.sea_surface_temperature.reshape(ncols)
         land_temp_col = forcing.stl_am.reshape(ncols)
         ctfreez = 271.38
         ice_temp_col = jnp.where(
@@ -601,6 +700,12 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         surface_exchange_moisture = vdiff_diagnostics.surface_exchange_moisture
         surface_exchange_momentum = vdiff_diagnostics.surface_exchange_momentum
 
+        # Delivered surface fluxes from the implicit surface-coupled solve
+        # (diagnosed from the implicit solution, §1.8 of the ECHAM map:
+        # reported == delivered == column-integrated tendency, exactly).
+        # ``EchamSurface`` republishes these as the public "surface" fluxes.
+        sfc_fluxes = vdiff_diagnostics.surface_fluxes
+
         # ``tke`` here is the *post-source* TKE (the analytic ECHAM-style
         # implicit update done in ``vertical_diffusion_column``);
         # ``tke_tend`` is purely the matrix-solver transport tendency.
@@ -626,6 +731,11 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_exchange_momentum=surface_exchange_momentum,
             pbl_height=pbl_height,
             surface_friction_velocity=u_star,
+            surface_evaporation=sfc_fluxes.evaporation,
+            surface_sensible_heat=sfc_fluxes.sensible_heat,
+            surface_latent_heat=sfc_fluxes.latent_heat,
+            surface_stress_u=sfc_fluxes.stress_u,
+            surface_stress_v=sfc_fluxes.stress_v,
         )
 
         return tendency, {**diagnostics, "vertical_diffusion": vdiff_out}

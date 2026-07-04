@@ -167,33 +167,61 @@ class VDiffTendencies(NamedTuple):
     
 
 
+class VDiffSurfaceFluxes(NamedTuple):
+    """Surface fluxes delivered by the implicit surface-coupled column solve.
+
+    Diagnosed from the *implicit solution* at the bottom level (the ECHAM
+    ``mo_surface_ocean.f90:620-634`` identity): each flux equals the exchange
+    term inside the solved bottom row, so the reported flux is exactly what
+    the column received — ``Σ_k dm_k·dX_k/dt == flux`` by construction
+    (ECHAM's ``pev_vdiff`` identity, ``vdiff.f90:1544-1551``).
+    """
+
+    evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
+    sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
+    latent_heat: jnp.ndarray     # LH = alhc·E [W/m²] (ncol,)
+    stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncol,)
+    stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncol,)
+
+    @classmethod
+    def zeros(cls, ncol):
+        z = jnp.zeros(ncol)
+        return cls(evaporation=z, sensible_heat=z, latent_heat=z,
+                   stress_u=z, stress_v=z)
+
+
 class VDiffDiagnostics(NamedTuple):
     """Diagnostic variables from vertical diffusion."""
-    
+
     # Exchange coefficients
     exchange_coeff_momentum: jnp.ndarray  # Momentum exchange coeff [m²/s] (ncol, nlev)
     exchange_coeff_heat: jnp.ndarray      # Heat exchange coeff [m²/s] (ncol, nlev)
     exchange_coeff_moisture: jnp.ndarray  # Moisture exchange coeff [m²/s] (ncol, nlev)
-    
+
     # Surface exchange coefficients (exchange velocities CH·|U|, CE·|U|, CM·|U|
     # in m/s — multiply by air density for a bulk-aerodynamic flux factor).
     surface_exchange_heat: jnp.ndarray     # Surface heat exchange [m/s] (ncol, nsfc_type)
     surface_exchange_moisture: jnp.ndarray  # Surface moisture exchange [m/s] (ncol, nsfc_type)
     surface_exchange_momentum: jnp.ndarray  # Surface momentum exchange [m/s] (ncol, nsfc_type)
-    
+
     # Boundary layer diagnostics
     boundary_layer_height: jnp.ndarray    # PBL height [m] (ncol,)
     friction_velocity: jnp.ndarray        # u* [m/s] (ncol,)
     convective_velocity: jnp.ndarray      # w* [m/s] (ncol,)
-    
+
     # Richardson number
     richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
-    
+
     # Mixing length
     mixing_length: jnp.ndarray           # Mixing length [m] (ncol, nlev)
-    
+
     # Energy dissipation
     kinetic_energy_dissipation: jnp.ndarray  # KE dissipation [W/m²] (ncol,)
+
+    # Delivered surface fluxes from the implicit surface-coupled solve
+    # (filled by ``vertical_diffusion_column`` after the matrix step; zero
+    # when the solve runs with the interior-only, zero-flux bottom BC).
+    surface_fluxes: 'VDiffSurfaceFluxes' = None
 
 
 class VDiffMatrixSystem(NamedTuple):
@@ -265,6 +293,17 @@ class VerticalDiffusionData:
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
 
+    # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
+    # column solve this step (diagnosed from the implicit solution, so they
+    # equal the column-integrated vdiff tendencies exactly — the ECHAM
+    # ``pev_vdiff == pqhfla`` identity). ``EchamSurface`` republishes these
+    # as the public ``surface`` fluxes.
+    surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
+    surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
+    surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
+    surface_stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncols,)
+    surface_stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncols,)
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         nsfc_type = 3  # water, ice, land
@@ -278,6 +317,11 @@ class VerticalDiffusionData:
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
+            surface_evaporation=jnp.zeros(nodal_shape),
+            surface_sensible_heat=jnp.zeros(nodal_shape),
+            surface_latent_heat=jnp.zeros(nodal_shape),
+            surface_stress_u=jnp.zeros(nodal_shape),
+            surface_stress_v=jnp.zeros(nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -291,6 +335,11 @@ class VerticalDiffusionData:
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
+            'surface_evaporation': self.surface_evaporation,
+            'surface_sensible_heat': self.surface_sensible_heat,
+            'surface_latent_heat': self.surface_latent_heat,
+            'surface_stress_u': self.surface_stress_u,
+            'surface_stress_v': self.surface_stress_v,
         }
         new_data.update(kwargs)
         return VerticalDiffusionData(**new_data)
