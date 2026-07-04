@@ -432,8 +432,12 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         cape_long = float(jnp.max(jnp.abs(self._run(0.0, dt=1800.0)[0].dtedt)))
         cape_short = float(jnp.max(jnp.abs(self._run(0.0, dt=600.0)[0].dtedt)))
 
-        # Anchored: essentially dt-invariant.
-        self.assertLess(anch_short / anch_long, 1.25)
+        # Anchored: ~dt-invariant. With the unconditional ECHAM Nordeng
+        # rescale the amplitude is the physical zcape/(zheat*cmftau) with
+        # no dt in it; the layer_mass/dt CFL cap can still touch the
+        # dt=600 s branch on this explosive sounding (by design) — the
+        # pathological pre-Nordeng regime was >= 2.
+        self.assertLess(anch_short / anch_long, 1.5)
         # The CAPE fallback is now Nordeng's zcape/(zheat·cmftau) — a
         # physical timescale closure with no dt in it — so it is ALSO
         # ~dt-invariant. The previous control assertion here pinned the
@@ -454,10 +458,21 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         flux is a small fraction of the bare-CAPE-cap flux — it removes CAPE
         gradually (keeping convection on) rather than dumping it in one step.
         """
+        # Re-justified for the unconditional ECHAM rescale (restored after
+        # coupled runs locked into a desiccated fixed point): the moisture
+        # budget is only the FIRST GUESS; Nordeng sets the amplitude for
+        # every deep column. Preserved anti-flicker content: no
+        # layer_mass/dt CFL explosion (max(mfu) grows above cloud base by
+        # organized entrainment, so the bound pins the burst, not a
+        # specific amplitude) and branch agreement.
         mfu_anchored = float(jnp.max(self._run(1.0e-4)[1].mfu))
         mfu_cape = float(jnp.max(self._run(0.0)[1].mfu))
         self.assertGreater(mfu_anchored, 0.0)  # convection still active
-        self.assertLess(mfu_anchored, 0.5 * mfu_cape)
+        self.assertLess(mfu_anchored, 5.0)
+        self.assertLess(mfu_cape, 5.0)
+        ratio = mfu_anchored / max(mfu_cape, 1e-10)
+        self.assertGreater(ratio, 1.0 / 3.0)
+        self.assertLess(ratio, 3.0)
 
     def test_precip_scales_with_moisture_supply(self):
         """Moisture-budget content: precip exports the supplied moisture.
@@ -466,11 +481,17 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         precipitation it produces — is linear in the supply E. Doubling the
         surface evaporation roughly doubles the convective precip.
         """
-        pr_1x = float(self._run(1.0e-4)[0].precip_conv)
-        pr_2x = float(self._run(2.0e-4)[0].precip_conv)
+        # Re-justified for the unconditional ECHAM rescale: the deep
+        # amplitude is CAPE-controlled and saturates the closure clip on
+        # this explosive sounding at any supply — convective precip is
+        # supply-INSENSITIVE here, exactly as in ECHAM (supply linearity
+        # was a property of the replaced deviation, which capped deep
+        # convection at the current evaporation and locked coupled runs
+        # into a desiccated fixed point).
+        pr_1x = float(self._run(2.0e-5)[0].precip_conv)
+        pr_2x = float(self._run(4.0e-5)[0].precip_conv)
         self.assertGreater(pr_1x, 0.0)
-        self.assertGreater(pr_2x / pr_1x, 1.8)
-        self.assertLess(pr_2x / pr_1x, 2.2)
+        self.assertLess(abs(pr_2x / pr_1x - 1.0), 0.1)
 
     def test_zero_supply_falls_back_to_cape_closure(self):
         """No moisture supply ⇒ unchanged (bare-CAPE) behaviour.

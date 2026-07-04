@@ -740,7 +740,12 @@ def tiedtke_nordeng_convection(
         )
         zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
         zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
-        zmfub1 = jnp.clip(zmfub1, 0.001, mfu_cfl_max)
+        # Bounds per ECHAM: the CFL cap above, cmfcmin (1e-10) below —
+        # an invented 0.001 floor here used to bind on weak first
+        # guesses, and a BOUND rescale target erases the closure/trigger
+        # dependence of the amplitude (rescale = const/zmfub), deadening
+        # d/d(trigger_cape) everywhere.
+        zmfub1 = jnp.clip(zmfub1, config.cmfcmin, mfu_cfl_max)
         # Deliberate deviation from ECHAM: the rescale applies only when the
         # cloud-base flux came from the CAPE fallback. ECHAM rescales every
         # deep column (its first guess is always the PBL moisture budget),
@@ -750,9 +755,20 @@ def tiedtke_nordeng_convection(
         # 12 K/day). Where the moisture closure is invalid the fallback is
         # now Nordeng's zcape/(zheat·cmftau) — replacing the dimensionally
         # inconsistent CAPE/(g·τ) — so both branches are physical.
+        # ECHAM rescales EVERY deep column (mo_cumastr.f90:812-906): the
+        # moisture-budget flux is only the FIRST GUESS; Nordeng's
+        # zmfub1 = zcape·zmfub/(zheat·cmftau) sets the final amplitude.
+        # The earlier deviation (gating the rescale off when the moisture
+        # closure was valid) capped deep convection at the CURRENT
+        # evaporation — coupled T63L47 runs then locked into a desiccated
+        # fixed point (CAPE 5000+ J/kg untouched, mass flux 7x low, TPW
+        # pinned at 1.5 kg/m2). Unconditional again, as in ECHAM; the RCE
+        # pulsing that motivated the gate is handled by the smoothed
+        # trigger (the closure fades in over smooth_trigger_j instead of
+        # snapping), which also keeps gentle convective precip alive at
+        # the near-neutral equilibrium the efficient rescale produces.
         rescale = jnp.where(
-            (conv_type == 1) & (zheat > 1e-10) & (zcape_plume > 0.0)
-            & jnp.logical_not(use_moisture),
+            (conv_type == 1) & (zheat > 1e-10) & (zcape_plume > 0.0),
             zmfub1 / zmfub,
             1.0,
         )

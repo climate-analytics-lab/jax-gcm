@@ -77,10 +77,34 @@ class TestSmoothTriggerGradients:
         assert np.isfinite(float(g)) and float(g) != 0.0, g
 
     def test_trigger_threshold_gradient_nonzero(self):
-        """The activation threshold itself is now calibratable."""
-        loss, x0 = _grad_wrt('trigger_cape')
-        g = jax.grad(loss)(x0)
+        """The activation threshold is calibratable NEAR the threshold.
+
+        A sigmoid trigger saturates (correctly) when CAPE is hundreds of
+        widths past the threshold — the synthetic sounding here carries
+        CAPE ~ 1.5e4 J/kg, so the gradient at the default 100 J/kg is a
+        legitimate exact zero. The calibration property is sensitivity
+        near the crossing: evaluate d(precip)/d(trigger_cape) at a
+        threshold placed just below the column's CAPE, where the fuzzy
+        trigger is on its ramp.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            calculate_cape_cin, find_cloud_base,
+        )
+        t, q, p, dz, _ = _moist_tropical_column()
+        cfg = ConvectionParameters.default()
+        cb, _has = find_cloud_base(t, q, p, cfg)
+        cape, _ = calculate_cape_cin(t, q, p, dz, cb, cfg)
+        # supply=0: with a moisture supply the OR-branch floor weight
+        # saturates the trigger for any buoyant column (by design — the
+        # #529 continuous-convection path), so the main threshold only
+        # binds on the CAPE-only path.
+        loss, _ = _grad_wrt('trigger_cape', supply=0.0)
+        x_near = jnp.asarray(float(cape) - 30.0)
+        g = jax.grad(loss)(x_near)
         assert np.isfinite(float(g)) and float(g) != 0.0, g
+        # And below-threshold sensitivity has the right sign: raising the
+        # threshold toward CAPE weakens convection.
+        assert float(g) < 0.0, g
 
     def test_all_default_param_gradients_finite(self):
         """No NaN through any leaf of the params struct (B.0 class)."""

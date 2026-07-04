@@ -438,6 +438,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # pinned directly by the closure dt-invariance test
         # (rce_integration_test), so the bound tracks the measured faithful
         # value + margin. It should tighten again once the half-level flux
-        # re-stagger (#530) lands.
+        # re-stagger (#530) lands. The unconditional ECHAM Nordeng rescale
+        # (mo_cumastr.f90:812-906; restored after the gated variant locked
+        # coupled runs in a desiccated fixed point) raises the measured
+        # value to ~15.2: the amplitude now tracks the plume-CAPE
+        # consumption cycle, and the smoothed trigger keeps convection
+        # continuously ON through it (the sustained-precip assertion
+        # above) instead of flipping off — pulsing amplitude, not the
+        # on/off pathology this bound originally guarded.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
-        self.assertLess(max_temporal_std, 14.0)  # K/day
+        self.assertLess(max_temporal_std, 16.5)  # K/day
